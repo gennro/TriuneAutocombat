@@ -3,7 +3,7 @@ name: Draft & Publish Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' # Triggers on push of tags like v1.0.0, v1.0.1
 
 permissions:
   contents: write
@@ -15,28 +15,24 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Package Release Files
+      - name: Stage and Package Files
         run: |
-          # Enable extended globbing so we can safely match files
-          shopt -s nullglob
-          
-          # Create a clean temporary directory for staging
+          # Create staging folder
           mkdir -p staging
-          
-          # Copy target folders if they exist
-          [ -d "config" ] && cp -r config/ staging/
-          [ -d "lua" ]    && cp -r lua/ staging/
-          
-          # Copy root files matching patterns
-          cp *.lua staging/ 2>/dev/null || true
-          cp README* CHANGELOG* staging/ 2>/dev/null || true
-          
-          # Zip only the contents inside the staging folder
-          cd staging
-          zip -r ../TriuneAutocombat.zip .
-          cd ..
 
-      - name: Create GitHub Release
+          # Copy folders if they exist
+          if [ -d "config" ]; then cp -r config staging/; fi
+          if [ -d "lua" ]; then cp -r lua staging/; fi
+
+          # Copy matching files if they exist (ignoring errors if absent)
+          cp -f *.lua staging/ 2>/dev/null || true
+          cp -f README* staging/ 2>/dev/null || true
+          cp -f CHANGELOG* staging/ 2>/dev/null || true
+
+          # Create zip file from staging contents
+          zip -r TriuneAutocombat.zip -j staging/* 2>/dev/null || (cd staging && zip -r ../TriuneAutocombat.zip .)
+
+      - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:
           files: TriuneAutocombat.zip
