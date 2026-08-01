@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime": {
+    "version": "LuaJIT"
+  },
+  "diagnostics": {
+    "globals": [
+      "ImGuiCond",
+      "ImGuiCol",
+      "ImGuiStyleVar",
+      "ImGuiTableFlags",
+      "ImGuiTableColumnFlags",
+      "ImGuiSelectableFlags",
+      "ImGuiWindowFlags",
+      "ImVec2",
+      "ImVec4",
+      "IM_COL32"
+    ]
+  }
+}
