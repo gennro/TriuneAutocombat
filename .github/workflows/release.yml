@@ -1,0 +1,28 @@
+name: Draft & Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers when a tag like v1.0.0 is created
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Package Release Files
+        run: |
+          zip -r TriuneAutocombat.zip config/ lua/ *.lua README* CHANGELOG* -x ".git*"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TriuneAutocombat.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
