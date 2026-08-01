@@ -1,0 +1,45 @@
+name: Draft & Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Package Release Files
+        run: |
+          # Enable extended globbing so we can safely match files
+          shopt -s nullglob
+          
+          # Create a clean temporary directory for staging
+          mkdir -p staging
+          
+          # Copy target folders if they exist
+          [ -d "config" ] && cp -r config/ staging/
+          [ -d "lua" ]    && cp -r lua/ staging/
+          
+          # Copy root files matching patterns
+          cp *.lua staging/ 2>/dev/null || true
+          cp README* CHANGELOG* staging/ 2>/dev/null || true
+          
+          # Zip only the contents inside the staging folder
+          cd staging
+          zip -r ../TriuneAutocombat.zip .
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TriuneAutocombat.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
