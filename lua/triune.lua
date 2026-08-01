@@ -128,6 +128,8 @@ local function defaultCtrl()
         hunter_z = 75,
         hunter_min_level = 1,
         hunter_max_level = 100,
+        hunter_combat_radius = 0,    -- 0 = disabled; >0 = max roam distance from anchor
+        hunter_combat_loc = nil,     -- {x,y,z} anchor; nil = no constraint
         pull_min_level = 1,
         pull_max_level = 100,
         nav_fallback_stick = false,
@@ -1134,6 +1136,53 @@ function UI.drawControlTab()
         ImGui.SetNextItemWidth(180)
         ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
         if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
+
+        -- Combat Radius anchor -- keeps Hunter from roaming the whole world
+        ImGui.Dummy(0, 2)
+        accent(GOLD, 'Combat Radius (optional)')
+        if ctrl.hunter_combat_loc then
+            ImGui.Text(string.format('Anchor: %.1f, %.1f, %.1f',
+                ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.z))
+        else
+            accent(MUTED, 'No anchor set -- Hunter roams freely.')
+        end
+
+        if ImGui.Button('Set Anchor##hunter') then
+            local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
+            if mx and my and mz then
+                ctrl.hunter_combat_loc = { x = mx, y = my, z = mz }
+                if (ctrl.hunter_combat_radius or 0) == 0 then
+                    ctrl.hunter_combat_radius = 500  -- sensible default on first Set
+                end
+            end
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Saves your current position as the anchor.\nHunter will only wander and find mobs within the Combat Radius of this point.')
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Clear Anchor##hunter') then
+            ctrl.hunter_combat_loc = nil
+            ctrl.hunter_combat_radius = 0
+            pursuit.wanderLoc = nil  -- ditch any wander-point that might be outside the old zone
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Remove the anchor -- Hunter will roam freely again.')
+        end
+
+        -- Radius slider (greyed out / clamped to 1 min when no anchor)
+        local hasAnchor = ctrl.hunter_combat_loc ~= nil
+        if not hasAnchor then ImGui.BeginDisabled() end
+        ImGui.SetNextItemWidth(220)
+        local displayRadius = math.max(1, ctrl.hunter_combat_radius or 0)
+        local newRadius = ImGui.SliderInt('Combat Radius##hunter', displayRadius, 1, 2000)
+        if hasAnchor then ctrl.hunter_combat_radius = newRadius end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Maximum distance from the anchor the Hunter will roam\n'
+                .. 'and search for targets. Mobs outside this radius are ignored.\n'
+                .. 'Greyed out until an anchor is set.')
+        end
+        if not hasAnchor then ImGui.EndDisabled() end
     end
 
     if usesMA then
@@ -2224,13 +2273,25 @@ end
 local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local minLv = minLevel or 1
     local maxLv = maxLevel or 100
+    -- Hunter combat anchor: if set and radius > 0, reject any candidate outside the circle.
+    local anchorLoc    = ctrl.hunter_combat_loc
+    local anchorRadius = anchorLoc and (ctrl.hunter_combat_radius or 0) or 0
+    local function outsideAnchor(sx, sy)
+        if anchorRadius <= 0 or not anchorLoc then return false end
+        local dx = sx - anchorLoc.x
+        local dy = sy - anchorLoc.y
+        return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
+    end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and not isIgnored(xt.CleanName())
             and not isUnreachable(xt.ID()) then
             local lvl = xt.Level() or 0
             if lvl >= minLv and lvl <= maxLv then
-                return xt.ID()
+                local sx, sy = xt.X() or 0, xt.Y() or 0
+                if not outsideAnchor(sx, sy) then
+                    return xt.ID()
+                end
             end
         end
     end
@@ -2246,7 +2307,10 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
             local lvl = s.Level() or 0
             if lvl >= minLv and lvl <= maxLv then
                 local sz = s.Z() or myZ
-                if math.abs(sz - myZ) <= maxZ then return s.ID() end
+                if math.abs(sz - myZ) <= maxZ then
+                    local sx, sy = s.X() or 0, s.Y() or 0
+                    if not outsideAnchor(sx, sy) then return s.ID() end
+                end
             end
         end
     end
@@ -2414,6 +2478,10 @@ onZoned = function()
         print('\ay[Triune]\ax zoned -- clearing camp (it was set in the previous zone). Set a new one if needed.')
         ctrl.camp_loc = nil
     end
+    if ctrl.hunter_combat_loc then
+        print('\ay[Triune]\ax zoned -- clearing Hunter combat anchor (it was set in the previous zone).')
+        ctrl.hunter_combat_loc = nil
+    end
     local detected = common.classesFromInventoryWindow(false, true)
     if detected then
         myClasses = detected
@@ -2567,12 +2635,26 @@ local function combatTick()
                     moveTowardLoc(pursuit.wanderLoc.x, pursuit.wanderLoc.y, pursuit.wanderLoc.z, 15)
                 if not pursuit.wanderLoc or arrived or (os.clock() - (pursuit.wanderSince or 0)) > 8.0 then
                     local ang = math.random() * 2 * math.pi
-                    local dist = 100 + math.random(150)
-                    pursuit.wanderLoc = {
-                        x = (mq.TLO.Me.X() or 0) + dist * math.cos(ang),
-                        y = (mq.TLO.Me.Y() or 0) + dist * math.sin(ang),
-                        z = mq.TLO.Me.Z() or 0,
-                    }
+                    if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+                        -- Anchor-bounded wander: pick a random point inside the combat circle
+                        local maxR = ctrl.hunter_combat_radius
+                        local minR = math.max(10, math.floor(maxR * 0.3))
+                        local r    = minR + math.random(math.floor(maxR * 0.6))
+                        local ax, ay = ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y
+                        pursuit.wanderLoc = {
+                            x = ax + r * math.cos(ang),
+                            y = ay + r * math.sin(ang),
+                            z = ctrl.hunter_combat_loc.z,
+                        }
+                    else
+                        -- Unbounded wander: pick a random point near current position
+                        local dist = 100 + math.random(150)
+                        pursuit.wanderLoc = {
+                            x = (mq.TLO.Me.X() or 0) + dist * math.cos(ang),
+                            y = (mq.TLO.Me.Y() or 0) + dist * math.sin(ang),
+                            z = mq.TLO.Me.Z() or 0,
+                        }
+                    end
                     pursuit.wanderSince = os.clock()
                 end
             end
