@@ -201,7 +201,9 @@ local petState = {
     lastCastCls = nil,
     lastCmdTargetId = 0,
     lastCmdAt = 0,
-    manualHunterHold = nil
+    manualHunterHold = nil,
+    petHoldActive = false,    -- true when we issued /pet hold waiting for HP threshold
+    holdIssuedForId = 0       -- target ID for which a hold was issued
 }
 
 local pursuit = {
@@ -237,6 +239,23 @@ local PET_CLASSES = { Nec = true, Mag = true, Bst = true }
 local function trioHasPetClass()
     for _, c in ipairs(myClasses) do if PET_CLASSES[c] then return true end end
     return false
+end
+
+-- Returns true if any character in the trio owns the Advanced Pet Discipline AA
+-- (rank >= 1). This AA unlocks the /pet hold command; without it the command is
+-- silently ignored by the game, so we gate the hold logic on its presence.
+-- NOTE: the entire check is wrapped in a single pcall -- calling aa() on a TLO
+-- object for an AA the character doesn't own throws in some MQ builds, and that
+-- exception would silently abort combatTick (caught by the outer pcall in the
+-- main loop). The single pcall catches any throw and returns false safely.
+local function hasAdvPetDiscipline()
+    local ok, result = pcall(function()
+        local aa = mq.TLO.Me.AltAbility('Advanced Pet Discipline')
+        if not aa or not aa() then return false end
+        local rank = aa.Rank() or 0
+        return rank >= 1
+    end)
+    return ok and result == true
 end
 
 -- Ignore list: names Hunter/Puller must never auto-target (e.g. a friendly NPC
@@ -476,6 +495,11 @@ local function applyEntry(e)
         if not e.control.combat_style then
             ctrl.combat_style = e.control.use_ranged and 'Ranged' or 'Melee'
         end
+        -- The combat anchor is a zone-specific position (like camp_loc): never
+        -- restore it from a saved file because the player will almost certainly
+        -- be in a different location or zone. They can set a new one in-game.
+        ctrl.hunter_combat_loc    = nil
+        ctrl.hunter_combat_radius = 0
     end
 end
 
@@ -553,6 +577,7 @@ local function loadoutSig()
             .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.priority)
     end
     local c = ctrl.camp_loc
+    local a = ctrl.hunter_combat_loc
     p[#p + 1] = table.concat({ ctrl.mode, tostring(ctrl.combat_style),
         tostring(ctrl.ranged_dist), tostring(ctrl.ma_name), tostring(ctrl.assist_at),
         tostring(ctrl.chase), tostring(ctrl.chase_dist), tostring(ctrl.automem),
@@ -566,7 +591,8 @@ local function loadoutSig()
         tostring(ctrl.medbreak_mana_on), tostring(ctrl.medbreak_mana_start), tostring(ctrl.medbreak_mana_stop),
         tostring(ctrl.medbreak_end_on), tostring(ctrl.medbreak_end_start), tostring(ctrl.medbreak_end_stop),
         tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec),
-        c and string.format('%.1f,%.1f,%.1f', c.x, c.y, c.z) or 'nocamp' }, '~')
+        c and string.format('%.1f,%.1f,%.1f', c.x, c.y, c.z) or 'nocamp',
+        a and string.format('%.1f,%.1f,%.1f,r%d', a.x, a.y, a.z, ctrl.hunter_combat_radius or 0) or 'noanchor' }, '~')
     return table.concat(p, '|')
 end
 
@@ -1390,6 +1416,9 @@ local function baseTok(token) return (tostring(token or '')):gsub('^[FE]: ', '')
 
 local function setTarget(id)
     if not id or id == 0 then return false end
+    local s = mq.TLO.Spawn(id)
+    if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
+    if s.Type() == 'NPC' and (s.PctHPs() or 0) <= 0 then return false end
     if mq.TLO.Target.ID() == id then return true end
     mq.cmdf('/target id %d', id)
     local t = 0
@@ -1405,7 +1434,7 @@ isCombat = function()
     if ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline' or ctrl.mode == 'Tank' then
         for i = 1, 13 do
             local xt = mq.TLO.Me.XTarget(i)
-            if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' then return true end
+            if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then return true end
         end
     end
     return false
@@ -1548,9 +1577,23 @@ local function anyXtarAlive()
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC'
-            and (xt.PctHPs() or 0) > 0
+            and (xt.PctHPs() or 0) > 0 and not xt.Dead()
             and not isIgnored(xt.CleanName())
             and not isUnreachable(xt.ID()) then
+            return true
+        end
+    end
+    return false
+end
+
+local function isXTargetId(id)
+    if not id or id <= 0 then return false end
+    for i = 1, 13 do
+        local xt = mq.TLO.Me.XTarget(i)
+        if xt() and (xt.ID() or 0) == id and xt.Type() == 'NPC'
+            and (xt.PctHPs() or 0) > 0 and not xt.Dead()
+            and not isIgnored(xt.CleanName())
+            and not isUnreachable(id) then
             return true
         end
     end
@@ -1601,7 +1644,7 @@ local function maTargetId()
         end
     end
     local t = mq.TLO.Target
-    if not (t() and t.Type() == 'NPC') then return nil end
+    if not (t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead()) then return nil end
     if gated and not targetIsEngaged(t.ID()) then
         return nil
     end
@@ -1630,14 +1673,15 @@ local function resolveTargetId(token, cls)
     elseif b == 'Nearest Add' or b == 'All Enemies' then
         id = firstNPCXtarget(false)
         if not id then
-            local s = mq.TLO.NearestSpawn(1, 'npc'); id = s() and s.ID() or nil
+            local s = mq.TLO.NearestSpawn(1, 'npc targetable')
+            id = (s() and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()) and s.ID() or nil
         end
     else
         id = mq.TLO.Target.ID()
     end
     if not id or id <= 0 then return nil end
     local s = mq.TLO.Spawn(id)
-    if not s() or s.Type() == 'Corpse' then return nil end
+    if not s() or s.Dead() or s.Type() == 'Corpse' or (s.Type() == 'NPC' and (s.PctHPs() or 0) <= 0) then return nil end
     if isIgnored(s.CleanName()) then return nil end
     if s.Type() == 'NPC' and (ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline')
         and not targetIsEngaged(id) then
@@ -2179,7 +2223,7 @@ local function checkStuck()
     stuckState.checkAt = now
     local trying = isMoveActive() or pursuit.id ~= 0
     local nt = mq.TLO.Target
-    if nt() and nt.Type() == 'NPC' and (nt.PctHPs() or 0) > 0 and distToId(nt.ID()) <= (desiredRange() + 12) then
+    if nt() and nt.Type() == 'NPC' and (nt.PctHPs() or 0) > 0 and not nt.Dead() and distToId(nt.ID()) <= (desiredRange() + 12) then
         trying = false
     end
     if not trying then
@@ -2213,7 +2257,7 @@ local function checkCombatStall()
         return
     end
     local t = mq.TLO.Target
-    local haveLiveNPC = t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0
+    local haveLiveNPC = t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead()
     local notPursuingThis = (pursuit.id == 0) or not (haveLiveNPC and pursuit.id == t.ID())
     local closeEnough = haveLiveNPC and distToId(t.ID()) <= (desiredRange() + 10)
     local stationary = not isMoveActive()
@@ -2284,14 +2328,11 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and not isIgnored(xt.CleanName())
-            and not isUnreachable(xt.ID()) then
+        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead()
+            and not isIgnored(xt.CleanName()) and not isUnreachable(xt.ID()) then
             local lvl = xt.Level() or 0
             if lvl >= minLv and lvl <= maxLv then
-                local sx, sy = xt.X() or 0, xt.Y() or 0
-                if not outsideAnchor(sx, sy) then
-                    return xt.ID()
-                end
+                return xt.ID()
             end
         end
     end
@@ -2299,10 +2340,10 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local maxZ = searchMaxZ or ctrl.hunter_z or 75
     local myZ = mq.TLO.Me.Z() or 0
     local search = string.format('npc targetable radius %d', radius)
-    for i = 1, 10 do
+    for i = 1, 30 do
         local s = mq.TLO.NearestSpawn(i, search)
         if not s() then break end -- ran out of candidates
-        if s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not isIgnored(s.CleanName())
+        if s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName())
             and not isUnreachable(s.ID()) then
             local lvl = s.Level() or 0
             if lvl >= minLv and lvl <= maxLv then
@@ -2335,7 +2376,7 @@ local function pullerTick()
     end
 
     local s = mq.TLO.Spawn(runtime.pullTargetId)
-    local alive = s() and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0
+    local alive = s() and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
     if not alive then
         runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving(); return
     end
@@ -2432,7 +2473,7 @@ local function checkAggroSwitch()
                     isHittingMe = true
                 end
             end)
-            local maxRange = isHittingMe and 40 or 15
+            local maxRange = (ctrl.mode == 'Hunter' or ctrl.mode == 'Pet Tank' or isHittingMe) and 60 or 25
             if d < maxRange and d < bestDist then
                 bestDist = d
                 bestId = xt.ID()
@@ -2440,8 +2481,11 @@ local function checkAggroSwitch()
         end
     end
     if bestId == 0 then return false end
-    if curId == 0 or curDist > 20 then
+    if curId == 0 or not isXTargetId(curId) or (curDist > 20 and bestDist < curDist) then
         if setTarget(bestId) then
+            stopMoving()
+            pursuit.id = 0
+            pursuit.lastNavTargetId = 0
             mq.cmd('/face fast')
             print('\ay[Triune]\ax aggro switch -> ' .. tostring(mq.TLO.Target.CleanName()))
             return true
@@ -2551,7 +2595,7 @@ local function combatTick()
     end
 
     local t = mq.TLO.Target
-    local haveNPC = t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0
+    local haveNPC = t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead()
     if haveNPC and (ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist'
             or ctrl.mode == 'Garrison' or ctrl.mode == 'Pet Tank') and isIgnored(t.CleanName()) then
         haveNPC = false
@@ -2607,6 +2651,23 @@ local function combatTick()
             haveNPC = false
         end
 
+        local xtarId = firstNPCXtarget(false)
+        if xtarId then
+            local curId = haveNPC and mq.TLO.Target.ID() or 0
+            if curId == 0 or not isXTargetId(curId) then
+                if curId ~= xtarId then
+                    stopMoving()
+                    pursuit.id = 0
+                    pursuit.lastNavTargetId = 0
+                    if setTarget(xtarId) then
+                        print(string.format('\ay[Triune]\ax Hunter aggro -- switching to XTarget #%d (%s)',
+                            xtarId, tostring(mq.TLO.Target.CleanName())))
+                    end
+                end
+                haveNPC = true
+            end
+        end
+
         if haveNPC then
             local curId = mq.TLO.Target.ID()
             local curDist = distToId(curId)
@@ -2625,6 +2686,8 @@ local function combatTick()
             if id and setTarget(id) then
                 haveNPC = true
                 pursuit.wanderLoc = nil
+                print(string.format('\ay[Triune]\ax Hunter target acquired: #%d (%s) dist %.1f',
+                    id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
             elseif not anyXtarAlive() then
                 -- Only wander out to seek fresh mobs when xtar is clear.
                 -- If live xtar NPCs remain but findRoamTarget returned nil
@@ -2633,7 +2696,7 @@ local function combatTick()
                 -- checkAggroSwitch moves them into target range.
                 local arrived = pursuit.wanderLoc and
                     moveTowardLoc(pursuit.wanderLoc.x, pursuit.wanderLoc.y, pursuit.wanderLoc.z, 15)
-                if not pursuit.wanderLoc or arrived or (os.clock() - (pursuit.wanderSince or 0)) > 8.0 then
+                if not pursuit.wanderLoc or arrived or (os.clock() - (pursuit.wanderSince or 0)) > 20.0 then
                     local ang = math.random() * 2 * math.pi
                     if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
                         -- Anchor-bounded wander: pick a random point inside the combat circle
@@ -2779,17 +2842,37 @@ local function combatTick()
     -- manual click). Rather than one-shot per target, also retry periodically
     -- while still engaged on the same target so a lost first attempt corrects
     -- itself within a few seconds instead of leaving pets idle for the fight.
+    --
+    -- Advanced Pet Discipline AA: if the player owns this AA, /pet hold is a
+    -- valid command that makes pets stand completely still. We use it to gate
+    -- pets behind the pet_assist_at HP threshold: issue /pet hold on the first
+    -- tick a new target is engaged (when threshold < 100), then release with
+    -- #petcmd attack all once the HP condition is satisfied. Without the AA,
+    -- /pet hold is silently ignored by the game, so we skip the hold entirely
+    -- and just fire the attack command at threshold as before.
+    local assistThreshold = ctrl.pet_assist_at or 100
+    local useHold = assistThreshold < 100 and hasAdvPetDiscipline()
+
     if ctrl.mode == 'Manual Hunter' and haveNPC and engage and trioHasPetClass() then
         setManualHunterPetHold(false)
         local tid = t.ID() or 0
         local dueForRetry = (os.clock() - (petState.lastCmdAt or 0)) > 5.0
         if (tid ~= petState.lastCmdTargetId or dueForRetry) and not mq.TLO.Me.Casting.ID() then
             local tgtHp = pctHP(tid) or 100
-            if playerHasAggro(tid) and playerIsEngagingTarget(tid)
-                and tgtHp <= (ctrl.pet_assist_at or 100) then
-                mq.cmd('/say #petcmd attack all')
-                petState.lastCmdTargetId = tid
-                petState.lastCmdAt = os.clock()
+            if playerHasAggro(tid) and playerIsEngagingTarget(tid) then
+                if tgtHp <= assistThreshold then
+                    -- Threshold met: release hold (if any) and send attack.
+                    mq.cmd('/say #petcmd attack all')
+                    petState.lastCmdTargetId = tid
+                    petState.lastCmdAt = os.clock()
+                    petState.petHoldActive = false
+                    petState.holdIssuedForId = 0
+                elseif useHold and petState.holdIssuedForId ~= tid then
+                    -- New target above threshold and we have the AA: hold pets.
+                    mq.cmd('/pet hold')
+                    petState.petHoldActive = true
+                    petState.holdIssuedForId = tid
+                end
             end
         end
     elseif haveNPC and engage and trioHasPetClass() then
@@ -2797,18 +2880,37 @@ local function combatTick()
         local dueForRetry = (os.clock() - (petState.lastCmdAt or 0)) > 5.0
         if (tid ~= petState.lastCmdTargetId or dueForRetry) and not mq.TLO.Me.Casting.ID() then
             local tgtHp = pctHP(tid) or 100
-            -- Pet Tank: pets ARE the tank; skip engagement gate, only apply HP threshold.
-            -- All other modes: require player has started hitting AND HP threshold met.
-            local readyToSend = (ctrl.mode == 'Pet Tank' and tgtHp <= (ctrl.pet_assist_at or 100))
-                or (playerHasAggro(tid) and playerIsEngagingTarget(tid)
-                    and tgtHp <= (ctrl.pet_assist_at or 100))
-            if readyToSend then
-                mq.cmd('/say #petcmd attack all')
-                petState.lastCmdTargetId = tid
-                petState.lastCmdAt = os.clock()
+            -- Self-directed modes: character is leading combat directly, skip external MA aggro gate.
+            -- Assist modes: require player/tank has started hitting AND HP threshold met.
+            local selfDirected = (ctrl.mode == 'Pet Tank' or ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter'
+                or ctrl.mode == 'Garrison' or ctrl.mode == 'Tank' or ctrl.mode == 'Puller')
+            local engageOk = selfDirected or (playerHasAggro(tid) and playerIsEngagingTarget(tid))
+            if tgtHp <= assistThreshold then
+                if engageOk then
+                    -- Threshold met: release hold (if any) and send attack.
+                    mq.cmd('/say #petcmd attack all')
+                    petState.lastCmdTargetId = tid
+                    petState.lastCmdAt = os.clock()
+                    petState.petHoldActive = false
+                    petState.holdIssuedForId = 0
+                end
+            elseif useHold and petState.holdIssuedForId ~= tid then
+                -- New target above threshold and we have the AA: hold pets.
+                mq.cmd('/pet hold')
+                petState.petHoldActive = true
+                petState.holdIssuedForId = tid
             end
         end
     else
+        -- No active NPC target: reset command tracking.
+        -- If we had pets on hold for a threshold that never triggered (e.g. mob
+        -- died before reaching the HP%,  or we disengaged), release them now so
+        -- they don't stay frozen after combat.
+        if petState.petHoldActive and trioHasPetClass() then
+            mq.cmd('/pet back off')
+            petState.petHoldActive = false
+            petState.holdIssuedForId = 0
+        end
         petState.lastCmdTargetId = 0
         if ctrl.mode == 'Manual Hunter' and not mq.TLO.Me.Combat() then
             setManualHunterPetHold(true)

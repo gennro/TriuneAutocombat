@@ -603,7 +603,9 @@ end
 function common.isSpawnAlive(id)
     if not id or id == 0 then return false end
     local s = mq.TLO.Spawn(id)
-    return s() ~= nil and not s.Dead()
+    if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
+    if s.Type() == 'NPC' and (s.PctHPs() or 0) <= 0 then return false end
+    return true
 end
 
 function common.distToId(id)
@@ -694,7 +696,7 @@ end
 function common.firstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn)
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' then
+        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
             local cleanName = xt.CleanName() or ''
             local id = xt.ID()
             local ign = isIgnoredFn and isIgnoredFn(cleanName) or false
@@ -713,7 +715,7 @@ function common.lowestHpNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn)
 
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' then
+        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
             local cleanName = xt.CleanName() or ''
             local id = xt.ID()
             local ign = isIgnoredFn and isIgnoredFn(cleanName) or false

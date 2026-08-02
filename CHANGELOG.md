@@ -2,6 +2,15 @@
 
 ## 2026-08-01
 
+- Fixed **Hunter mode aggro switching & XTarget clearing flow**:
+  - If Hunter takes aggro while running toward a distant roam target (an NPC enters XTarget), movement immediately stops (`stopMoving()`, pursuit state reset), and target switches to the aggroed XTarget NPC (`firstNPCXtarget(false)`).
+  - Hunter now fights all NPCs on XTarget sequentially until `anyXtarAlive()` is false before seeking new roaming targets.
+  - XTarget hostiles in `findRoamTarget` are no longer filtered by the combat anchor radius, ensuring characters always defend themselves against active aggressors regardless of position.
+  - `checkAggroSwitch()` now calls `stopMoving()` and resets `pursuit.id` / `pursuit.lastNavTargetId` on target switch so navigation re-routes cleanly.
+  - Added strict global corpse and dead-spawn filtering (`not s.Dead()`, `s.Type() ~= 'Corpse'`, `(s.PctHPs() or 0) > 0`) across `setTarget`, `isCombat`, `haveNPC`, `findRoamTarget`, `pullerTick`, `maTargetId`, `resolveTargetId`, `common.isSpawnAlive`, `common.firstNPCXtarget`, and `common.lowestHpNPCXtarget` to completely prevent targeting or navigating to dead corpses.
+  - Fixed invalid `noanim` MQ TLO search string parameter in `findRoamTarget()` and `resolveTargetId()` that caused `NearestSpawn` lookups to fail and return nil, fixing the issue where Hunter would stand still or wander to random locations without acquiring targets. Expanded nearest spawn scan to 30 candidates.
+  - Updated pet assist threshold logic for self-directed modes (`Hunter`, `Pet Tank`, `Garrison`, etc.) so pet attacks dispatch reliably at `ctrl.pet_assist_at` without getting blocked by `playerIsEngagingTarget()`.
+
 - Added Hunter mode **Combat Radius** anchor feature.
   - New `ctrl.hunter_combat_loc` (x/y/z table) and `ctrl.hunter_combat_radius` (integer, 1–2000) fields in `defaultCtrl()`.
   - New UI sub-section in the Combat tab (Hunter / Pet Tank panel): shows the anchor coordinates or "No anchor set", **Set Anchor** and **Clear Anchor** buttons, and a **Combat Radius** slider (greyed out until an anchor is placed).
@@ -12,6 +21,19 @@
   - Anchor is cleared automatically on zone-out (matching `camp_loc` behaviour).
   - Both fields persist across log-out/log-in automatically because `ctrl` is serialised whole via `collectEntry()`.
 
+- Fixed **Pet Assist At %** threshold not actually holding pets before the HP condition is met.
+  - Added `hasAdvPetDiscipline()` helper that checks `mq.TLO.Me.AltAbility('Advanced Pet Discipline')` (with pcall guard) and returns `true` only when the AA is owned at rank ≥ 1.
+  - When **Pet Assist At % < 100** and the player owns the AA: `/pet hold` is issued the first tick a new target is engaged (before the threshold is reached), keeping pets stationary; `/say #petcmd attack all` is then sent as soon as target HP drops to or below the threshold.
+  - When the AA is not owned: the hold command is skipped entirely (it is silently ignored by the game without the AA); pets continue to receive the attack command at threshold exactly as before.
+  - If combat ends before the threshold is ever reached (mob died too fast, player disengaged, etc.), `/pet back off` is sent to release any stale hold so pets are not left frozen after the fight.
+  - Added `petHoldActive` and `holdIssuedForId` fields to `petState` to track hold state without bare top-level locals.
+  - **Critical crash fix:** `hasAdvPetDiscipline()` called `aa()` outside any pcall guard. Calling the TLO functor on an AA the character doesn't own throws an exception in some MacroQuest builds; this exception propagated up and was silently swallowed by the `pcall(combatTick)` in the main loop, halting the entire combat engine every tick. The whole AA check is now a single `pcall` so any throw is caught and returns `false`.
+
+- Fixed Hunter mode going to random locations instead of seeking mobs after a reload.
+  - Root cause: `hunter_combat_loc` (the combat radius anchor) was being restored from the saved loadout via `applyEntry`. Since the anchor is a zone-specific position (like `camp_loc`), reloading it in a new session/zone caused `findRoamTarget` to reject every mob outside the stale anchor circle, leaving no valid targets and forcing the wander path.
+  - `applyEntry` now explicitly clears `hunter_combat_loc` and `hunter_combat_radius` after applying the saved `ctrl` block. Players set the anchor in-game each session.
+  - Added `hunter_combat_loc` and `hunter_combat_radius` to `loadoutSig` so anchor Set/Clear actions trigger auto-save (previously, clearing the anchor would not save immediately).
+  - Increased wander point hold-time from 8 s to 20 s so MQ2Nav has time to actually reach a random wander destination before the engine picks a new one.
 
 - Fixed Hunter mode roaming to a new mob before all current XTarget NPCs are dead.
   - Added `anyXtarAlive()` helper that iterates `Me.XTarget(1..13)` and returns `true` if any live (HP > 0), non-ignored, reachable NPC remains on the extended target list.
