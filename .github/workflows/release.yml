@@ -3,8 +3,14 @@ name: Draft & Publish Release
 on:
   push:
     tags:
-      - 'v*' # Triggers on push of tags like v1.0.0, v1.0.1
-  workflow_dispatch: # Allows manual trigger from the Actions UI tab
+      - 'v*'
+      - 'V*' # Added uppercase V just in case!
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to release (e.g., v1.1)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -18,19 +24,13 @@ jobs:
 
       - name: Stage and Package Files
         run: |
-          # Create staging directory
           mkdir -p staging
-
-          # Copy directories maintaining full structure
           if [ -d "config" ]; then cp -r config staging/config; fi
           if [ -d "lua" ]; then cp -r lua staging/lua; fi
-
-          # Copy root files into staging root
           cp -f *.lua staging/ 2>/dev/null || true
           cp -f README* staging/ 2>/dev/null || true
           cp -f CHANGELOG* staging/ 2>/dev/null || true
 
-          # Archive contents of staging folder while retaining folder hierarchy
           cd staging
           zip -r ../TriuneAutocombat.zip .
           cd ..
@@ -39,6 +39,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: TriuneAutocombat.zip
+          tag_name: ${{ inputs.tag_name || github.ref_name }} # Uses manual input if provided, otherwise defaults to pushed tag
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
