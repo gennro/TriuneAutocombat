@@ -1,5 +1,30 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-06
+
+- Fixed discipline classification issue in `lua/triune.lua`:
+  - Filtered out combat disciplines from `filteredSpells()` so they no longer appear inside the spell selection dropdowns under the **Spell Gems** tab and **Buff Loadout** tab.
+  - Added `PURE_MELEE_CLASSES` mapping (`War`, `Mnk`, `Rog`, `Ber`) and `isDisciplineSpell(abbr, spellName)` helper to identify disciplines by checking `DATA.discs`, MQ TLO `Spell.IsSkill()`, and discipline state.
+  - Updated `classHasSpells()` to return `false` for pure melee classes so they correctly display `"has no gem spells (melee) -> Abilities tab"` in the UI instead of rendering empty or discipline-populated spell pickers.
+  - Updated `spellClassInfo()` to exclude disciplines and pure melee classes from spell class ownership lookups.
+
+- Standardized spell categorization across `lua/triune_spellbook.lua` and `lua/triune.lua`:
+  - Established standardized 8-category system: `ALL`, `DD` (nukes), `DoT` (damage over time), `Debuff` (slows, Tash, Malo, AC debuffs), `Buff` (beneficial buffs), `Heal` (heals/HoTs), `Pet` (SPA 103 pet summons), and `Util` (item summons, ports/gate, rez/corpse, CC).
+  - Created `checkHasSPA()` in `lua/triune_spellbook.lua` supporting SPA 103 (`SE_SummonPet`), item summoning (SPAs 32, 33, 108), Teleport/Gate/Evac (SPAs 83, 88), Resurrection/Corpse (SPAs 81, 91), CC (SPAs 18, 22, 31), and Debuffs (SPAs 11, 23, 46).
+  - Updated spellbook top category filter buttons to `ALL`, `DD`, `DoT`, `Debuff`, `Buff`, `Heal`, `Pet`, `Util`.
+  - Updated `KIND_LABEL` in `lua/triune.lua` and `KIND_LABELS` in `lua/triune_spellbook.lua` to sync category tags across dropdown pickers and spell table rows.
+  - Defined `KIND_LABEL` above `filteredSpells()` in `lua/triune.lua` to prevent `nil` scoping errors when rendering the **Spell Gems** tab.
+  - Reordered evaluation order inside `mapTLOCategoryToKind()` in `lua/triune_spellbook.lua` and `lua/triune.lua`: beneficial status is extracted early so beneficial player haste (*Celerity*, *Alacrity*, *Swift*), movement buffs (*Spirit of Wolf*, *SoW*), and damage shields (*Shield of Lava*, *Shield of Fire*) route directly to **`buff`**, non-beneficial direct damage nukes and lifetaps (*Lifetap*, *Lifedraw*, *Lifespike*, *Siphon Life*, *Drain*) route to **`dd`**, non-beneficial debuffs (*Mala*, *Malo*, *Malosi*, *Tash*, *Incapacitate*, *Listless Power*, *Disempower*, *Turgur's*) route to **`debuff`**, and utility/travel/stealth spells (*Gate*, *Bind Affinity*, *Invisibility*, *Camouflage*, *Translocate*, SPAs 12, 29, 30, 41, 83, 88) route to **`util`**.
+  - Positioned `mapTLOCategoryToKind()` lexically above `filteredSpells()` in `lua/triune.lua` to fix a nil function reference error when populating spell gem dropdown pickers.
+  - Prioritized dynamic `mapTLOCategoryToKind()` SPA and category string evaluation over legacy static `kind` values from database tables across `triune_spellbook.lua` (`getActiveClassSpells`) and `triune.lua` (`filteredSpells` & `spellClassInfo`).
+
+- Fixed character class auto-detection fallback issue in `lua/triune.lua`:
+  - Replaced hardcoded default `myClasses = { 'War', 'Rng', 'Brd' }` with an empty table `{}`.
+  - Updated `UI.drawClassPicker()` combo box logic so unassigned class slots do not implicitly overwrite class slots with `'War'`, `'Rng'`, or `'Brd'`, preventing incorrect class AA/spell lists from rendering.
+
+- Updated zoning behavior in `lua/triune.lua`:
+  - Updated `onZoned()` handler to set `ctrl.running = false`, issue `fullStop()`, and log `zoned -- pausing autocombat` when transitioning between zones.
+
 ## 2026-08-05
 
 - Updated Pet Hold management in `lua/triune.lua`:

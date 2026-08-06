@@ -97,7 +97,7 @@ end
 local openGUI = true
 local isRunning = true
 
-local KIND_LABELS = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet = 'Pet', util = 'Util', other = 'Other' }
+local KIND_LABELS = { dd = 'DD', dot = 'DoT', debuff = 'Debuff', buff = 'Buff', heal = 'Heal', pet = 'Pet', util = 'Util' }
 
 -- Global State & Data Store
 local state = {
@@ -476,29 +476,39 @@ end
 -- Core Character Inspection Utilities
 -- ============================================================================
 
-local function checkHasSPA103(name, sp)
-    local isPet = false
+local function checkHasSPA(tloSpell, name, sp, spaId)
+    local hasIt = false
     pcall(function()
-        if sp and sp.ID and sp.ID() > 0 then
-            local res = mq.TLO.Spell(sp.ID()).HasSPA(103)
-            if res == true or res == 1 then isPet = true end
-            if not isPet and (type(res) == 'function' or type(res) == 'userdata') then
+        if tloSpell then
+            local res = tloSpell.HasSPA(spaId)
+            if res == true or res == 1 then hasIt = true end
+            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
                 local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
-                if ok and (r2 == true or r2 == 1) then isPet = true end
+                if ok and (r2 == true or r2 == 1) then hasIt = true end
             end
         end
     end)
-    if not isPet and name and name ~= "" then
+    if not hasIt and sp and sp.ID and sp.ID() > 0 then
         pcall(function()
-            local res = mq.TLO.Spell(name).HasSPA(103)
-            if res == true or res == 1 then isPet = true end
-            if not isPet and (type(res) == 'function' or type(res) == 'userdata') then
+            local res = mq.TLO.Spell(sp.ID()).HasSPA(spaId)
+            if res == true or res == 1 then hasIt = true end
+            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
                 local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
-                if ok and (r2 == true or r2 == 1) then isPet = true end
+                if ok and (r2 == true or r2 == 1) then hasIt = true end
             end
         end)
     end
-    return isPet
+    if not hasIt and name and name ~= "" then
+        pcall(function()
+            local res = mq.TLO.Spell(name).HasSPA(spaId)
+            if res == true or res == 1 then hasIt = true end
+            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
+                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
+                if ok and (r2 == true or r2 == 1) then hasIt = true end
+            end
+        end)
+    end
+    return hasIt
 end
 
 local function mapTLOCategoryToKind(sp, name)
@@ -526,12 +536,7 @@ local function mapTLOCategoryToKind(sp, name)
         tloSpell = sp
     end
 
-    -- 1. Check SPA 103 (SE_SummonPet) for 100% accurate pet spell classification
-    if checkHasSPA103(name, sp) then
-        return 'pet'
-    end
-
-    -- 2. Extract Category and Subcategory strings safely
+    -- 1. Extract Category and Subcategory strings safely
     local catStr = ""
     local subcatStr = ""
 
@@ -553,22 +558,17 @@ local function mapTLOCategoryToKind(sp, name)
         end)
     end
 
-    -- 3. Match category strings
-    if catStr:find('pet') or subcatStr:find('pet') or catStr:find('summon') or subcatStr:find('summon') then
+    local nmLower = name and name:lower() or ""
+
+    -- Check specific pet subcategories/categories, pet spell names, or pet buff spells (e.g. Burnout, Pet Haste, Pet Power)
+    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility')) 
+        or subcatStr:find('burnout') or nmLower:find('burnout')
+        or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant')
+        or subcatStr:find('companion') or catStr:find('companion') or subcatStr:find('minion') or catStr:find('minion') then
         return 'pet'
-    elseif catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore') then
-        return 'heal'
-    elseif catStr:find('dot') or catStr:find('damage over time') or subcatStr:find('dot') or subcatStr:find('damage over time') then
-        return 'dot'
-    elseif catStr:find('direct damage') or catStr:find('nuke') or catStr:find('dd') or subcatStr:find('direct damage') or subcatStr:find('nuke') then
-        return 'dd'
-    elseif catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') then
-        return 'buff'
-    elseif catStr:find('transport') or catStr:find('travel') or catStr:find('utility') or catStr:find('misc') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') then
-        return 'util'
     end
 
-    -- 4. Beneficial check fallback
+    -- Extract Beneficial status early
     local bene = true
     pcall(function()
         if tloSpell then
@@ -579,6 +579,82 @@ local function mapTLOCategoryToKind(sp, name)
             if type(b) == 'function' or type(b) == 'userdata' then bene = b() or false else bene = b or false end
         end
     end)
+
+    -- Check player buffs / damage shields / haste spells (Celerity, Alacrity, Haste, Swift, Shield of Lava, etc.)
+    if bene then
+        if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') 
+            or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield')
+            or subcatStr:find('haste') or catStr:find('haste')
+            or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste') or nmLower:find('swift') then
+            return 'buff'
+        end
+    end
+
+    -- Debuff Check for resist debuffs (Mala, Malo, Malosi, Tash, etc.)
+    if not bene then
+        if catStr:find('debuff') or subcatStr:find('debuff') or catStr:find('slow') or subcatStr:find('slow')
+            or catStr:find('dispel') or subcatStr:find('dispel') or catStr:find('blind') or subcatStr:find('blind')
+            or nmLower:find('mala') or nmLower:find('malo') or nmLower:find('tash') or nmLower:find('incapacitate') or nmLower:find('listless') or nmLower:find('disempower') then
+            return 'debuff'
+        end
+    end
+
+    -- Utility Check (Gate, Bind Affinity, Invisibility, Camouflage, Teleports, Illusions, Item Summons)
+    if nmLower:find('gate') or nmLower:find('bind affinity') or nmLower:find('invisib') or nmLower:find('camouflage') or nmLower:find('translocate')
+        or catStr:find('transport') or catStr:find('travel') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') or catStr:find('invis')
+        or subcatStr:find('transport') or subcatStr:find('travel') or subcatStr:find('teleport') or subcatStr:find('gate') or subcatStr:find('illusion') or subcatStr:find('invis')
+        or (catStr:find('utility') and not catStr:find('debuff')) or (subcatStr:find('utility') and not subcatStr:find('debuff')) then
+        return 'util'
+    end
+
+    -- 2. SPA-based checks (most authoritative for non-beneficial SPA mechanics)
+    -- SPA 103: SE_SummonPet
+    if checkHasSPA(tloSpell, name, sp, 103) then
+        return 'pet'
+    end
+
+    -- Item summoning SPAs: 32 (SE_SummonItem), 108 (SE_SummonItem3), 33 (SE_SummonItem2)
+    if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then
+        return 'util'
+    end
+
+    -- Teleport / Gate / Evac SPAs: 83 (SE_Teleport), 88 (SE_Evacuate), 12 (SE_Invisibility), 41 (SE_Invisibility2), 29 (SE_InvisVsUndead), 30 (SE_InvisVsAnimals)
+    if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then
+        return 'util'
+    end
+
+    -- Resurrection / Corpse SPAs: 81 (SE_Resurrect), 91 (SE_SummonCorpse)
+    if checkHasSPA(tloSpell, name, sp, 81) or checkHasSPA(tloSpell, name, sp, 91) then
+        return 'util'
+    end
+
+    -- Crowd Control / Charm SPAs: 18 (SE_Pacify), 22 (SE_Charm), 31 (SE_Mez)
+    if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then
+        return 'util'
+    end
+
+    -- Debuff SPAs: 11 (SE_AttackSpeed/Slow), 46 (SE_Resist debuff/Tash/Malo), 23 (SE_ArmorClass debuff), 4 (SE_STR debuff), 5 (SE_DEX debuff), 6 (SE_AGI debuff), 7 (SE_STA debuff), 8 (SE_INT debuff), 9 (SE_WIS debuff), 10 (SE_CHA debuff)
+    if not bene then
+        if checkHasSPA(tloSpell, name, sp, 11) or checkHasSPA(tloSpell, name, sp, 46) or checkHasSPA(tloSpell, name, sp, 23)
+            or checkHasSPA(tloSpell, name, sp, 4) or checkHasSPA(tloSpell, name, sp, 5) or checkHasSPA(tloSpell, name, sp, 6) or checkHasSPA(tloSpell, name, sp, 7) then
+            return 'debuff'
+        end
+    end
+
+    -- 3. Match non-beneficial attack / damage / buff categories
+    if catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore') then
+        return 'heal'
+    elseif catStr:find('dot') or catStr:find('damage over time') or subcatStr:find('dot') or subcatStr:find('damage over time') then
+        return 'dot'
+    elseif catStr:find('direct damage') or catStr:find('nuke') or catStr:find('dd') or subcatStr:find('direct damage') or subcatStr:find('nuke') or catStr:find('lifetap') or subcatStr:find('lifetap') or nmLower:find('lifetap') or nmLower:find('lifedraw') or nmLower:find('lifespike') or nmLower:find('siphon life') or nmLower:find('drain') then
+        return 'dd'
+    elseif catStr:find('debuff') or subcatStr:find('debuff') or catStr:find('slow') or subcatStr:find('slow') or catStr:find('dispel') or subcatStr:find('dispel') or catStr:find('blind') or subcatStr:find('blind') or nmLower:find('incapacitate') or nmLower:find('listless') or nmLower:find('disempower') then
+        return 'debuff'
+    elseif bene or catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield') or nmLower:find('spirit of wolf') or nmLower:find('sow') then
+        return 'buff'
+    elseif catStr:find('transport') or catStr:find('travel') or catStr:find('utility') or catStr:find('misc') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') or catStr:find('summon') or subcatStr:find('summon') then
+        return 'util'
+    end
 
     if bene then
         return 'buff'
@@ -736,7 +812,8 @@ local function getActiveClassSpells(cls)
                     end)
                 end
 
-                local kind = (dbEntry and dbEntry.kind) or mapTLOCategoryToKind(sp, name)
+                local kind = mapTLOCategoryToKind(sp, name)
+                if not kind or kind == 'other' then kind = (dbEntry and dbEntry.kind) or 'other' end
 
                 local normName = normalizeSpellName(name)
                 scribedNormMap[normName] = true
@@ -762,11 +839,13 @@ local function getActiveClassSpells(cls)
         local dCleanLower = cleanSpellName(dName):lower()
 
         if not scribedNormMap[dNorm] and not scribedNormMap[dLower] and not scribedNormMap[dCleanLower] then
+            local dynamicKind = mapTLOCategoryToKind(nil, dName)
+            if dynamicKind == 'other' or not dynamicKind then dynamicKind = dKind or 'other' end
             table.insert(outList, {
                 name = dName,
                 level = tonumber(dLvl) or 1,
                 bene = (dBene == 1 or dBene == true),
-                kind = dKind or 'other',
+                kind = dynamicKind,
                 scribed = false,
                 slot = nil
             })
@@ -1082,7 +1161,7 @@ local function DrawTriuneUI()
 
     if ImGui.BeginTabBar("MainWorkspaceTabs") then
         if ImGui.BeginTabItem("Spellbook Browser##Tab") then
-            local cats = { 'ALL', 'dd', 'dot', 'heal', 'buff', 'pet', 'util', 'other' }
+            local cats = { 'ALL', 'dd', 'dot', 'debuff', 'buff', 'heal', 'pet', 'util' }
             for _, c in ipairs(cats) do
                 local isCat = (state.selectedCategory == c)
                 if isCat then ImGui.PushStyleColor(ImGuiCol.Button, 0.3, 0.6, 0.9, 1.0) end

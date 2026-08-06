@@ -44,7 +44,7 @@ local ALL_ABBR          = { 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd
 
 -- the character's gestalt trio (editable). Declared here, before classColor,
 -- so slot colors below can be looked up by position in this list.
-local myClasses         = { 'War', 'Rng', 'Brd' }
+local myClasses         = {}
 
 -- Set by the "Re-detect" button (drawClassPicker runs inside the ImGui render
 -- callback, a non-yieldable thread) and drained in the main loop below. Do
@@ -341,6 +341,8 @@ local function defaultsForKind(kind, bene)
     if kind == 'heal' then return 'Self', 'my HP <=' end
     if kind == 'buff' then return 'Self', 'missing buff' end
     if kind == 'pet' then return 'Self', 'missing pet' end
+    if kind == 'util' then return 'Self', 'always' end
+    if kind == 'debuff' then return 'Target', 'target HP <=' end
     if kind == 'dot' then return 'Target', 'target HP <=' end
     if kind == 'dd' then return 'Target', 'target HP <=' end
     if bene == true then return 'Self', 'missing buff' end
@@ -799,33 +801,212 @@ local function lookupSpells(abbr)
     return {}
 end
 
-local function classHasSpells(abbr)
-    local s = lookupSpells(abbr)
-    return s ~= nil and #s > 0
-end
+local PURE_MELEE_CLASSES = { War = true, WAR = true, Mnk = true, MNK = true, Rog = true, ROG = true, Ber = true, BER = true }
 
--- Checked live every time the spell picker renders (not cached), so the list
--- naturally updates the moment you scribe something new -- no separate
--- refresh mechanism needed.
--- isScribed is defined in local helpers above
-
--- kind tag (4th field the extractor writes: dd/dot/heal/buff, classified from
--- goodEffect + whether the spell has a duration -- verified against known
--- spells: Flame Bolt=dd, Immolate/Heat Blood=dot, Minor Healing=heal, Spirit
--- of Wolf=buff). Shown in the picker so a low-level player isn't left
--- guessing what an unfamiliar spell name actually does.
-local KIND_LABEL = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet = 'Pet' }
-
--- spells for a class within the level band; returns name list + lookup by name.
--- ctrl.scribed_only (default on) additionally filters to spells actually in
--- your spellbook -- without it, a lower-level character sees every spell
--- their class could EVER learn in that level range, most of which they may
--- not have scribed yet, which reads as "the tool doesn't know what I have".
 local filteredSpellsCache = {}
 local lastFilteredCacheTime = 0
 local lastFilterState = {}
 
+local function isDisciplineSpell(abbr, spellName)
+    if not abbr or not spellName or spellName == "" then return false end
+    if PURE_MELEE_CLASSES[abbr] or PURE_MELEE_CLASSES[abbr:upper()] then return true end
+
+    if DATA and DATA.discs then
+        local alt = ALIAS_CLASS_MAP[abbr:upper()] or abbr
+        local discList = DATA.discs[abbr] or DATA.discs[abbr:upper()] or DATA.discs[alt]
+        if discList then
+            for _, row in ipairs(discList) do
+                if row[1] == spellName or row[1]:lower() == spellName:lower() then
+                    return true
+                end
+            end
+        end
+    end
+
+    local isSkill = false
+    pcall(function()
+        local spObj = mq.TLO.Spell(spellName)
+        if spObj() and spObj.IsSkill() then
+            isSkill = true
+        end
+    end)
+    if isSkill then return true end
+
+    return isDiscKnown(spellName)
+end
+
+local function checkHasSPA(tloSpell, name, sp, spaId)
+    local hasIt = false
+    pcall(function()
+        if tloSpell then
+            local res = tloSpell.HasSPA(spaId)
+            if res == true or res == 1 then hasIt = true end
+            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
+                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
+                if ok and (r2 == true or r2 == 1) then hasIt = true end
+            end
+        end
+    end)
+    if not hasIt and sp and sp.ID and sp.ID() > 0 then
+        pcall(function()
+            local res = mq.TLO.Spell(sp.ID()).HasSPA(spaId)
+            if res == true or res == 1 then hasIt = true end
+            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
+                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
+                if ok and (r2 == true or r2 == 1) then hasIt = true end
+            end
+        end)
+    end
+    if not hasIt and name and name ~= "" then
+        pcall(function()
+            local res = mq.TLO.Spell(name).HasSPA(spaId)
+            if res == true or res == 1 then hasIt = true end
+            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
+                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
+                if ok and (r2 == true or r2 == 1) then hasIt = true end
+            end
+        end)
+    end
+    return hasIt
+end
+
+local function mapTLOCategoryToKind(sp, name)
+    if not sp and not name then return 'other' end
+
+    -- Extract Spell TLO via ID first (most reliable in MQ)
+    local tloSpell = nil
+    pcall(function()
+        if sp and sp.ID and sp.ID() > 0 then
+            tloSpell = mq.TLO.Spell(sp.ID())
+        end
+    end)
+    if not tloSpell and name and name ~= "" then
+        pcall(function()
+            tloSpell = mq.TLO.Spell(name)
+        end)
+    end
+    if not tloSpell and name and name ~= "" then
+        pcall(function()
+            local cl = cleanSpellName(name)
+            if cl ~= name then tloSpell = mq.TLO.Spell(cl) end
+        end)
+    end
+    if not tloSpell and type(sp) == 'userdata' then
+        tloSpell = sp
+    end
+
+    -- 1. Extract Category and Subcategory strings safely
+    local catStr = ""
+    local subcatStr = ""
+
+    pcall(function()
+        if tloSpell then
+            local c = tloSpell.Category
+            if c then catStr = tostring(c() or c.Name() or c):lower() end
+            local sc = tloSpell.Subcategory
+            if sc then subcatStr = tostring(sc() or sc.Name() or sc):lower() end
+        end
+    end)
+
+    if (catStr == "" or catStr == "nil") and sp then
+        pcall(function()
+            local c = sp.Category
+            if c then catStr = tostring(c() or c.Name() or c):lower() end
+            local sc = sp.Subcategory
+            if sc then subcatStr = tostring(sc() or sc.Name() or sc):lower() end
+        end)
+    end
+
+    local nmLower = name and name:lower() or ""
+
+    -- Check specific pet subcategories/categories, pet spell names, or pet buff spells (e.g. Burnout, Pet Haste, Pet Power)
+    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility')) 
+        or subcatStr:find('burnout') or nmLower:find('burnout')
+        or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant')
+        or subcatStr:find('companion') or catStr:find('companion') or subcatStr:find('minion') or catStr:find('minion') then
+        return 'pet'
+    end
+
+    -- Extract Beneficial status early
+    local bene = true
+    pcall(function()
+        if tloSpell then
+            local b = tloSpell.Beneficial
+            if type(b) == 'function' or type(b) == 'userdata' then bene = b() or false else bene = b or false end
+        elseif sp then
+            local b = sp.Beneficial
+            if type(b) == 'function' or type(b) == 'userdata' then bene = b() or false else bene = b or false end
+        end
+    end)
+
+    -- Check player buffs / damage shields / haste spells (Celerity, Alacrity, Haste, Swift, Shield of Lava, etc.)
+    if bene then
+        if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') 
+            or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield')
+            or subcatStr:find('haste') or catStr:find('haste')
+            or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste') or nmLower:find('swift') then
+            return 'buff'
+        end
+    end
+
+    -- Debuff Check for resist debuffs (Mala, Malo, Malosi, Tash, etc.)
+    if not bene then
+        if catStr:find('debuff') or subcatStr:find('debuff') or catStr:find('slow') or subcatStr:find('slow')
+            or catStr:find('dispel') or subcatStr:find('dispel') or catStr:find('blind') or subcatStr:find('blind')
+            or nmLower:find('mala') or nmLower:find('malo') or nmLower:find('tash') or nmLower:find('incapacitate') or nmLower:find('listless') or nmLower:find('disempower') then
+            return 'debuff'
+        end
+    end
+
+    -- Utility Check (Gate, Bind Affinity, Invisibility, Camouflage, Teleports, Illusions, Item Summons)
+    if nmLower:find('gate') or nmLower:find('bind affinity') or nmLower:find('invisib') or nmLower:find('camouflage') or nmLower:find('translocate')
+        or catStr:find('transport') or catStr:find('travel') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') or catStr:find('invis')
+        or subcatStr:find('transport') or subcatStr:find('travel') or subcatStr:find('teleport') or subcatStr:find('gate') or subcatStr:find('illusion') or subcatStr:find('invis')
+        or (catStr:find('utility') and not catStr:find('debuff')) or (subcatStr:find('utility') and not subcatStr:find('debuff')) then
+        return 'util'
+    end
+
+    -- 2. SPA-based checks (most authoritative for non-beneficial SPA mechanics)
+    if checkHasSPA(tloSpell, name, sp, 103) then return 'pet' end
+    if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then return 'util' end
+    if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then return 'util' end
+    if checkHasSPA(tloSpell, name, sp, 81) or checkHasSPA(tloSpell, name, sp, 91) then return 'util' end
+    if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then return 'util' end
+    if not bene then
+        if checkHasSPA(tloSpell, name, sp, 11) or checkHasSPA(tloSpell, name, sp, 46) or checkHasSPA(tloSpell, name, sp, 23)
+            or checkHasSPA(tloSpell, name, sp, 4) or checkHasSPA(tloSpell, name, sp, 5) or checkHasSPA(tloSpell, name, sp, 6) or checkHasSPA(tloSpell, name, sp, 7) then
+            return 'debuff'
+        end
+    end
+
+    -- 3. Match remaining category strings
+    if catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore') then
+        return 'heal'
+    elseif catStr:find('dot') or catStr:find('damage over time') or subcatStr:find('dot') or subcatStr:find('damage over time') then
+        return 'dot'
+    elseif catStr:find('direct damage') or catStr:find('nuke') or catStr:find('dd') or subcatStr:find('direct damage') or subcatStr:find('nuke') or catStr:find('lifetap') or subcatStr:find('lifetap') or nmLower:find('lifetap') or nmLower:find('lifedraw') or nmLower:find('lifespike') or nmLower:find('siphon life') or nmLower:find('drain') then
+        return 'dd'
+    elseif catStr:find('debuff') or subcatStr:find('debuff') or catStr:find('slow') or subcatStr:find('slow') or catStr:find('dispel') or subcatStr:find('dispel') or catStr:find('blind') or subcatStr:find('blind') or nmLower:find('incapacitate') or nmLower:find('listless') or nmLower:find('disempower') then
+        return 'debuff'
+    elseif bene or catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield') or nmLower:find('spirit of wolf') or nmLower:find('sow') then
+        return 'buff'
+    elseif catStr:find('transport') or catStr:find('travel') or catStr:find('utility') or catStr:find('misc') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') or catStr:find('summon') or subcatStr:find('summon') then
+        return 'util'
+    end
+
+    if bene then
+        return 'buff'
+    else
+        return 'dd'
+    end
+end
+
+local KIND_LABEL = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet = 'Pet', util = 'Util', debuff = 'Debuff' }
+
 local function filteredSpells(abbr)
+    if not abbr then
+        return {}, {}
+    end
     local now = os.clock()
     local scribedOnly = ctrl and ctrl.scribed_only or false
     local myClassAbbr = nil
@@ -842,13 +1023,17 @@ local function filteredSpells(abbr)
     local names, lookup = {}, {}
     local src = lookupSpells(abbr)
     for _, row in ipairs(src) do
-        local nm, lv, bene, kind = row[1], row[2], row[3], row[4]
+        local nm, lv, bene, dbKind = row[1], row[2], row[3], row[4]
         local checkScribed = scribedOnly and isMyClass
-        if lv >= lvlMin and lv <= lvlMax and (not checkScribed or isScribed(nm)) then
-            local label       = KIND_LABEL[kind]
-            names[#names + 1] = label and string.format('%s  (L%d) [%s]', nm, lv, label)
-                or string.format('%s  (L%d)', nm, lv)
-            lookup[#names]    = { name = nm, level = lv, bene = (bene == 1), kind = kind }
+        if not isDisciplineSpell(abbr, nm) then
+            if lv >= lvlMin and lv <= lvlMax and (not checkScribed or isScribed(nm)) then
+                local kind = mapTLOCategoryToKind(nil, nm)
+                if not kind or kind == 'other' then kind = dbKind or 'other' end
+                local label       = KIND_LABEL[kind]
+                names[#names + 1] = label and string.format('%s  (L%d) [%s]', nm, lv, label)
+                    or string.format('%s  (L%d)', nm, lv)
+                lookup[#names]    = { name = nm, level = lv, bene = (bene == 1), kind = kind }
+            end
         end
     end
 
@@ -857,6 +1042,25 @@ local function filteredSpells(abbr)
     lastFilterState = { lvlMin = lvlMin, lvlMax = lvlMax, scribedOnly = scribedOnly }
     return names, lookup
 end
+
+local function classHasSpells(abbr)
+    if not abbr or PURE_MELEE_CLASSES[abbr] or PURE_MELEE_CLASSES[abbr:upper()] then
+        return false
+    end
+    local names, _ = filteredSpells(abbr)
+    return names ~= nil and #names > 0
+end
+
+-- Checked live every time the spell picker renders (not cached), so the list
+-- naturally updates the moment you scribe something new -- no separate
+-- refresh mechanism needed.
+-- isScribed is defined in local helpers above
+
+-- kind tag (4th field the extractor writes: dd/dot/heal/buff, classified from
+-- goodEffect + whether the spell has a duration -- verified against known
+-- spells: Flame Bolt=dd, Immolate/Heat Blood=dot, Minor Healing=heal, Spirit
+-- of Wolf=buff). Shown in the picker so a low-level player isn't left
+-- guessing what an unfamiliar spell name actually does.
 
 -- Base SKILLS (not spells/discs/AAs -- no extractor entry, no cooldown data,
 -- fired via /doability) worth an emergency %-based condition. Keyed by class
@@ -919,10 +1123,21 @@ local ALLDATA = {} -- character name -> saved entry
 -- its kind tag (dd/dot/heal/buff) -- all three feed defaultsForKind.
 local function spellClassInfo(name)
     for _, abbr in ipairs(myClasses) do
-        local list = lookupSpells(abbr)
-        if list then for _, it in ipairs(list) do if it[1] == name then return abbr, (it[3] == 1), it[4] end end end
+        if not PURE_MELEE_CLASSES[abbr] and not PURE_MELEE_CLASSES[abbr:upper()] then
+            local list = lookupSpells(abbr)
+            if list then
+                for _, it in ipairs(list) do
+                    if it[1] == name and not isDisciplineSpell(abbr, name) then
+                        local kind = mapTLOCategoryToKind(nil, name)
+                        if not kind or kind == 'other' then kind = it[4] or 'other' end
+                        return abbr, (it[3] == 1), kind
+                    end
+                end
+            end
+        end
     end
-    return myClasses[1] or 'War', true, nil
+    local fallbackKind = mapTLOCategoryToKind(nil, name)
+    return myClasses[1] or 'War', true, fallbackKind
 end
 
 -- Read the spells currently on the gem bar into the loadout -- no re-memming; the
@@ -1361,8 +1576,17 @@ function UI.drawClassPicker()
         ImGui.TextDisabled('Auto-detected on login; adjust if needed (saved per character):')
         for i = 1, 3 do
             ImGui.SetNextItemWidth(90)
-            local newIdx = ImGui.Combo('##cls' .. i, idxOf(ALL_ABBR, myClasses[i] or 'War'), ALL_ABBR)
-            myClasses[i] = ALL_ABBR[newIdx]
+            local defaultClass = myClasses[1] or 'War'
+            local currentVal = myClasses[i]
+            local idx = currentVal and idxOf(ALL_ABBR, currentVal) or (i == 1 and idxOf(ALL_ABBR, defaultClass) or nil)
+            if idx then
+                local newIdx = ImGui.Combo('##cls' .. i, idx, ALL_ABBR)
+                myClasses[i] = ALL_ABBR[newIdx]
+            else
+                -- If slot i is unassigned (e.g. single-class or 2-class toon), show empty/selectable combo without defaulting to War/Rng/Brd
+                local newIdx = ImGui.Combo('##cls' .. i, 1, ALL_ABBR)
+                if currentVal then myClasses[i] = ALL_ABBR[newIdx] end
+            end
             ImGui.SameLine()
         end
         if ImGui.Button('Re-detect') then reDetectRequested = true end
@@ -3234,6 +3458,11 @@ fullStop = function()
 end
 
 onZoned = function()
+    if ctrl.running then
+        ctrl.running = false
+        fullStop()
+        print('\ay[Triune]\ax zoned -- pausing autocombat.')
+    end
     pursuit.unreachableIds = {}
     pursuit.id = 0
     pursuit.wanderLoc = nil
