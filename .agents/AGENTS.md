@@ -12,30 +12,17 @@ written entirely in Lua 5.1 / LuaJIT and runs inside MacroQuest2 via
 
 | File | Role |
 |---|---|
-| `lua/triune.lua` | Main engine: UI, loadout, combat loop, persistence. Entry point. |
-| `lua/triune_common.lua` | Shared library: navigation, spell helpers, class detection, ImGui theme. |
-| `lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window. |
-| `lua/triune_cursor.lua` | Standalone cursor item manager window. |
+| `lua/triune.lua` | Main engine: UI with theme, loadout, combat loop, persistence. Entry point. |
+
+| `lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window with theme. |
+| `lua/triune_cursor.lua` | Standalone cursor item manager window with theme. |
 | `config/triune_data.lua` | Era-correct spell/disc/AA database (generated, not hand-edited). |
 | `CHANGELOG.md` | Full history of changes, newest date first. |
 | `README.md` | User-facing documentation including commands, features, file structure. |
 
 > **Note:** `triune_loadout.lua` is written to the MQ config directory at runtime — it is NOT in this repo.
 
-## Module Dependency Chain
 
-```
-triune.lua
-  └── requires triune_common.lua
-
-triune_spellbook.lua
-  └── requires triune_common.lua
-
-triune_cursor.lua
-  └── requires triune_common.lua (multi-path search)
-```
-
-`triune_common.lua` has **no project-level dependencies** — it only requires `mq`.
 
 ---
 
@@ -163,3 +150,7 @@ When adding new state, always add it to the appropriate table — never add a ba
 - Color constants use descriptive names: `GOOD`, `WARN`, `ERR`, `ARC`, `GOLD`, `MUTED`.
 - The unified dark theme must be applied to every ImGui window via `common.pushTheme()` / `common.popTheme()`.
 - Class abbreviations always use the mixed-case data-file format: `War`, `Clr`, `Pal`, `Rng`, `SK`, `Dru`, `Mnk`, `Brd`, `Rog`, `Shm`, `Nec`, `Wiz`, `Mag`, `Enc`, `Bst`, `Ber`.
+
+
+## Macroquest Lua Definitions
+Located here /home/gennro/Documents/github/mq-definitions/

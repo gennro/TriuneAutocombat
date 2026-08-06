@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
 -- TRIUNE SPELLBOOK ENGINE (Standalone ImGui Script)
 -- ----------------------------------------------------------------------------
@@ -7,7 +8,90 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 local bit = require('bit') -- LuaJIT bitwise library
-local common = require('triune_common')
+-- Theme & style helpers for spellbook window
+local _colN, _varN = 0, 0
+local function pushCol(id, r, g, b, a)
+    if id == nil then return end
+    local ImGuiColType = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
+    local enumVal = ImGuiColType and ImGuiColType(id) or id
+    if pcall(mq.imgui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end ---@diagnostic disable-line: undefined-field
+end
+local function pushVar(id, a, b)
+    if id == nil then return end
+    local ok
+    local ImGuiSVType = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+    local enumVal = ImGuiSVType and ImGuiSVType(id) or id
+    if b ~= nil then
+        local ImVec2Type = _G.ImVec2
+        if type(ImVec2Type) == 'function' then
+            ok = pcall(mq.imgui.PushStyleVar, enumVal, ImVec2Type(a, b)) ---@diagnostic disable-line: undefined-field
+        else
+            ok = pcall(mq.imgui.PushStyleVar, enumVal, a, b) ---@diagnostic disable-line: undefined-field
+        end
+    else
+        ok = pcall(mq.imgui.PushStyleVar, enumVal, a) ---@diagnostic disable-line: undefined-field
+    end
+    if ok then _varN = _varN + 1 end
+end
+
+local function pushTheme()
+    _colN, _varN = 0, 0
+    local ImGuiCol = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
+    local ImGuiStyleVar = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+    if ImGuiCol then
+        pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
+        pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
+        pushCol(ImGuiCol.PopupBg, 0.047, 0.075, 0.118, 1)
+        pushCol(ImGuiCol.Border, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.Text, 0.851, 0.898, 0.953, 1)
+        pushCol(ImGuiCol.TextDisabled, 0.490, 0.561, 0.651, 1)
+        pushCol(ImGuiCol.TitleBg, 0.043, 0.067, 0.106, 1)
+        pushCol(ImGuiCol.TitleBgActive, 0.047, 0.078, 0.125, 1)
+        pushCol(ImGuiCol.FrameBg, 0.047, 0.078, 0.125, 1)
+        pushCol(ImGuiCol.FrameBgHovered, 0.090, 0.150, 0.220, 1)
+        pushCol(ImGuiCol.FrameBgActive, 0.120, 0.190, 0.270, 1)
+        pushCol(ImGuiCol.Button, 0.086, 0.125, 0.196, 1)
+        pushCol(ImGuiCol.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
+        pushCol(ImGuiCol.ButtonActive, 0.300, 0.700, 1.000, 0.60)
+        pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
+        pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
+        pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
+        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
+        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
+        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
+        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
+        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
+        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
+        pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
+        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
+    end
+    if ImGuiStyleVar then
+        local ImGuiSV = ImGuiStyleVar
+        pushVar(ImGuiSV.WindowRounding, 6)
+        pushVar(ImGuiSV.ChildRounding, 5)
+        pushVar(ImGuiSV.FrameRounding, 4)
+        pushVar(ImGuiSV.PopupRounding, 4)
+        pushVar(ImGuiSV.TabRounding, 4)
+        pushVar(ImGuiSV.GrabRounding, 3)
+        pushVar(ImGuiSV.ScrollbarRounding, 6)
+
+        pushVar(ImGuiSV.FrameBorderSize, 1)
+        pushVar(ImGuiSV.FramePadding, 7, 4)
+        pushVar(ImGuiSV.ItemSpacing, 8, 6)
+        pushVar(ImGuiSV.WindowPadding, 12, 10)
+    end
+end
+
+local function popTheme()
+    if _varN > 0 then
+        pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 ---@diagnostic disable-line: undefined-field
+    end
+    if _colN > 0 then
+        pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 ---@diagnostic disable-line: undefined-field
+    end
+end
+
 
 -- Script Control State
 local openGUI = true
@@ -17,11 +101,11 @@ local KIND_LABELS = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet 
 
 -- Global State & Data Store
 local state = {
-    myClasses = { 'War', 'Clr', 'Pal' }, -- Default fallback trio (mixed-case to match triune_data.lua keys)
+    myClasses = { 'WAR', 'CLR', 'PAL' }, -- Default fallback trio (uppercase to match MQSHORT keys)
     activeClassTab = 1,                  -- Selected class tab index
     lvlMin = 1,
     lvlMax = 125,
-    scribedOnly = false,
+    scribedOnly = true,
     searchFilter = '',
     selectedCategory = 'ALL', -- Filter: ALL, dd, dot, heal, buff, pet, util, other
     selectedSpell = nil,
@@ -40,6 +124,273 @@ local state = {
         ["Buff Suite"] = {}
     }
 }
+
+-- ============================================================================
+-- Spellbook Functions (defined locally in this file)
+-- ============================================================================
+
+local spellbookMapCache = nil
+local lastCacheTime = 0
+
+local function cleanSpellName(name)
+    if not name or type(name) ~= 'string' then return "" end
+    local cleaned = name:gsub('%s*%([%w%s/]+%)$', '')
+    return (cleaned:gsub('^%s*(.-)%s*$', '%1'))
+end
+
+local function normalizeSpellName(name)
+    if not name or type(name) ~= 'string' then return "" end
+    local s = name:lower()
+    s = s:gsub('%s*%(?%s*rk%.?%s*[%ivxlc%d]+%s*%)?', '')
+    s = s:gsub('%s*%([^%)]+%)', '')
+    s = s:gsub('[%p%s]', '')
+    return s
+end
+
+local function getSpellbookMap()
+    local now = os.time()
+    if spellbookMapCache and (now - lastCacheTime) < 3 then
+        return spellbookMapCache
+    end
+
+    local map = { exact = {}, norm = {}, list = {} }
+
+    for s = 1, 720 do
+        local bName = nil
+        pcall(function() bName = mq.TLO.Me.Book(s).Name() end)
+        if not bName or bName == "" or bName == "NULL" then
+            pcall(function()
+                local res = mq.TLO.Me.Book(s)()
+                if type(res) == "string" and res ~= "" and res ~= "NULL" then bName = res end
+            end)
+        end
+
+        if bName and bName ~= "" and bName ~= "NULL" then
+            local lowerName = bName:lower()
+            local cleanName = cleanSpellName(bName):lower()
+            local normName = normalizeSpellName(bName)
+
+            map.exact[lowerName] = s
+            map.exact[cleanName] = s
+            if normName ~= "" then map.norm[normName] = s end
+            table.insert(map.list, { slot = s, name = bName, norm = normName })
+        end
+    end
+    spellbookMapCache = map
+    lastCacheTime = now
+    return map
+end
+
+local function checkBook(name)
+    if not name or name == '' then return nil end
+    local foundSlot = nil
+    pcall(function()
+        local res = mq.TLO.Me.Book(name)()
+        if type(res) == 'number' and res > 0 then
+            foundSlot = res
+        elseif type(res) == 'string' and tonumber(res) and tonumber(res) > 0 then
+            foundSlot = tonumber(res)
+        end
+    end)
+    return foundSlot
+end
+
+local function getSpellBookSlot(spellName)
+    if not spellName or spellName == '' then return nil end
+
+    local sbMap = getSpellbookMap()
+    local targetLower = spellName:lower()
+    local cleaned = cleanSpellName(spellName)
+    local targetCleanLower = cleaned:lower()
+    local targetNorm = normalizeSpellName(spellName)
+
+    if sbMap.exact[targetLower] then return sbMap.exact[targetLower] end
+    if sbMap.exact[targetCleanLower] then return sbMap.exact[targetCleanLower] end
+    if targetNorm ~= "" and sbMap.norm[targetNorm] then return sbMap.norm[targetNorm] end
+
+    local slot = checkBook(spellName)
+    if slot then return slot end
+
+    if cleaned ~= spellName then
+        slot = checkBook(cleaned)
+        if slot then return slot end
+    end
+
+    pcall(function()
+        local rName = mq.TLO.Spell(spellName).RankName()
+        if rName and rName ~= '' and rName ~= spellName then
+            slot = checkBook(rName)
+        end
+    end)
+    if slot then return slot end
+
+    pcall(function()
+        local rName = mq.TLO.Spell(cleaned).RankName()
+        if rName and rName ~= '' and rName ~= cleaned and rName ~= spellName then
+            slot = checkBook(rName)
+        end
+    end)
+    if slot then return slot end
+
+    return nil
+end
+
+local function isScribed(spellName)
+    if not spellName or spellName == '' then return false end
+    return getSpellBookSlot(spellName) ~= nil
+end
+
+-- ============================================================================
+-- Cursor management (needed by tryMem before its definition)
+-- ============================================================================
+local function clearCursor()
+    local item = mq.TLO.Cursor
+    if not item() or (item.ID() or 0) <= 0 then return false end
+
+    local count = 0
+    local firstName = tostring(item.Name() or 'Item')
+
+    while mq.TLO.Cursor() and (mq.TLO.Cursor.ID() or 0) > 0 and count < 255 do
+        mq.cmd('/autoinventory')
+        count = count + 1
+        mq.delay(50)
+    end
+
+    if count > 0 then
+        print(string.format('\ay[Spellbook]\ax Cleared %d item(s) from cursor (first: [%s]).', count, firstName))
+        return true
+    end
+    return false
+end
+
+local function tryMem(slot, spellName, bypassCheck)
+    if not spellName or spellName == '' then return false end
+    local cleanName = cleanSpellName(spellName)
+
+    clearCursor()
+
+    if mq.TLO.Me.Combat() then
+        print('\ay[Spellbook]\ax cannot memorize in combat: ' .. cleanName)
+        return false
+    end
+
+    local currentInGem = mq.TLO.Me.Gem(slot).Name()
+    if currentInGem == cleanName or currentInGem == spellName then
+        return true
+    end
+
+    if currentInGem and currentInGem ~= '' then
+        mq.cmdf('/notify CastSpellWnd CSPW_Spell%d rightmouseup', slot - 1)
+        mq.delay(200)
+        local clearWait = 0
+        while mq.TLO.Me.Gem(slot).Name() and clearWait < 1000 do
+            mq.delay(100)
+            clearWait = clearWait + 100
+        end
+    end
+
+    local bookSlot = getSpellBookSlot(spellName)
+    if not bookSlot and not bypassCheck then
+        print('\ay[Spellbook]\ax "' .. cleanName .. '" is not scribed in your spellbook -- scribe it first.')
+        return false
+    end
+    bookSlot = bookSlot or 1
+
+    if mq.TLO.Me.Sitting() then
+        mq.cmd('/stand')
+        mq.delay(400)
+    end
+
+    if mq.TLO.Me.Moving() then
+        print('\ay[Spellbook]\ax stand still to memorize ' .. cleanName)
+        return false
+    end
+
+    local SBW = function() return mq.TLO.Window('SpellBookWnd') end
+
+    if not SBW().Open() then mq.cmd('/book') end
+    local t = 0
+    while not SBW().Open() and t < 2500 do
+        mq.delay(100)
+        t = t + 100
+    end
+    if not SBW().Open() then
+        print('\ar[Spellbook]\ax could not open the spellbook.')
+        return false
+    end
+
+    local per = 0
+    for i = 0, 24 do
+        local nm
+        pcall(function() nm = SBW().Child('SBW_Spell' .. i).Name() end)
+        if nm then per = per + 1 else break end
+    end
+    if per == 0 then per = 8 end
+
+    local curPage, inferred = 1, false
+    for i = 0, per - 1 do
+        local txt
+        pcall(function() txt = SBW().Child('SBW_Spell' .. i).Text() end)
+        if txt and txt ~= '' then
+            txt = txt:match('^%s*(.-)%s*$')
+            local bs = getSpellBookSlot(txt)
+            if bs then
+                curPage = math.ceil(bs / per)
+                inferred = true
+                break
+            end
+        end
+    end
+
+    if not inferred then
+        for _ = 1, 40 do
+            mq.cmd('/notify SpellBookWnd SBW_PageDown_Button leftmouseup')
+            mq.delay(70)
+        end
+        curPage = 1
+    end
+
+    local targetPage = math.ceil(bookSlot / per)
+    if curPage ~= targetPage then
+        local diff = targetPage - curPage
+        local btn = (diff > 0) and 'SBW_PageUp_Button' or 'SBW_PageDown_Button'
+        for _ = 1, math.abs(diff) do
+            mq.cmdf('/notify SpellBookWnd %s leftmouseup', btn)
+            mq.delay(math.random(150, 300))
+        end
+    end
+
+    mq.cmdf('/notify SpellBookWnd SBW_Spell%d leftmouseup', (bookSlot - 1) % per)
+    mq.delay(math.random(300, 500))
+    mq.cmdf('/notify CastSpellWnd CSPW_Spell%d leftmouseup', slot - 1)
+
+    local w = 0
+    while not mq.TLO.Window('CastingWindow').Open() and w < 3000 do
+        mq.delay(100)
+        w = w + 100
+    end
+    while mq.TLO.Window('CastingWindow').Open() do
+        mq.delay(100)
+    end
+    mq.delay(400)
+
+    if SBW().Open() then
+        mq.cmd('/notify SpellBookWnd SBW_DoneButton leftmouseup')
+    end
+
+    local finalGem = mq.TLO.Me.Gem(slot).Name()
+    if finalGem == cleanName or finalGem == spellName then
+        print('\ag[Spellbook]\ax memorized ' .. cleanName .. ' -> gem ' .. slot)
+        return true
+    elseif mq.TLO.Me.Gem(cleanName)() or mq.TLO.Me.Gem(spellName)() then
+        print('\ag[Spellbook]\ax ' .. cleanName .. ' is on the bar.')
+        return true
+    else
+        print('\ar[Spellbook]\ax mem may have failed for "' .. cleanName .. '" (gem ' .. slot .. ').')
+        return false
+    end
+end
+
 
 -- Spell Database Store
 local DATA = { spells = {} }
@@ -125,9 +476,6 @@ end
 -- Core Character Inspection Utilities
 -- ============================================================================
 
-
--- Note: cleanSpellName, normalizeSpellName, checkBook, getSpellbookMap, getSpellBookSlot, and isScribed are provided by triune_common.lua
-
 local function checkHasSPA103(name, sp)
     local isPet = false
     pcall(function()
@@ -135,7 +483,7 @@ local function checkHasSPA103(name, sp)
             local res = mq.TLO.Spell(sp.ID()).HasSPA(103)
             if res == true or res == 1 then isPet = true end
             if not isPet and (type(res) == 'function' or type(res) == 'userdata') then
-                local ok, r2 = pcall(res)
+                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
                 if ok and (r2 == true or r2 == 1) then isPet = true end
             end
         end
@@ -145,7 +493,7 @@ local function checkHasSPA103(name, sp)
             local res = mq.TLO.Spell(name).HasSPA(103)
             if res == true or res == 1 then isPet = true end
             if not isPet and (type(res) == 'function' or type(res) == 'userdata') then
-                local ok, r2 = pcall(res)
+                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
                 if ok and (r2 == true or r2 == 1) then isPet = true end
             end
         end)
@@ -170,7 +518,7 @@ local function mapTLOCategoryToKind(sp, name)
     end
     if not tloSpell and name and name ~= "" then
         pcall(function()
-            local cl = common.cleanSpellName(name)
+            local cl = cleanSpellName(name)
             if cl ~= name then tloSpell = mq.TLO.Spell(cl) end
         end)
     end
@@ -277,7 +625,8 @@ local CLASS_SHORT_TO_ID = {
 
 local function getSpellLevelForClassID(sp, name, cls)
     local classId = CLASS_SHORT_TO_ID[cls]
-    local myClassShort = mq.TLO.Me.Class.ShortName()
+    local myClassShort = nil
+    pcall(function() myClassShort = mq.TLO.Me.Class.ShortName() end)
     local isMyClassTab = (myClassShort and myClassShort:upper() == cls:upper())
 
     local lvl = 0
@@ -288,7 +637,7 @@ local function getSpellLevelForClassID(sp, name, cls)
 
         if tloS then
             if classId then
-                local l = tloS.Level(classId)
+                local l = tloS.Level(classId) ---@diagnostic disable-line
                 if type(l) == 'function' or type(l) == 'userdata' then l = l() end
                 if type(l) == 'number' and l > 0 and l <= 125 then
                     lvl = l
@@ -332,25 +681,19 @@ local function getActiveClassSpells(cls)
     local outList = {}
     local scribedNormMap = {}
 
-    -- Pre-build a lookup from triune_data.lua for this class so we can fall
-    -- back when Spell.Level(classId) returns 0 (common on multi-class servers
-    -- where MQ only recognises the "primary" class).
-    local dbSpells = getClassSpells(cls)
-    local dbLookup = {} -- normalizedName -> { level, bene, kind }
+    local dbSpells = getClassSpells(cls) or {}
+    local dbLookup = {}
     for _, row in ipairs(dbSpells) do
         local dName, dLvl, dBene, dKind = row[1], row[2], row[3], row[4]
-        dbLookup[common.normalizeSpellName(dName)] = {
+        dbLookup[normalizeSpellName(dName)] = {
             level = tonumber(dLvl) or 1,
             bene = (dBene == 1 or dBene == true),
-            kind =
-                dKind or 'other'
+            kind = dKind or 'other'
         }
-        dbLookup[dName:lower()] = dbLookup[common.normalizeSpellName(dName)]
-        dbLookup[common.cleanSpellName(dName):lower()] = dbLookup[common.normalizeSpellName(dName)]
+        dbLookup[dName:lower()] = dbLookup[normalizeSpellName(dName)]
+        dbLookup[cleanSpellName(dName):lower()] = dbLookup[normalizeSpellName(dName)]
     end
 
-    -- 1. For scribed spells: query live Me.Book(slot), then try Level(classId),
-    --    then fall back to the triune_data DB lookup.
     for slot = 1, 720 do
         local sp = mq.TLO.Me.Book(slot)
         local name = nil
@@ -361,8 +704,8 @@ local function getActiveClassSpells(cls)
         end)
         if not name then
             pcall(function()
-                local res = sp.Name
-                if type(res) == 'function' or type(res) == 'userdata' then res = res() end
+                local rawName = sp.Name
+                local res = (type(rawName) == 'function' or type(rawName) == 'userdata') and rawName() or rawName
                 if type(res) == "string" and res ~= "" and res ~= "NULL" then name = res end
             end)
         end
@@ -370,17 +713,14 @@ local function getActiveClassSpells(cls)
         if name and name ~= "" and name ~= "NULL" then
             local lvl = getSpellLevelForClassID(sp, name, cls)
 
-            -- Fallback: if TLO couldn't determine level for this class,
-            -- check our triune_data DB for a match.
             local dbEntry = nil
             if lvl == 0 then
-                dbEntry = dbLookup[common.normalizeSpellName(name)]
+                dbEntry = dbLookup[normalizeSpellName(name)]
                     or dbLookup[name:lower()]
-                    or dbLookup[common.cleanSpellName(name):lower()]
+                    or dbLookup[cleanSpellName(name):lower()]
                 if dbEntry then lvl = dbEntry.level end
             end
 
-            -- If lvl > 0, this scribed spell IS usable by class `cls`!
             if lvl > 0 then
                 local bene = true
                 if dbEntry then
@@ -398,10 +738,10 @@ local function getActiveClassSpells(cls)
 
                 local kind = (dbEntry and dbEntry.kind) or mapTLOCategoryToKind(sp, name)
 
-                local normName = common.normalizeSpellName(name)
+                local normName = normalizeSpellName(name)
                 scribedNormMap[normName] = true
                 scribedNormMap[name:lower()] = true
-                scribedNormMap[common.cleanSpellName(name):lower()] = true
+                scribedNormMap[cleanSpellName(name):lower()] = true
 
                 table.insert(outList, {
                     name = name,
@@ -415,13 +755,11 @@ local function getActiveClassSpells(cls)
         end
     end
 
-    -- 2. For unscribed spells: ONLY pull from triune_data.lua if spell is NOT scribed
-    -- (dbSpells already fetched above for the fallback lookup)
     for _, row in ipairs(dbSpells) do
         local dName, dLvl, dBene, dKind = row[1], row[2], row[3], row[4]
-        local dNorm = common.normalizeSpellName(dName)
+        local dNorm = normalizeSpellName(dName)
         local dLower = dName:lower()
-        local dCleanLower = common.cleanSpellName(dName):lower()
+        local dCleanLower = cleanSpellName(dName):lower()
 
         if not scribedNormMap[dNorm] and not scribedNormMap[dLower] and not scribedNormMap[dCleanLower] then
             table.insert(outList, {
@@ -435,7 +773,6 @@ local function getActiveClassSpells(cls)
         end
     end
 
-    -- Sort by Level ascending, then Name
     table.sort(outList, function(a, b)
         local lvlA = tonumber(a.level) or 1
         local lvlB = tonumber(b.level) or 1
@@ -451,20 +788,16 @@ local function getActiveClassSpells(cls)
     return outList
 end
 
--- ============================================================================
--- Anti-Cheat Safe Auto-Memorization Engine
--- ============================================================================
-
 local function processQueue()
     for slot, spellName in pairs(state.pendingQueue) do
         if spellName then
-            local cleanName = common.cleanSpellName(spellName)
+            local cleanName = cleanSpellName(spellName)
             local currentGem = mq.TLO.Me.Gem(slot).Name() or ""
             if currentGem == cleanName or currentGem == spellName then
                 state.pendingQueue[slot] = nil
                 state.statusMsg = "Finished memming " .. cleanName
             else
-                local ok = common.tryMem(slot, spellName, state.bypassScribedCheck)
+                local ok = tryMem(slot, spellName, state.bypassScribedCheck)
                 if ok then
                     state.statusMsg = "Finished memming " .. cleanName
                 else
@@ -477,9 +810,88 @@ local function processQueue()
     end
 end
 
--- ============================================================================
--- ImGui Rendering Dashboard
--- ============================================================================
+local MQSHORT = {
+    WARRIOR = 'War',
+    CLERIC = 'Clr',
+    PALADIN = 'Pal',
+    RANGER = 'Rng',
+    SHADOWKNIGHT = 'SK',
+    DRUID = 'Dru',
+    MONK = 'Mnk',
+    BARD = 'Brd',
+    ROGUE = 'Rog',
+    SHAMAN = 'Shm',
+    NECROMANCER = 'Nec',
+    WIZARD = 'Wiz',
+    MAGICIAN = 'Mag',
+    ENCHANTER = 'Enc',
+    BEASTLORD = 'Bst',
+    BERSERKER = 'Ber'
+}
+
+local function detectClasses()
+    -- 1. Try saved classes from mq.configDir/triune_loadout.lua
+    local myName = nil
+    pcall(function() myName = mq.TLO.Me.CleanName() end)
+    if myName and myName ~= '' and myName ~= 'NULL' then
+        local cfg = mq.configDir or '.'
+        local fn = loadfile(cfg .. '/triune_loadout.lua')
+        if fn then
+            local ok, t = pcall(fn)
+            if ok and type(t) == 'table' and type(t[myName]) == 'table' then
+                local saved = t[myName].classes
+                if type(saved) == 'table' and #saved > 0 then
+                    return saved
+                end
+            end
+        end
+    end
+
+    -- 2. Try MacroQuest Window Title
+    local okTitle, title = pcall(function() return mq.TLO.MacroQuest.Title() end) ---@diagnostic disable-line: undefined-field
+    if okTitle and type(title) == 'string' and title ~= '' then
+        local found = {}
+        for word in title:gmatch('%a+') do
+            local up = word:upper()
+            if MQSHORT[up] then
+                local abbr = MQSHORT[up]
+                local duplicate = false
+                for _, existing in ipairs(found) do
+                    if existing == abbr then
+                        duplicate = true; break
+                    end
+                end
+                if not duplicate then found[#found + 1] = abbr end
+            end
+        end
+        if #found > 0 then return found end
+    end
+
+    -- 3. Try InventoryWindow IW_ClassList
+    local foundInv = {}
+    pcall(function()
+        for i = 1, 3 do
+            local text = mq.TLO.Window('InventoryWindow').Child('IW_ClassList').List(i)()
+            if text and text ~= '' then
+                local firstWord = text:match('^(%a+)')
+                if firstWord then
+                    local up = firstWord:upper()
+                    if MQSHORT[up] then
+                        foundInv[#foundInv + 1] = MQSHORT[up]
+                    end
+                end
+            end
+        end
+    end)
+    if #foundInv > 0 then return foundInv end
+
+    -- 4. Fallback to single primary class
+    local ok, mainClass = pcall(function() return mq.TLO.Me.Class.ShortName() end)
+    if ok and mainClass and mainClass ~= '' and mainClass ~= 'NULL' then
+        return { mainClass }
+    end
+    return { 'Wiz' }
+end
 
 local function DrawTriuneUI()
     if not openGUI then
@@ -487,23 +899,26 @@ local function DrawTriuneUI()
         return
     end
 
-    common.pushTheme()
+    pushTheme()
 
     ImGui.SetNextWindowSize(820, 560, ImGuiCond.FirstUseEver)
-    local open, draw = ImGui.Begin('Triune Spellbook Engine##Main', openGUI, ImGuiWindowFlags.MenuBar)
+    local windowFlags = 0
+    if ImGuiWindowFlags then
+        windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding, ImGuiWindowFlags.MenuBar) ---@diagnostic disable-line: deprecated
+    end
+    local open, draw = ImGui.Begin('Triune Spellbook Engine##Main', openGUI, windowFlags)
     if not open then
         openGUI = false
         isRunning = false
         ImGui.End()
-        common.popTheme()
+        popTheme()
         return
     end
 
-    -- Menu Bar
     if ImGui.BeginMenuBar() then
         if ImGui.BeginMenu("Gestalt Options") then
             if ImGui.MenuItem("Re-detect Classes") then
-                state.myClasses = common.detectClasses()
+                state.myClasses = detectClasses()
             end
             if ImGui.MenuItem("Clear Pending Queue") then
                 state.pendingQueue = {}
@@ -583,7 +998,7 @@ local function DrawTriuneUI()
                 else
                     for idx, row in ipairs(bstSpells) do
                         local sName, sLvl, sBene, sKind = row[1], row[2], row[3], row[4]
-                        local slotFound = common.getSpellBookSlot(sName)
+                        local slotFound = getSpellBookSlot(sName)
                         local scribedStatus = slotFound and string.format("\ag[Scribed in Slot %d]\ax", slotFound) or
                             "\ar[Unscribed]\ax"
                         print(string.format("  Lvl %3d [%-4s] %-30s => %s", tonumber(sLvl) or 0, tostring(sKind or ""),
@@ -598,7 +1013,6 @@ local function DrawTriuneUI()
         ImGui.EndMenuBar()
     end
 
-    -- Gestalt Class Selector Tabs
     ImGui.TextColored(0.4, 0.8, 1.0, 1.0, "ACTIVE GESTALT TRIO:")
     ImGui.SameLine()
 
@@ -629,7 +1043,6 @@ local function DrawTriuneUI()
 
     ImGui.Separator()
 
-    -- Visual Spell Gem Rack
     ImGui.TextDisabled("CURRENT GEM LOADOUT (CLICK SLOT TO ASSIGN SELECTED SPELL)")
 
     local numGems = mq.TLO.Me.NumGems() or 8
@@ -667,11 +1080,8 @@ local function DrawTriuneUI()
     ImGui.Spacing()
     ImGui.Separator()
 
-    -- Main Workspace Tabs
     if ImGui.BeginTabBar("MainWorkspaceTabs") then
-        -- Tab 1: Spellbook Browser
         if ImGui.BeginTabItem("Spellbook Browser##Tab") then
-            -- Category Filters
             local cats = { 'ALL', 'dd', 'dot', 'heal', 'buff', 'pet', 'util', 'other' }
             for _, c in ipairs(cats) do
                 local isCat = (state.selectedCategory == c)
@@ -687,7 +1097,6 @@ local function DrawTriuneUI()
 
             ImGui.Spacing()
 
-            -- Level & Text Filters
             ImGui.SetNextItemWidth(120)
             state.lvlMin = ImGui.SliderInt("Min Lvl", state.lvlMin or 1, 1, 125)
             ImGui.SameLine()
@@ -702,7 +1111,6 @@ local function DrawTriuneUI()
             ImGui.SetNextItemWidth(180)
             state.searchFilter = ImGui.InputText("Search##Filter", state.searchFilter or '')
 
-            -- Spell Table (Fixed with bit.bor flags)
             local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.ScrollY)
             if ImGui.BeginTable("SpellTable", 4, tableFlags, 0, -35) then
                 ImGui.TableSetupColumn("Level", ImGuiTableColumnFlags.WidthFixed, 50)
@@ -762,7 +1170,6 @@ local function DrawTriuneUI()
             ImGui.EndTabItem()
         end
 
-        -- Tab 2: Loadouts / Presets
         if ImGui.BeginTabItem("Loadouts / Presets##Tab") then
             ImGui.Text("Save or load full gem set loadouts for quick switching:")
             ImGui.Spacing()
@@ -797,7 +1204,6 @@ local function DrawTriuneUI()
                         state.statusMsg = string.format("Saved %d gems to preset: %s", savedCount, presetName)
                     end
 
-                    -- Preview saved preset gems
                     if next(savedGems) then
                         ImGui.TextDisabled("Saved Loadout:")
                         local gemCount = mq.TLO.Me.NumGems() or 8
@@ -818,7 +1224,6 @@ local function DrawTriuneUI()
         ImGui.EndTabBar()
     end
 
-    -- Status Bar
     ImGui.Separator()
 
     if next(state.pendingQueue) then
@@ -831,19 +1236,14 @@ local function DrawTriuneUI()
     ImGui.Text(state.statusMsg)
 
     ImGui.End()
-    common.popTheme()
+    popTheme()
 end
 
--- ============================================================================
--- Main Script Execution Loop
--- ============================================================================
-
 loadData()
-state.myClasses = common.detectClasses()
+state.myClasses = detectClasses()
 
 mq.imgui.init('TriuneSpellbookUI', DrawTriuneUI)
 
--- Startup summary
 local clsStr = table.concat(state.myClasses, ' / ')
 local spellCounts = {}
 for _, cls in ipairs(state.myClasses) do

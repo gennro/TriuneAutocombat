@@ -1,5 +1,142 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-05
+
+- Updated Pet Hold management in `lua/triune.lua`:
+  - When **Enable Pet Hold** is checked (`ctrl.pet_hold_enabled`), the engine issues `/say #petcmd hold all` (a toggle command) anytime the trio is out of combat or prior to reaching the configured Pet Assist At HP% threshold to enable pet hold.
+  - Once in combat and the mob HP meets or drops below `ctrl.pet_assist_at`, the engine issues `/say #petcmd attack all` to send pets.
+  - Updated tooltips and documentation comments to reflect exact `#petcmd hold all` toggle syntax.
+
+- Updated **Puller** mode in `lua/triune.lua` to handle incoming aggro on path to mob:
+  - Checked `firstNPCXtarget(false)` during the `TO_MOB` state in `pullerTick()`.
+  - If another NPC attacks the puller while running toward a target mob, the puller halts navigation, switches target to the incoming aggro mob (`runtime.pullTargetId = aggroId`), and transitions immediately to `TO_CAMP` state to pull it back to camp.
+
+- Added **Help** tab to `lua/triune.lua` ImGui window:
+  - Positioned at the end of the tab bar after the Ignore List tab.
+  - Formatted ImGui tables for Slash Commands (`/ac run`, `/ac pause`, `/ac status`, `/ac spellbook`, `/ac cursorui`, `/ac clearcursor`, `/ac <mode>`, `/triunerun`) and Combat Modes (`MODES` table with `MODE_DESC` explanations).
+  - Used `accent(COLOR, text)` helper and `bit.bor()` for combining `ImGuiTableFlags` enum values, ensuring strict Lua 5.1 / LuaJIT compatibility and preventing `')' expected near '|'` syntax errors.
+
+- Updated Hunter Combat Radius UI slider in `lua/triune.lua`:
+  - Removed `ImGui.BeginDisabled()` constraint so the **Combat Radius** slider remains fully interactive regardless of whether an anchor location is set.
+  - Added immediate `updateMapRadiusVisuals()` invocation when dragging the Combat Radius slider or clicking Set/Clear Anchor to update the green anchor circle on the map live in real-time.
+  - Preserved radius value when clearing the anchor so pre-configured radius preferences persist when re-anchoring.
+
+- Updated Hunter mode behavior when no targetable NPCs are found in `lua/triune.lua`:
+  - Player now stops moving and stays in place instead of wandering to random locations when no valid mobs are in search/level range.
+  - Clears `pursuit.wanderLoc` and halts `/nav` / `/stick` movement when idle in Hunter mode.
+  - Prints a diagnostic message (`Hunter: No NPCs found (Lvl min-max, Radius R, Z diff...). Waiting...`) when no mobs are found.
+  - Diagnostic message appears once and does not repeat continuously on every tick, unless search range/level settings or anchor config are changed.
+  - Set default `hunter_combat_radius` in `defaultCtrl()` table to `250` in `lua/triune.lua`.
+  - Added `hunter_repeat_msg` setting under `ctrl` table and a "Repeat Missing Mob Msg" checkbox in the Hunter tab UI to allow optionally repeating the diagnostic message.
+  - Resets missing mob message tracking state as soon as a target is acquired.
+
+- Added map radius circle visualization for combat modes in `lua/triune.lua`:
+  - Hunter search radius draws a **red** circle (`/mapfilter castradius color 255 0 0` + `castradius show`) centered on the character that dynamically moves with the player across the map as they hunt.
+  - Stationary Camp/Anchor locations continue to draw green circles (`rcolor 0 255 0`) via `/maploc` and `/mapfilter pullradius`.
+  - Unconditionally clears all previous map overlays (`/maploc remove`, `/mapfilter pullradius 0`, `/mapfilter castradius 0`) when switching modes or redrawing to prevent leftover initial circles from lingering on the map.
+  - Added state key tracking in `updateMapRadiusVisuals()` to prevent redundant `/maploc` or `/mapfilter` command executions.
+  - Added `show_map_radius` setting (default `true`) under `ctrl` table, saved settings persistence, and auto-save signature calculation.
+  - Added "Show Map Radius Circles" checkbox and tooltip under Navigation in the Settings UI tab.
+  - Added `clearMapRadiusVisuals()` to clean up all map markers and filters on script exit or when disabled.
+
+- Fixed IDE diagnostic warnings for undefined MacroQuest ImGui globals and fields across `lua/triune_cursor.lua`, `lua/triune_spellbook.lua`, and `lua/triune.lua`:
+  - Added `local ImGui = require('ImGui')` import to `lua/triune_cursor.lua`.
+  - Added `---@diagnostic disable: undefined-global, undefined-field` file annotations to suppress MacroQuest C++ runtime ImGui global type & field LSP warnings.
+
+- Fixed `mq2movutils you are not sticking to anything` chat spam in `lua/triune.lua`:
+  - Added `mq.TLO.Stick.Active()` and `mq.TLO.Stick.Status() == 'ON'` checks in `stopMoving()`, `fullStop()`, `moveToward()`, and `performUnstuck()` prior to issuing `/stick off` or `/stick id`.
+  - Fixed `performUnstuck()` calling `/stick off` and `/nav stop` unconditionally without checking active status.
+  - Guarded `moveToward()` to prevent re-issuing `/stick id` every tick when already sticking to the current target.
+
+- Prevented NPC target bouncing in Hunter mode in `lua/triune.lua`:
+  - Removed opportunistic target swapping logic that checked for closer fresh mobs while already navigating toward or engaging an NPC.
+  - Hunter now sticks to its target until it dies, becomes unreachable/ignored, or `checkAggroSwitch()` detects a hostile NPC actively attacking the player.
+
+- Fixed AA name rendering and checkbox synchronization in `drawAATab` in `lua/triune.lua`:
+  - Added strict `not tonumber(nm)` filtering in `hasAA()` and `drawAATab()` to filter out numeric cooldown keys (e.g., `60`, `90`) from being displayed as AAs.
+  - Scoped ImGui IDs using `ImGui.PushID('aa_' .. tier .. '_' .. cls .. '_' .. nm)` so checkboxes for distinct AAs maintain isolated state without checking multiple rows simultaneously.
+
+- Fixed `attempt to index local 'a' (a nil value)` crash in `loadoutSig()` in `lua/triune.lua`:
+  - Added `type(a) == 'table'` and `type(d) == 'table'` guards when iterating over `loadout.aas` and `loadout.discs` entries during auto-save signature calculation.
+
+- Fixed ImGui runtime exception in `drawDiscTab` / `drawAATab` in `lua/triune.lua`:
+  - Updated `classColor(abbr)` helper to unpack `r, g, b, a` RGBA values instead of returning a table array. Fixes `sol: no matching function call` crash in `ImGui.TextColored` when drawing class tabs.
+
+- Cleaned up IDE diagnostic warnings in `lua/triune.lua` and `lua/triune_spellbook.lua`:
+  - Added line-level `---@diagnostic disable-line: undefined-field` annotations for MacroQuest ImGui `PopStyleVar`, `PopStyleColor`, and `StyleVar` dynamic lookups.
+
+- Updated auto-attack / auto-fire gating in `lua/triune.lua`:
+  - Enforced distance check so `/attack on` (or `/autofire on`) only turns on once within range of the target (`MELEE_RANGE` / `ranged_dist`).
+  - Added XTarget list check via `anyXtarAlive()` to immediately execute `/attack off` and `/autofire off` as soon as all hostile NPCs on the XTarget list are dead/cleared.
+
+- Updated pet hold command and added a toggle setting in `lua/triune.lua`:
+  - Updated pet hold command execution from `/pet hold` to `/say #petcmd hold all` in combat loop pet management logic.
+  - Added `pet_hold_enabled` (default `true`) under `ctrl` table, saved settings persistence, and auto-save signature calculation `loadoutSig()`.
+  - Added "Enable Pet Hold" checkbox and tooltip in the Control/Settings UI tab under Pet Settings.
+
+- Completed Option A refactor to make `triune.lua` fully self-contained:
+  - Removed missing module dependency `local common = require('triune_common')` from `lua/triune.lua`.
+  - Inlined all common utilities into `triune.lua` (`MQSHORT`, `SLOT_COLORS`, `classColor`, `classPlausible`, `detectClasses`, `defaultsForKind`, `idxOf`, `isScribed`, `hasAA`, `hasDisc`, `isSpawnAlive`, `distToId`, `distToLoc`, `hasLoS`, `pctHP`, `buffActive`, `sungKey`, `navLoaded`, `stickLoaded`, `isMoveActive`, `stopMoving`, `firstNPCXtarget`, `maPcId`, `createCastTracker`, `clearCursor`, `tryMem`, `pushTheme`, `popTheme`).
+  - Fixed ImGui `ImVec2` vector safety in `drawEmblem()` using `_G.ImVec2` fallback.
+  - Bumped version to `3.27-no-commonmod` across `lua/triune.lua` and `README.md`.
+- Resolved static analysis warnings and critical logic bugs across project files:
+  - Fixed critical infinite recursion stack overflows in `triune.lua` by renaming inner helpers (`firstNPCXtarget` -> `findFirstNPCXtarget`, `maPcId` -> `findMaPcId`).
+  - Restored missing `pushTheme()` and `popTheme()` local functions in `triune.lua`.
+  - Fixed `classColor()` return tuple unpacking bug causing `nil` alpha parameters in `ImGui.TextColored()`.
+  - Added standalone `detectClasses()` implementation to `triune_spellbook.lua` and fixed undeclared global functions (`cleanSpellName`, `normalizeSpellName`, `checkBook`, `getSpellBookSlot`, `isScribed`).
+  - Added diagnostic annotations for MQ TLOs (`CombatAbilityCount`, `Title`, `Song`, `Poisoned`, `Diseased`, `AggroHolder`) and ImGui deprecation flags across `triune.lua`, `triune_spellbook.lua`, and `triune_cursor.lua`.
+  - Cleaned up duplicate code blocks in `triune_spellbook.lua` to resolve syntax errors (`Miss corresponding end`), defined `cleanSpellName()` and `hasDisc()` alias in `triune.lua`, and updated `ImGuiCol.TabSelected` across all windows.
+  - Added explicit table fallback for `knownDiscSet` in `isDiscKnown()` and guarded `myClasses` assignment on line 997 against `nil` in `triune.lua`.
+  - Cleaned up stale `(Delegated to triune_common)` comment header in `lua/triune.lua`.
+
+- Fixed spell dropdown population bug in ImGui spell picker in `lua/triune.lua`:
+  - Scoped `ctrl.scribed_only` filtering in `filteredSpells()` so it only applies when querying spells for the currently logged in player's class (`mq.TLO.Me.Class.ShortName()`). Prevents non-local trio classes (e.g. Enchanter/Magician when logged in as Cleric) from having empty spell dropdowns.
+  - Fixed TLO query syntax in `isScribed()` fallback (`mq.TLO.Me.Book(name)()`), correcting `.ID()` calls on integer return values from `Me.Book(name)`.
+  - Updated `spellClassInfo()` to use `lookupSpells(abbr)` for case-insensitive and class alias safety.
+- Fixed class detection in `triune_spellbook.lua`:
+  - Added primary lookup of saved character class configurations from `mq.configDir .. '/triune_loadout.lua'` so the standalone spellbook automatically loads the character's saved trio configuration.
+  - Upgraded fallback `detectClasses()` to check MacroQuest Window Title and `InventoryWindow` class list (`IW_ClassList`) before falling back to single primary character class.
+  - Added `pcall` guards around `mq.TLO.Me.Class.ShortName()` in `getSpellLevelForClassID()` to prevent nil crashes.
+
+---
+
+## 2026-08-04
+
+- Fixed duplicate code block in `pullerTick()` - removed redundant `if not ctrl.camp_loc then return end` check (line 2394)
+- Fixed potential crash in `fireAA()` when accessing AA spell data - wrapped `aa.Spell()` call with proper type checks before accessing EnduranceCost/ManaCost
+- Added missing `mq.doevents()` calls to ensure chat events are processed:
+  - Moved doevents() earlier in combat loop (before gem casting) to catch repositioning cues and failure messages immediately
+  - Added final doevents() in main loop to process any remaining queued events
+- Fixed unsafe camp_loc field access by adding table type checks before accessing `.x/.y/.z` fields:
+  - UI Camp Location section (line 1257)
+  - idleReturn() function (line 2326)
+  - Garrison mode camp return (line 2790)
+- Increased setTarget() timeout from 300ms to 1000ms to prevent premature target switch failures on laggy servers
+- Fixed ImGui window rounding not being applied:
+  - Removed `NoDecoration` flag from all windows to restore title bar with close button (X)
+  - Updated `pushVar()` to properly handle ImVec2 for 2D style variables using `_G.ImVec2` fallback
+  - Changed WindowRounding to 10, ChildRounding to 8, added BorderSize settings for Window/Child/Popup
+  - Ensured FramePadding (7,4), ItemSpacing (8,6), WindowPadding (12,10) use ImVec2 vectors correctly
+- Fixed linter warnings by converting global functions to local and adding forward declarations:
+  - Added forward declaration for `isCombat` and `isUnreachable` before their use
+  - `fullStop` and `onZoned` already had forward declarations (line 237)
+  - `triuneToggle` converted to `local`
+- Fixed ImGui window rounding by moving theme code from triune_common.lua into each UI file:
+  - Moved pushTheme/popTheme functions from triune_common.lua to triune.lua
+  - Added same theme code to triune_spellbook.lua and triune_cursor.lua
+  - Theme now uses mq.imgui or _G.ImGui* enums with pcall guards for safe fallback
+  - WindowRounding, ChildRounding, FramePadding, ItemSpacing, WindowPadding all applied correctly
+
+---
+## 2026-08-03
+
+- Updated **ImGui Theme & Window Rounding Styling**:
+  - Implemented proper 2D `ImVec2` vector handling in `pushVar()` in `triune_common.lua` for style variables that expect 2D dimensions (`FramePadding`, `ItemSpacing`, `WindowPadding`).
+  - Set `WindowRounding` to 10 and added `WindowBorderSize = 1` in `common.pushTheme()` so all ImGui windows feature smooth, prominent rounded corners and clean borders.
+  - Aligned `ChildRounding` (8), `ChildBorderSize` (1), `PopupRounding` (8), `PopupBorderSize` (1), `FrameRounding` (6), `FrameBorderSize` (1), `TabRounding` (6), `GrabRounding` (6), and `ScrollbarRounding` (8) for consistent rounded styling across all windows, sub-panels, tooltips, popups, tabs, and input controls.
+
+---
+
 ## 2026-08-01
 
 - Fixed **Hunter mode aggro switching & XTarget clearing flow**:

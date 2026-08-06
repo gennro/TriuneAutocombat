@@ -1,7 +1,14 @@
 {
-  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "$schema": "https://raw.githubusercontent.com/sumneko/vscode-lua/master/setting/schema.json",
   "runtime": {
     "version": "LuaJIT"
+  },
+  "workspace": {
+    "library": [
+      "/home/gennro/Documents/github/mq-definitions",
+      "/home/gennro/.config/Code/User/globalStorage/zenithcodeforge.mq-defs/file-downloader-downloads/macroquest/mq-definitions-master",
+      "/home/gennro/Documents/TriuneAutocombat/.luarc.types"
+    ]
   },
   "diagnostics": {
     "globals": [
@@ -14,7 +21,15 @@
       "ImGuiWindowFlags",
       "ImVec2",
       "ImVec4",
-      "IM_COL32"
+      "IM_COL32",
+      "bit",
+      "clearCursor",
+      "DATA"
+    ],
+    "disable": [
+      "undefined-field",       -- MQ's type definitions are incomplete (imgui, TLO)
+      "param-type-mismatch",   -- Same as above
+      "cast-local-type"        -- Same as above
     ]
   }
 }

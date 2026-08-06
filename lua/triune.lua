@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
 -- Triune AutoCombat -- Gem & AA loadout builder (PHASE 1: UI + data + persistence)
 -- ----------------------------------------------------------------------------
@@ -27,25 +28,23 @@ Triune Lua navigation guide
 9. Main loop
 ]]
 
-local mq = require('mq')
-local ImGui = require('ImGui')
-local scriptDir = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
-package.path = scriptDir .. "?.lua;" .. package.path
-local common = require('triune_common')
-
-local VERSION = '3.25-commonmod'
-local open = true
-local cfg = mq.configDir
+local mq                = require('mq')
+local ImGui             = require('ImGui')
+local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
+package.path            = scriptDir .. "?.lua;" .. package.path
+local VERSION           = '1.1'
+local open              = true
+local cfg               = mq.configDir
 
 -- ============================================================================
 -- Constants / class data
 -- ============================================================================
-local ALL_ABBR = { 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm',
+local ALL_ABBR          = { 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm',
     'Nec', 'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
 
 -- the character's gestalt trio (editable). Declared here, before classColor,
 -- so slot colors below can be looked up by position in this list.
-local myClasses = { 'War', 'Rng', 'Brd' }
+local myClasses         = { 'War', 'Rng', 'Brd' }
 
 -- Set by the "Re-detect" button (drawClassPicker runs inside the ImGui render
 -- callback, a non-yieldable thread) and drained in the main loop below. Do
@@ -57,31 +56,33 @@ local myClasses = { 'War', 'Rng', 'Brd' }
 -- resume. Confirmed via a real crash report from a tester.
 local reDetectRequested = false
 
--- Validated categorical slot colors (dataviz palette check, dark surface) --
--- one per TRIO SLOT, not per class, so the emblem/tags always show three
--- distinct, colorblind-safe hues no matter which 3 of the 16 classes you play.
-local function classColor(abbr)
-    return common.classColor(abbr, myClasses)
-end
-
 -- theme accents (r,g,b,a 0-1)
-local GOLD    = { 1.0, 0.70, 0.54, 1 }
-local ARC     = { 0.30, 0.70, 1.0, 1 }
-local MUTED   = { 0.49, 0.56, 0.65, 1 }
-local GOOD    = { 0.37, 0.88, 0.64, 1 }
-local WARN    = { 1.0, 0.72, 0.30, 1 }
+local GOLD              = { 1.0, 0.70, 0.54, 1 }
+local ARC               = { 0.30, 0.70, 1.0, 1 }
+local MUTED             = { 0.49, 0.56, 0.65, 1 }
+local GOOD              = { 0.37, 0.88, 0.64, 1 }
+local WARN              = { 1.0, 0.72, 0.30, 1 }
 
 -- ============================================================================
 -- Data loading
 -- ============================================================================
-local DATA    = { era_expansion = 5, spells = {}, discs = {}, aas = {} }
-local DATA_OK = false
+local DATA              = { era_expansion = 5, spells = {}, discs = {}, aas = {} }
+local DATA_OK           = false
 do
-    local f = loadfile(cfg .. '/triune_data.lua')
-    if f then
-        local ok, t = pcall(f)
-        if ok and type(t) == 'table' and t.spells then
-            DATA = t; DATA_OK = true
+    local paths = { cfg .. '/triune_data.lua' }
+    pcall(function()
+        if scriptDir then table.insert(paths, scriptDir .. 'triune_data.lua') end
+        if scriptDir then table.insert(paths, scriptDir .. '../config/triune_data.lua') end
+        if mq.luaDir then table.insert(paths, mq.luaDir .. '/triune_data.lua') end
+    end)
+    for _, p in ipairs(paths) do
+        local f = loadfile(p)
+        if f then
+            local ok, t = pcall(f)
+            if ok and type(t) == 'table' and t.spells then
+                DATA = t; DATA_OK = true
+                break
+            end
         end
     end
 end
@@ -112,45 +113,48 @@ local loadout        = { gems = {}, buffGems = {}, aas = {}, discs = {} }
 -- in the other would silently default to nil after a character switch.
 local function defaultCtrl()
     return {
-        running = false,
-        mode = 'Assist',
-        combat_style = 'Melee',
-        ranged_dist = 40,
-        ma_name = '',
-        assist_at = 98,
-        chase = true,
-        chase_dist = 15,
-        automem = true,
-        camp_loc = nil,
-        camp_radius = 100,
-        camp_z = 75,
-        hunter_radius = 1500,
-        hunter_z = 75,
-        hunter_min_level = 1,
-        hunter_max_level = 100,
-        hunter_combat_radius = 0,    -- 0 = disabled; >0 = max roam distance from anchor
-        hunter_combat_loc = nil,     -- {x,y,z} anchor; nil = no constraint
-        pull_min_level = 1,
-        pull_max_level = 100,
-        nav_fallback_stick = false,
-        debug_mode = false,
-        buff_mode = false,
-        scribed_only = true,
-        aa_purchased_only = true,
-        disc_trained_only = true,
-        medbreak_enabled = false,
-        medbreak_hp_on = false,
-        medbreak_hp_start = 20,
-        medbreak_hp_stop = 90,
-        medbreak_mana_on = false,
-        medbreak_mana_start = 20,
-        medbreak_mana_stop = 90,
-        medbreak_end_on = false,
-        medbreak_end_start = 20,
-        medbreak_end_stop = 90,
-        cast_max_retries = 2,
-        cast_lockout_sec = 30,
-        pet_assist_at    = 100
+        running              = false,
+        mode                 = 'Assist',
+        combat_style         = 'Melee',
+        ranged_dist          = 40,
+        ma_name              = '',
+        assist_at            = 98,
+        chase                = true,
+        chase_dist           = 15,
+        automem              = true,
+        camp_loc             = nil,
+        camp_radius          = 100,
+        camp_z               = 75,
+        hunter_radius        = 1500,
+        hunter_z             = 75,
+        hunter_min_level     = 1,
+        hunter_max_level     = 100,
+        hunter_combat_radius = 250,   -- max roam distance from anchor when anchor is set
+        hunter_combat_loc    = nil,   -- {x,y,z} anchor; nil = no constraint
+        hunter_repeat_msg    = false, -- repeat missing target diagnostic message continuously
+        pull_min_level       = 1,
+        pull_max_level       = 100,
+        nav_fallback_stick   = false,
+        debug_mode           = false,
+        buff_mode            = false,
+        scribed_only         = true,
+        aa_purchased_only    = true,
+        disc_trained_only    = true,
+        medbreak_enabled     = false,
+        medbreak_hp_on       = false,
+        medbreak_hp_start    = 20,
+        medbreak_hp_stop     = 90,
+        medbreak_mana_on     = false,
+        medbreak_mana_start  = 20,
+        medbreak_mana_stop   = 90,
+        medbreak_end_on      = false,
+        medbreak_end_start   = 20,
+        medbreak_end_stop    = 90,
+        cast_max_retries     = 2,
+        cast_lockout_sec     = 30,
+        pet_assist_at        = 100,
+        pet_hold_enabled     = true,
+        show_map_radius      = true
     }
 end
 local ctrl = defaultCtrl()
@@ -190,9 +194,11 @@ local runtime = {
     autoDirtyAt = 0,
     lastBuffDiagAt = 0,
     lastHunterDiagAt = 0,
+    lastHunterMsgKey = nil,
     lastGemDiagAt = 0,
     lastAssistCmdAt = 0,
-    sungBuffs = {}
+    sungBuffs = {},
+    lastMapDraw = { active = false, type = nil, key = '' }
 }
 
 local petState = {
@@ -202,8 +208,8 @@ local petState = {
     lastCmdTargetId = 0,
     lastCmdAt = 0,
     manualHunterHold = nil,
-    petHoldActive = false,    -- true when we issued /pet hold waiting for HP threshold
-    holdIssuedForId = 0       -- target ID for which a hold was issued
+    petHoldActive = false, -- true when we issued /pet hold waiting for HP threshold
+    holdIssuedForId = 0    -- target ID for which a hold was issued
 }
 
 local pursuit = {
@@ -275,25 +281,533 @@ local WHENS = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff
     'always' }
 
 -- ============================================================================
--- Helpers (Delegated to triune_common)
+-- Local Theme & Common Helpers (Self-Contained Module)
 -- ============================================================================
-local H = common
-local idxOf, defaultsForKind, isCasting, isSpawnAlive = H.idxOf, H.defaultsForKind, H.isCasting, H.isSpawnAlive
-local distToId, distToLoc, hasLoS, pctHP = H.distToId, H.distToLoc, H.hasLoS, H.pctHP
-local buffActive, sungKey, navLoaded, stickLoaded = H.buffActive, H.sungKey, H.navLoaded, H.stickLoaded
-local isMoveActive, stopMoving = H.isMoveActive, H.stopMoving
+local MQSHORT = {
+    WARRIOR = 'War',
+    CLERIC = 'Clr',
+    PALADIN = 'Pal',
+    RANGER = 'Rng',
+    SHADOWKNIGHT = 'SK',
+    DRUID = 'Dru',
+    MONK = 'Mnk',
+    BARD = 'Brd',
+    ROGUE = 'Rog',
+    SHAMAN = 'Shm',
+    NECROMANCER = 'Nec',
+    WIZARD = 'Wiz',
+    MAGICIAN = 'Mag',
+    ENCHANTER = 'Enc',
+    BEASTLORD = 'Bst',
+    BERSERKER = 'Ber'
+}
+
+local SLOT_COLORS = {
+    { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
+    { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
+    { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
+}
+
+local function classColor(abbr)
+    for i, c in ipairs(myClasses) do
+        if c == abbr then
+            local col = SLOT_COLORS[i] or { 0.49, 0.56, 0.65 }
+            return col[1], col[2], col[3], col[4] or 1.0
+        end
+    end
+    return 0.49, 0.56, 0.65, 1.0
+end
+
+local function classPlausible(abbr)
+    if not abbr or type(abbr) ~= 'string' then return false end
+    if DATA and DATA.spells and DATA.spells[abbr] and #DATA.spells[abbr] > 0 then
+        return true
+    end
+    for _, a in ipairs(ALL_ABBR) do
+        if a == abbr then return true end
+    end
+    return false
+end
+
+local function idxOf(tbl, val)
+    if not tbl then return 1 end
+    for i, v in ipairs(tbl) do
+        if v == val then return i end
+    end
+    return 1
+end
+
+local function defaultsForKind(kind, bene)
+    if kind == 'heal' then return 'Self', 'my HP <=' end
+    if kind == 'buff' then return 'Self', 'missing buff' end
+    if kind == 'pet' then return 'Self', 'missing pet' end
+    if kind == 'dot' then return 'Target', 'target HP <=' end
+    if kind == 'dd' then return 'Target', 'target HP <=' end
+    if bene == true then return 'Self', 'missing buff' end
+    return 'Target', 'target HP <='
+end
+
+local function cleanSpellName(name)
+    if not name or type(name) ~= 'string' then return "" end
+    local cleaned = name:gsub('%s*%([%w%s/]+%)$', '')
+    return (cleaned:gsub('^%s*(.-)%s*$', '%1'))
+end
+
+local function normalizeSpellName(name)
+    if not name or type(name) ~= 'string' then return "" end
+    local s = name:lower()
+    s = s:gsub('%s*%(?%s*rk%.?%s*[%ivxlc%d]+%s*%)?', '')
+    s = s:gsub('%s*%([^%)]+%)', '')
+    s = s:gsub('[%p%s]', '')
+    return s
+end
+
+local spellbookSetCache = nil
+local lastSpellbookCacheTime = 0
+
+local function getScribedSpellSet()
+    local now = os.clock()
+    if spellbookSetCache and (now - lastSpellbookCacheTime) < 3.0 then
+        return spellbookSetCache
+    end
+
+    local set = {}
+    pcall(function()
+        local count = mq.TLO.Me.BookCount() or 720 ---@diagnostic disable-line: undefined-field
+        for slot = 1, count do
+            local bName = nil
+            pcall(function() bName = mq.TLO.Me.Book(slot).Name() end)
+            if not bName or bName == "" or bName == "NULL" then
+                pcall(function()
+                    local res = mq.TLO.Me.Book(slot)()
+                    if type(res) == "string" and res ~= "" and res ~= "NULL" then bName = res end
+                end)
+            end
+
+            if bName and bName ~= "" and bName ~= "NULL" then
+                set[bName] = true
+                set[bName:lower()] = true
+                local cleaned = cleanSpellName(bName):lower()
+                set[cleaned] = true
+                local norm = normalizeSpellName(bName)
+                if norm ~= "" then set[norm] = true end
+            end
+        end
+    end)
+
+    spellbookSetCache = set
+    lastSpellbookCacheTime = now
+    return set
+end
+
+local function isScribed(nm)
+    if not nm or nm == "" then return false end
+
+    -- 1. Check cached spellbook map (fastest & handles unindexed TLO names)
+    local sbSet = getScribedSpellSet()
+    if sbSet[nm] or sbSet[nm:lower()] then return true end
+
+    local cleaned = cleanSpellName(nm):lower()
+    if cleaned ~= "" and sbSet[cleaned] then return true end
+
+    local norm = normalizeSpellName(nm)
+    if norm ~= "" and sbSet[norm] then return true end
+
+    -- 2. Direct TLO Book query fallback (Me.Book(name) returns slot index integer > 0 if scribed)
+    local ok, res = pcall(function() return mq.TLO.Me.Book(nm)() end)
+    if ok and type(res) == 'number' and res > 0 then return true end
+
+    if cleaned ~= "" then
+        local okC, resC = pcall(function() return mq.TLO.Me.Book(cleaned)() end)
+        if okC and type(resC) == 'number' and resC > 0 then return true end
+    end
+
+    -- 3. RankName lookup via TLO Spell
+    local okR, rName = pcall(function() return mq.TLO.Spell(nm).RankName() end)
+    if okR and type(rName) == 'string' and rName ~= "" and rName ~= nm then
+        if sbSet[rName] or sbSet[rName:lower()] then return true end
+        local okRB, resRB = pcall(function() return mq.TLO.Me.Book(rName)() end)
+        if okRB and type(resRB) == 'number' and resRB > 0 then return true end
+    end
+
+    return false
+end
+
+local hasAACache = {}
+local function hasAA(nm)
+    if not nm or nm == "" or tonumber(nm) ~= nil then return false end
+    local now = os.clock()
+    if hasAACache[nm] ~= nil and (now - (hasAACache[nm].time or 0)) < 5.0 then
+        return hasAACache[nm].val
+    end
+    local ok, res = pcall(function() return mq.TLO.Me.AltAbility(nm).Rank() end)
+    local hasIt = (ok and res ~= nil and res > 0)
+    hasAACache[nm] = { val = hasIt, time = now }
+    return hasIt
+end
+
+local knownDiscSet = nil
+local function scanKnownDiscs()
+    knownDiscSet = {}
+    pcall(function()
+        local count = mq.TLO.Me.CombatAbilityCount() or 0 ---@diagnostic disable-line: undefined-field
+        for i = 1, count do
+            local name = mq.TLO.Me.CombatAbility(i).Name()
+            if name and name ~= "" then
+                knownDiscSet[name] = true
+                knownDiscSet[name:lower()] = true
+            end
+        end
+    end)
+end
+
+local function isDiscKnown(discName)
+    if not discName or discName == "" then return false end
+    if not knownDiscSet then scanKnownDiscs() end
+    local kSet = knownDiscSet or {}
+    local nm = cleanSpellName(discName) or ""
+    if (nm ~= "" and (kSet[nm] or kSet[nm:lower()])) or kSet[discName] or kSet[discName:lower()] then
+        return true
+    end
+    local ok, res = pcall(function() return mq.TLO.Me.CombatAbility(nm)() end)
+    return (ok and res ~= nil)
+end
+
+local function hasDisc(discName)
+    return isDiscKnown(discName)
+end
+
+local function classesFromTitle(loud)
+    local ok, title = pcall(function() return mq.TLO.MacroQuest.Title() end) ---@diagnostic disable-line: undefined-field
+    if not ok or type(title) ~= 'string' or title == '' then return nil end
+    local found = {}
+    for word in title:gmatch('%a+') do
+        local up = word:upper()
+        if MQSHORT[up] then
+            local abbr = MQSHORT[up]
+            local duplicate = false
+            for _, existing in ipairs(found) do
+                if existing == abbr then
+                    duplicate = true; break
+                end
+            end
+            if not duplicate then found[#found + 1] = abbr end
+        end
+    end
+    if #found > 0 then
+        if loud then
+            print(string.format('\127[33m[Triune]\127[r Detected %d class(es) from MacroQuest Title: %s', #found,
+                table.concat(found, ', ')))
+        end
+        return found
+    end
+    return nil
+end
+
+local function classesFromInventoryWindow(loud, force)
+    local wasOpen = false
+    pcall(function() wasOpen = mq.TLO.Window('InventoryWindow').Open() end)
+
+    if not wasOpen and force then
+        mq.cmd('/windowstate InventoryWindow open')
+        mq.delay(200)
+    end
+
+    local found = {}
+    pcall(function()
+        for i = 1, 3 do
+            local text = mq.TLO.Window('InventoryWindow').Child('IW_ClassList').List(i)()
+            if text and text ~= '' then
+                local firstWord = text:match('^(%a+)')
+                if firstWord then
+                    local up = firstWord:upper()
+                    if MQSHORT[up] then
+                        found[#found + 1] = MQSHORT[up]
+                    end
+                end
+            end
+        end
+    end)
+
+    if not wasOpen and force then
+        mq.cmd('/windowstate InventoryWindow close')
+    end
+
+    if #found > 0 then
+        if loud then
+            print(string.format('\127[33m[Triune]\127[r Detected %d class(es) from InventoryWindow: %s', #found,
+                table.concat(found, ', ')))
+        end
+        return found
+    end
+    return nil
+end
+
+local function detectClasses(loud)
+    local found = classesFromTitle(loud)
+    if found and #found > 0 then return found end
+
+    found = classesFromInventoryWindow(loud, false)
+    if found and #found > 0 then return found end
+
+    local ok, mainClass = pcall(function() return mq.TLO.Me.Class.ShortName() end)
+    if ok and mainClass and mainClass ~= '' and mainClass ~= 'NULL' then
+        if loud then
+            print(string.format('\127[33m[Triune]\127[r Single-class character detected (%s).', mainClass))
+        end
+        return { mainClass }
+    end
+
+    return nil
+end
+
+local function isSpawnAlive(id)
+    if not id or id <= 0 then return false end
+    local ok, s = pcall(function() return mq.TLO.Spawn(id) end)
+    if not ok or not s or not s() then return false end
+    local dead, tp, hp = false, '', 100
+    pcall(function() dead = s.Dead() end)
+    pcall(function() tp = s.Type() end)
+    pcall(function() hp = s.PctHPs() end)
+    return (not dead) and (tp ~= 'Corpse') and ((hp or 0) > 0)
+end
+
+local function distToId(id)
+    if not id or id <= 0 then return 9999 end
+    local d = 9999
+    pcall(function() d = mq.TLO.Spawn(id).Distance() or 9999 end)
+    return d
+end
+
+local function distToLoc(x, y, z)
+    if not x or not y then return 9999 end
+    local mx, my, mz = 0, 0, 0
+    pcall(function() mx = mq.TLO.Me.X() or 0 end)
+    pcall(function() my = mq.TLO.Me.Y() or 0 end)
+    pcall(function() mz = mq.TLO.Me.Z() or 0 end)
+    local dx, dy = mx - x, my - y
+    local dz = z and (mz - z) or 0
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function hasLoS(id)
+    if not id or id <= 0 then return false end
+    local los = false
+    pcall(function() los = mq.TLO.Spawn(id).LineOfSight() or false end)
+    return los
+end
+
+local function pctHP(id)
+    if not id or id <= 0 then return 0 end
+    local hp = 0
+    pcall(function() hp = mq.TLO.Spawn(id).PctHPs() or 0 end)
+    return hp
+end
+
+local function buffActive(targetId, spellName)
+    if not spellName or spellName == '' then return false end
+    local active = false
+    pcall(function()
+        if targetId and targetId > 0 and targetId ~= (mq.TLO.Me.ID() or 0) then
+            active = (mq.TLO.Spawn(targetId).Buff(spellName).ID() or 0) > 0
+        else
+            active = (mq.TLO.Me.Buff(spellName).ID() or 0) > 0
+                or (mq.TLO.Me.Song(spellName).ID() or 0) > 0
+        end
+    end)
+    return active
+end
+
+local function sungKey(spellName, targetId)
+    return string.format('%d_%s', targetId or 0, spellName or '')
+end
+
+local function navLoaded()
+    local ok, loaded = pcall(function() return mq.TLO.Plugin('mq2nav').IsLoaded() or false end)
+    return ok and loaded
+end
+
+local function stickLoaded()
+    local ok, loaded = pcall(function() return mq.TLO.Plugin('mq2moveutils').IsLoaded() or false end)
+    return ok and loaded
+end
+
+local function isMoveActive()
+    local navActive, moveActive = false, false
+    if navLoaded() then
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+    end
+    if stickLoaded() then
+        pcall(function() moveActive = mq.TLO.Stick.Active() or false end)
+    end
+    return navActive or moveActive
+end
+
+local function stopMoving()
+    if navLoaded() then
+        local navActive = false
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+        if navActive then pcall(function() mq.cmd('/nav stop') end) end
+    end
+    if stickLoaded() then
+        local stickActive = false
+        pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+        if stickActive then
+            pcall(function() mq.cmd('/stick off') end)
+        end
+    end
+    pcall(function() mq.cmd('/keypress back') end)
+end
+
+local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn)
+    local chosenId, lowestHp = nil, 101
+    pcall(function()
+        local count = mq.TLO.Me.XTarget() or 0
+        for i = 1, count do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt and xt.TargetType() == 'Auto Hater' then
+                local id = xt.ID()
+                if id and id > 0 and isSpawnAlive(id) then
+                    local s = mq.TLO.Spawn(id)
+                    local isNPC = false
+                    pcall(function() isNPC = (s.Type() == 'NPC') end)
+                    if isNPC and (not isIgnoredFn or not isIgnoredFn(id)) and (not isUnreachableFn or not isUnreachableFn(id)) then
+                        if not unmezzedOnly or not buffActive(id, 'Mez') then
+                            local hp = s.PctHPs() or 100
+                            if hp < lowestHp then
+                                lowestHp = hp
+                                chosenId = id
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    return chosenId
+end
+
+local function findMaPcId(maName)
+    if not maName or maName == '' then return nil end
+    local id = nil
+    pcall(function()
+        local s = mq.TLO.Spawn('pc ' .. maName)
+        if s and s() and isSpawnAlive(s.ID()) then id = s.ID() end
+    end)
+    return id
+end
+
+local function createCastTracker()
+    local failureCount = {}
+    local lockouts = {}
+
+    local function recordFailure(spellName, maxRetries, lockoutSec)
+        if not spellName then return end
+        failureCount[spellName] = (failureCount[spellName] or 0) + 1
+        if failureCount[spellName] >= (maxRetries or 2) then
+            lockouts[spellName] = os.clock() + (lockoutSec or 30)
+            failureCount[spellName] = 0
+            print(string.format('\127[31m[Triune]\127[r Lockout applied for "%s" (%ds)', spellName, lockoutSec or 30))
+        end
+    end
+
+    local function isLockedOut(spellName)
+        if not spellName then return false end
+        local untilTime = lockouts[spellName]
+        if not untilTime then return false end
+        if os.clock() < untilTime then return true end
+        lockouts[spellName] = nil
+        return false
+    end
+
+    local function onFailureEvent(reason, maxRetries, lockoutSec)
+        local castingName = nil
+        pcall(function() castingName = mq.TLO.Me.Casting.Name() end)
+        if castingName and castingName ~= '' then
+            recordFailure(castingName, maxRetries, lockoutSec)
+        end
+    end
+
+    return {
+        recordFailure = recordFailure,
+        isLockedOut = isLockedOut,
+        onFailureEvent = onFailureEvent,
+        clear = function()
+            failureCount = {}; lockouts = {}
+        end
+    }
+end
+
+local function clearCursor()
+    pcall(function()
+        local count = 0
+        while (mq.TLO.Cursor.ID() or 0) > 0 and count < 255 do
+            mq.cmd('/autoinventory')
+            mq.delay(50)
+            count = count + 1
+        end
+    end)
+end
+
+local function tryMem(slot, name)
+    if not slot or not name or name == '' then return false end
+    local current = nil
+    pcall(function() current = mq.TLO.Me.Gem(slot).Name() end)
+    if current == name then return true end
+
+    clearCursor()
+    pcall(function()
+        mq.cmdf('/memspell %d "%s"', slot, name)
+        mq.delay(2000, function() return (mq.TLO.Me.Gem(slot).Name() or '') == name end)
+    end)
+    local landed = false
+    pcall(function() landed = (mq.TLO.Me.Gem(slot).Name() or '') == name end)
+    return landed
+end
+
+local ALIAS_CLASS_MAP = {
+    SK = 'SK',
+    SHD = 'SK',
+    BST = 'Bst',
+    Bst = 'Bst',
+    SHM = 'Shm',
+    Shm = 'Shm'
+}
+
+local function lookupSpells(abbr)
+    if not abbr or not DATA.spells then return {} end
+    if DATA.spells[abbr] then return DATA.spells[abbr] end
+
+    local u = abbr:upper()
+    if DATA.spells[u] then return DATA.spells[u] end
+
+    local titleCase = u:sub(1, 1) .. u:sub(2):lower()
+    if DATA.spells[titleCase] then return DATA.spells[titleCase] end
+
+    local alt = ALIAS_CLASS_MAP[u] or ALIAS_CLASS_MAP[abbr]
+    if alt and DATA.spells[alt] then return DATA.spells[alt] end
+    if alt then
+        local altTitle = alt:sub(1, 1):upper() .. alt:sub(2):lower()
+        if DATA.spells[altTitle] then return DATA.spells[altTitle] end
+    end
+
+    for k, v in pairs(DATA.spells) do
+        if type(k) == 'string' and k:upper() == u then
+            return v
+        end
+    end
+    return {}
+end
 
 local function classHasSpells(abbr)
-    local s = DATA.spells[abbr]
+    local s = lookupSpells(abbr)
     return s ~= nil and #s > 0
 end
 
 -- Checked live every time the spell picker renders (not cached), so the list
 -- naturally updates the moment you scribe something new -- no separate
 -- refresh mechanism needed.
-local function isScribed(nm)
-    return common.isScribed(nm)
-end
+-- isScribed is defined in local helpers above
 
 -- kind tag (4th field the extractor writes: dd/dot/heal/buff, classified from
 -- goodEffect + whether the spell has a duration -- verified against known
@@ -314,6 +828,10 @@ local lastFilterState = {}
 local function filteredSpells(abbr)
     local now = os.clock()
     local scribedOnly = ctrl and ctrl.scribed_only or false
+    local myClassAbbr = nil
+    pcall(function() myClassAbbr = mq.TLO.Me.Class.ShortName() end)
+    local isMyClass = myClassAbbr and (abbr:upper() == myClassAbbr:upper())
+
     if filteredSpellsCache[abbr] and (now - lastFilteredCacheTime) < 2.0
         and lastFilterState.lvlMin == lvlMin
         and lastFilterState.lvlMax == lvlMax
@@ -322,10 +840,11 @@ local function filteredSpells(abbr)
     end
 
     local names, lookup = {}, {}
-    local src = DATA.spells[abbr] or {}
+    local src = lookupSpells(abbr)
     for _, row in ipairs(src) do
         local nm, lv, bene, kind = row[1], row[2], row[3], row[4]
-        if lv >= lvlMin and lv <= lvlMax and (not scribedOnly or isScribed(nm)) then
+        local checkScribed = scribedOnly and isMyClass
+        if lv >= lvlMin and lv <= lvlMax and (not checkScribed or isScribed(nm)) then
             local label       = KIND_LABEL[kind]
             names[#names + 1] = label and string.format('%s  (L%d) [%s]', nm, lv, label)
                 or string.format('%s  (L%d)', nm, lv)
@@ -393,18 +912,14 @@ end
 -- Character storage and class detection
 -- ============================================================================
 local myName = nil
-local MQSHORT = common.MQSHORT
 local ALLDATA = {} -- character name -> saved entry
-
-local function detectClasses(loud)
-    return common.detectClasses(loud)
-end
+-- detectClasses, classesFromInventoryWindow, and classesFromTitle are defined in local helpers above
 
 -- Which of the character's classes owns a spell, whether it's beneficial, and
 -- its kind tag (dd/dot/heal/buff) -- all three feed defaultsForKind.
 local function spellClassInfo(name)
     for _, abbr in ipairs(myClasses) do
-        local list = DATA.spells[abbr]
+        local list = lookupSpells(abbr)
         if list then for _, it in ipairs(list) do if it[1] == name then return abbr, (it[3] == 1), it[4] end end end
     end
     return myClasses[1] or 'War', true, nil
@@ -486,8 +1001,15 @@ local function applyEntry(e)
     lvlMin           = e.lvlMin or lvlMin; lvlMax = e.lvlMax or lvlMax
     loadout.gems     = e.gems or {}
     loadout.buffGems = e.buffGems or {}
-    loadout.aas      = e.aas or {}
-    loadout.discs    = e.discs or {}
+    loadout.aas      = {}
+    if type(e.aas) == 'table' then
+        for k, v in pairs(e.aas) do
+            if not tonumber(k) and type(v) == 'table' then
+                loadout.aas[k] = v
+            end
+        end
+    end
+    loadout.discs = e.discs or {}
     if type(e.control) == 'table' then
         for k, v in pairs(e.control) do ctrl[k] = v end
         -- Migrate pre-3.6 saves (separate use_melee/use_ranged checkboxes) to the
@@ -560,29 +1082,36 @@ local function loadoutSig()
             .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct)) or '-'
     end
     local keys = {}
-    for nm in pairs(loadout.aas) do keys[#keys + 1] = tostring(nm) end
+    for nm in pairs(loadout.aas or {}) do keys[#keys + 1] = tostring(nm) end
     table.sort(keys)
     for _, nm in ipairs(keys) do
-        local a = loadout.aas[nm]
-        p[#p + 1] = nm ..
-            '~' .. tostring(a.enabled) .. '~' .. tostring(a.target) .. '~' .. tostring(a.when) .. '~' .. tostring(a.pct)
+        local a = loadout.aas and loadout.aas[nm]
+        if type(a) == 'table' then
+            p[#p + 1] = nm ..
+                '~' ..
+                tostring(a.enabled) .. '~' .. tostring(a.target) .. '~' .. tostring(a.when) .. '~' .. tostring(a.pct)
+        end
     end
     local dkeys = {}
-    for nm in pairs(loadout.discs) do dkeys[#dkeys + 1] = tostring(nm) end
+    for nm in pairs(loadout.discs or {}) do dkeys[#dkeys + 1] = tostring(nm) end
     table.sort(dkeys)
     for _, nm in ipairs(dkeys) do
-        local d = loadout.discs[nm]
-        p[#p + 1] = nm ..
-            '~' .. tostring(d.enabled) .. '~' .. tostring(d.target) .. '~' .. tostring(d.when) .. '~' .. tostring(d.pct)
-            .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.priority)
+        local d = loadout.discs and loadout.discs[nm]
+        if type(d) == 'table' then
+            p[#p + 1] = nm ..
+                '~' ..
+                tostring(d.enabled) .. '~' .. tostring(d.target) .. '~' .. tostring(d.when) .. '~' .. tostring(d.pct)
+                .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.priority)
+        end
     end
     local c = ctrl.camp_loc
     local a = ctrl.hunter_combat_loc
     p[#p + 1] = table.concat({ ctrl.mode, tostring(ctrl.combat_style),
         tostring(ctrl.ranged_dist), tostring(ctrl.ma_name), tostring(ctrl.assist_at),
         tostring(ctrl.chase), tostring(ctrl.chase_dist), tostring(ctrl.automem),
-        tostring(ctrl.hunter_radius), tostring(ctrl.hunter_z), tostring(ctrl.camp_radius), tostring(ctrl.camp_z),
-        tostring(ctrl.pet_assist_at),
+        tostring(ctrl.hunter_radius), tostring(ctrl.hunter_z), tostring(ctrl.hunter_repeat_msg), tostring(ctrl
+    .camp_radius), tostring(ctrl.camp_z),
+        tostring(ctrl.pet_assist_at), tostring(ctrl.pet_hold_enabled), tostring(ctrl.show_map_radius),
         tostring(ctrl.nav_fallback_stick), tostring(ctrl.debug_mode), tostring(ctrl.buff_mode), tostring(ctrl
         .scribed_only),
         tostring(ctrl.aa_purchased_only), tostring(ctrl.disc_trained_only),
@@ -603,9 +1132,7 @@ end
 -- one Bard song/spell/disc/AA ever; a class name that's only in the save because
 -- of a past bug (detectClasses used to hardcode 'Rng'/'Brd' when it couldn't
 -- find a real 2nd/3rd class) will show zero.
-local function classPlausible(abbr)
-    return common.classPlausible(abbr, DATA)
-end
+-- classPlausible is defined in local helpers above
 
 -- Called when the logged-in character changes: load that toon's saved setup, or
 -- detect classes fresh if it's new.
@@ -616,7 +1143,7 @@ local function onCharacterChanged()
     lvlMin, lvlMax = 1, 65
     if ALLDATA[myName] then
         applyEntry(ALLDATA[myName])
-        common.scanKnownDiscs()
+        scanKnownDiscs()
         local ok, prim = pcall(function() return mq.TLO.Me.Class.ShortName() end)
         local primAbbr = (ok and prim) and MQSHORT[tostring(prim):upper()] or nil
         -- Self-heal: discard any saved class slot that isn't the game-reported
@@ -639,14 +1166,15 @@ local function onCharacterChanged()
             end
         end
     else
-        myClasses = detectClasses()
+        local detected = detectClasses()
+        if detected then myClasses = detected end
         importCurrentGems() -- new character: seed the loadout from the current bar
     end
-    -- Authoritative live read always wins, even over a saved/heuristic value --
-    -- catches a stale save immediately on login without waiting on self-heal or
-    -- a manual Re-detect click.
-    local liveClasses = common.classesFromInventoryWindow(false, true)
-    if liveClasses then myClasses = liveClasses end
+    -- Fallback to live inventory read only if no classes were loaded or detected
+    if not myClasses or #myClasses == 0 then
+        local liveClasses = classesFromInventoryWindow(false, true)
+        if liveClasses then myClasses = liveClasses end
+    end
     ctrl.running = false -- never auto-start on load
 end
 
@@ -659,9 +1187,7 @@ loadAll()
 -- instant /memspell is rejected. Memorize the legit way instead: open the spellbook,
 -- page to the spell, pick it up, drop it on the target gem, and let the mem gauge run
 -- its full time -- exactly how a person does it. Mirrors autocombat's Simulated Mem.
-local function tryMem(slot, name)
-    return common.tryMem(slot, name)
-end
+-- tryMem is defined in local helpers above
 
 -- ============================================================================
 -- UI
@@ -669,13 +1195,89 @@ end
 local function accent(c, txt) ImGui.TextColored(c[1], c[2], c[3], c[4], txt) end
 
 -- UI: theme and style helpers
--- ---- NMS theme (pushed each frame; every push is pcall-guarded so any enum this
---      MQ build doesn't expose is skipped instead of breaking the window) --------
-local function pushTheme()
-    common.pushTheme()
+local _colN, _varN = 0, 0
+local function pushCol(id, r, g, b, a)
+    if id == nil then return end
+    local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
+    local enumVal = ImGuiColType and ImGuiColType(id) or id
+    if pcall(ImGui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end
 end
+local function pushVar(id, a, b)
+    if id == nil then return end
+    local ok
+    local ImGuiSVType = (mq.imgui and mq.imgui.StyleVar) or _G
+    .ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+    local enumVal = ImGuiSVType and ImGuiSVType(id) or id
+    if b ~= nil then
+        local ImVec2Type = _G.ImVec2 or ImVec2
+        if type(ImVec2Type) == 'function' then
+            ok = pcall(ImGui.PushStyleVar, enumVal, ImVec2Type(a, b))
+        else
+            ok = pcall(ImGui.PushStyleVar, enumVal, a, b)
+        end
+    else
+        ok = pcall(ImGui.PushStyleVar, enumVal, a)
+    end
+    if ok then _varN = _varN + 1 end
+end
+
+local function pushTheme()
+    _colN, _varN = 0, 0
+    local ImGuiCol = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol or ImGuiCol ---@diagnostic disable-line: undefined-field
+    local ImGuiStyleVar = (mq.imgui and mq.imgui.StyleVar) or _G.ImGuiStyleVar or
+    ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+    if ImGuiCol then
+        pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
+        pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
+        pushCol(ImGuiCol.PopupBg, 0.047, 0.075, 0.118, 1)
+        pushCol(ImGuiCol.Border, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.Text, 0.851, 0.898, 0.953, 1)
+        pushCol(ImGuiCol.TextDisabled, 0.490, 0.561, 0.651, 1)
+        pushCol(ImGuiCol.TitleBg, 0.043, 0.067, 0.106, 1)
+        pushCol(ImGuiCol.TitleBgActive, 0.047, 0.078, 0.125, 1)
+        pushCol(ImGuiCol.FrameBg, 0.047, 0.078, 0.125, 1)
+        pushCol(ImGuiCol.FrameBgHovered, 0.090, 0.150, 0.220, 1)
+        pushCol(ImGuiCol.FrameBgActive, 0.120, 0.190, 0.270, 1)
+        pushCol(ImGuiCol.Button, 0.086, 0.125, 0.196, 1)
+        pushCol(ImGuiCol.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
+        pushCol(ImGuiCol.ButtonActive, 0.300, 0.700, 1.000, 0.60)
+        pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
+        pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
+        pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
+        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
+        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
+        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
+        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
+        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
+        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
+        pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
+        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
+    end
+    if ImGuiStyleVar then
+        local ImGuiSV = ImGuiStyleVar
+        pushVar(ImGuiSV.WindowRounding, 6)
+        pushVar(ImGuiSV.ChildRounding, 5)
+        pushVar(ImGuiSV.FrameRounding, 4)
+        pushVar(ImGuiSV.PopupRounding, 4)
+        pushVar(ImGuiSV.TabRounding, 4)
+        pushVar(ImGuiSV.GrabRounding, 3)
+        pushVar(ImGuiSV.ScrollbarRounding, 6)
+
+        pushVar(ImGuiSV.FrameBorderSize, 1)
+        pushVar(ImGuiSV.FramePadding, 7, 4)
+        pushVar(ImGuiSV.ItemSpacing, 8, 6)
+        pushVar(ImGuiSV.WindowPadding, 12, 10)
+    end
+end
+
 local function popTheme()
-    common.popTheme()
+    if _varN > 0 then
+        pcall(ImGui.PopStyleVar, _varN); _varN = 0
+    end
+    if _colN > 0 then
+        pcall(ImGui.PopStyleColor, _colN); _colN = 0
+    end
 end
 
 -- Renders the Triune sigil (outer ring + inner triangle + three class-colored
@@ -686,21 +1288,23 @@ end
 -- UI: header emblem
 local function drawEmblem(size)
     pcall(function()
+        local ImVec2Type = _G.ImVec2 or ImVec2 or
+            (mq.imgui and mq.imgui.ImVec2) ---@diagnostic disable-line: undefined-field
         local dl = ImGui.GetWindowDrawList()
         local p = ImGui.GetCursorScreenPosVec()
         local r = size / 2
         local cx, cy = p.x + r, p.y + r
 
-        dl:AddCircle(ImVec2(cx, cy), r - 1, IM_COL32(143, 208, 255, 160), 24, 1.2)
+        dl:AddCircle(ImVec2Type(cx, cy), r - 1, IM_COL32(143, 208, 255, 160), 24, 1.2)
 
         local tri_r = r * 0.62
-        local top   = ImVec2(cx, cy - tri_r)
-        local right = ImVec2(cx + tri_r * 0.87, cy + tri_r * 0.55)
-        local left  = ImVec2(cx - tri_r * 0.87, cy + tri_r * 0.55)
+        local top   = ImVec2Type(cx, cy - tri_r)
+        local right = ImVec2Type(cx + tri_r * 0.87, cy + tri_r * 0.55)
+        local left  = ImVec2Type(cx - tri_r * 0.87, cy + tri_r * 0.55)
         dl:AddTriangle(top, right, left, IM_COL32(143, 165, 235, 150), 1.1)
 
         local function node(pt, slot)
-            local c = common.SLOT_COLORS[slot]
+            local c = SLOT_COLORS[slot] or { 0.5, 0.5, 0.5 }
             dl:AddCircleFilled(pt, r * 0.16,
                 IM_COL32(math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255), 255), 12)
         end
@@ -816,6 +1420,66 @@ function UI.drawIgnoreTab()
     ImGui.EndTabItem()
 end
 
+function UI.drawHelpTab()
+    if not ImGui.BeginTabItem('Help') then return end
+    ImGui.Dummy(0, 4)
+
+    if ImGui.CollapsingHeader('Slash Commands', ImGuiTreeNodeFlags.DefaultOpen) then
+        accent(GOLD, 'Commands (Alias: /ac or /triune):')
+        ImGui.Dummy(0, 2)
+        local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
+        if ImGui.BeginTable('##HelpCmdTable', 2, tableFlags) then
+            ImGui.TableSetupColumn('Command', ImGuiTableColumnFlags.WidthFixed, 180)
+            ImGui.TableSetupColumn('Description', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableHeadersRow()
+
+            local commands = {
+                { cmd = '/ac run',              desc = 'Start / unpause auto-combat execution' },
+                { cmd = '/ac pause / /ac stop', desc = 'Pause auto-combat execution & halt movement' },
+                { cmd = '/ac status',           desc = 'Print current running state and combat mode to chat' },
+                { cmd = '/ac spellbook',        desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
+                { cmd = '/ac cursorui',         desc = 'Toggle the standalone cursor item manager window' },
+                { cmd = '/ac clearcursor',      desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
+                { cmd = '/ac <mode>',           desc = 'Switch combat mode (e.g. /ac assist, /ac hunter, /ac tank)' },
+                { cmd = '/triunerun',           desc = 'Quick keybind command to toggle run / pause' },
+            }
+
+            for _, entry in ipairs(commands) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                accent(ARC, entry.cmd)
+                ImGui.TableNextColumn()
+                ImGui.Text(entry.desc)
+            end
+            ImGui.EndTable()
+        end
+    end
+
+    ImGui.Dummy(0, 6)
+
+    if ImGui.CollapsingHeader('Combat Modes', ImGuiTreeNodeFlags.DefaultOpen) then
+        accent(GOLD, 'Available Combat Modes & Behavior:')
+        ImGui.Dummy(0, 2)
+        local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
+        if ImGui.BeginTable('##HelpModeTable', 2, tableFlags) then
+            ImGui.TableSetupColumn('Mode', ImGuiTableColumnFlags.WidthFixed, 140)
+            ImGui.TableSetupColumn('Behavior Description', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableHeadersRow()
+
+            for _, modeName in ipairs(MODES) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                accent(GOOD, modeName)
+                ImGui.TableNextColumn()
+                ImGui.TextWrapped(MODE_DESC[modeName] or '')
+            end
+            ImGui.EndTable()
+        end
+    end
+
+    ImGui.EndTabItem()
+end
+
 -- Shared row-rendering for both the Spell Gems tab and the Buff Loadout tab --
 -- same class -> spell -> target -> when -> percent picker either way, just
 -- pointed at a different 12-slot table. isActiveSet gates auto-mem-on-pick so
@@ -823,7 +1487,7 @@ end
 -- memmed right now; only editing the currently-active set mems immediately.
 -- UI: spell/gem list editor
 function UI.drawGemList(gemsTable, idPrefix, isActiveSet)
-    if ImGui.BeginChild('gemlist_' .. idPrefix, 0, 0, false) then
+    if ImGui.BeginChild('gemlist_' .. idPrefix, ImVec2(0, 0), nil, 0) then
         for i = 1, NUM_GEMS do
             ImGui.PushID(idPrefix .. i)
             local g = gemsTable[i]
@@ -988,22 +1652,24 @@ function UI.drawAATab()
     end
     ImGui.Separator()
 
-    if ImGui.BeginChild('aalist', 0, 0, false) then
+    if ImGui.BeginChild('aalist', ImVec2(0, 0), nil, 0) then
         for _, tier in ipairs(TIER_ORDER) do
             local any = false
             for _, cls in ipairs(myClasses) do
                 for sec, list in pairs(DATA.aas[cls] or {}) do
-                    if aaTier(sec) == tier then
-                        for _, nm in ipairs(list) do
-                            if not ctrl.aa_purchased_only or common.hasAA(nm) then
+                    local secNum = tonumber(sec) or 60
+                    if aaTier(secNum) == tier and type(list) == 'table' then
+                        for _, item in ipairs(list) do
+                            local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
+                            if not tonumber(nm) and (not ctrl.aa_purchased_only or hasAA(nm)) then
                                 any = true
-                                ImGui.PushID(cls .. nm)
+                                ImGui.PushID('aa_' .. tier .. '_' .. cls .. '_' .. nm)
                                 local entry = loadout.aas[nm] or
                                     { cls = cls, target = 'F: Myself', when = 'in combat', enabled = false, pct = 30 }
                                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
-                                ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls)
+                                ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
                                 ImGui.SameLine(); ImGui.Text(nm)
-                                ImGui.SameLine(); ImGui.TextDisabled('(' .. fmtSec(sec) .. ')')
+                                ImGui.SameLine(); ImGui.TextDisabled('(' .. fmtSec(secNum) .. ')')
                                 if entry.enabled then
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(150)
                                     local ti = ImGui.Combo('##aat', idxOf(TARGETS, entry.target), TARGETS)
@@ -1044,18 +1710,18 @@ function UI.drawDiscTab()
             'Only show disciplines you\'ve actually trained, not every disc your\nclass could ever learn. Updates live as you train new ones. Turn\noff to browse/plan ahead.')
     end
     ImGui.Separator()
-    if ImGui.BeginChild('disclist', 0, 0, false) then
+    if ImGui.BeginChild('disclist', ImVec2(0, 0), nil, 0) then
         local anyDisc = false
         for _, cls in ipairs(myClasses) do
             for _, row in ipairs(DATA.discs[cls] or {}) do
                 local nm, lv = row[1], row[2]
-                if not ctrl.disc_trained_only or common.hasDisc(nm) then
+                if not ctrl.disc_trained_only or hasDisc(nm) then
                     anyDisc = true
                     ImGui.PushID('disc' .. cls .. nm)
                     local entry = loadout.discs[nm] or
                         { cls = cls, target = 'F: Myself', when = 'HP <=', enabled = false, pct = 30, boss_only = false, priority = 50 }
                     entry.enabled = ImGui.Checkbox('##en', entry.enabled)
-                    ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls)
+                    ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
                     ImGui.SameLine(); ImGui.Text(nm)
                     ImGui.SameLine(); ImGui.TextDisabled('(L' .. lv .. ')')
                     if entry.enabled then
@@ -1163,6 +1829,12 @@ function UI.drawControlTab()
         ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
         if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
 
+        ctrl.hunter_repeat_msg = ImGui.Checkbox('Repeat Missing Mob Msg', ctrl.hunter_repeat_msg or false)
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+            'When checked, repeats the "No NPCs found" message continuously on every tick.\nWhen unchecked (default), prints the diagnostic message only once unless search settings change.')
+        end
+
         -- Combat Radius anchor -- keeps Hunter from roaming the whole world
         ImGui.Dummy(0, 2)
         accent(GOLD, 'Combat Radius (optional)')
@@ -1177,38 +1849,40 @@ function UI.drawControlTab()
             local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
             if mx and my and mz then
                 ctrl.hunter_combat_loc = { x = mx, y = my, z = mz }
-                if (ctrl.hunter_combat_radius or 0) == 0 then
-                    ctrl.hunter_combat_radius = 500  -- sensible default on first Set
+                if (ctrl.hunter_combat_radius or 0) <= 0 then
+                    ctrl.hunter_combat_radius = 250
                 end
+                if updateMapRadiusVisuals then updateMapRadiusVisuals() end
             end
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Saves your current position as the anchor.\nHunter will only wander and find mobs within the Combat Radius of this point.')
+            ImGui.SetTooltip(
+                'Saves your current position as the anchor.\nHunter will only wander and find mobs within the Combat Radius of this point.')
         end
         ImGui.SameLine()
         if ImGui.Button('Clear Anchor##hunter') then
             ctrl.hunter_combat_loc = nil
-            ctrl.hunter_combat_radius = 0
-            pursuit.wanderLoc = nil  -- ditch any wander-point that might be outside the old zone
+            pursuit.wanderLoc = nil -- ditch any wander-point that might be outside the old zone
+            if updateMapRadiusVisuals then updateMapRadiusVisuals() end
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('Remove the anchor -- Hunter will roam freely again.')
         end
 
-        -- Radius slider (greyed out / clamped to 1 min when no anchor)
-        local hasAnchor = ctrl.hunter_combat_loc ~= nil
-        if not hasAnchor then ImGui.BeginDisabled() end
+        -- Radius slider (editable whether an anchor is set or not)
         ImGui.SetNextItemWidth(220)
-        local displayRadius = math.max(1, ctrl.hunter_combat_radius or 0)
-        local newRadius = ImGui.SliderInt('Combat Radius##hunter', displayRadius, 1, 2000)
-        if hasAnchor then ctrl.hunter_combat_radius = newRadius end
+        local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl.hunter_combat_radius or 250
+        local newRadius, changed = ImGui.SliderInt('Combat Radius##hunter', curRadius, 1, 2000)
+        if changed then
+            ctrl.hunter_combat_radius = newRadius
+            if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+        end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
                 'Maximum distance from the anchor the Hunter will roam\n'
                 .. 'and search for targets. Mobs outside this radius are ignored.\n'
-                .. 'Greyed out until an anchor is set.')
+                .. 'Takes effect whenever an anchor location is set.')
         end
-        if not hasAnchor then ImGui.EndDisabled() end
     end
 
     if usesMA then
@@ -1289,8 +1963,8 @@ function UI.drawSettingsTab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Spell: stand off at the range below and never auto-attack (no\n'
-            ..'/attack, no /autofire) -- your Spell Gems loadout does all the\n'
-            ..'damage. For pure caster trios that don\'t melee or carry a bow.')
+            .. '/attack, no /autofire) -- your Spell Gems loadout does all the\n'
+            .. 'damage. For pure caster trios that don\'t melee or carry a bow.')
     end
     if ctrl.combat_style ~= 'Melee' then
         ImGui.SameLine(); ImGui.SetNextItemWidth(140)
@@ -1303,16 +1977,22 @@ function UI.drawSettingsTab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'If MQ2Nav reports no path to a target, /stick will still\n'
-            ..'try to close on it in a straight line -- which walks\n'
-            ..'straight at whatever wall is blocking the path.\n'
-            ..'Off by default: unreachable targets are dropped instead.')
+            .. 'try to close on it in a straight line -- which walks\n'
+            .. 'straight at whatever wall is blocking the path.\n'
+            .. 'Off by default: unreachable targets are dropped instead.')
     end
     ctrl.debug_mode = ImGui.Checkbox('Debug Mode', ctrl.debug_mode)
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Prints extra diagnostic lines (e.g. Hunter\'s full targeting\n'
-            ..'state every few seconds) to help track down a stuck/frozen\n'
-            ..'report. Off by default -- noisy for normal use.')
+            .. 'state every few seconds) to help track down a stuck/frozen\n'
+            .. 'report. Off by default -- noisy for normal use.')
+    end
+    ctrl.show_map_radius = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'Draws green radius circles on the in-game map window\n'
+            .. 'for Hunter, Anchor, and Pull/Camp radii.')
     end
 
     ImGui.Dummy(0, 4)
@@ -1340,8 +2020,15 @@ function UI.drawSettingsTab()
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
                 'Send pets to attack once the target drops to or below\n'
-                ..'this HP%% AND the player has started hitting the mob.\n'
-                ..'100%% = send as soon as the first hit connects (default).')
+                .. 'this HP% AND the player has started hitting the mob.\n'
+                .. '100% = send as soon as the first hit connects (default).')
+        end
+        ctrl.pet_hold_enabled = ImGui.Checkbox('Enable Pet Hold', ctrl.pet_hold_enabled ~= false)
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Hold pets via "#petcmd hold all" whenever out of combat\n'
+                .. 'or prior to reaching the Pet Assist At HP% threshold,\n'
+                .. 'releasing them to attack once threshold is met.')
         end
     end
 
@@ -1351,27 +2038,27 @@ function UI.drawSettingsTab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Stops everything and sits to recover once any enabled\n'
-            ..'resource below drops to its "at" %%; resumes once ALL enabled\n'
-            ..'resources have recovered up to their "until" %%.')
+            .. 'resource below drops to its "at" %%; resumes once ALL enabled\n'
+            .. 'resources have recovered up to their "until" %%.')
     end
     if ctrl.medbreak_enabled then
         ctrl.medbreak_hp_on = ImGui.Checkbox('HP##mbhp', ctrl.medbreak_hp_on)
         ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
         ctrl.medbreak_hp_start = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%')
         ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_hp_stop  = ImGui.SliderInt('##mbhpstop',  ctrl.medbreak_hp_stop  or 90, 0, 100, '%d%%')
+        ctrl.medbreak_hp_stop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%')
 
         ctrl.medbreak_mana_on = ImGui.Checkbox('Mana##mbmana', ctrl.medbreak_mana_on)
         ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
         ctrl.medbreak_mana_start = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%')
         ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_mana_stop  = ImGui.SliderInt('##mbmanastop',  ctrl.medbreak_mana_stop  or 90, 0, 100, '%d%%')
+        ctrl.medbreak_mana_stop = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%')
 
-        ctrl.medbreak_end_on = ImGui.Checkbox('Endurance##mbend', ctrl.medbreak_end_on)
+        ctrl.medbreak_end_on    = ImGui.Checkbox('Endurance##mbend', ctrl.medbreak_end_on)
         ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
         ctrl.medbreak_end_start = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%')
         ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_end_stop  = ImGui.SliderInt('##mbendstop',  ctrl.medbreak_end_stop  or 90, 0, 100, '%d%%')
+        ctrl.medbreak_end_stop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%')
     end
 
     ImGui.EndTabItem()
@@ -1398,6 +2085,7 @@ local function draw()
         UI.drawAATab()
         UI.drawDiscTab()
         UI.drawIgnoreTab()
+        UI.drawHelpTab()
         ImGui.EndTabBar()
     end
 
@@ -1526,7 +2214,7 @@ local function buffActive(id, name)
         local m = mq.TLO.Group.Member(i)
         if m and m() and m.ID() == id then
             if hasNamedBuff(m, name) then return true end
-            if tloTrue(function() return m.Song(name)() end) then return true end
+            if tloTrue(function() return m.Song(name)() end) then return true end ---@diagnostic disable-line: undefined-field
             return false
         end
     end
@@ -1566,7 +2254,7 @@ end
 local isUnreachable -- forward declaration; defined in the pursuit section below
 
 local function firstNPCXtarget(unmezzedOnly)
-    return common.firstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable)
+    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable)
 end
 
 -- Returns true if any live (PctHPs > 0), non-ignored, reachable NPC occupies
@@ -1601,7 +2289,7 @@ local function isXTargetId(id)
 end
 
 local function maPcId()
-    return common.maPcId(ctrl and ctrl.ma_name)
+    return findMaPcId(ctrl and ctrl.ma_name)
 end
 
 local function targetIsEngaged(id)
@@ -1774,7 +2462,7 @@ local function conditionMet(when, pct, spellName, targetId, cls)
     end
     if when == 'has Poison/Disease' then
         local s = mq.TLO.Spawn(targetId)
-        return s() and (s.Poisoned() ~= nil and s.Poisoned()() ~= nil or s.Diseased() ~= nil and s.Diseased()() ~= nil) or
+        return s() and (s.Poisoned() ~= nil and s.Poisoned()() ~= nil or s.Diseased() ~= nil and s.Diseased()() ~= nil) or ---@diagnostic disable-line: undefined-field
             false
     end
     if when == 'add is loose' then return firstNPCXtarget(true) ~= nil end
@@ -1789,7 +2477,7 @@ end
 -- ============================================================================
 -- Spell Fail-Count & Lockout System (2-try limit -> 30s lockout)
 -- ============================================================================
-local castTracker = common.createCastTracker()
+local castTracker = createCastTracker()
 
 local function onFailureEvent(reason)
     castTracker.onFailureEvent(reason, ctrl and ctrl.cast_max_retries or 2, ctrl and ctrl.cast_lockout_sec or 30)
@@ -1930,7 +2618,7 @@ end
 -- If neither plugin is loaded, movement is skipped and the character just fights
 -- from wherever it's standing.
 -- ============================================================================
--- Movement: plugin and distance helpers (Delegated to triune_common)
+-- Movement: plugin and distance helpers
 -- ============================================================================
 
 -- Reverted from 20 back to true melee weapon range -- 20 was meant to stop
@@ -2083,7 +2771,11 @@ local function moveToward(id, dist, followOnly)
         end
     end
     if stickLoaded() then
-        mq.cmdf('/stick id %d %d', id, dist); pursuit.lastNavTargetId = id
+        local stickActive = false
+        pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+        if pursuit.lastNavTargetId ~= id or not stickActive then
+            mq.cmdf('/stick id %d %d', id, dist); pursuit.lastNavTargetId = id
+        end
         return false
     end
     return false -- no movement plugin loaded; stand and fight from here
@@ -2203,7 +2895,16 @@ local function performUnstuck()
     local tgtNote = (tgt() and tgt.Type() == 'NPC') and
         string.format(' (target dist %.0f, desired %.0f)', distToId(tgt.ID()), desiredRange()) or ''
     print('\ay[Triune]\ax stuck -- backing up and pivoting.' .. tgtNote)
-    mq.cmd('/nav stop'); mq.cmd('/stick off')
+    if navLoaded() then
+        local navActive = false
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+        if navActive then mq.cmd('/nav stop') end
+    end
+    if stickLoaded() then
+        local stickActive = false
+        pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+        if stickActive then mq.cmd('/stick off') end
+    end
     mq.cmd('/keypress back hold')
     mq.delay(1200)
     mq.cmd('/keypress back')
@@ -2315,8 +3016,8 @@ end
 -- Hunter standing still. NearestSpawn(i, ...) returning a falsy spawn () is what
 -- actually marks "no more candidates."
 local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
-    local minLv = minLevel or 1
-    local maxLv = maxLevel or 100
+    local minLv        = minLevel or 1
+    local maxLv        = maxLevel or 100
     -- Hunter combat anchor: if set and radius > 0, reject any candidate outside the circle.
     local anchorLoc    = ctrl.hunter_combat_loc
     local anchorRadius = anchorLoc and (ctrl.hunter_combat_radius or 0) or 0
@@ -2364,8 +3065,6 @@ end
 local function pullerTick()
     if not ctrl.camp_loc then return end
 
-    if not ctrl.camp_loc then return end
-
     if runtime.pullState == 'IDLE' then
         if mq.TLO.Me.Combat() then return end -- already fighting something; don't pull yet
         local id = findRoamTarget(ctrl.camp_radius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
@@ -2373,6 +3072,20 @@ local function pullerTick()
             runtime.pullTargetId = id; runtime.pullState = 'TO_MOB'
         end
         return
+    end
+
+    -- If another mob attacks while heading out to pull (TO_MOB state), switch to incoming aggro immediately and pull back
+    if runtime.pullState == 'TO_MOB' then
+        local aggroId = firstNPCXtarget(false)
+        if aggroId and aggroId ~= runtime.pullTargetId then
+            stopMoving()
+            if setTarget(aggroId) then
+                print(string.format('\ay[Triune]\ax Puller aggro on path to mob -- switching to XTarget #%d (%s) and pulling back',
+                    aggroId, tostring(mq.TLO.Target.CleanName())))
+                runtime.pullTargetId = aggroId
+                runtime.pullState = 'TO_CAMP'
+            end
+        end
     end
 
     local s = mq.TLO.Spawn(runtime.pullTargetId)
@@ -2425,7 +3138,7 @@ local function playerHasAggro(targetId)
             if totId == myId then return true end
 
             local ahId = 0
-            pcall(function() ahId = s.AggroHolder.ID() or 0 end)
+            pcall(function() ahId = s.AggroHolder.ID() or 0 end) ---@diagnostic disable-line: undefined-field
             if ahId == myId then return true end
         end
     end
@@ -2447,8 +3160,8 @@ end
 --             (at least one spell has connected)
 -- Works for all three combat styles; safe to call with no pets present.
 local function playerIsEngagingTarget(tid)
-    if mq.TLO.Me.Combat()   then return true end  -- melee /attack on
-    if mq.TLO.Me.AutoFire() then return true end  -- ranged autofire on
+    if mq.TLO.Me.Combat() then return true end   -- melee /attack on
+    if mq.TLO.Me.AutoFire() then return true end -- ranged autofire on
     -- Spell style: confirm a hit has landed via HP drop + aggro ownership
     local tpct = pctHP(tid) or 100
     if tpct < 100 and playerHasAggro(tid) then return true end
@@ -2469,7 +3182,7 @@ local function checkAggroSwitch()
             local d = xt.Distance3D() or 999
             local isHittingMe = false
             pcall(function()
-                if xt.TargetOfTarget.ID() == myId or xt.AggroHolder.ID() == myId or (xt.PctAggro() or 0) >= 100 then
+                if xt.TargetOfTarget.ID() == myId or xt.AggroHolder.ID() == myId or (xt.PctAggro() or 0) >= 100 then ---@diagnostic disable-line: undefined-field
                     isHittingMe = true
                 end
             end)
@@ -2495,8 +3208,16 @@ local function checkAggroSwitch()
 end
 
 fullStop = function()
-    if navLoaded() and mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
-    if stickLoaded() then mq.cmd('/stick off') end
+    if navLoaded() then
+        local navActive = false
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+        if navActive then mq.cmd('/nav stop') end
+    end
+    if stickLoaded() then
+        local stickActive = false
+        pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+        if stickActive then mq.cmd('/stick off') end
+    end
     if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
     if mq.TLO.Me.Casting.ID() then mq.cmd('/stopsong') end
@@ -2526,7 +3247,7 @@ onZoned = function()
         print('\ay[Triune]\ax zoned -- clearing Hunter combat anchor (it was set in the previous zone).')
         ctrl.hunter_combat_loc = nil
     end
-    local detected = common.classesFromInventoryWindow(false, true)
+    local detected = classesFromInventoryWindow(false, true)
     if detected then
         myClasses = detected
     end
@@ -2669,56 +3390,43 @@ local function combatTick()
         end
 
         if haveNPC then
-            local curId = mq.TLO.Target.ID()
-            local curDist = distToId(curId)
-            -- Only opportunistically swap to a closer fresh mob when xtar is
-            -- fully clear. checkAggroSwitch() already handles in-fight adds,
-            -- so this path is purely for "current mob is far and there's
-            -- something closer" -- which must not fire mid-fight.
-            if curDist > desiredRange() and curDist > 20 and not anyXtarAlive() then
-                local betterId = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
-                if betterId and betterId ~= curId and distToId(betterId) < curDist - 10 then
-                    if setTarget(betterId) then curId = betterId end
-                end
-            end
+            -- Hunter keeps its target once chosen until it dies, becomes unreachable/ignored,
+            -- or checkAggroSwitch() redirects to an NPC that actually has aggro on us.
+            -- No opportunistic bouncing to other fresh mobs while heading to/fighting the current target.
         else
             local id = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
             if id and setTarget(id) then
                 haveNPC = true
                 pursuit.wanderLoc = nil
+                runtime.lastHunterMsgKey = nil -- reset missing mob log state on finding a target
                 print(string.format('\ay[Triune]\ax Hunter target acquired: #%d (%s) dist %.1f',
                     id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
             elseif not anyXtarAlive() then
-                -- Only wander out to seek fresh mobs when xtar is clear.
-                -- If live xtar NPCs remain but findRoamTarget returned nil
-                -- (e.g. all ignored/unreachable), do nothing this tick --
-                -- they will either die, leave xtar, or be picked up once
-                -- checkAggroSwitch moves them into target range.
-                local arrived = pursuit.wanderLoc and
-                    moveTowardLoc(pursuit.wanderLoc.x, pursuit.wanderLoc.y, pursuit.wanderLoc.z, 15)
-                if not pursuit.wanderLoc or arrived or (os.clock() - (pursuit.wanderSince or 0)) > 20.0 then
-                    local ang = math.random() * 2 * math.pi
-                    if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
-                        -- Anchor-bounded wander: pick a random point inside the combat circle
-                        local maxR = ctrl.hunter_combat_radius
-                        local minR = math.max(10, math.floor(maxR * 0.3))
-                        local r    = minR + math.random(math.floor(maxR * 0.6))
-                        local ax, ay = ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y
-                        pursuit.wanderLoc = {
-                            x = ax + r * math.cos(ang),
-                            y = ay + r * math.sin(ang),
-                            z = ctrl.hunter_combat_loc.z,
-                        }
-                    else
-                        -- Unbounded wander: pick a random point near current position
-                        local dist = 100 + math.random(150)
-                        pursuit.wanderLoc = {
-                            x = (mq.TLO.Me.X() or 0) + dist * math.cos(ang),
-                            y = (mq.TLO.Me.Y() or 0) + dist * math.sin(ang),
-                            z = mq.TLO.Me.Z() or 0,
-                        }
-                    end
-                    pursuit.wanderSince = os.clock()
+                -- No NPCs found and xtar is clean: stop moving/sit and log diagnostic message.
+                -- Clear wander location so player doesn't keep running to a previous random location.
+                if pursuit.wanderLoc then
+                    pursuit.wanderLoc = nil
+                    if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+                    if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
+                end
+
+                local radius = ctrl.hunter_radius or 1500
+                local minLv = ctrl.hunter_min_level or 1
+                local maxLv = ctrl.hunter_max_level or 100
+                local zDiff = ctrl.hunter_z or 75
+                local anchorKey = ''
+                if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+                    anchorKey = string.format('; anchor R%d @ %.0f,%.0f,%.0f',
+                        ctrl.hunter_combat_radius, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y,
+                        ctrl.hunter_combat_loc.z)
+                end
+                local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
+
+                if ctrl.hunter_repeat_msg or runtime.lastHunterMsgKey ~= currentKey then
+                    runtime.lastHunterMsgKey = currentKey
+                    print(string.format(
+                        '\ay[Triune]\ax Hunter: No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',
+                        minLv, maxLv, radius, zDiff, anchorKey))
                 end
             end
         end
@@ -2784,38 +3492,32 @@ local function combatTick()
             pursuit.id, pursuit.navStalls, pursuit.bestDist))
     end
 
-    -- Tank/Garrison are inherently melee/tanking roles regardless of Combat
-    -- Style. These, plus Hunter/Puller when actually set to Melee, flag
-    -- /attack the instant a live target is picked (haveNPC) instead of
-    -- waiting for moveToward to confirm "arrived in range" (engage) -- EQ's
-    -- own auto-attack simply won't connect until truly in weapon range
-    -- anyway, so flagging it early costs nothing, and it removes the need to
-    -- get engage/distance state exactly right before combat can even start,
-    -- which was the root of several race-condition bugs already fixed this
-    -- session (checkStuck vs. moveToward, checkCombatStall vs. moveToward).
-    -- Assist-family modes (Assist/Chase Assist/Backline) are deliberately
-    -- excluded -- they wait for Assist At % on purpose, not by accident.
-    local eagerMelee = (ctrl.mode == 'Tank' or ctrl.mode == 'Garrison')
-        or ((ctrl.mode == 'Hunter' or ctrl.mode == 'Puller') and ctrl.combat_style == 'Melee')
-    if eagerMelee then
-        if haveNPC then
+    -- Auto-attack / Auto-fire handling:
+    -- Engage autoattack/autofire only when target exists, engage=true (within range),
+    -- and target is within desired range / melee range.
+    -- Turn off autoattack/autofire whenever out of range or when no NPCs remain on XTarget list.
+    local xtarActive = anyXtarAlive()
+    if ctrl.combat_style == 'Melee' and ctrl.mode ~= 'Pet Tank' then
+        if haveNPC and engage and distToId(mq.TLO.Target.ID()) <= MELEE_RANGE then
             if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-        elseif mq.TLO.Me.Combat() then
-            mq.cmd('/attack off')
+        elseif not xtarActive or not haveNPC or not engage then
+            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
         end
     elseif ctrl.combat_style == 'Ranged' then
-        if haveNPC and engage then
+        if haveNPC and engage and distToId(mq.TLO.Target.ID()) <= (ctrl.ranged_dist or 40) then
             if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-        elseif mq.TLO.Me.AutoFire() then
-            mq.cmd('/autofire off')
+        elseif not xtarActive or not haveNPC or not engage then
+            if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
         end
-        -- Spell style (and Pet Tank, regardless of style -- pets do the melee,
-        -- that's the entire point of the mode) never auto-attacks at all; the
-        -- Spell Gems loadout is the only source of damage.
-    elseif ctrl.combat_style == 'Spell' or ctrl.mode == 'Pet Tank' then
         if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-    elseif haveNPC and engage and not mq.TLO.Me.Combat() then
-        mq.cmd('/attack on')
+    else
+        -- Spell style or Pet Tank: turn off auto-attack
+        if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    end
+    if not xtarActive then
+        if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
     end
 
     -- Pet classes on this server can have multiple simultaneous pets (one per
@@ -2843,15 +3545,20 @@ local function combatTick()
     -- while still engaged on the same target so a lost first attempt corrects
     -- itself within a few seconds instead of leaving pets idle for the fight.
     --
-    -- Advanced Pet Discipline AA: if the player owns this AA, /pet hold is a
-    -- valid command that makes pets stand completely still. We use it to gate
-    -- pets behind the pet_assist_at HP threshold: issue /pet hold on the first
-    -- tick a new target is engaged (when threshold < 100), then release with
-    -- #petcmd attack all once the HP condition is satisfied. Without the AA,
-    -- /pet hold is silently ignored by the game, so we skip the hold entirely
-    -- and just fire the attack command at threshold as before.
+    -- Advanced Pet Discipline AA / Pet Hold:
+    -- "#petcmd hold all" is a toggle command.
+    -- If pet_hold_enabled is active and the character has pet classes, we issue:
+    --   "#petcmd hold all" while out of combat / waiting for assist threshold to enable hold,
+    --   "#petcmd attack all" once in combat and HP threshold is met.
     local assistThreshold = ctrl.pet_assist_at or 100
-    local useHold = assistThreshold < 100 and hasAdvPetDiscipline()
+    local petHoldEnabled = (ctrl.pet_hold_enabled ~= false) and trioHasPetClass()
+
+    if petHoldEnabled and not (haveNPC and engage) then
+        if not petState.petHoldActive then
+            mq.cmd('/say #petcmd hold all')
+            petState.petHoldActive = true
+        end
+    end
 
     if ctrl.mode == 'Manual Hunter' and haveNPC and engage and trioHasPetClass() then
         setManualHunterPetHold(false)
@@ -2861,15 +3568,14 @@ local function combatTick()
             local tgtHp = pctHP(tid) or 100
             if playerHasAggro(tid) and playerIsEngagingTarget(tid) then
                 if tgtHp <= assistThreshold then
-                    -- Threshold met: release hold (if any) and send attack.
+                    -- Threshold met: send attack.
                     mq.cmd('/say #petcmd attack all')
                     petState.lastCmdTargetId = tid
                     petState.lastCmdAt = os.clock()
                     petState.petHoldActive = false
                     petState.holdIssuedForId = 0
-                elseif useHold and petState.holdIssuedForId ~= tid then
-                    -- New target above threshold and we have the AA: hold pets.
-                    mq.cmd('/pet hold')
+                elseif petHoldEnabled and not petState.petHoldActive then
+                    mq.cmd('/say #petcmd hold all')
                     petState.petHoldActive = true
                     petState.holdIssuedForId = tid
                 end
@@ -2887,30 +3593,21 @@ local function combatTick()
             local engageOk = selfDirected or (playerHasAggro(tid) and playerIsEngagingTarget(tid))
             if tgtHp <= assistThreshold then
                 if engageOk then
-                    -- Threshold met: release hold (if any) and send attack.
+                    -- Threshold met: send attack.
                     mq.cmd('/say #petcmd attack all')
                     petState.lastCmdTargetId = tid
                     petState.lastCmdAt = os.clock()
                     petState.petHoldActive = false
                     petState.holdIssuedForId = 0
                 end
-            elseif useHold and petState.holdIssuedForId ~= tid then
-                -- New target above threshold and we have the AA: hold pets.
-                mq.cmd('/pet hold')
+            elseif petHoldEnabled and not petState.petHoldActive then
+                mq.cmd('/say #petcmd hold all')
                 petState.petHoldActive = true
                 petState.holdIssuedForId = tid
             end
         end
     else
         -- No active NPC target: reset command tracking.
-        -- If we had pets on hold for a threshold that never triggered (e.g. mob
-        -- died before reaching the HP%,  or we disengaged), release them now so
-        -- they don't stay frozen after combat.
-        if petState.petHoldActive and trioHasPetClass() then
-            mq.cmd('/pet back off')
-            petState.petHoldActive = false
-            petState.holdIssuedForId = 0
-        end
         petState.lastCmdTargetId = 0
         if ctrl.mode == 'Manual Hunter' and not mq.TLO.Me.Combat() then
             setManualHunterPetHold(true)
@@ -2940,7 +3637,7 @@ local function combatTick()
                 local bossOk = true
                 if d.boss_only then
                     local s = mq.TLO.Spawn(id)
-                    bossOk = s() and s.Named()
+                    bossOk = not not (s() and s.Named())
                 end
                 if bossOk then
                     eligibleDiscs[#eligibleDiscs + 1] = { name = name, entry = d, id = id }
@@ -3110,7 +3807,7 @@ local function triuneCommand(...)
             print('\ag[Triune]\ax launching cursor manager...')
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
-        common.clearCursor()
+        clearCursor()
     elseif setTriuneMode(cmd) then
         -- mode command handled
     else
@@ -3151,6 +3848,90 @@ print('\ag[Triune]\ax loaded v' ..
     '. Use /ac run | /ac pause | /ac status | /ac spellbook | /ac <mode>. /lua stop triune to exit.')
 
 -- ============================================================================
+-- Map Visualization Helper
+-- ============================================================================
+local updateMapRadiusVisuals
+
+local function clearMapRadiusVisuals()
+    mq.cmd('/maploc remove')
+    mq.cmd('/mapfilter pullradius 0')
+    mq.cmd('/mapfilter castradius 0')
+    runtime.lastMapDraw = { active = false, type = nil, key = '' }
+end
+
+updateMapRadiusVisuals = function()
+    if not ctrl.show_map_radius then
+        if runtime.lastMapDraw and runtime.lastMapDraw.active then
+            clearMapRadiusVisuals()
+        end
+        return
+    end
+
+    local mode = ctrl.mode
+    local drawType = nil
+    local radius = 0
+    local loc = nil
+    local label = ''
+
+    if mode == 'Puller' or mode == 'Pull & Assist' or mode == 'Manual Puller' then
+        radius = ctrl.camp_radius or 100
+        if ctrl.camp_loc then
+            drawType = 'maploc'
+            loc = ctrl.camp_loc
+            label = 'Camp'
+        else
+            drawType = 'pullradius'
+        end
+    elseif mode == 'Hunter' or mode == 'Manual Hunter' then
+        if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+            drawType = 'maploc'
+            radius = ctrl.hunter_combat_radius
+            loc = ctrl.hunter_combat_loc
+            label = 'Anchor'
+        else
+            drawType = 'castradius'
+            radius = ctrl.hunter_radius or 1500
+        end
+    end
+
+    if not drawType or radius <= 0 then
+        if runtime.lastMapDraw and runtime.lastMapDraw.active then
+            clearMapRadiusVisuals()
+        end
+        return
+    end
+
+    local key = string.format('%s|%d|%s|%s', drawType, radius, label,
+        loc and string.format('%.1f,%.1f,%.1f', loc.x or 0, loc.y or 0, loc.z or 0) or 'noloc')
+
+    if runtime.lastMapDraw and runtime.lastMapDraw.active and runtime.lastMapDraw.key == key then
+        return -- State unchanged; do nothing
+    end
+
+    -- Clear all previous map overlays before applying new one
+    clearMapRadiusVisuals()
+
+    if drawType == 'maploc' and loc then
+        mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label %s',
+            loc.y, loc.x, loc.z, radius, label)
+    elseif drawType == 'pullradius' then
+        mq.cmd('/mapfilter pullradius color 0 255 0')
+        mq.cmd('/mapfilter pullradius show')
+        mq.cmdf('/mapfilter pullradius %d', radius)
+    elseif drawType == 'castradius' then
+        mq.cmd('/mapfilter castradius color 255 0 0')
+        mq.cmd('/mapfilter castradius show')
+        mq.cmdf('/mapfilter castradius %d', radius)
+    end
+
+    runtime.lastMapDraw = {
+        active = true,
+        type = drawType,
+        key = key
+    }
+end
+
+-- ============================================================================
 -- Main loop
 -- ============================================================================
 local function runMainLoop()
@@ -3166,11 +3947,13 @@ local function runMainLoop()
         end
         if reDetectRequested then
             reDetectRequested = false
-            myClasses = detectClasses(true) -- safe here -- main loop coroutine can yield/delay
+            local detected = detectClasses(true) -- safe here -- main loop coroutine can yield/delay
+            if detected then myClasses = detected end
         end
         if ctrl.running then
-            common.clearCursor()
+            clearCursor()
         end
+        updateMapRadiusVisuals()
         -- drain one queued spell-mem per pass, out of combat and while not casting
         local memmed = false
         if not mq.TLO.Me.Casting.ID() then
@@ -3201,3 +3984,4 @@ local function runMainLoop()
 end
 
 runMainLoop()
+clearMapRadiusVisuals()
