@@ -131,7 +131,6 @@ local function defaultCtrl()
         hunter_max_level     = 100,
         hunter_combat_radius = 250,   -- max roam distance from anchor when anchor is set
         hunter_combat_loc    = nil,   -- {x,y,z} anchor; nil = no constraint
-        hunter_repeat_msg    = false, -- repeat missing target diagnostic message continuously
         pull_min_level       = 1,
         pull_max_level       = 100,
         nav_fallback_stick   = false,
@@ -1324,7 +1323,7 @@ local function loadoutSig()
     p[#p + 1] = table.concat({ ctrl.mode, tostring(ctrl.combat_style),
         tostring(ctrl.ranged_dist), tostring(ctrl.ma_name), tostring(ctrl.assist_at),
         tostring(ctrl.chase), tostring(ctrl.chase_dist), tostring(ctrl.automem),
-        tostring(ctrl.hunter_radius), tostring(ctrl.hunter_z), tostring(ctrl.hunter_repeat_msg), tostring(ctrl
+        tostring(ctrl.hunter_radius), tostring(ctrl.hunter_z), tostring(ctrl
     .camp_radius), tostring(ctrl.camp_z),
         tostring(ctrl.pet_assist_at), tostring(ctrl.pet_hold_enabled), tostring(ctrl.show_map_radius),
         tostring(ctrl.nav_fallback_stick), tostring(ctrl.debug_mode), tostring(ctrl.buff_mode), tostring(ctrl
@@ -2052,12 +2051,6 @@ function UI.drawControlTab()
         ImGui.SetNextItemWidth(180)
         ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
         if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
-
-        ctrl.hunter_repeat_msg = ImGui.Checkbox('Repeat Missing Mob Msg', ctrl.hunter_repeat_msg or false)
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(
-            'When checked, repeats the "No NPCs found" message continuously on every tick.\nWhen unchecked (default), prints the diagnostic message only once unless search settings change.')
-        end
 
         -- Combat Radius anchor -- keeps Hunter from roaming the whole world
         ImGui.Dummy(0, 2)
@@ -3651,7 +3644,7 @@ local function combatTick()
                 end
                 local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
 
-                if ctrl.hunter_repeat_msg or runtime.lastHunterMsgKey ~= currentKey then
+                if runtime.lastHunterMsgKey ~= currentKey then
                     runtime.lastHunterMsgKey = currentKey
                     print(string.format(
                         '\ay[Triune]\ax Hunter: No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',

@@ -2,6 +2,10 @@
 
 ## 2026-08-06
 
+- Removed "Repeat Missing Mob Msg" checkbox and control setting from Hunter mode in `lua/triune.lua`:
+  - Removed `ctrl.hunter_repeat_msg` setting and its ImGui checkbox from the Hunter tab UI.
+  - Simplified Hunter mode log behavior to log missing target diagnostics once whenever target search parameters or anchor settings change.
+
 - Fixed discipline classification issue in `lua/triune.lua`:
   - Filtered out combat disciplines from `filteredSpells()` so they no longer appear inside the spell selection dropdowns under the **Spell Gems** tab and **Buff Loadout** tab.
   - Added `PURE_MELEE_CLASSES` mapping (`War`, `Mnk`, `Rog`, `Ber`) and `isDisciplineSpell(abbr, spellName)` helper to identify disciplines by checking `DATA.discs`, MQ TLO `Spell.IsSkill()`, and discipline state.
