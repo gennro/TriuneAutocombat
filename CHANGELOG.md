@@ -1,6 +1,91 @@
 # Triune AutoCombat Change Log
 
-## 2026-08-06
+## 2026-08-07
+
+- Added `lua/triune_buffbot.lua` standalone MacroQuest ImGui Lua script:
+  - Saves current spell gems on script startup/start and restores original spell gems on stop or script exit via `mq.atexit()`.
+  - Implemented interactive tell confirmation protocol (`Would you like buffs? Reply 'yes' within 30s`).
+  - Added range checking against requesting player spawns.
+  - Implemented dropdown combo selectors for 12 buff slots populated with scribed spells from character spellbook.
+  - Added automatic completion `/tell` sent to requesters after all configured buff spells finish casting.
+  - Styled interface adhering to the dark Triune design system.
+
+---
+
+  - Added `recordSuccess()` helper to reset fail counts and clear lockouts upon successful spell completion.
+  - Fixes `attempt to call field 'recordSuccess' (a nil value)` error post-cast.
+
+- Fixed `sp.Duration()` type handling in `castGem()` in `lua/triune.lua`:
+  - Wrapped `sp.Duration()` in `tonumber()` to ensure numeric comparison in `dur > 0`.
+  - Fixes `attempt to compare number with string` runtime crash in `castGem()` line 2871.
+
+- Fixed error handling & safety in `lua/triune.lua`:
+  - Added explicit error reporting to `pcall(combatTick)` in `runMainLoop()`, printing red `[Triune error]` messages to chat if any sub-call throws a Lua runtime error.
+  - Wrapped `s.CleanName()` in `resolveTargetId()` with `pcall` protection to prevent uncaught TLO exceptions.
+
+- Fixed `resolveTargetId()` spawn HP & type evaluation in `lua/triune.lua`:
+  - Wrapped `s.PctHPs()` and `s.Type()` evaluation in `pcall` guards within `resolveTargetId()`.
+  - Fixes false `hp=0` / `nil` return on `Spawn(id).PctHPs()` when evaluating live NPC targets during combat.
+
+- Fixed `baseTok()` target token resolution for saved character loadouts in `lua/triune.lua`:
+  - Updated `baseTok()` to map legacy target strings (`'Target'`, `'Self'`) to canonical target names (`'Current Target'`, `'Myself'`).
+  - Resolves `id=nil condOk=nil` spell evaluation failure when processing saved loadouts with un-prefixed target tokens.
+
+- Fixed `countNPCXtarget()` XTarget & Target TLO property resolution in `lua/triune.lua`:
+  - Resolved `xt.Type()` returning `nil` on XTarget slot TLO objects by querying `mq.TLO.Spawn(id).Type()` directly.
+  - Added `pcall` guards and support for `NPC` and hostile `Pet` spawn types for both XTarget list slots and active target fallback.
+  - Resolves `xtOk=false(0>=1)` gate failure when hostiles are on target or XTarget.
+
+- Fixed spell gem targeting and memorization verification in `lua/triune.lua`:
+  - Fixed `defaultsForKind()` returning raw target tokens (`'Target'`, `'Self'`) instead of prefixed tokens expected by `TARGETS` (`'E: Current Target'`, `'F: Myself'`), which caused newly picked spells or default loadouts to fail `resolveTargetId()`.
+  - Fixed `castGem()` verification check for memorized spells: updated `Me.Gem(g.spell)()` check to inspect `Me.Gem(i).Name()` by slot index `i` as well as spell name, preventing false negatives where MacroQuest TLO gem-by-name returned `nil` for valid memmed spells.
+  - Enhanced debug diagnostics in `combatTick()` to print explicit gating and condition status when `Debug Mode` is enabled.
+
+- Fixed `isCombat()` detection helper in `lua/triune.lua`:
+  - Updated `isCombat()` to evaluate `true` when `Me.Combat()`, `Me.CombatState() == 'COMBAT'`, active target is a live NPC, or XTarget has live NPCs.
+  - Fixes spells configured with `when = 'in combat'` not firing in **Hunter**, **Manual Hunter**, and **Pet Tank** modes when fighting mobs before combat state or XTarget is registered by EverQuest.
+
+- Fixed spell casting in **Hunter** and **Manual Hunter** modes in `lua/triune.lua`:
+  - Added explicit `stopMoving()` call when `moveToward()` arrives within desired casting/attack range of the target.
+  - Resolves issue where active `/stick` state remained flag-active (`isMoveActive() == true`), blocking spell casting in `combatTick()`.
+
+- Fixed spell/ability casting issue caused by `min_xtar` combo selection:
+  - Resolved `ImGui.Combo` returning option index `1` (`1`), which previously set `min_xtar` to `1` when selected but evaluated `0` or `nil` on existing unedited entries.
+  - Added target fallback in `countNPCXtarget()`: if XTarget slots are empty or unpopulated, a current active live NPC target counts as `1` target so single-target spells (with `min_xtar = 1`) fire as expected.
+  - Added `tonumber()` guards and bounds validation (`1` to `10`) for `min_xtar` combo rendering and condition evaluation (`numXtar >= (tonumber(g.min_xtar) or 1)`) across Spell Gems, AAs, and Disciplines tabs.
+
+- Fixed zoning event processing bug in `lua/triune.lua`:
+  - Added `mq.doevents()` call to the main loop loop iteration (`runMainLoop()`).
+  - Ensures queued MacroQuest chat events (like `You have entered...`) process immediately while paused, preventing stale zone events from firing and pausing the engine when the user clicks **START** after zoning.
+
+- Added **Min XTarget** (1-10) dropdown filter in `lua/triune.lua`:
+  - Added per-entry `min_xtar` dropdown selector (displaying plain numbers `1` through `10`, width 45px, with tooltip on hover) to **Spell Gems**, **Abilities & AAs**, and **Disciplines** tabs (excluded from **Buff Loadout** tab).
+  - Added `countNPCXtarget()` helper counting active, living, non-ignored, reachable NPCs on the player's XTarget list.
+  - Enforced minimum XTarget check during combat loop execution: spells, AAs, and disciplines with `min_xtar > 1` only fire when the number of hostiles on XTarget meets or exceeds the specified threshold.
+  - Persisted `min_xtar` settings across sessions in character loadout config files.
+
+- Added **Min Mana %** setting to `lua/triune.lua`:
+  - Added `ctrl.min_mana_pct` control setting (default `0%`, range `0%` to `95%`) persisted across sessions.
+  - Added a `Min Mana %` slider under a new `Mana Management` section in the **Settings** tab UI.
+  - Fixed an `invalid option '% =` printf format error in C/C++ `ImGui.SetTooltip` by replacing unescaped `%` percent specifier characters in tooltip strings with plain text.
+  - Enforced minimum mana check in `castGem()`: automatically halts spell gem casting when character mana drops below the configured percentage threshold.
+  - Automatically bypasses the minimum mana restriction when **Burn Mode** (`ctrl.burn`) is active, allowing full burst spending during burn burns.
+
+- Added pre-cast active spell & debuff check to `lua/triune.lua`:
+  - Added target active check in `castGem()` for all spells with a duration (`sp.Duration() > 0`), including DoTs, debuffs, slows, snares, CC, and buffs.
+  - Prevents duplicate spell casting on targets when the effect is already active, conserving mana and preventing recast loops on `always`, `in combat`, and `on Named / burn` conditions.
+  - Instant spells with zero duration (direct damage nukes, instant heals, cures, lifetaps) bypass the check and continue firing on demand.
+  - Cleaned up duplicate function stub for `buffActive()` at lines 609-621 in `lua/triune.lua`.
+
+
+- Added **Burn Mode** feature for burst damage on boss fights in `lua/triune.lua`:
+  - Added `ctrl.burn` state persisted across loadout sessions.
+  - Added a `BURN` toggle button beside `START` / `PAUSE` on the Control tab UI header.
+  - Replaced the old 'x' clear button at the end of each Spell Gem row with the `Burn` checkbox (`Burn##bo`). To clear a gem slot, simply select `-- choose --` or `--` from the class/spell dropdowns.
+  - Added `/ac burn [on|off]` slash command (and `/ac burn` toggle) with chat feedback, `ctrl.burn` state in `/ac status`, and documentation in the Help tab and `README.md`.
+  - Added `Burn Only` (`Burn`) checkboxes to item rows in **Spell Gems**, **Abilities & AAs**, and **Disciplines** tabs (suppressed on **Buff Loadout** tab).
+  - Gated execution of marked spells, AAs, and disciplines: when Burn Mode is OFF (`ctrl.burn == false`), marked abilities are skipped. When ON, they fire according to their normal triggers.
+  - Added auto-disable feature: Burn Mode automatically turns OFF (`ctrl.burn = false`) as soon as all mobs are cleared from the extended target list (`not anyXtarAlive()`).
 
 - Removed "Repeat Missing Mob Msg" checkbox and control setting from Hunter mode in `lua/triune.lua`:
   - Removed `ctrl.hunter_repeat_msg` setting and its ImGui checkbox from the Hunter tab UI.

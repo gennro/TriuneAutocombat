@@ -129,8 +129,8 @@ local function defaultCtrl()
         hunter_z             = 75,
         hunter_min_level     = 1,
         hunter_max_level     = 100,
-        hunter_combat_radius = 250,   -- max roam distance from anchor when anchor is set
-        hunter_combat_loc    = nil,   -- {x,y,z} anchor; nil = no constraint
+        hunter_combat_radius = 250, -- max roam distance from anchor when anchor is set
+        hunter_combat_loc    = nil, -- {x,y,z} anchor; nil = no constraint
         pull_min_level       = 1,
         pull_max_level       = 100,
         nav_fallback_stick   = false,
@@ -151,9 +151,11 @@ local function defaultCtrl()
         medbreak_end_stop    = 90,
         cast_max_retries     = 2,
         cast_lockout_sec     = 30,
+        min_mana_pct         = 0,
         pet_assist_at        = 100,
         pet_hold_enabled     = true,
-        show_map_radius      = true
+        show_map_radius      = true,
+        burn                 = false
     }
 end
 local ctrl = defaultCtrl()
@@ -337,15 +339,15 @@ local function idxOf(tbl, val)
 end
 
 local function defaultsForKind(kind, bene)
-    if kind == 'heal' then return 'Self', 'my HP <=' end
-    if kind == 'buff' then return 'Self', 'missing buff' end
-    if kind == 'pet' then return 'Self', 'missing pet' end
-    if kind == 'util' then return 'Self', 'always' end
-    if kind == 'debuff' then return 'Target', 'target HP <=' end
-    if kind == 'dot' then return 'Target', 'target HP <=' end
-    if kind == 'dd' then return 'Target', 'target HP <=' end
-    if bene == true then return 'Self', 'missing buff' end
-    return 'Target', 'target HP <='
+    if kind == 'heal' then return 'F: Myself', 'my HP <=' end
+    if kind == 'buff' then return 'F: Myself', 'missing buff' end
+    if kind == 'pet' then return 'F: Myself', 'missing pet' end
+    if kind == 'util' then return 'F: Myself', 'always' end
+    if kind == 'debuff' then return 'E: Current Target', 'target HP <=' end
+    if kind == 'dot' then return 'E: Current Target', 'target HP <=' end
+    if kind == 'dd' then return 'E: Current Target', 'target HP <=' end
+    if bene == true then return 'F: Myself', 'missing buff' end
+    return 'E: Current Target', 'target HP <='
 end
 
 local function cleanSpellName(name)
@@ -605,19 +607,7 @@ local function pctHP(id)
     return hp
 end
 
-local function buffActive(targetId, spellName)
-    if not spellName or spellName == '' then return false end
-    local active = false
-    pcall(function()
-        if targetId and targetId > 0 and targetId ~= (mq.TLO.Me.ID() or 0) then
-            active = (mq.TLO.Spawn(targetId).Buff(spellName).ID() or 0) > 0
-        else
-            active = (mq.TLO.Me.Buff(spellName).ID() or 0) > 0
-                or (mq.TLO.Me.Song(spellName).ID() or 0) > 0
-        end
-    end)
-    return active
-end
+
 
 local function sungKey(spellName, targetId)
     return string.format('%d_%s', targetId or 0, spellName or '')
@@ -729,8 +719,15 @@ local function createCastTracker()
         end
     end
 
+    local function recordSuccess(spellName)
+        if not spellName then return end
+        failureCount[spellName] = 0
+        lockouts[spellName] = nil
+    end
+
     return {
         recordFailure = recordFailure,
+        recordSuccess = recordSuccess,
         isLockedOut = isLockedOut,
         onFailureEvent = onFailureEvent,
         clear = function()
@@ -919,7 +916,7 @@ local function mapTLOCategoryToKind(sp, name)
     local nmLower = name and name:lower() or ""
 
     -- Check specific pet subcategories/categories, pet spell names, or pet buff spells (e.g. Burnout, Pet Haste, Pet Power)
-    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility')) 
+    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility'))
         or subcatStr:find('burnout') or nmLower:find('burnout')
         or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant')
         or subcatStr:find('companion') or catStr:find('companion') or subcatStr:find('minion') or catStr:find('minion') then
@@ -940,7 +937,7 @@ local function mapTLOCategoryToKind(sp, name)
 
     -- Check player buffs / damage shields / haste spells (Celerity, Alacrity, Haste, Swift, Shield of Lava, etc.)
     if bene then
-        if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') 
+        if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield')
             or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield')
             or subcatStr:find('haste') or catStr:find('haste')
             or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste') or nmLower:find('swift') then
@@ -967,10 +964,13 @@ local function mapTLOCategoryToKind(sp, name)
 
     -- 2. SPA-based checks (most authoritative for non-beneficial SPA mechanics)
     if checkHasSPA(tloSpell, name, sp, 103) then return 'pet' end
-    if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then return 'util' end
-    if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then return 'util' end
+    if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then return
+        'util' end
+    if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then return
+        'util' end
     if checkHasSPA(tloSpell, name, sp, 81) or checkHasSPA(tloSpell, name, sp, 91) then return 'util' end
-    if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then return 'util' end
+    if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then return
+        'util' end
     if not bene then
         if checkHasSPA(tloSpell, name, sp, 11) or checkHasSPA(tloSpell, name, sp, 46) or checkHasSPA(tloSpell, name, sp, 23)
             or checkHasSPA(tloSpell, name, sp, 4) or checkHasSPA(tloSpell, name, sp, 5) or checkHasSPA(tloSpell, name, sp, 6) or checkHasSPA(tloSpell, name, sp, 7) then
@@ -1288,12 +1288,12 @@ local function loadoutSig()
     for i = 1, NUM_GEMS do
         local g = loadout.gems[i]
         p[#p + 1] = g and (tostring(g.cls) .. '~' .. tostring(g.spell) .. '~' .. tostring(g.target)
-            .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct)) or '-'
+            .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct) .. '~' .. tostring(g.burn_only)) or '-'
     end
     for i = 1, NUM_GEMS do
         local g = loadout.buffGems[i]
         p[#p + 1] = g and (tostring(g.cls) .. '~' .. tostring(g.spell) .. '~' .. tostring(g.target)
-            .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct)) or '-'
+            .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct) .. '~' .. tostring(g.burn_only)) or '-'
     end
     local keys = {}
     for nm in pairs(loadout.aas or {}) do keys[#keys + 1] = tostring(nm) end
@@ -1304,6 +1304,7 @@ local function loadoutSig()
             p[#p + 1] = nm ..
                 '~' ..
                 tostring(a.enabled) .. '~' .. tostring(a.target) .. '~' .. tostring(a.when) .. '~' .. tostring(a.pct)
+                .. '~' .. tostring(a.burn_only)
         end
     end
     local dkeys = {}
@@ -1315,7 +1316,7 @@ local function loadoutSig()
             p[#p + 1] = nm ..
                 '~' ..
                 tostring(d.enabled) .. '~' .. tostring(d.target) .. '~' .. tostring(d.when) .. '~' .. tostring(d.pct)
-                .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.priority)
+                .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.burn_only) .. '~' .. tostring(d.priority)
         end
     end
     local c = ctrl.camp_loc
@@ -1324,16 +1325,17 @@ local function loadoutSig()
         tostring(ctrl.ranged_dist), tostring(ctrl.ma_name), tostring(ctrl.assist_at),
         tostring(ctrl.chase), tostring(ctrl.chase_dist), tostring(ctrl.automem),
         tostring(ctrl.hunter_radius), tostring(ctrl.hunter_z), tostring(ctrl
-    .camp_radius), tostring(ctrl.camp_z),
+        .camp_radius), tostring(ctrl.camp_z),
         tostring(ctrl.pet_assist_at), tostring(ctrl.pet_hold_enabled), tostring(ctrl.show_map_radius),
-        tostring(ctrl.nav_fallback_stick), tostring(ctrl.debug_mode), tostring(ctrl.buff_mode), tostring(ctrl
-        .scribed_only),
+        tostring(ctrl.nav_fallback_stick), tostring(ctrl.debug_mode), tostring(ctrl.buff_mode), tostring(ctrl.burn),
+        tostring(ctrl
+            .scribed_only),
         tostring(ctrl.aa_purchased_only), tostring(ctrl.disc_trained_only),
         tostring(ctrl.medbreak_enabled),
         tostring(ctrl.medbreak_hp_on), tostring(ctrl.medbreak_hp_start), tostring(ctrl.medbreak_hp_stop),
         tostring(ctrl.medbreak_mana_on), tostring(ctrl.medbreak_mana_start), tostring(ctrl.medbreak_mana_stop),
         tostring(ctrl.medbreak_end_on), tostring(ctrl.medbreak_end_start), tostring(ctrl.medbreak_end_stop),
-        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec),
+        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec), tostring(ctrl.min_mana_pct),
         c and string.format('%.1f,%.1f,%.1f', c.x, c.y, c.z) or 'nocamp',
         a and string.format('%.1f,%.1f,%.1f,r%d', a.x, a.y, a.z, ctrl.hunter_combat_radius or 0) or 'noanchor' }, '~')
     return table.concat(p, '|')
@@ -1420,7 +1422,7 @@ local function pushVar(id, a, b)
     if id == nil then return end
     local ok
     local ImGuiSVType = (mq.imgui and mq.imgui.StyleVar) or _G
-    .ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+        .ImGuiStyleVar ---@diagnostic disable-line: undefined-field
     local enumVal = ImGuiSVType and ImGuiSVType(id) or id
     if b ~= nil then
         local ImVec2Type = _G.ImVec2 or ImVec2
@@ -1439,7 +1441,7 @@ local function pushTheme()
     _colN, _varN = 0, 0
     local ImGuiCol = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol or ImGuiCol ---@diagnostic disable-line: undefined-field
     local ImGuiStyleVar = (mq.imgui and mq.imgui.StyleVar) or _G.ImGuiStyleVar or
-    ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+        ImGuiStyleVar ---@diagnostic disable-line: undefined-field
     if ImGuiCol then
         pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
         pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
@@ -1659,6 +1661,7 @@ function UI.drawHelpTab()
             local commands = {
                 { cmd = '/ac run',              desc = 'Start / unpause auto-combat execution' },
                 { cmd = '/ac pause / /ac stop', desc = 'Pause auto-combat execution & halt movement' },
+                { cmd = '/ac burn [on|off]',    desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
                 { cmd = '/ac status',           desc = 'Print current running state and combat mode to chat' },
                 { cmd = '/ac spellbook',        desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
                 { cmd = '/ac cursorui',         desc = 'Toggle the standalone cursor item manager window' },
@@ -1709,7 +1712,8 @@ end
 -- editing the INACTIVE set (planning ahead) never clobbers whatever's actually
 -- memmed right now; only editing the currently-active set mems immediately.
 -- UI: spell/gem list editor
-function UI.drawGemList(gemsTable, idPrefix, isActiveSet)
+function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
+    if allowBurn == nil then allowBurn = true end
     if ImGui.BeginChild('gemlist_' .. idPrefix, ImVec2(0, 0), nil, 0) then
         for i = 1, NUM_GEMS do
             ImGui.PushID(idPrefix .. i)
@@ -1772,8 +1776,26 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet)
                     ImGui.SameLine(); ImGui.SetNextItemWidth(80)
                     g.pct = ImGui.SliderInt('##p', g.pct or 0, 0, 100, '%d%%')
                 end
-                ImGui.SameLine()
-                if ImGui.Button('x') then gemsTable[i] = nil end
+
+                if allowBurn then
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                    local curXt = tonumber(g.min_xtar) or 1
+                    if curXt < 1 then curXt = 1 end
+                    if curXt > 10 then curXt = 10 end
+                    local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                    local newXti = ImGui.Combo('##mxt', curXt, xtOpts)
+                    g.min_xtar = newXti
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this spell to fire.')
+                    end
+
+                    ImGui.SameLine()
+                    local boVal = ImGui.Checkbox('Burn##bo', g.burn_only or false)
+                    g.burn_only = boVal
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Only cast this spell when Burn Mode is ON.')
+                    end
+                end
             end
             ImGui.PopID()
         end
@@ -1847,7 +1869,7 @@ end
 function UI.drawGemTab()
     if not ImGui.BeginTabItem('Spell Gems') then return end
     UI.drawGemTabHeader(loadout.gems, false)
-    UI.drawGemList(loadout.gems, 'gem', not ctrl.buff_mode)
+    UI.drawGemList(loadout.gems, 'gem', not ctrl.buff_mode, true)
     ImGui.EndTabItem()
 end
 
@@ -1856,7 +1878,7 @@ function UI.drawBuffTab()
     accent(MUTED,
         'A second gem set for pet summons / buffs that don\'t fit alongside your combat spells -- e.g. Nec/Mag pet summons, Bst buffs. Build it here, hit Mem All to Bar to swap it onto your bar, buff up, then switch back on the Spell Gems tab.')
     UI.drawGemTabHeader(loadout.buffGems, true)
-    UI.drawGemList(loadout.buffGems, 'bgem', ctrl.buff_mode)
+    UI.drawGemList(loadout.buffGems, 'bgem', ctrl.buff_mode, false)
     ImGui.EndTabItem()
 end
 
@@ -1888,7 +1910,7 @@ function UI.drawAATab()
                                 any = true
                                 ImGui.PushID('aa_' .. tier .. '_' .. cls .. '_' .. nm)
                                 local entry = loadout.aas[nm] or
-                                    { cls = cls, target = 'F: Myself', when = 'in combat', enabled = false, pct = 30 }
+                                    { cls = cls, target = 'F: Myself', when = 'in combat', enabled = false, pct = 30, burn_only = false }
                                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
                                 ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
                                 ImGui.SameLine(); ImGui.Text(nm)
@@ -1902,6 +1924,22 @@ function UI.drawAATab()
                                     entry.when = WHENS[wi]
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(80)
                                     entry.pct = ImGui.SliderInt('##aap', entry.pct or 30, 0, 100, '%d%%')
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                                    local curXt = tonumber(entry.min_xtar) or 1
+                                    if curXt < 1 then curXt = 1 end
+                                    if curXt > 10 then curXt = 10 end
+                                    local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                                    local xti = ImGui.Combo('##aamxt', curXt, xtOpts)
+                                    entry.min_xtar = xti
+                                    if ImGui.IsItemHovered() then
+                                        ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this AA to fire.')
+                                    end
+                                    ImGui.SameLine()
+                                    local aaboVal = ImGui.Checkbox('Burn##bo', entry.burn_only or false)
+                                    entry.burn_only = aaboVal
+                                    if ImGui.IsItemHovered() then
+                                        ImGui.SetTooltip('Only fire this AA when Burn Mode is ON.')
+                                    end
                                 end
                                 loadout.aas[nm] = entry
                                 ImGui.PopID()
@@ -1942,7 +1980,7 @@ function UI.drawDiscTab()
                     anyDisc = true
                     ImGui.PushID('disc' .. cls .. nm)
                     local entry = loadout.discs[nm] or
-                        { cls = cls, target = 'F: Myself', when = 'HP <=', enabled = false, pct = 30, boss_only = false, priority = 50 }
+                        { cls = cls, target = 'F: Myself', when = 'HP <=', enabled = false, pct = 30, boss_only = false, burn_only = false, priority = 50 }
                     entry.enabled = ImGui.Checkbox('##en', entry.enabled)
                     ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
                     ImGui.SameLine(); ImGui.Text(nm)
@@ -1955,14 +1993,35 @@ function UI.drawDiscTab()
                         local wi = ImGui.Combo('##dw', idxOf(WHENS, entry.when), WHENS)
                         entry.when = WHENS[wi]
                         ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                        entry.pct = ImGui.SliderInt('##dp', entry.pct or 30, 0, 100, '%d%%')
-                        ImGui.SameLine(); entry.boss_only = ImGui.Checkbox('Boss Only##bo', entry.boss_only)
+                        local dpVal = ImGui.SliderInt('##dp', entry.pct or 30, 0, 100, '%d%%')
+                        entry.pct = dpVal
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                        local curXt = tonumber(entry.min_xtar) or 1
+                        if curXt < 1 then curXt = 1 end
+                        if curXt > 10 then curXt = 10 end
+                        local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                        local xti = ImGui.Combo('##dmxt', curXt, xtOpts)
+                        entry.min_xtar = xti
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this discipline to fire.')
+                        end
+                        ImGui.SameLine()
+                        local dboVal = ImGui.Checkbox('Boss Only##bo', entry.boss_only)
+                        entry.boss_only = dboVal
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip(
                                 'Only fires if the resolved target is a Named mob.')
                         end
+                        ImGui.SameLine()
+                        local dbrnVal = ImGui.Checkbox('Burn##brn', entry.burn_only or false)
+                        entry.burn_only = dbrnVal
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip(
+                                'Only fires when Burn Mode is ON.')
+                        end
                         ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                        entry.priority = ImGui.SliderInt('##pri', entry.priority or 50, 1, 99, 'Pri %d')
+                        local priVal = ImGui.SliderInt('##pri', entry.priority or 50, 1, 99, 'Pri %d')
+                        entry.priority = priVal
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip(
                                 'Lower = tried first when more than one eligible\ndisc is ready at the same time.')
@@ -2007,14 +2066,30 @@ function UI.drawControlTab()
     end
     ImGui.SameLine(); ImGui.Dummy(20, 0); ImGui.SameLine()
     if ctrl.running then
-        if ImGui.Button('PAUSE', 220, 30) then
+        if ImGui.Button('PAUSE', 150, 30) then
             if ctrl.mode == 'Manual Hunter' then
                 setManualHunterPetHold(true)
             end
             ctrl.running = false
         end
     else
-        if ImGui.Button('START', 220, 30) then ctrl.running = true end
+        if ImGui.Button('START', 150, 30) then ctrl.running = true end
+    end
+    ImGui.SameLine(); ImGui.Dummy(10, 0); ImGui.SameLine()
+    if ctrl.burn then
+        if ImGui.Button('BURN (ON)##btnBurn', 150, 30) then
+            ctrl.burn = false
+            print('\ag[Triune]\ax Burn mode DISABLED.')
+        end
+    else
+        if ImGui.Button('BURN (OFF)##btnBurn', 150, 30) then
+            ctrl.burn = true
+            print('\ag[Triune]\ax Burn mode ENABLED!')
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+        'Enable/disable Burn Mode. When enabled, spells, AAs, and disciplines marked "Burn Only" will fire.\nTurns off automatically when extended target list clears.')
     end
 
     ImGui.Dummy(0, 6)
@@ -2088,7 +2163,8 @@ function UI.drawControlTab()
 
         -- Radius slider (editable whether an anchor is set or not)
         ImGui.SetNextItemWidth(220)
-        local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl.hunter_combat_radius or 250
+        local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl.hunter_combat_radius or
+        250
         local newRadius, changed = ImGui.SliderInt('Combat Radius##hunter', curRadius, 1, 2000)
         if changed then
             ctrl.hunter_combat_radius = newRadius
@@ -2108,7 +2184,8 @@ function UI.drawControlTab()
         ctrl.ma_name = ImGui.InputText('MA Name', ctrl.ma_name or '')
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Character to assist. Leave blank to assist group leader.') end
         ImGui.SetNextItemWidth(160)
-        ctrl.assist_at = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%')
+        local assistVal = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%')
+        ctrl.assist_at = assistVal
 
         ctrl.chase = ImGui.Checkbox('Chase MA', ctrl.chase)
         if ctrl.chase then
@@ -2215,16 +2292,29 @@ function UI.drawSettingsTab()
     ImGui.Dummy(0, 4)
     accent(GOLD, 'Spell Failures & Lockout')
     ImGui.SetNextItemWidth(140)
-    ctrl.cast_max_retries = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10)
+    local retriesVal = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10)
+    ctrl.cast_max_retries = retriesVal
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Consecutive failed cast attempts allowed before temporarily locking out a spell.\nDefault: 2 tries.')
     end
     ImGui.SameLine()
     ImGui.SetNextItemWidth(140)
-    ctrl.cast_lockout_sec = ImGui.SliderInt('Lockout Time (s)##cls', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
+    local lockoutVal = ImGui.SliderInt('Lockout Time (s)##cls', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
+    ctrl.cast_lockout_sec = lockoutVal
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('How many seconds to wait before trying a locked-out spell again.\nDefault: 30 seconds.')
+    end
+
+    ImGui.Dummy(0, 4)
+    accent(GOLD, 'Mana Management')
+    ImGui.SetNextItemWidth(180)
+    local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%')
+    ctrl.min_mana_pct = minManaVal
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'Prevents automatic spell casting if current mana drops below this percentage.\n'
+            .. 'Ignored during Burn Mode (0 = disabled / cast at any mana level).')
     end
 
     ImGui.Dummy(0, 4)
@@ -2232,19 +2322,19 @@ function UI.drawSettingsTab()
     if trioHasPetClass() then
         accent(ARC, 'Pet Settings')
         ImGui.SetNextItemWidth(180)
-        ctrl.pet_assist_at = ImGui.SliderInt('Pet Assist At %##pa',
-            ctrl.pet_assist_at or 100, 1, 100, '%d%%')
+        local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
+        ctrl.pet_assist_at = petAssistVal
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
                 'Send pets to attack once the target drops to or below\n'
-                .. 'this HP% AND the player has started hitting the mob.\n'
-                .. '100% = send as soon as the first hit connects (default).')
+                .. 'this HP threshold AND the player has started hitting the mob.\n'
+                .. '100 percent = send as soon as the first hit connects (default).')
         end
         ctrl.pet_hold_enabled = ImGui.Checkbox('Enable Pet Hold', ctrl.pet_hold_enabled ~= false)
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
                 'Hold pets via "#petcmd hold all" whenever out of combat\n'
-                .. 'or prior to reaching the Pet Assist At HP% threshold,\n'
+                .. 'or prior to reaching the Pet Assist At HP threshold,\n'
                 .. 'releasing them to attack once threshold is met.')
         end
     end
@@ -2255,27 +2345,33 @@ function UI.drawSettingsTab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Stops everything and sits to recover once any enabled\n'
-            .. 'resource below drops to its "at" %%; resumes once ALL enabled\n'
-            .. 'resources have recovered up to their "until" %%.')
+            .. 'resource below drops to its "at" threshold; resumes once ALL enabled\n'
+            .. 'resources have recovered up to their "until" threshold.')
     end
     if ctrl.medbreak_enabled then
         ctrl.medbreak_hp_on = ImGui.Checkbox('HP##mbhp', ctrl.medbreak_hp_on)
         ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_hp_start = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%')
+        local mbHpStart = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%')
+        ctrl.medbreak_hp_start = mbHpStart
         ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_hp_stop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%')
+        local mbHpStop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%')
+        ctrl.medbreak_hp_stop = mbHpStop
 
         ctrl.medbreak_mana_on = ImGui.Checkbox('Mana##mbmana', ctrl.medbreak_mana_on)
         ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_mana_start = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%')
+        local mbManaStart = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%')
+        ctrl.medbreak_mana_start = mbManaStart
         ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_mana_stop = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%')
+        local mbManaStop        = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%')
+        ctrl.medbreak_mana_stop = mbManaStop
 
         ctrl.medbreak_end_on    = ImGui.Checkbox('Endurance##mbend', ctrl.medbreak_end_on)
         ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_end_start = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%')
+        local mbEndStart = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%')
+        ctrl.medbreak_end_start = mbEndStart
         ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        ctrl.medbreak_end_stop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%')
+        local mbEndStop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%')
+        ctrl.medbreak_end_stop = mbEndStop
     end
 
     ImGui.EndTabItem()
@@ -2316,7 +2412,13 @@ end
 -- puller kiting, hunter roaming, and real bard twisting.
 -- ============================================================================
 -- Combat engine: target and condition helpers
-local function baseTok(token) return (tostring(token or '')):gsub('^[FE]: ', '') end
+local function baseTok(token)
+    local s = tostring(token or '')
+    s = s:gsub('^[FE]:%s*', '')
+    if s == 'Target' or s == 'Current Target' then return 'Current Target' end
+    if s == 'Self' or s == 'Myself' then return 'Myself' end
+    return s
+end
 
 
 local function setTarget(id)
@@ -2335,12 +2437,13 @@ end
 
 
 isCombat = function()
+    if mq.TLO.Me.Combat() then return true end
     if mq.TLO.Me.CombatState() == 'COMBAT' then return true end
-    if ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline' or ctrl.mode == 'Tank' then
-        for i = 1, 13 do
-            local xt = mq.TLO.Me.XTarget(i)
-            if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then return true end
-        end
+    local t = mq.TLO.Target
+    if t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead() then return true end
+    for i = 1, 13 do
+        local xt = mq.TLO.Me.XTarget(i)
+        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then return true end
     end
     return false
 end
@@ -2474,21 +2577,50 @@ local function firstNPCXtarget(unmezzedOnly)
     return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable)
 end
 
+-- Returns count of live (PctHPs > 0), non-ignored, reachable NPCs occupying XTarget slots.
+local function countNPCXtarget()
+    local cnt = 0
+    pcall(function()
+        local count = mq.TLO.Me.XTarget() or 0
+        for i = 1, count do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt() then
+                local id = xt.ID() or 0
+                if id > 0 and isSpawnAlive(id) then
+                    local s = mq.TLO.Spawn(id)
+                    local stype = (s() and s.Type()) or ''
+                    if (stype == 'NPC' or stype == 'Pet')
+                        and (s.PctHPs() or 0) > 0 and not s.Dead()
+                        and not isIgnored(s.CleanName())
+                        and not isUnreachable(id) then
+                        cnt = cnt + 1
+                    end
+                end
+            end
+        end
+    end)
+    -- Fallback: if XTarget list is unpopulated or empty, but we have a valid live NPC target, count as at least 1
+    if cnt == 0 then
+        pcall(function()
+            local t = mq.TLO.Target
+            if t() and (t.ID() or 0) > 0 then
+                local stype = t.Type() or ''
+                if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
+                    and not isIgnored(t.CleanName()) and not isUnreachable(t.ID()) then
+                    cnt = 1
+                end
+            end
+        end)
+    end
+    return cnt
+end
+
 -- Returns true if any live (PctHPs > 0), non-ignored, reachable NPC occupies
 -- an XTarget slot. Used by Hunter mode to decide whether it is safe to roam
 -- for a fresh mob: if the XTarget list still has live hostiles from the
 -- current or recent fight, Hunter must finish those before wandering away.
 local function anyXtarAlive()
-    for i = 1, 13 do
-        local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC'
-            and (xt.PctHPs() or 0) > 0 and not xt.Dead()
-            and not isIgnored(xt.CleanName())
-            and not isUnreachable(xt.ID()) then
-            return true
-        end
-    end
-    return false
+    return countNPCXtarget() > 0
 end
 
 local function isXTargetId(id)
@@ -2586,9 +2718,16 @@ local function resolveTargetId(token, cls)
     end
     if not id or id <= 0 then return nil end
     local s = mq.TLO.Spawn(id)
-    if not s() or s.Dead() or s.Type() == 'Corpse' or (s.Type() == 'NPC' and (s.PctHPs() or 0) <= 0) then return nil end
-    if isIgnored(s.CleanName()) then return nil end
-    if s.Type() == 'NPC' and (ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline')
+    if not s() or s.Dead() or s.Type() == 'Corpse' then return nil end
+    local hp = 100
+    pcall(function() hp = s.PctHPs() or 100 end)
+    local stype = ''
+    pcall(function() stype = s.Type() or '' end)
+    if (stype == 'NPC' or stype == 'Pet') and hp <= 0 then return nil end
+    local cname = ''
+    pcall(function() cname = s.CleanName() or '' end)
+    if cname ~= '' and isIgnored(cname) then return nil end
+    if (stype == 'NPC' or stype == 'Pet') and (ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline')
         and not targetIsEngaged(id) then
         return nil
     end
@@ -2719,9 +2858,27 @@ local function castGem(i, g, id)
     if (os.clock() - (runtime.lastCast[key] or 0)) < 1.2 then return false end
     local sp = mq.TLO.Spell(g.spell)
     if not sp() then return false end
-    if not mq.TLO.Me.Gem(g.spell)() then return false end -- not memmed
+    local isMemmed = false
+    pcall(function()
+        local gemName = mq.TLO.Me.Gem(i).Name()
+        if gemName == g.spell then
+            isMemmed = true
+        else
+            isMemmed = (mq.TLO.Me.Gem(g.spell)() ~= nil)
+        end
+    end)
+    if not isMemmed then return false end -- not memmed
     if (mq.TLO.Me.CurrentMana() or 0) < (sp.Mana() or 0) then return false end
+    if not ctrl.burn and (ctrl.min_mana_pct or 0) > 0 and (mq.TLO.Me.PctMana() or 100) < (ctrl.min_mana_pct or 0) then return false end
     if not mq.TLO.Me.SpellReady(g.spell)() then return false end
+
+    local dur = 0
+    pcall(function() dur = tonumber(sp.Duration()) or 0 end)
+    dur = tonumber(dur) or 0
+    if dur > 0 and buffActive(id, g.spell) then
+        return false
+    end
+
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     if not selfCast and not setTarget(id) then return false end
@@ -3297,7 +3454,8 @@ local function pullerTick()
         if aggroId and aggroId ~= runtime.pullTargetId then
             stopMoving()
             if setTarget(aggroId) then
-                print(string.format('\ay[Triune]\ax Puller aggro on path to mob -- switching to XTarget #%d (%s) and pulling back',
+                print(string.format(
+                    '\ay[Triune]\ax Puller aggro on path to mob -- switching to XTarget #%d (%s) and pulling back',
                     aggroId, tostring(mq.TLO.Target.CleanName())))
                 runtime.pullTargetId = aggroId
                 runtime.pullState = 'TO_CAMP'
@@ -3836,10 +3994,18 @@ local function combatTick()
         end
     end
 
+    -- Auto-turn off Burn Mode when extended target list becomes clear
+    if ctrl.burn and not xtarActive then
+        ctrl.burn = false
+        print('\ag[Triune]\ax Burn mode auto-disabled (XTarget clear).')
+    end
+
+    local numXtar = countNPCXtarget()
+
     -- activated AAs are instant and off the spell timer: fire every eligible one,
     -- and don't let them block (or be blocked by) the spell cast below
     for name, a in pairs(loadout.aas) do
-        if a.enabled then
+        if a.enabled and (not a.burn_only or ctrl.burn) and (numXtar >= (tonumber(a.min_xtar) or 1)) then
             local id = resolveTargetId(a.target, a.cls)
             if id and conditionMet(a.when, a.pct, name, id, a.cls) then fireAA(name, a, id) end
         end
@@ -3853,7 +4019,7 @@ local function combatTick()
     -- 1..12 in order, break on success).
     local eligibleDiscs = {}
     for name, d in pairs(loadout.discs) do
-        if d.enabled then
+        if d.enabled and (not d.burn_only or ctrl.burn) and (numXtar >= (tonumber(d.min_xtar) or 1)) then
             local id = resolveTargetId(d.target, d.cls)
             if id and conditionMet(d.when, d.pct, name, id, d.cls) then
                 local bossOk = true
@@ -3901,44 +4067,36 @@ local function combatTick()
         local activeGems = ctrl.buff_mode and loadout.buffGems or loadout.gems
         for i = 1, NUM_GEMS do
             local g = activeGems[i]
-            if g and g.spell and g.spell ~= '' and not castTracker.isLockedOut(g.spell) then
-                local id = resolveTargetId(g.target, g.cls)
-                local condOk = id and conditionMet(g.when, g.pct, g.spell, id, g.cls)
-                if condOk and castGem(i, g, id) then
-                    -- Durable "already applied this life" mark for beneficial
-                    -- "missing buff" casts. Self-buff DETECTION is entirely
-                    -- broken on this build -- confirmed live for a buff that
-                    -- IS up: MyBuffCount=0, BuffCount=0, Buff("name")=nil,
-                    -- index enumeration empty -- so "missing buff" reads true
-                    -- forever and respams every cast (reported live: Pious
-                    -- Might / Vampiric Embrace / Frenzied Strength etc. cast
-                    -- endlessly, never settling). The bard code already solved
-                    -- this exact problem the same way (see sungBuffs): self
-                    -- buffs are PERMANENT on this server, so once cast,
-                    -- remember it and don't recheck until zone/death (sungBuffs
-                    -- is cleared by both). conditionMet's "missing buff" branch
-                    -- already consults sungBuffs first, so marking here closes
-                    -- the loop. ONLY for beneficial spells -- a detrimental DoT
-                    -- on "missing buff" legitimately needs reapplying when it
-                    -- wears off, and uses target-side detection, a separate
-                    -- concern; and "missing pet" has working spawn detection
-                    -- (isSpawnAlive) so it must NOT be marked either.
-                    if g.when == 'missing buff' then
-                        local bene = false
-                        pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
-                        if bene then runtime.sungBuffs[sungKey(g.spell, id)] = true end
+            if g and g.spell and g.spell ~= '' then
+                local minXt = tonumber(g.min_xtar) or 1
+                local xtOk = ctrl.buff_mode or (numXtar >= minXt)
+                local burnOk = (not g.burn_only or ctrl.burn)
+                local lockedOut = castTracker.isLockedOut(g.spell)
+                if burnOk and xtOk and not lockedOut then
+                    local id = resolveTargetId(g.target, g.cls)
+                    local condOk = id and conditionMet(g.when, g.pct, g.spell, id, g.cls)
+                    if condOk and castGem(i, g, id) then
+                        if g.when == 'missing buff' then
+                            local bene = false
+                            pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
+                            if bene then runtime.sungBuffs[sungKey(g.spell, id)] = true end
+                        end
+                        break
+                    elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
+                        runtime.lastGemDiagAt = os.clock()
+                        local tid = mq.TLO.Target.ID() or 0
+                        local ts = mq.TLO.Spawn(tid)
+                        local ttype = (ts() and ts.Type()) or 'nil'
+                        local thp = (ts() and ts.PctHPs()) or -1
+                        print(string.format(
+                            '\ao[Triune debug]\ax gem %d "%s" skipped -- tgtTok="%s"(base="%s") id=%s (rawTgt=%d type=%s hp=%d) condOk=%s xtOk=%s(%d>=%d)',
+                            i, g.spell, tostring(g.target), tostring(baseTok(g.target)), tostring(id), tid, ttype, thp, tostring(condOk), tostring(xtOk), numXtar, minXt))
                     end
-                    break
-                elseif ctrl.debug_mode and id and condOk and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
+                elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
                     runtime.lastGemDiagAt = os.clock()
-                    local sp = mq.TLO.Spell(g.spell)
-                    local memmed, ready = false, false
-                    pcall(function() memmed = mq.TLO.Me.Gem(g.spell)() ~= nil end)
-                    pcall(function() ready = mq.TLO.Me.SpellReady(g.spell)() end)
                     print(string.format(
-                        '\ao[Triune debug]\ax gem %d "%s" not cast -- target=%s condMet=%s memmed=%s ready=%s mana=%s/%s',
-                        i, g.spell, tostring(id), tostring(condOk), tostring(memmed), tostring(ready),
-                        tostring(mq.TLO.Me.CurrentMana()), tostring(sp() and sp.Mana() or '?')))
+                        '\ao[Triune debug]\ax gem %d "%s" gate failed -- xtOk=%s(%d>=%d) burnOk=%s lockedOut=%s',
+                        i, g.spell, tostring(xtOk), numXtar, minXt, tostring(burnOk), tostring(lockedOut)))
                 end
             end
         end
@@ -4009,7 +4167,20 @@ local function triuneCommand(...)
             print('\ag[Triune]\ax paused.')
         end
     elseif cmd == 'status' then
-        print(string.format('\ag[Triune]\ax status: %s, mode: %s', ctrl.running and 'running' or 'paused', ctrl.mode))
+        print(string.format('\ag[Triune]\ax status: %s, mode: %s, burn: %s', ctrl.running and 'running' or 'paused',
+            ctrl.mode, ctrl.burn and 'ON' or 'OFF'))
+    elseif cmd == 'burn' or cmd == 'burnon' or cmd == 'burnoff' or cmd == 'burn1' or cmd == 'burn0' or cmd == 'burntoggle' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or cmd == 'burnon' or cmd == 'burn1' then
+            ctrl.burn = true
+            print('\ag[Triune]\ax Burn mode ENABLED!')
+        elseif sub == 'off' or sub == '0' or cmd == 'burnoff' or cmd == 'burn0' then
+            ctrl.burn = false
+            print('\ag[Triune]\ax Burn mode DISABLED.')
+        else
+            ctrl.burn = not ctrl.burn
+            print(string.format('\ag[Triune]\ax Burn mode %s.', ctrl.burn and 'ENABLED!' or 'DISABLED.'))
+        end
     elseif cmd == 'spellbook' or cmd == 'book' then
         local s = mq.TLO.Lua.Script('triune_spellbook')
         if s() and s.Status() == 'RUNNING' then
@@ -4033,7 +4204,7 @@ local function triuneCommand(...)
     elseif setTriuneMode(cmd) then
         -- mode command handled
     else
-        print('\ay[Triune]\ax usage: /ac [run|pause|status|spellbook|clearcursor|<mode>]')
+        print('\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|status|spellbook|clearcursor|<mode>]')
     end
 end
 
@@ -4158,6 +4329,7 @@ end
 -- ============================================================================
 local function runMainLoop()
     while open do
+        mq.doevents()
         local nm = mq.TLO.Me.CleanName()
         if nm and nm ~= '' and nm ~= myName then
             myName = nm
@@ -4186,9 +4358,11 @@ local function runMainLoop()
                 break
             end
         end
-        -- combat engine: act on the loadout when running (slice 1: casting + AAs)
         if ctrl.running and not memmed and (os.clock() - runtime.lastTick) > 0.4 then
-            pcall(combatTick)
+            local ok, err = pcall(combatTick)
+            if not ok and err then
+                print('\ar[Triune error]\ax combatTick failed: ' .. tostring(err))
+            end
             runtime.lastTick = os.clock()
         end
 
