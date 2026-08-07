@@ -1678,6 +1678,10 @@ function UI.drawHelpTab()
                 { cmd = '/ac spellbook',        desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
                 { cmd = '/ac cursorui',         desc = 'Toggle the standalone cursor item manager window' },
                 { cmd = '/ac clearcursor',      desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
+                { cmd = '/ac dps / /dps',       desc = 'Toggle or launch the standalone DPS Parser window' },
+                { cmd = '/dps compact',         desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
+                { cmd = '/dps report [chan]',   desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
+                { cmd = '/dps reset',           desc = 'Reset active combat damage counters' },
                 { cmd = '/ac <mode>',           desc = 'Switch combat mode (e.g. /ac assist, /ac hunter, /ac tank)' },
                 { cmd = '/triunerun',           desc = 'Quick keybind command to toggle run / pause' },
             }
