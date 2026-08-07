@@ -12,6 +12,7 @@
 -- - Interactive two-stage tell confirmation ("Would you like buffs? Reply 'yes'").
 -- - Casts selected buff spells and sends a completion /tell when finished.
 -- - Dropdown combo boxes for selecting buff spells per slot from scribed spellbook.
+-- - Automatic configuration persistence per character (triune_buffbot_config.lua).
 -- - Theme styling adhering to Triune dark design system.
 -- ============================================================================
 
@@ -150,6 +151,87 @@ local function logMsg(msg, isWarn, isErr)
     local prefix = os.date("[%H:%M:%S] ")
     table.insert(runtime.log, 1, { time = prefix, msg = msg, isWarn = isWarn, isErr = isErr })
     if #runtime.log > 100 then table.remove(runtime.log) end
+end
+
+-- ============================================================================
+-- Persistence (Save / Load Config per Character)
+-- ============================================================================
+local function serializeValue(val)
+    if type(val) == 'string' then
+        return string.format("%q", val)
+    elseif type(val) == 'number' or type(val) == 'boolean' then
+        return tostring(val)
+    elseif type(val) == 'table' then
+        local parts = {}
+        for k, v in pairs(val) do
+            local keyStr = (type(k) == 'number') and string.format("[%d]", k) or string.format("[%q]", tostring(k))
+            local valStr = serializeValue(v)
+            if valStr then
+                table.insert(parts, keyStr .. " = " .. valStr)
+            end
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    return "nil"
+end
+
+local function saveConfig(silent)
+    local myName, myServer = nil, nil
+    pcall(function()
+        myName = mq.TLO.Me.CleanName()
+        myServer = mq.TLO.EverQuest.Server()
+    end)
+    local charKey = (myServer or 'default') .. '_' .. (myName or 'default')
+
+    local allData = {}
+    local fn = loadfile(cfg .. '/triune_buffbot_config.lua')
+    if fn then
+        local ok, t = pcall(fn)
+        if ok and type(t) == 'table' then allData = t end
+    end
+
+    allData[charKey] = {
+        maxRange      = ctrl.maxRange,
+        timeoutSec    = ctrl.timeoutSec,
+        cooldownSec   = ctrl.cooldownSec,
+        minManaPct    = ctrl.minManaPct,
+        promptMsg     = ctrl.promptMsg,
+        completionMsg = ctrl.completionMsg,
+        buffSlots     = ctrl.buffSlots
+    }
+
+    local f = io.open(cfg .. '/triune_buffbot_config.lua', 'w')
+    if f then
+        f:write("return " .. serializeValue(allData) .. "\n")
+        f:close()
+        if not silent then logMsg("Saved buffbot configuration.") end
+    end
+end
+
+local function loadConfig()
+    local myName, myServer = nil, nil
+    pcall(function()
+        myName = mq.TLO.Me.CleanName()
+        myServer = mq.TLO.EverQuest.Server()
+    end)
+    local charKey = (myServer or 'default') .. '_' .. (myName or 'default')
+
+    local fn = loadfile(cfg .. '/triune_buffbot_config.lua')
+    if not fn then return end
+    local ok, allData = pcall(fn)
+    if not ok or type(allData) ~= 'table' then return end
+
+    local charData = allData[charKey] or allData['default']
+    if charData and type(charData) == 'table' then
+        if charData.maxRange then ctrl.maxRange = charData.maxRange end
+        if charData.timeoutSec then ctrl.timeoutSec = charData.timeoutSec end
+        if charData.cooldownSec then ctrl.cooldownSec = charData.cooldownSec end
+        if charData.minManaPct then ctrl.minManaPct = charData.minManaPct end
+        if charData.promptMsg then ctrl.promptMsg = charData.promptMsg end
+        if charData.completionMsg then ctrl.completionMsg = charData.completionMsg end
+        if type(charData.buffSlots) == 'table' then ctrl.buffSlots = charData.buffSlots end
+        logMsg("Loaded saved buffbot configuration for " .. charKey .. ".")
+    end
 end
 
 -- ============================================================================
@@ -467,30 +549,35 @@ local function drawControlTab()
         end
     end
 
+    ImGui.SameLine()
+    if ImGui.Button(" Save Settings ", 120, 32) then
+        saveConfig(false)
+    end
+
     ImGui.Spacing()
     ImGui.Separator()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Configuration Options")
 
     local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", ctrl.maxRange, 20, 300)
-    if rangeChanged then ctrl.maxRange = rangeVal end
+    if rangeChanged then ctrl.maxRange = rangeVal; saveConfig(true) end
 
     local timeoutVal, timeoutChanged = ImGui.SliderInt("Offer Expiration (sec)", ctrl.timeoutSec, 10, 120)
-    if timeoutChanged then ctrl.timeoutSec = timeoutVal end
+    if timeoutChanged then ctrl.timeoutSec = timeoutVal; saveConfig(true) end
 
     local cdVal, cdChanged = ImGui.SliderInt("Player Cooldown (sec)", ctrl.cooldownSec, 10, 300)
-    if cdChanged then ctrl.cooldownSec = cdVal end
+    if cdChanged then ctrl.cooldownSec = cdVal; saveConfig(true) end
 
     local manaVal, manaChanged = ImGui.SliderInt("Min Mana % Threshold", ctrl.minManaPct, 5, 50)
-    if manaChanged then ctrl.minManaPct = manaVal end
+    if manaChanged then ctrl.minManaPct = manaVal; saveConfig(true) end
 
     ImGui.Spacing()
     ImGui.Text("Prompt Tell (Sent on initial tell):")
     local newPrompt, promptChanged = ImGui.InputText("##promptMsg", ctrl.promptMsg, 256)
-    if promptChanged then ctrl.promptMsg = newPrompt end
+    if promptChanged then ctrl.promptMsg = newPrompt; saveConfig(true) end
 
     ImGui.Text("Completion Tell (Sent after all buffs cast):")
     local newComp, compChanged = ImGui.InputText("##completionMsg", ctrl.completionMsg, 256)
-    if compChanged then ctrl.completionMsg = newComp end
+    if compChanged then ctrl.completionMsg = newComp; saveConfig(true) end
 end
 
 local function drawBuffSlotsTab()
@@ -516,12 +603,14 @@ local function drawBuffSlotsTab()
         if ImGui.BeginCombo("##buffCombo", preview) then
             if ImGui.Selectable("-- (None) --", currentSpell == "") then
                 ctrl.buffSlots[slot] = nil
+                saveConfig(true)
             end
 
             for _, spellName in ipairs(runtime.scribedSpells) do
                 local isSelected = (currentSpell == spellName)
                 if ImGui.Selectable(spellName, isSelected) then
                     ctrl.buffSlots[slot] = spellName
+                    saveConfig(true)
                 end
                 if isSelected then
                     ImGui.SetItemDefaultFocus()
@@ -607,6 +696,7 @@ end
 local function init()
     mq.imgui.init('TriuneBuffbotWin', renderGUI)
     refreshScribedSpells()
+    loadConfig()
     logMsg("Triune Buffbot script initialized.")
 end
 
@@ -619,11 +709,13 @@ while runtime.openGUI do
     if runtime.pendingAction == 'START' then
         runtime.pendingAction = nil
         ctrl.enabled = true
+        saveConfig(true)
         saveCurrentGems()
         memorizeBuffSlots()
     elseif runtime.pendingAction == 'STOP' then
         runtime.pendingAction = nil
         ctrl.enabled = false
+        saveConfig(true)
         restoreSavedGems()
     end
 

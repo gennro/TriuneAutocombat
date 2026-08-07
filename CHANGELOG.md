@@ -7,6 +7,7 @@
   - Implemented interactive tell confirmation protocol (`Would you like buffs? Reply 'yes' within 30s`).
   - Added range checking against requesting player spawns.
   - Implemented dropdown combo selectors for 12 buff slots populated with scribed spells from character spellbook.
+  - Added per-character configuration persistence (`triune_buffbot_config.lua` in MQ config dir) so buff slot selections and settings load automatically on launch.
   - Added automatic completion `/tell` sent to requesters after all configured buff spells finish casting.
   - Styled interface adhering to the dark Triune design system.
 
