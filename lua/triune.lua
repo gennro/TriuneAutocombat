@@ -1565,6 +1565,18 @@ function UI.drawHeaderBar()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or closes the standalone Triune Cursor Item Manager.')
     end
+    ImGui.SameLine()
+    if ImGui.Button('DPS Parser##hdrDPS') then
+        local s = mq.TLO.Lua.Script('triune_dps')
+        if s() and s.Status() == 'RUNNING' then
+            mq.cmd('/dps toggle')
+        else
+            mq.cmd('/lua run triune_dps')
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Launches or toggles the standalone Triune DPS Parser window.')
+    end
     if not DATA_OK then
         accent(WARN,
             'No triune_data.lua found in your MQ config folder -- run extract_spells.py and copy it there. Spell/AA lists will be empty.')
@@ -4199,12 +4211,21 @@ local function triuneCommand(...)
             mq.cmd('/lua run triune_cursor')
             print('\ag[Triune]\ax launching cursor manager...')
         end
+    elseif cmd == 'dps' or cmd == 'dpsui' or cmd == 'dpsparser' then
+        local s = mq.TLO.Lua.Script('triune_dps')
+        if s() and s.Status() == 'RUNNING' then
+            mq.cmd('/dps toggle')
+            print('\ag[Triune]\ax toggling DPS parser window...')
+        else
+            mq.cmd('/lua run triune_dps')
+            print('\ag[Triune]\ax launching DPS parser window...')
+        end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()
     elseif setTriuneMode(cmd) then
         -- mode command handled
     else
-        print('\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|status|spellbook|clearcursor|<mode>]')
+        print('\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|status|spellbook|cursorui|dps|clearcursor|<mode>]')
     end
 end
 

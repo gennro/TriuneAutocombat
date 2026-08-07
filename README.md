@@ -62,6 +62,16 @@ A lightweight standalone ImGui utility for managing items on the EQ cursor:
 - Session history log with timestamps, item names, quantities, and actions taken
 - Launch via `/ac cursorui` or the **Cursor Manager** header button
 
+### 📊 DPS Parser (`triune_dps.lua`)
+
+A standalone ImGui DPS parser for tracking player and pet combat performance:
+- **Real-Time Damage Tracking**: Monitors player melee, direct damage spells, DoTs, damage shields, and pet combat damage.
+- **Live Metrics**: Combined DPS, Player DPS, Pet DPS, active target name, encounter duration, and damage contribution percentage gauge.
+- **Detailed Attack Breakdowns**: Min, Max, Avg, Crit %, and Accuracy % per attack type and spell.
+- **Historic Fight Log**: Retains up to 50 previous combat encounters with fight inspection and single-click clear.
+- **Chat Reporting**: Post formatted DPS reports to `/group`, `/say`, `/guild`, or `/raid` with `/dps report`.
+- **Launch via**: `/lua run triune_dps` or slash command `/dps`.
+
 ### 🗺️ Navigation & Movement
 
 - NavMesh (`/nav`) with automatic fallback to `/stick` when nav is unavailable
@@ -113,6 +123,7 @@ A lightweight standalone ImGui utility for managing items on the EQ cursor:
 | `/ac cursorui` | `/ac cursorwin`, `/ac cursormgr` | Open the Cursor Manager window |
 | `/ac clearcursor` | `/ac autoinv`, `/ac cursor` | Manually drain all cursor items to inventory |
 | `/lua run triune_buffbot` | | Launch the standalone Interactive Buffbot window |
+| `/dps` | `/triunedps`, `/ac dps`, `/lua run triune_dps` | Toggle or control the standalone DPS Parser window (`/dps compact`, `/dps report [chan]`, `/dps reset`, `/dps pause`) |
 
 ---
 
@@ -124,7 +135,8 @@ TriuneAutocombat/
 │   ├── triune.lua           # Main autocombat engine & loadout UI
 │   ├── triune_spellbook.lua # Standalone spellbook browser & memorization window
 │   ├── triune_cursor.lua    # Standalone cursor item manager window
-│   └── triune_buffbot.lua   # Standalone interactive tell buffbot window
+│   ├── triune_buffbot.lua   # Standalone interactive tell buffbot window
+│   └── triune_dps.lua       # Standalone ImGui DPS parser for player & pet damage
 ├── config/
 │   └── triune_data.lua      # Era-correct spell/disc/AA database (generated)
 ├── README.md                # This file

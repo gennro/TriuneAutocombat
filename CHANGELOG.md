@@ -2,6 +2,71 @@
 
 ## 2026-08-07
 
+- Added `DPS Parser` header button to `lua/triune.lua` top navigation bar next to `Open Spellbook` and `Cursor Manager`, with `/ac dps` slash command integration to launch or toggle the standalone DPS parser script.
+- Added `lua/triune_dps.lua` standalone MacroQuest ImGui Lua script:
+  - Real-time combat damage tracking for player melee, direct damage spells, DoTs, damage shields, and pet attacks.
+  - Implemented live performance gauges, breakdown tables (Min, Max, Avg, Crit %, Accuracy %), and player/pet percentage contribution split.
+  - Added historic encounter logging (retains up to 50 completed fights) with fight inspector and clear options.
+  - Added slash command handler (`/dps` and `/triunedps`) supporting `show`, `hide`, `toggle`, `reset`, `pause`, `resume`, and `report <channel>` commands.
+  - Implemented auto-fight completion after configurable inactivity timeout (default 6.0s).
+  - Added per-character configuration persistence (`triune_dps_<Name>.lua` in MQ config dir).
+  - Added combat verb validation lookup (`COMBAT_VERBS`) and non-combat string filtering (`healed`, `taken`, `been`, `mana`) to prevent non-damage messages from misparsing as attacks.
+  - Implemented `isPetActor()` helper with dynamic `mq.TLO.Pet` clean name matching to accurately capture pet melee, pet spells, and pet misses.
+  - Added automatic mob death and target-switch encounter archiving (`mq.TLO.Target.IsDead()` / target ID change) to push completed fights into Fight History per mob.
+  - Rendered a unified Player & Pet attack breakdown table on the Live Overview tab with color-coded source tags (`[Player]` / `[Pet]`).
+  - Consolidated melee event registration into a unified `onCombatHit` callback (`#1# #2# #3# for #4# points of damage#5#`), resolving MacroQuest event pattern shadowing where broad pet match wildcards intercepted player hits before player events fired.
+  - Updated project rules in `.agents/AGENTS.md`, documenting mandatory practices for thread-safe script exit outside ImGui callbacks (prevents fatal crashes), omitting `ImGuiWindowFlags.NoCollapse` for proper `WindowRounding` rendering, and using sequential `SameLine()` toolbar positioning.
+  - Enabled Window Corner Rounding (`v4.3`), removing `ImGuiWindowFlags.NoCollapse` flag from `ImGui.Begin()` calls so ImGui's `WindowRounding` style token (6.0) applies directly to both the full parser window and mini HUD frame.
+  - Unified Design System & Window Rounding (`v4.2`), bringing `pushTheme()` and `popTheme()` into 100% alignment with `triune.lua` design tokens including `WindowRounding` (6), `ChildRounding` (5), `FrameRounding` (4), `ScrollbarRounding` (6), `FrameBorderSize` (1), and exact color palettes across all windows.
+  - Resolved Fatal C++ Access Violation Crash on Window Close (`v4.1`), removing inline `mq.exit()` and `mq.imgui.destroy()` calls from inside the non-yieldable ImGui render callback and command handler so window termination occurs safely on the main script thread.
+  - Optimized Compact Mini HUD Layout (`v4.0`), increasing vertical padding and spacing, removing redundant header expand button in favor of single bottom `[Full Window]` action button, and converting full window toolbar to sequential `SameLine()` alignment to prevent button overlaps.
+  - Refactored Compact Mode into Dual Top-Level Window Architecture (`v3.9`), registering an independent, auto-resizing mini HUD window (`TriuneDPSMiniWindow`) that cleanly replaces the main window when toggled into compact mode.
+  - Implemented Compact Mini-Window Mode (`v3.8`), creating a low-profile widget view showing live target, fight duration, combined DPS, and player/pet contribution split with quick `[Expand]` / `[Compact Mode]` toggles and `/dps compact` / `/dps mini` command support.
+  - Updated fight history retention capacity to 25 fights max (`v3.7`) to optimize memory footprint during long farming sessions.
+  - Implemented First-Person Verb Parsing Engine (`v3.6`), allowing player melee lines that omit "You" (e.g. `punch a cleric of hate for 607`, `kick a cleric...`, `crush a...`) to properly parse as player attacks.
+  - Implemented Dedicated Critical Hit & Blast Event Handlers (`v3.6`), adding `#1# scores a critical hit! (#2#)` and `#1# delivers a critical blast! (#2#)#3#` event listeners to record critical hits and spell blasts across player and multi-pet breakdown statistics.
+  - Implemented Short Combat Log Pattern Engine (`v3.5`), adding `#1# for #2#` damage pattern and `#1# missed #2#` miss pattern to support custom/emulator server abbreviated melee chat formats (`Tenekis crushes a forlorn revenant for 204`, `Grimrorik kicks a forlorn revenant for 25`).
+  - Implemented `calculateCategoryTotals()` dynamic breakdown scanner (`v3.4`), calculating category metrics (Melee, Skills, Spells, DoTs, DS) directly from player and multi-pet attack breakdown tables to guarantee category sync in Fight History and live UI.
+  - Resolved event pattern precedence shadowing (`v3.3`), removing the redundant `#1# hit #2# for #3# points of damage#4#` pattern which was intercepting all physical melee hits before `DPS_MeleeHitPlural` could execute.
+  - Added fallback pattern matching to `parseMeleeSentence()` to guarantee 100% verb extraction across all space-separated combat lines.
+  - Updated `parseMeleeSentence()` to use plaintext space-bounded verb matching (`v3.2`), replacing Lua frontier pattern regexes (`%f[%a]`) with `string.find(" " .. verb .. " ", 1, true)` for 100% reliable execution in MacroQuest LuaJIT.
+  - Implemented `parseMeleeSentence()` Lua verb parsing engine (`v3.1`), resolving MacroQuest event pattern greedy wildcard behavior (`#1# #2# #3# for #4#`) that was swallowing actor, verb, and target names into single wildcards.
+  - Simplified melee and skill event registration to `#1# for #2# points of damage#3#` and `#1# for #2# point of damage#3#`, guaranteeing 100% accurate capture of player melee, pet melee, and special combat skills (Kick, Bash, Backstab, Flying Kick, Frenzy, etc.).
+  - Implemented Damage Category Classification Engine (`v3.0`), categorizing all attacks, spells, and skills into 5 distinct metrics: **Melee**, **Skills / Abilities** (Kick, Bash, Backstab, Flying Kick, Frenzy, Headbutt, Maul, etc.), **Spells (DD)**, **DoTs**, and **Proc / Damage Shield**.
+  - Added categorized damage columns to Fight History table (`Melee Dmg`, `Skill Dmg`, `Spell/DoT Dmg`) and category metric badges to the Encounter Inspector header (`Melee: X (X%) | Skills: Y (Y%) | Spells: Z (Z%) | DoTs: A (A%) | DS: B (B%)`).
+  - Added color-coded Category badges (`[Melee]`, `[Skill]`, `[Spell]`, `[DoT]`, `[DS/Proc]`) to all breakdown tables across Overview, Player Details, and Pet Details.
+  - Enhanced `/dps report` and chat report buttons to include category percentage breakdowns (`Types: Melee X%, Skill Y%, Spell Z%, DoT A%`).
+  - Implemented `isValidMobName()` target name filtering (`v2.9`), preventing combat lines like `was hit by non-melee` from incorrectly saving `by non-melee` as the target name in Fight History.
+  - Added dedicated event listeners (`DPS_MobNonMeleePlural`, `DPS_MobNonMeleeSingular`) for `#1# was hit by non-melee for #2# points of damage`, accurately capturing mob damage shield and environmental damage under the mob's actual clean name.
+  - Added automatic target name fallback to `mq.TLO.Target.CleanName()` whenever an incoming hit event contains an invalid or non-actor target string.
+  - Implemented Dual-Mode Encounter Inspector (`v2.8`), rendering an instant **In-Tab Fight Detail View** directly inside the Fight History tab with `< Back to Fight List`, `Report Fight`, and `Pop Out Window` controls, as well as an `ImGui.BeginPopupModal` dialog for 100% mouse input focus.
+  - Added **Secondary Window Focus & Inspectors** rule to `.agents/AGENTS.md`, documenting that secondary windows in MQ Lua do not automatically capture mouse focus from the primary window, making In-Tab Detail Views and ImGui Modal Popups the standard pattern for responsive sub-inspectors.
+  - Registered `drawInspectorGui()` as an independent top-level MacroQuest ImGui window callback (`mq.imgui.init('TriuneDPSInspectorWindow', drawInspectorGui)`), eliminating nested `ImGui.Begin()` calls inside `drawDpsGui()`.
+  - Added **No Nested ImGui.Begin Window Callbacks** rule to `.agents/AGENTS.md`, documenting that calling `ImGui.Begin()` for a secondary window inside a primary window's render callback corrupts ImGui's input focus stack and freezes secondary window controls.
+  - Removed `ImGuiSelectableFlags.SpanAllColumns` from `HistoryTable` target selectables, ensuring column 8 buttons (`Inspect`, `Report`) receive mouse clicks cleanly without row overlap.
+  - Implemented unique string ID suffixes across `drawDpsGui()` and `drawInspectorGui()` in `lua/triune_dps.lua` (`MainOverviewTable`, `InspectOverviewTable`, `MainMultiPetTabBar`, `InspectMultiPetTabBar`), fixing ImGui mouse routing collision where buttons (`Close Inspector`, `Report`) and titlebar `X` close button froze on pop-out windows.
+  - Updated window titlebar `X` close logic in `drawInspectorGui()` to cleanly handle `open == false` from `ImGui.Begin()`.
+  - Added interactive Encounter Inspector window (`drawInspectorGui`), allowing users to click any fight row or Inspect button in Fight History to open a dedicated window displaying complete historical fight stats, player breakdown, and multi-pet breakdown tabs.
+  - Added per-fight `Report` button in Fight History table and Encounter Inspector, enabling instant reporting of any past encounter to chat (/group, /say, /guild, /raid).
+  - Fixed player vs pet actor resolution in `isPlayerActor()` by checking for explicit `(Owner: ...)` strings and enforcing exact character name matching, preventing pet spells (`Hand of Retribution`, `Spirit of Storm Strike`) and swarm pets (`Gennro's Animated Corpse`) from misclassifying under Player DPS.
+  - Added `getCleanPetName()` to strip `(Owner: ...)` tags from pet actors, cleanly grouping pet melee and pet spell attacks under their proper pet names (`Glidequill`, `Tenekis`, `Grimrorik`, `Gennro's Animated Corpse`).
+  - Added chat-driven mob slain listeners (`DPS_MobSlain1`, `DPS_MobSlain2`) for `"has been slain"` and `"You have slain"` lines, ensuring 100% reliable fight session archiving on mob death.
+  - Added Multi-Pet Detailed Breakdown under Pet Details tab, rendering individual tab pages per pet name (`Jobab`, `Water Spirit`, `Charmed NPC`) as well as an `All Pets Combined` overview tab.
+  - Implemented automatic target-switch fight archiving in `startFightIfNeeded()`, cleanly completing and saving Mob A's fight session into Fight History when Mob B is engaged.
+  - Fixed premature mid-combat encounter resets by removing `targetId ~= currentTargetId` triggers when player targets self or party members to cast spells, preventing accumulative fight damage from resetting to 0 mid-fight.
+  - Added `parseDamageValue()` helper to strip commas from damage values (e.g. `1,250` -> `1250`), resolving a bug where all combat damage hits >= 1,000 returned `nil` under `tonumber()` and were silently dropped.
+  - Expanded `COMBAT_VERBS` matrix with additional special attack verbs (`headbutt`, `maul`, `pummel`, `rend`, `rip`, `sweep`).
+  - Fixed post-encounter DPS calculation in `getCurrentFightDuration()`, preserving actual fight duration from `fightStartTime` to `lastDamageTime` after mob death so calculated DPS does not reset to 0 upon fight completion.
+  - Expanded `isPetActor()` to recognize `"Your pet"`, `"your pet"`, swarm pets, and `mq.TLO.Pet` clean names, ensuring all pet attacks are accurately categorized.
+  - Fixed `isPlayerActor()` string matching by switching to exact string equality (`cleanActor == 'you'` / `cleanActor == cleanMyName`), resolving a bug where empty player name queries matched all pet damage and misclassified it under Player DPS.
+  - Implemented `isPlayerActor()` with non-alphanumeric character stripping (`gsub("%W", "")`) and `mq.TLO.Me.CleanName()` verification, capturing player damage accurately regardless of first-person ("You") or third-person (Character Name) chat settings.
+  - Consolidated event pattern registration into `onUnifiedMeleeHit` (`#1# #2# #3# for #4# points of damage#5#`) and `onUnifiedSpellHit` (`#1# hit #2# for #3# points of non-melee damage#4#`), eliminating MacroQuest event shadowing where generic wildcard listeners intercepted player combat lines before specific player listeners fired.
+  - Corrected `ImGui.Begin` return order (`local open, draw = ImGui.Begin(...)`), resolving an issue where the titlebar `X` button close state was received in the `draw` variable instead of `open`.
+  - Implemented dual-mode ASCII 7 (BEL character) & ASCII 127 color tag stripper in `cleanLine()`, removing hidden MQ color control bytes that prevented player combat log matching.
+  - Implemented explicit script unloading via `mq.imgui.destroy()` and `mq.exit()` upon clicking the window titlebar close (`X`) button or typing `/dps close`.
+  - Added safety guard (`type(mq.atexit) == 'function'`) for graceful exit handling on all MacroQuest Lua builds.
+  - Styled interface adhering to the dark Triune design system.
+
 - Added `lua/triune_buffbot.lua` standalone MacroQuest ImGui Lua script:
   - Saves current spell gems on script startup/start and restores original spell gems on stop or script exit via `mq.atexit()`.
   - Implemented interactive tell confirmation protocol (`Would you like buffs? Reply 'yes' within 30s`).

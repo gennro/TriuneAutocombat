@@ -344,11 +344,13 @@ local function memorizeBuffSlots()
 end
 
 -- Ensure gems are restored if script terminates via /lua stop
-mq.atexit(function()
-    if runtime.savedGems and next(runtime.savedGems) ~= nil then
-        restoreSavedGems()
-    end
-end)
+if type(mq.atexit) == 'function' then
+    mq.atexit(function()
+        if runtime.savedGems and next(runtime.savedGems) ~= nil then
+            restoreSavedGems()
+        end
+    end)
+end
 
 -- ============================================================================
 -- Interactive Tell Event Handler

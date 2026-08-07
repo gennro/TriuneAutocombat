@@ -110,10 +110,16 @@ if ok and val then ... end
 local val = mq.TLO.Me.Gem(slot).Name()
 ```
 
-### ImGui Thread Safety
+### ImGui Thread Safety & Window Rules
 - **Never call `mq.delay()` from an ImGui render callback** — it is a non-yieldable thread and will crash with "Cannot delay from non-yieldable thread".
 - Queue actions via a `pending*` flag (e.g., `reDetectRequested`, `pendingAction`) and execute them in the main coroutine loop.
 - Pattern used in `triune_cursor.lua` (pendingAction) and `triune.lua` (reDetectRequested).
+- **Unique Element & Table IDs across Windows**: Every ImGui table, child window, tab bar, or button rendered in the same frame MUST have unique string IDs (e.g. `InspectTable` vs `MainTable`). Duplicate IDs across separate windows cause ImGui ID collisions, freezing inputs and routing clicks to the wrong window.
+- **No Nested `ImGui.Begin()` Window Callbacks**: Never call `ImGui.Begin()` for a secondary window inside the render callback of a primary window (between its `ImGui.Begin()` and `ImGui.End()`). Nested `ImGui.Begin()` calls corrupt ImGui's focus stack, causing buttons, tab bars, and titlebar `X` close buttons on the secondary window to freeze. Always register secondary top-level windows as independent callbacks via `mq.imgui.init('SecondaryWin', drawSecondaryFunc)`.
+- **Secondary Window Focus & Inspectors**: Secondary top-level windows in MQ Lua do not automatically steal mouse focus from the main window, causing clicks on secondary window controls to freeze or fall through. To present detailed inspection UI, use **In-Tab Detail Views** (with a `< Back to List` button) or **ImGui Modal Popups** (`ImGui.BeginPopupModal` / `ImGui.OpenPopup`), which force 100% input focus and guarantee responsive clicks.
+- **Window Close Tuple Handling & Safe Exit**: `ImGui.Begin(title, openFlag)` returns `open, draw`. When `open` returns false (titlebar `X` button clicked), update the open flag state, call `ImGui.End()`, and return cleanly. `ImGui.End()` MUST be called once for every `ImGui.Begin()` call. **NEVER call `mq.exit()` or `mq.imgui.destroy()` inside an ImGui draw callback or event handler** — destroying the Lua context mid-render triggers a Fatal C++ Access Violation Crash in MacroQuest/EverQuest. Set `isRunning = false`, return cleanly, and let the main script coroutine loop exit naturally outside the callback.
+- **Window Corner Rounding & `ImGuiWindowFlags.NoCollapse`**: Do NOT pass `ImGuiWindowFlags.NoCollapse` to `ImGui.Begin()`. In MacroQuest ImGui, passing `NoCollapse` overrides the theme's `WindowRounding` style token and forces ImGui to render a square window frame with sharp 90-degree titlebar corners. Omit `NoCollapse` (or use `ImGuiWindowFlags.AlwaysUseWindowPadding`) so `ImGuiStyleVar.WindowRounding` (e.g. 6.0) applies rounded corners to top-level windows.
+- **Sequential Toolbar Layout (No Hardcoded Offsets)**: Avoid hardcoded x-position offsets like `ImGui.SameLine(390)` for toolbars. Hardcoded offsets collide and overlap when window width or button labels change. Use sequential `ImGui.SameLine()` without arguments for toolbars.
 
 ### Command Execution
 ```lua
