@@ -148,22 +148,15 @@ TriuneAutocombat/
 
 ---
 
-## Requirements
-
-- [MacroQuest](https://macroquest.org/) with the **Lua** plugin enabled
-- **MQ2Nav** (recommended) for NavMesh-based pathfinding; falls back to `/stick` automatically
-- `triune_data.lua` in your MQ config directory (era-correct spell/AA database for your server)
-
----
-
 ## Getting Started
 
-1. Place all four `.lua` files from the `lua/` folder into your MacroQuest `lua/` directory (or a `triune/` subdirectory within it).
-2. Ensure `triune_data.lua` is present in your MacroQuest config directory.
-3. Log in with your trio character and run:
-   ```
-   /lua run triune
-   ```
+### 1. MacroQuest Setup
+1. Unzip the downloaded release folder to your **Documents** folder (e.g. `Documents\MacroQuest`).
+2. Run `MacroQuest.exe` **before** launching EverQuest.
+3. MacroQuest will run in your Windows system tray while waiting for the game to start.
+
+### 2. Running Triune AutoCombat
+1. Launch EverQuest and log in with your character. Triune loads automatically.
 4. In the **Character Classes & Loadout** section, verify or re-detect your class trio.
 5. Open the **Spell Gems** tab to assign spells and abilities to your loadout slots.
 6. Choose your combat mode in the **Control** tab and click **Start**.

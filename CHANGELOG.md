@@ -2,6 +2,9 @@
 
 ## 2026-08-08
 
+- Updated `README.md` documentation to include MacroQuest (MQ2) setup instructions.
+  - Added installation instructions covering unzipping the release package into the `Documents` directory and starting `MacroQuest.exe` prior to launching EverQuest.
+
 - Added GitHub release workflow (`release.yml`) and configured `.gitattributes` release archive exclusions.
   - Configured `git archive` packaging in `.github/workflows/release.yml` to bundle all runtime engine modules, scripts, configs, resources, and executables into `TriuneAutocombat.zip`.
   - Updated `.gitattributes` with `export-ignore` directives to strip repository metadata, CI workflows, agent rules, and dev configs (`.git`, `.github`, `.agents`, `.luarc.json`, `.gitattributes`) from release zip archives.
