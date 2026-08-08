@@ -24,26 +24,14 @@ jobs:
 
       - name: Package Release Archives
         run: |
-          # 1. Base distribution zip (engine, executables, plugins, scripts, configs, macros, and MeshUpdater.exe)
-          git archive --format=zip -o TriuneAutocombat.zip HEAD ':' ':!resources/MQ2Nav/*.navmesh'
 
-          # 2. Update-only zip (scripts, configs, macros, and docs for upgrading an existing install)
           git archive --format=zip -o TriuneAutocombat-Update.zip HEAD lua config/triune_data.lua macros README.md CHANGELOG.md
-
-          # 3. Offline NavMesh Pack Part 1 (A-M zones)
-          git archive --format=zip -o TriuneAutocombat-NavMeshes-Part1.zip HEAD 'resources/MQ2Nav/[a-mA-M]*'
-
-          # 4. Offline NavMesh Pack Part 2 (N-Z zones)
-          git archive --format=zip -o TriuneAutocombat-NavMeshes-Part2.zip HEAD 'resources/MQ2Nav/[n-zN-Z]*'
 
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            TriuneAutocombat.zip
             TriuneAutocombat-Update.zip
-            TriuneAutocombat-NavMeshes-Part1.zip
-            TriuneAutocombat-NavMeshes-Part2.zip
           tag_name: ${{ inputs.tag_name || github.ref_name }} # Uses manual input if provided, otherwise defaults to pushed tag
           generate_release_notes: true
         env:
