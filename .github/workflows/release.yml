@@ -22,16 +22,23 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Package Release Archive
+      - name: Package Release Archives
         run: |
+          # Full distribution zip (all tracked project files except ignored metadata)
           git archive --format=zip -o TriuneAutocombat.zip HEAD
+
+          # Update-only zip (scripts, configs, macros, and docs for upgrading an existing install)
+          git archive --format=zip -o TriuneAutocombat-Update.zip HEAD lua config/triune_data.lua macros README.md CHANGELOG.md
 
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:
-          files: TriuneAutocombat.zip
+          files: |
+            TriuneAutocombat.zip
+            TriuneAutocombat-Update.zip
           tag_name: ${{ inputs.tag_name || github.ref_name }} # Uses manual input if provided, otherwise defaults to pushed tag
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
