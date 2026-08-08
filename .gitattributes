@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Exclude repo metadata, agent configs, and CI workflows from release archives
+.gitattributes export-ignore
+.gitignore export-ignore
+.github export-ignore
+.agents export-ignore
+.luarc.json export-ignore
+

@@ -2,6 +2,10 @@
 
 ## 2026-08-08
 
+- Added GitHub release workflow (`release.yml`) and configured `.gitattributes` release archive exclusions.
+  - Configured `git archive` packaging in `.github/workflows/release.yml` to bundle all runtime engine modules, scripts, configs, resources, and executables into `TriuneAutocombat.zip`.
+  - Updated `.gitattributes` with `export-ignore` directives to strip repository metadata, CI workflows, agent rules, and dev configs (`.git`, `.github`, `.agents`, `.luarc.json`, `.gitattributes`) from release zip archives.
+
 - Fixed character class detection and save validation across `triune.lua` and `triune_spellbook.lua`.
   - Rewrote `classesFromInventoryWindow` to walk the **entire** `InventoryWindow` child tree using MQ's `FirstChild`/`Next` sibling traversal API instead of guessing hardcoded child control names like `IW_ClassList`. This discovers class text in any label, list, or STMLbox child regardless of custom UI XML layout.
   - Added diagnostic console output when `loud=true`: every child node's `Name`, `ScreenID`, `Type`, and `Text` are printed to the MQ chat window so class detection problems can be debugged visually.
