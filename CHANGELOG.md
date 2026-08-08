@@ -1,7 +1,69 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-08
+
+- Fixed character class detection and save validation across `triune.lua` and `triune_spellbook.lua`.
+  - Rewrote `classesFromInventoryWindow` to walk the **entire** `InventoryWindow` child tree using MQ's `FirstChild`/`Next` sibling traversal API instead of guessing hardcoded child control names like `IW_ClassList`. This discovers class text in any label, list, or STMLbox child regardless of custom UI XML layout.
+  - Added diagnostic console output when `loud=true`: every child node's `Name`, `ScreenID`, `Type`, and `Text` are printed to the MQ chat window so class detection problems can be debugged visually.
+  - Updated `onCharacterChanged()` and `runMainLoop()` to execute live `detectClasses(true)` on login and re-detection, immediately replacing stale `brd/war/war` saves in `triune_loadout.lua`.
+  - Seeded `myName` from `mq.TLO.Me.CleanName()` at the top of `runMainLoop()` so detection fires on first script launch, not only on character change events.
+  - Implemented `parseClassLine(text)` helper using 3-letter (`SHD`, `MAG`, `BST`) and 2-letter (`SK`) prefix matching to parse un-spaced concatenated class/title strings (e.g. `"MAGArchConvoker"`, `"SHD DreadLord"`, `"BST FeralLord"`) and skip header lines (e.g. `"Level: 65"`).
+  - Expanded `MQSHORT` dictionary mapping table to include standard 3-letter MacroQuest ShortNames, long class names, and word tokens.
+  - Added `normalizeClass(raw)` helper function to convert any class string/token into Triune's canonical mixed-case format (`War`, `Clr`, `SK`, etc.).
+  - Synchronized `triune_spellbook.lua` with the same `walkChildTree` / `scanOneNode` approach.
+
+- Gated detrimental spells, AAs, combat abilities, disciplines, and skills behind XTarget verification.
+  - Added `isDetrimentalAction(name, targetToken, entry)` helper to authoritatively classify offensive/detrimental actions vs beneficial spells/heals/buffs.
+  - Added `isSpawnPetOrPlayer(id)` helper to ensure self, player pets, group pets, player characters, and master-owned spawns are never misclassified as hostile targets.
+  - Updated `isXTargetId(id)` to check both `'NPC'` and `'Pet'` spawn types on XTarget slots.
+  - Updated `isHostileTarget(id)` to exclude pets and players from hostile target classification.
+  - Updated `Manual Hunter` mode targeting logic in `combatTick()`: if the current target is a pet, player, or non-XTarget spawn, the engine auto-switches to an available XTarget NPC or sets `haveNPC = false`, preventing pets from being attacked or targeted while gathering mobs.
+  - Gated AA, disc, skill, and spell gem execution so detrimental actions require the target `id` to be on the XTarget list (exempting `Puller` mode during `TO_MOB` state), while allowing beneficial spells (heals, buffs, pet summons) to fire freely in or out of combat.
+- Shifted cursor item clearing from continuous main loop polling to Just-In-Time (JIT) targeted execution.
+  - Removed unconditional `clearCursor()` call from `runMainLoop()`, allowing players to hold, inspect, organize, or trade items on the cursor without the script auto-inventorying them every loop pass.
+  - Optimized `clearCursor()` with an instant early-exit check when the cursor is empty.
+  - Added targeted `clearCursor()` calls immediately prior to executing `/cast` in `castGem()`, `/alt act` in `fireAA()`, `/disc` in `fireDisc()`, and `/doability` in `fireSkill()`.
+  - Added `clearCursor()` at the completion of `tryMem()` in `triune.lua` and `triune_spellbook.lua` to clean up any leftover spell icons.
+  - Added post-cast `clearCursor()` in `combatTick()` when `wasCasting` transitions to `false` to clear summoned items (Mod Rods, Pet Weapons, Food/Reagents) into inventory upon spell completion.
+- Added dynamic closer NPC retargeting during travel for `Hunter`, `Puller`, `Pull & Assist`, and `Pet Tank` modes.
+  - Implemented `checkCloserTarget(curTargetId, searchRadius, searchMaxZ, minLevel, maxLevel)` helper to evaluate if a candidate spawn visible during movement is significantly closer (`candDist <= curDist - 25` AND `candDist <= curDist * 0.75`).
+  - Enforced a single retarget limit per pursuit run (`pursuit.hasRetargeted`) to prevent target bouncing or ping-ponging between nearby mobs.
+  - Maintained strict priority for active XTarget aggro interrupts in `checkAggroSwitch()` and `pullerTick()`, ensuring attacking mobs are engaged immediately.
+  - Fixed false-positive stuck detection (`stuck -- backing up and pivoting`) during idle, manual hunter, casting, sitting, and player chase states.
+  - Restricted `checkStuck()` evaluation strictly to when movement plugins are active (`isMoveActive() == true`), eliminating false-positive stuck maneuvers while standing still or waiting for targets.
+  - Added state guards in `checkStuck()` for spell casting (`me.Casting.ID()`), sitting (`me.Sitting()`), med break (`runtime.medBreakActive`), stunned (`me.Stunned()`), and rooted (`me.Rooted()`) states.
+  - Extended target proximity check in `checkStuck()` to handle player targets (e.g. MA player in `Chase Assist` mode with `ctrl.chase_dist`) in addition to NPC targets.
+  - Updated script version number to `1.3` in `lua/triune.lua` and `README.md`.
+- Added pulsing red visual style to the BURN button when Burn Mode is enabled.
+  - Implemented smooth sine-wave RGB color oscillation (`os.clock()`) pulsing between deep red and vibrant glowing red for `ctrl.burn == true`.
+  - Applied high-contrast white text and hover highlighting with proper `ImGui.PopStyleColor()` cleanup.
+- Fixed `Manual Hunter` mode targeting lock, pet hold deadlocks, XTarget range evaluation, and XTarget slot filtering.
+  - Updated `Manual Hunter` mode target dispatch in `combatTick()` to respect player-selected NPC targets (not dead, not ignored, not unreachable) and auto-acquire the top-priority XTarget mob when current target dies or is cleared.
+  - Removed restrictive non-XTarget target rejection that was forcibly discarding manual player targets and preventing combat initiation.
+  - Integrated `Manual Hunter` into unified `selfDirected` pet command handling, eliminating the pet aggro deadlock where casters and pet classes got stuck waiting for direct melee/spell aggro before sending pets to attack.
+  - Strictly enforced Pet Assist HP threshold (`ctrl.pet_assist_at`): pets remain on hold (`#petcmd hold all`) until target NPC HP percentage drops to or below `ctrl.pet_assist_at`, engaging immediately with `#petcmd attack all` once threshold is met.
+  - Extended `checkAggroSwitch()` range check to 60 units for `Manual Hunter` mode to properly evaluate XTarget adds within range.
+  - Fixed `findFirstNPCXtarget()` filtering by removing `TargetType() == 'Auto Hater'` check to recognize all XTarget slot configurations (`Hater`, `Specific NPC`, `Group Tank Target`, etc.) and passing spawn clean name (string) instead of ID (number) to `isIgnoredFn`.
+- Styled the main execution toggle button based on script state (`ctrl.running`).
+  - Rendered a vibrant green button (`PAUSE`) when the engine is actively running (`ctrl.running == true`).
+  - Rendered a deep crimson red button (`START`) when the engine is paused (`ctrl.running == false`).
+  - Removed redundant `STATUS: RUNNING` / `STATUS: PAUSED` text label from the main ImGui Control tab layout.
+
+---
+
 ## 2026-08-07
 
+- Fixed ImGui PAUSE button not stopping navigation and combat actions.
+  - The UI PAUSE button now calls `fullStop()` (stops `/nav`, `/stick`, `/attack`, `/autofire`, casting, and resets pursuit state), matching the behavior already present in `/ac pause` and `/triunerun`.
+  - Also added missing `setManualHunterPetHold()` consistency for Manual Hunter mode.
+- Added universal hostile-target safety gate across all combat modes.
+  - New `isHostileTarget(id)` helper: confirms an NPC is hostile (on XTarget, player is attacking it, target-of-target points at player, or HP < 100%) before allowing any offensive actions.
+  - Auto-attack (`/attack on`, `/autofire on`) and all casting (AAs, discs, spell gems) are now gated behind this check for player-directed modes (Manual, Manual Hunter, Assist, Chase Assist, Backline, Tank).
+  - Engine-auto-targeting modes (Hunter, Puller, Pull & Assist, Pet Tank, Garrison) are exempt since their own `findRoamTarget`/`firstNPCXtarget` target selection is the safety gate.
+  - Prevents accidentally attacking or casting on friendly NPCs (merchants, quest givers, guards, bankers) in any mode.
+- Improved `checkAggroSwitch()` to respond immediately when an NPC is directly hitting the player.
+  - Removed the 60-unit distance cap for NPCs with confirmed aggro (`isHittingMe`); the engine now switches to the attacker regardless of range.
+  - Added `bestIsHittingMe` condition: always switches to an NPC that is directly hitting the player, even if the current target is on XTarget.
 - Added `DPS Parser` header button to `lua/triune.lua` top navigation bar next to `Open Spellbook` and `Cursor Manager`, with `/ac dps` slash command integration to launch or toggle the standalone DPS parser script.
 - Added `lua/triune_dps.lua` standalone MacroQuest ImGui Lua script:
   - Real-time combat damage tracking for player melee, direct damage spells, DoTs, damage shields, and pet attacks.

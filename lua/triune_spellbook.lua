@@ -379,6 +379,7 @@ local function tryMem(slot, spellName, bypassCheck)
     end
 
     local finalGem = mq.TLO.Me.Gem(slot).Name()
+    clearCursor()
     if finalGem == cleanName or finalGem == spellName then
         print('\ag[Spellbook]\ax memorized ' .. cleanName .. ' -> gem ' .. slot)
         return true

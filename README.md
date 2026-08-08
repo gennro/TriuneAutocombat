@@ -80,6 +80,7 @@ A standalone ImGui DPS parser for tracking player and pet combat performance:
 - Stuck detection with automatic unstuck recovery (door clicks, position retries)
 - Combat stall detection and recovery
 - Automatic repositioning when receiving "too far away / get closer" chat messages
+- Dynamic mid-travel closer NPC retargeting: checks once for significantly closer targetable NPCs while moving toward distant targets in Hunter, Puller, and Pet Tank modes (configurable)
 - Wander-path generation for Hunter/Garrison roaming
 
 ### 🐾 Pet Management
@@ -171,6 +172,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **3.27-no-commonmod**
+Current version: **1.3**
 
 See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
