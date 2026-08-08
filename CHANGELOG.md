@@ -6,8 +6,9 @@
   - Added installation instructions covering unzipping the release package into the `Documents` directory and starting `MacroQuest.exe` prior to launching EverQuest.
 
 - Added GitHub release workflow (`release.yml`) and configured `.gitattributes` release archive exclusions.
-  - Configured `git archive` packaging in `.github/workflows/release.yml` to bundle all runtime engine modules, scripts, configs, resources, and executables into `TriuneAutocombat.zip`.
-  - Added script-and-config update package (`TriuneAutocombat-Update.zip`) to the release workflow containing `lua/`, `config/triune_data.lua`, `macros/`, `README.md`, and `CHANGELOG.md` for fast, lightweight updates over existing installations.
+  - Configured `git archive` packaging in `.github/workflows/release.yml` to bundle engine modules, executables, plugins, scripts, and configs into `TriuneAutocombat.zip` (~25MB base install).
+  - Added script-and-config update package (`TriuneAutocombat-Update.zip`, ~1.6MB) containing `lua/`, `config/triune_data.lua`, `macros/`, `README.md`, and `CHANGELOG.md` for fast updates over existing installs.
+  - Split offline pre-built navmesh files into `TriuneAutocombat-NavMeshes-Part1.zip` (~1.2GB) and `TriuneAutocombat-NavMeshes-Part2.zip` (~860MB) to stay strictly below GitHub's 2.0GB per-file release asset upload limit.
   - Updated `.gitattributes` with `export-ignore` directives to strip repository metadata, CI workflows, agent rules, and dev configs (`.git`, `.github`, `.agents`, `.luarc.json`, `.gitattributes`) from release zip archives.
 
 - Fixed character class detection and save validation across `triune.lua` and `triune_spellbook.lua`.
