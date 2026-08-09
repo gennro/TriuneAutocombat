@@ -25,7 +25,7 @@ jobs:
       - name: Package Release Archives
         run: |
 
-          git archive --format=zip -o TriuneAutocombat-Update.zip HEAD lua config macros README.md CHANGELOG.md
+          git archive --format=zip -o TriuneAutocombat-Update.zip HEAD mq2triune/lua mq2triune/config mq2triune/macros README.md CHANGELOG.md
 
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
