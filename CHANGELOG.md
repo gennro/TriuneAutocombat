@@ -2,6 +2,7 @@
 
 ## 2026-08-09
 
+- **Bumped version to v1.4.**
 - Fixed spell gem dropdown spell filtering and "Scribed Only" checkbox toggle reactivity in `triune.lua`.
   - Removed the `isMyClass` gate from `filteredSpells()` that was preventing the Scribed Only filter from ever applying. The old logic only checked `isScribed()` when the dropdown's class matched `Me.Class.ShortName()`, but the class comparison was always failing (different string formats between MQ TLO return and Triune abbreviations), making the checkbox a complete no-op. Now `isScribed()` is called directly when `scribed_only` is on, for every class — `Me.Book()` naturally returns false for classes the character hasn't scribed.
   - Added `toCanonicalClassAbbr(str)` helper and expanded `MQSHORT` table to map 3-letter MQ ShortName codes (`SHD`, `CLR`, `MAG`, `ENC`, etc.) to Triune class abbreviations.

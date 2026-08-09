@@ -180,6 +180,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.3**
+Current version: **1.4**
 
 See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
