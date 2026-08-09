@@ -22,7 +22,8 @@
   - Enforced user configuration preservation (`triune_loadout.lua`, `MacroQuest.ini`, character INIs are explicitly protected from overwrite).
   - Added multi-stage fallback (VBScript `MSXML2.ServerXMLHTTP` -> Python CLI -> direct `curl`/`curl.exe` -> PowerShell TLS 1.2) in `triune_updater.lua` for zero-dependency HTTP downloads under native Windows, Linux, and Wine/Lutris environments.
   - Implemented raw GitHub content individual text file downloads with HTTP 404 fallback for legacy release tag paths, ensuring seamless updates under Wine without binary `ADODB.Stream` limitations.
-  - Fixed MacroQuest script reload sequence to use `/lua stop triune` followed by `/lua run triune`.
+  - Refactored release updater to use dynamic runtime script directory resolution (`debug.getinfo`), eliminating all hardcoded paths and allowing updates to function regardless of custom installation location or folder renaming.
+  - Enforced an active script detection loop (`mq.TLO.Lua.Script`) in `triune_updater.lua` that automatically stops and restarts all currently running Triune Lua scripts (`triune`, `triune_spellbook`, `triune_cursor`, `triune_buffbot`, `triune_dps`) after an update, ensuring every active module reloads fresh from disk.
 - Enhanced stuck recovery logic in `triune.lua` with a multi-step directional attempt sequence (`stuckState.attempts`).
   - Attempt 1: Backs up for 1200ms and jumps to clear immediate frontal collisions.
   - Attempt 2: If still stuck on the obstacle, backs up briefly and strafes left for 1000ms to maneuver around the left side.

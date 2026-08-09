@@ -175,6 +175,8 @@ local function runVBScriptDownload(url, destFile, scriptFile)
         .. 'End If\r\n'
         .. 'http.Open "GET", "' .. url .. '", False\r\n'
         .. 'http.setRequestHeader "User-Agent", "TriuneUpdater"\r\n'
+        .. 'http.setRequestHeader "Cache-Control", "no-cache"\r\n'
+        .. 'http.setRequestHeader "Pragma", "no-cache"\r\n'
         .. 'http.Send\r\n'
         .. 'If Err.Number = 0 Then\r\n'
         .. '    Dim fso\r\n'
@@ -249,7 +251,8 @@ local function checkForUpdates()
             name = 'VBScript MSXML2',
             run = function()
                 local vbsFile = configDir .. sep .. 'triune_check.vbs'
-                return runVBScriptDownload(API_URL, tmpFile, vbsFile)
+                local checkUrl = API_URL .. '?t=' .. os.time()
+                return runVBScriptDownload(checkUrl, tmpFile, vbsFile)
             end
         })
     end
@@ -380,21 +383,13 @@ local function checkForUpdates()
     end
 end
 
--- Files to update from GitHub raw content (relative to repo root)
-local UPDATE_FILES = {
-    'mq2triune/lua/triune.lua',
-    'mq2triune/lua/triune_spellbook.lua',
-    'mq2triune/lua/triune_cursor.lua',
-    'mq2triune/lua/triune_updater.lua',
-    'mq2triune/lua/triune_buffbot.lua',
-    'mq2triune/lua/triune_dps.lua',
-    'mq2triune/config/triune_data.lua',
-    'mq2triune/triune_updater.py',
-    'mq2triune/update.bat',
-    'mq2triune/update.sh',
-    'README.md',
-    'CHANGELOG.md',
-}
+-- Dynamically resolve the absolute directory containing triune_updater.lua
+local function getScriptDir()
+    local src = debug.getinfo(1, "S").source:sub(2)
+    src = src:gsub('\\', '/')
+    local dir = src:match('(.+)/[^/]+$') or '.'
+    return dir
+end
 
 -- Perform update action on main thread
 local function executeUpdate()
@@ -405,18 +400,34 @@ local function executeUpdate()
     local sep = package.config:sub(1,1)
     local logFile = configDir .. sep .. 'triune_update.log'
 
-    -- Determine script paths for fallback candidates
-    local pyScript = rootDir .. sep .. 'triune_updater.py'
-    local batScript = rootDir .. sep .. 'update.bat'
-    local shScript = rootDir .. sep .. 'update.sh'
+    -- Dynamically resolve target file destinations based on current script location
+    local luaDir = getScriptDir()
+    local parentDir = luaDir:match('(.+)/[^/]+$') or '.'
+    local configDirTarget = (mq.configDir or (parentDir .. '/config')):gsub('\\', '/')
 
-    local f = io.open(rootDir .. sep .. 'mq2triune' .. sep .. 'triune_updater.py', 'r')
-    if f then
-        f:close()
-        pyScript = rootDir .. sep .. 'mq2triune' .. sep .. 'triune_updater.py'
-        batScript = rootDir .. sep .. 'mq2triune' .. sep .. 'update.bat'
-        shScript = rootDir .. sep .. 'mq2triune' .. sep .. 'update.sh'
-    end
+    diag('Dynamic luaDir: ' .. tostring(luaDir))
+    diag('Dynamic parentDir: ' .. tostring(parentDir))
+    diag('Dynamic configDirTarget: ' .. tostring(configDirTarget))
+
+    local UPDATE_MAP = {
+        { repo = 'mq2triune/lua/triune.lua',           target = luaDir .. '/triune.lua' },
+        { repo = 'mq2triune/lua/triune_spellbook.lua', target = luaDir .. '/triune_spellbook.lua' },
+        { repo = 'mq2triune/lua/triune_cursor.lua',    target = luaDir .. '/triune_cursor.lua' },
+        { repo = 'mq2triune/lua/triune_updater.lua',   target = luaDir .. '/triune_updater.lua' },
+        { repo = 'mq2triune/lua/triune_buffbot.lua',   target = luaDir .. '/triune_buffbot.lua' },
+        { repo = 'mq2triune/lua/triune_dps.lua',       target = luaDir .. '/triune_dps.lua' },
+        { repo = 'mq2triune/config/triune_data.lua',   target = configDirTarget .. '/triune_data.lua' },
+        { repo = 'mq2triune/triune_updater.py',        target = parentDir .. '/triune_updater.py' },
+        { repo = 'mq2triune/update.bat',               target = parentDir .. '/update.bat' },
+        { repo = 'mq2triune/update.sh',                target = parentDir .. '/update.sh' },
+        { repo = 'README.md',                          target = parentDir .. '/README.md' },
+        { repo = 'CHANGELOG.md',                       target = parentDir .. '/CHANGELOG.md' },
+    }
+
+    -- Determine script paths for fallback candidates
+    local pyScript = parentDir .. sep .. 'triune_updater.py'
+    local batScript = parentDir .. sep .. 'update.bat'
+    local shScript = parentDir .. sep .. 'update.sh'
 
     local updateSuccess = false
 
@@ -427,7 +438,6 @@ local function executeUpdate()
         local rawBase = 'https://raw.githubusercontent.com/' .. GITHUB_REPO .. '/' .. latestTag
         local vbsFile = configDir .. sep .. 'triune_update.vbs'
         local resultFile = configDir .. sep .. 'triune_update_result.txt'
-        local vbsRoot = rootDir:gsub('\\', '/')
         local vbsResult = resultFile:gsub('\\', '/')
 
         -- Build VBScript that downloads each file individually using MSXML2 (text)
@@ -453,9 +463,10 @@ local function executeUpdate()
             .. 'fileCount = 0\r\n'
             .. '\r\n'
 
-        for _, relPath in ipairs(UPDATE_FILES) do
+        for _, item in ipairs(UPDATE_MAP) do
+            local winTarget = item.target:gsub('/', '\\')
             vbsCode = vbsCode
-                .. 'DownloadFileWithFallback "' .. rawBase .. '", "' .. relPath .. '", "' .. vbsRoot .. '"\r\n'
+                .. 'DownloadFileWithFallback "' .. rawBase .. '", "' .. item.repo .. '", "' .. winTarget .. '"\r\n'
         end
 
         vbsCode = vbsCode
@@ -464,67 +475,69 @@ local function executeUpdate()
             .. 'WScript.Quit 0\r\n'
             .. '\r\n'
             .. 'Sub EnsureDir(path)\r\n'
+            .. '    On Error Resume Next\r\n'
             .. '    If Not fso.FolderExists(path) Then\r\n'
-            .. '        Dim parts\r\n'
-            .. '        parts = Split(path, "/")\r\n'
-            .. '        Dim buildPath\r\n'
+            .. '        Dim parts, buildPath, i\r\n'
+            .. '        parts = Split(path, "\\")\r\n'
             .. '        buildPath = ""\r\n'
-            .. '        Dim i\r\n'
             .. '        For i = 0 To UBound(parts)\r\n'
             .. '            If buildPath = "" Then\r\n'
             .. '                buildPath = parts(i)\r\n'
             .. '            Else\r\n'
-            .. '                buildPath = buildPath & "/" & parts(i)\r\n'
+            .. '                buildPath = buildPath & "\\" & parts(i)\r\n'
             .. '            End If\r\n'
             .. '            If Len(buildPath) > 0 And Not fso.FolderExists(buildPath) Then\r\n'
-            .. '                fso.CreateFolder(buildPath)\r\n'
+            .. '                fso.CreateFolder buildPath\r\n'
             .. '            End If\r\n'
             .. '        Next\r\n'
             .. '    End If\r\n'
             .. 'End Sub\r\n'
             .. '\r\n'
-            .. 'Sub DownloadFileWithFallback(rawBase, relPath, rootDir)\r\n'
+            .. 'Sub SaveTextFile(diskPath, content)\r\n'
             .. '    On Error Resume Next\r\n'
-            .. '    Dim url, localPath, parentDir, gotData\r\n'
+            .. '    Dim winPath\r\n'
+            .. '    winPath = Replace(diskPath, "/", "\\")\r\n'
+            .. '    EnsureDir GetParentDir(winPath)\r\n'
+            .. '    Dim f\r\n'
+            .. '    Set f = fso.CreateTextFile(winPath, True)\r\n'
+            .. '    f.Write content\r\n'
+            .. '    f.Close\r\n'
+            .. 'End Sub\r\n'
+            .. '\r\n'
+            .. 'Sub DownloadFileWithFallback(rawBase, repoPath, destFile)\r\n'
+            .. '    On Error Resume Next\r\n'
+            .. '    Dim url, gotData, textData, tParam\r\n'
+            .. '    tParam = "?t=" & Fix(Timer())\r\n'
             .. '    gotData = False\r\n'
             .. '\r\n'
             .. '    \' Primary URL attempt\r\n'
-            .. '    url = rawBase & "/" & relPath\r\n'
+            .. '    url = rawBase & "/" & repoPath & tParam\r\n'
             .. '    http.Open "GET", url, False\r\n'
             .. '    http.setRequestHeader "User-Agent", "TriuneUpdater"\r\n'
+            .. '    http.setRequestHeader "Cache-Control", "no-cache"\r\n'
+            .. '    http.setRequestHeader "Pragma", "no-cache"\r\n'
             .. '    http.Send\r\n'
             .. '\r\n'
             .. '    If Err.Number = 0 And http.Status = 200 Then\r\n'
             .. '        gotData = True\r\n'
-            .. '    ElseIf Left(relPath, 10) = "mq2triune/" Then\r\n'
+            .. '        textData = http.responseText\r\n'
+            .. '    ElseIf Left(repoPath, 10) = "mq2triune/" Then\r\n'
             .. '        \' Fallback for legacy release tags without mq2triune/ prefix\r\n'
             .. '        Err.Clear\r\n'
-            .. '        url = rawBase & "/" & Mid(relPath, 11)\r\n'
+            .. '        url = rawBase & "/" & Mid(repoPath, 11) & tParam\r\n'
             .. '        http.Open "GET", url, False\r\n'
             .. '        http.setRequestHeader "User-Agent", "TriuneUpdater"\r\n'
+            .. '        http.setRequestHeader "Cache-Control", "no-cache"\r\n'
+            .. '        http.setRequestHeader "Pragma", "no-cache"\r\n'
             .. '        http.Send\r\n'
-            .. '        If Err.Number = 0 And http.Status = 200 Then gotData = True\r\n'
+            .. '        If Err.Number = 0 And http.Status = 200 Then\r\n'
+            .. '            gotData = True\r\n'
+            .. '            textData = http.responseText\r\n'
+            .. '        End If\r\n'
             .. '    End If\r\n'
             .. '\r\n'
             .. '    If gotData Then\r\n'
-            .. '        localPath = rootDir & "/" & relPath\r\n'
-            .. '        parentDir = GetParentDir(localPath)\r\n'
-            .. '        EnsureDir parentDir\r\n'
-            .. '        Dim f\r\n'
-            .. '        Set f = fso.CreateTextFile(localPath, True)\r\n'
-            .. '        f.Write http.responseText\r\n'
-            .. '        f.Close\r\n'
-            .. '\r\n'
-            .. '        \' Also update legacy path if present on user disk\r\n'
-            .. '        If Left(relPath, 10) = "mq2triune/" Then\r\n'
-            .. '            Dim altPath\r\n'
-            .. '            altPath = rootDir & "/" & Mid(relPath, 11)\r\n'
-            .. '            If fso.FileExists(altPath) Then\r\n'
-            .. '                Set f = fso.CreateTextFile(altPath, True)\r\n'
-            .. '                f.Write http.responseText\r\n'
-            .. '                f.Close\r\n'
-            .. '            End If\r\n'
-            .. '        End If\r\n'
+            .. '        SaveTextFile destFile, textData\r\n'
             .. '        fileCount = fileCount + 1\r\n'
             .. '    End If\r\n'
             .. '    Err.Clear\r\n'
@@ -532,7 +545,7 @@ local function executeUpdate()
             .. '\r\n'
             .. 'Function GetParentDir(path)\r\n'
             .. '    Dim lastSlash\r\n'
-            .. '    lastSlash = InStrRev(path, "/")\r\n'
+            .. '    lastSlash = InStrRev(path, "\\")\r\n'
             .. '    If lastSlash > 0 Then\r\n'
             .. '        GetParentDir = Left(path, lastSlash - 1)\r\n'
             .. '    Else\r\n'
@@ -542,7 +555,7 @@ local function executeUpdate()
             .. '\r\n'
             .. 'Sub WriteResult(msg)\r\n'
             .. '    Dim rf\r\n'
-            .. '    Set rf = fso.CreateTextFile("' .. vbsResult .. '", True)\r\n'
+            .. '    Set rf = fso.CreateTextFile(Replace("' .. vbsResult .. '", "/", "\\"), True)\r\n'
             .. '    rf.Write msg\r\n'
             .. '    rf.Close\r\n'
             .. 'End Sub\r\n'
@@ -567,8 +580,12 @@ local function executeUpdate()
                 pcall(os.remove, resultFile)
                 diag('VBScript update result: ' .. tostring(result))
 
-                if result and result:find('completed successfully') then
+                local updatedCount = result and result:match('Files updated:%s*(%d+)')
+                if result and result:find('completed successfully') and tonumber(updatedCount or 0) > 0 then
                     updateSuccess = true
+                    diag('VBScript update succeeded with ' .. tostring(updatedCount) .. ' files updated.')
+                else
+                    diag('VBScript update failed or 0 files updated. Result: ' .. tostring(result))
                 end
             end
         end
@@ -596,9 +613,42 @@ local function executeUpdate()
     if updateSuccess then
         checkStatus = 'up_to_date'
         installedVersion = latestVersion
-        statusMessage = 'Update applied successfully! Triune engine reloaded.'
-        print('\ag[TriuneUpdater]\ax \agUpdate applied successfully!\ax Restarting Triune engine...')
-        mq.cmd('/lua restart triune')
+        statusMessage = 'Update applied successfully! All active Triune scripts reloaded.'
+        print('\ag[TriuneUpdater]\ax \agUpdate applied successfully!\ax Reloading active Triune scripts from disk...')
+
+        local TRIUNE_SCRIPTS = { 'triune', 'triune_spellbook', 'triune_cursor', 'triune_buffbot', 'triune_dps' }
+        local toRestart = {}
+
+        for _, s in ipairs(TRIUNE_SCRIPTS) do
+            local isRunningScript = false
+            local ok, status = pcall(function() return mq.TLO.Lua.Script(s).Status() end)
+            if ok and status and tostring(status):lower() == 'running' then
+                isRunningScript = true
+            else
+                local okPid, pid = pcall(function() return mq.TLO.Lua.Script(s).PID() end)
+                if okPid and pid and tonumber(pid or 0) > 0 then
+                    isRunningScript = true
+                end
+            end
+
+            if isRunningScript then
+                table.insert(toRestart, s)
+                diag('Stopping running script: ' .. s)
+                mq.cmdf('/lua stop %s', s)
+            end
+        end
+
+        if #toRestart == 0 then
+            table.insert(toRestart, 'triune')
+            mq.cmd('/lua stop triune')
+        end
+
+        mq.delay(400)
+
+        for _, s in ipairs(toRestart) do
+            diag('Restarting updated script: ' .. s)
+            mq.cmdf('/lua run %s', s)
+        end
     else
         checkStatus = 'error'
         statusMessage = 'Update failed. Check triune_update.log in config folder.'
