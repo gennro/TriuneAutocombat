@@ -2,7 +2,11 @@
 
 ## 2026-08-09
 
-- **Bumped version to v1.4.**
+- **Fixed character class detection and manual class selection dropdowns in `triune.lua` and `triune_spellbook.lua`.**
+  - Removed `classesFromTitle` completely from both scripts so title bar text (e.g. MacroQuest window title containing "Bard") is never used for class detection.
+  - Enforced Inventory Window as the sole source of live auto-detection: checks `IW_ClassAbbr` (`Text="SHD\nMAG\nBST"`), `IW_Class` (`Text="DreadLord\nArchConvoker\nFeralLord"`), `IW_ClassList`, and full `FirstChild`/`Next` tree traversal, falling back only to `Me.Class.ShortName()` for single-class characters.
+  - Refactored `UI.drawClassPicker()` in `triune.lua` with a `CLASS_PICKER_OPTIONS` array containing `'-- None --'` and all 16 class abbreviations. Allows full manual dropdown selection for any slot at any time, saving choices immediately to `triune_loadout.lua`.
+  - Removed the `classPlausible` discard loop from `onCharacterChanged()` that was wiping saved non-primary/melee class slots.
 - Fixed spell gem dropdown spell filtering and "Scribed Only" checkbox toggle reactivity in `triune.lua`.
   - Removed the `isMyClass` gate from `filteredSpells()` that was preventing the Scribed Only filter from ever applying. The old logic only checked `isScribed()` when the dropdown's class matched `Me.Class.ShortName()`, but the class comparison was always failing (different string formats between MQ TLO return and Triune abbreviations), making the checkbox a complete no-op. Now `isScribed()` is called directly when `scribed_only` is on, for every class — `Me.Book()` naturally returns false for classes the character hasn't scribed.
   - Added `toCanonicalClassAbbr(str)` helper and expanded `MQSHORT` table to map 3-letter MQ ShortName codes (`SHD`, `CLR`, `MAG`, `ENC`, etc.) to Triune class abbreviations.

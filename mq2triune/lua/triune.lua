@@ -515,31 +515,80 @@ local function hasDisc(discName)
     return isDiscKnown(discName)
 end
 
-local function classesFromTitle(loud)
-    local ok, title = pcall(function() return mq.TLO.MacroQuest.Title() end) ---@diagnostic disable-line: undefined-field
-    if not ok or type(title) ~= 'string' or title == '' then return nil end
-    local found = {}
-    for word in title:gmatch('%a+') do
-        local up = word:upper()
-        if MQSHORT[up] then
-            local abbr = MQSHORT[up]
-            local duplicate = false
-            for _, existing in ipairs(found) do
-                if existing == abbr then
-                    duplicate = true; break
+local function parseClassLine(text)
+    if not text or type(text) ~= 'string' or text == '' or text == 'NULL' then return nil end
+    local cleaned = text:gsub('^%s*%d+[%s%.:]*', ''):gsub('^%s+', '')
+    if cleaned == '' then return nil end
+
+    local up = cleaned:upper()
+    if up:find('^LEVEL') or up:find('^LVL') then return nil end
+
+    local code3 = up:sub(1, 3)
+    if MQSHORT[code3] then return MQSHORT[code3] end
+
+    local code2 = up:sub(1, 2)
+    if MQSHORT[code2] then return MQSHORT[code2] end
+
+    for word in cleaned:gmatch('%a+') do
+        local wup = word:upper()
+        if MQSHORT[wup] then return MQSHORT[wup] end
+    end
+
+    return nil
+end
+
+local function scanOneNode(node, found)
+    if not node or not node() then return end
+    pcall(function()
+        local items = node.Items()
+        if items and items > 0 then
+            for i = 1, items do
+                local ok, text = pcall(function() return node.List(i)() end)
+                if ok and text and text ~= '' and text ~= 'NULL' then
+                    local norm = parseClassLine(text)
+                    if norm then
+                        local dup = false
+                        for _, existing in ipairs(found) do
+                            if existing == norm then dup = true; break end
+                        end
+                        if not dup then found[#found + 1] = norm end
+                    end
                 end
             end
-            if not duplicate then found[#found + 1] = abbr end
         end
-    end
-    if #found > 0 then
-        if loud then
-            print(string.format('\127[33m[Triune]\127[r Detected %d class(es) from MacroQuest Title: %s', #found,
-                table.concat(found, ', ')))
+    end)
+    pcall(function()
+        local text = node.Text()
+        if text and text ~= '' and text ~= 'NULL' then
+            for line in text:gmatch('[^\r\n]+') do
+                local norm = parseClassLine(line)
+                if norm then
+                    local dup = false
+                    for _, existing in ipairs(found) do
+                        if existing == norm then dup = true; break end
+                    end
+                    if not dup then found[#found + 1] = norm end
+                end
+            end
         end
-        return found
+    end)
+end
+
+local function walkChildTree(parentNode, found, depth)
+    if not parentNode or not parentNode() then return end
+    depth = depth or 0
+    if depth > 15 then return end
+    local okChild, child = pcall(function() return parentNode.FirstChild end)
+    if not okChild or not child or not child() then return end
+    local visited = 0
+    while child and child() and visited < 200 do
+        visited = visited + 1
+        scanOneNode(child, found)
+        walkChildTree(child, found, depth + 1)
+        local okNext, nxt = pcall(function() return child.Next end)
+        if not okNext or not nxt or not nxt() then break end
+        child = nxt
     end
-    return nil
 end
 
 local function classesFromInventoryWindow(loud, force)
@@ -548,24 +597,105 @@ local function classesFromInventoryWindow(loud, force)
 
     if not wasOpen and force then
         mq.cmd('/windowstate InventoryWindow open')
-        mq.delay(200)
+        mq.delay(250)
     end
 
     local found = {}
+
+    -- 1. Check IW_ClassAbbr ("SHD\nMAG\nBST")
     pcall(function()
-        for i = 1, 3 do
-            local text = mq.TLO.Window('InventoryWindow').Child('IW_ClassList').List(i)()
-            if text and text ~= '' then
-                local firstWord = text:match('^(%a+)')
-                if firstWord then
-                    local up = firstWord:upper()
-                    if MQSHORT[up] then
-                        found[#found + 1] = MQSHORT[up]
+        local invWin = mq.TLO.Window('InventoryWindow')
+        if not invWin or not invWin() then return end
+        local abbrChild = invWin.Child('IW_ClassAbbr')
+        if abbrChild and abbrChild() then
+            local text = abbrChild.Text()
+            if text and text ~= '' and text ~= 'NULL' then
+                for line in text:gmatch('[^\r\n]+') do
+                    local norm = parseClassLine(line)
+                    if norm then
+                        local dup = false
+                        for _, existing in ipairs(found) do
+                            if existing == norm then dup = true; break end
+                        end
+                        if not dup then found[#found + 1] = norm end
                     end
                 end
             end
         end
     end)
+
+    -- 2. Check IW_Class ("DreadLord\nArchConvoker\nFeralLord")
+    if #found == 0 then
+        pcall(function()
+            local invWin = mq.TLO.Window('InventoryWindow')
+            if not invWin or not invWin() then return end
+            local clsChild = invWin.Child('IW_Class')
+            if clsChild and clsChild() then
+                local text = clsChild.Text()
+                if text and text ~= '' and text ~= 'NULL' then
+                    for line in text:gmatch('[^\r\n]+') do
+                        local norm = parseClassLine(line)
+                        if norm then
+                            local dup = false
+                            for _, existing in ipairs(found) do
+                                if existing == norm then dup = true; break end
+                            end
+                            if not dup then found[#found + 1] = norm end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 3. Check IW_ClassList
+    if #found == 0 then
+        pcall(function()
+            local invWin = mq.TLO.Window('InventoryWindow')
+            if not invWin or not invWin() then return end
+            local listChild = invWin.Child('IW_ClassList')
+            if listChild and listChild() then
+                for i = 1, 10 do
+                    local ok, text = pcall(function() return listChild.List(i)() end)
+                    if ok and text and text ~= '' and text ~= 'NULL' then
+                        local norm = parseClassLine(text)
+                        if norm then
+                            local dup = false
+                            for _, existing in ipairs(found) do
+                                if existing == norm then dup = true; break end
+                            end
+                            if not dup then found[#found + 1] = norm end
+                        end
+                    end
+                end
+                if #found == 0 then
+                    local okText, rawText = pcall(function() return listChild.Text() end)
+                    if okText and rawText and rawText ~= '' and rawText ~= 'NULL' then
+                        for line in rawText:gmatch('[^\r\n]+') do
+                            local norm = parseClassLine(line)
+                            if norm then
+                                local dup = false
+                                for _, existing in ipairs(found) do
+                                    if existing == norm then dup = true; break end
+                                end
+                                if not dup then found[#found + 1] = norm end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 4. Tree Walk fallback
+    if #found == 0 then
+        pcall(function()
+            local invWin = mq.TLO.Window('InventoryWindow')
+            if invWin and invWin() then
+                walkChildTree(invWin, found, 0)
+            end
+        end)
+    end
 
     if not wasOpen and force then
         mq.cmd('/windowstate InventoryWindow close')
@@ -578,22 +708,26 @@ local function classesFromInventoryWindow(loud, force)
         end
         return found
     end
+
+    if loud then
+        print('\127[31m[Triune]\127[r InventoryWindow returned no classes.')
+    end
     return nil
 end
 
 local function detectClasses(loud)
-    local found = classesFromTitle(loud)
-    if found and #found > 0 then return found end
-
-    found = classesFromInventoryWindow(loud, false)
+    local found = classesFromInventoryWindow(loud, true)
     if found and #found > 0 then return found end
 
     local ok, mainClass = pcall(function() return mq.TLO.Me.Class.ShortName() end)
     if ok and mainClass and mainClass ~= '' and mainClass ~= 'NULL' then
-        if loud then
-            print(string.format('\127[33m[Triune]\127[r Single-class character detected (%s).', mainClass))
+        local norm = toCanonicalClassAbbr(mainClass)
+        if norm then
+            if loud then
+                print(string.format('\127[33m[Triune]\127[r Single-class character fallback (%s).', norm))
+            end
+            return { norm }
         end
-        return { mainClass }
     end
 
     return nil
@@ -1412,35 +1546,13 @@ local function onCharacterChanged()
     if ALLDATA[myName] then
         applyEntry(ALLDATA[myName])
         scanKnownDiscs()
-        local ok, prim = pcall(function() return mq.TLO.Me.Class.ShortName() end)
-        local primAbbr = (ok and prim) and MQSHORT[tostring(prim):upper()] or nil
-        -- Self-heal: discard any saved class slot that isn't the game-reported
-        -- primary AND has zero supporting evidence -- catches the old bad
-        -- fallback ('Rng'/'Brd') left over in a save from before this fix,
-        -- without needing the user to remember to click Re-detect. Gated on
-        -- DATA_OK -- classPlausible() reads DATA.spells/discs/aas, which are
-        -- empty tables if triune_data.lua failed to load, so it would return
-        -- false for EVERY class with no data present and this loop would
-        -- wipe every non-primary class slot for the wrong reason (missing
-        -- data, not an actually-bad save) and blame it on a stale save.
-        if DATA_OK then
-            for i = 1, 3 do
-                if myClasses[i] and myClasses[i] ~= primAbbr and not classPlausible(myClasses[i]) then
-                    print('\ay[Triune]\ax discarding saved class "' ..
-                        myClasses[i] ..
-                        '" -- no evidence found for it (likely a stale/incorrect save). Set it manually in Character Classes if it does not get redetected on its own.')
-                    myClasses[i] = nil
-                end
-            end
-        end
     else
-        local detected = detectClasses()
+        local detected = detectClasses(true)
         if detected then myClasses = detected end
         importCurrentGems() -- new character: seed the loadout from the current bar
     end
-    -- Fallback to live inventory read only if no classes were loaded or detected
     if not myClasses or #myClasses == 0 then
-        local liveClasses = classesFromInventoryWindow(false, true)
+        local liveClasses = detectClasses(false)
         if liveClasses then myClasses = liveClasses end
     end
     ctrl.running = false -- never auto-start on load
@@ -1648,21 +1760,31 @@ function UI.drawHeaderBar()
     ImGui.Separator()
 end
 
+local CLASS_PICKER_OPTIONS = { '-- None --', 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm', 'Nec', 'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
+
 function UI.drawClassPicker()
     if ImGui.CollapsingHeader('Character Classes & Loadout') then
-        ImGui.TextDisabled('Auto-detected on login; adjust if needed (saved per character):')
+        ImGui.TextDisabled('Auto-detected from Inventory Window on login; adjust manually if needed:')
         for i = 1, 3 do
-            ImGui.SetNextItemWidth(90)
-            local defaultClass = myClasses[1] or 'War'
+            ImGui.SetNextItemWidth(95)
             local currentVal = myClasses[i]
-            local idx = currentVal and idxOf(ALL_ABBR, currentVal) or (i == 1 and idxOf(ALL_ABBR, defaultClass) or nil)
-            if idx then
-                local newIdx = ImGui.Combo('##cls' .. i, idx, ALL_ABBR)
-                myClasses[i] = ALL_ABBR[newIdx]
-            else
-                -- If slot i is unassigned (e.g. single-class or 2-class toon), show empty/selectable combo without defaulting to War/Rng/Brd
-                local newIdx = ImGui.Combo('##cls' .. i, 1, ALL_ABBR)
-                if currentVal then myClasses[i] = ALL_ABBR[newIdx] end
+            local currentIdx = 1
+            if currentVal then
+                for idx, opt in ipairs(CLASS_PICKER_OPTIONS) do
+                    if opt == currentVal then
+                        currentIdx = idx
+                        break
+                    end
+                end
+            end
+            local newIdx = ImGui.Combo('##cls' .. i, currentIdx, CLASS_PICKER_OPTIONS)
+            if newIdx ~= currentIdx then
+                if newIdx == 1 then
+                    myClasses[i] = nil
+                else
+                    myClasses[i] = CLASS_PICKER_OPTIONS[newIdx]
+                end
+                saveLoadout()
             end
             ImGui.SameLine()
         end
@@ -1670,8 +1792,7 @@ function UI.drawClassPicker()
         ImGui.Dummy(0, 4)
         if ImGui.Button('Save Loadout', 140, 24) then saveLoadout() end
         ImGui.SameLine(); ImGui.TextDisabled('-> triune_loadout.lua (auto-saves on changes)')
-        accent(MUTED,
-            'Detected from your scribed spells, trained discs, AND AAs. Run the full extractor (all 16 classes) so every class -- including melee -- can be matched.')
+        accent(MUTED, 'Detected from your in-game Inventory Window.')
         ImGui.Dummy(0, 2)
     end
 end

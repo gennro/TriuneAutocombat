@@ -909,6 +909,82 @@ local MQSHORT = {
     BERSERKER = 'Ber'
 }
 
+local function parseClassLine(text)
+    if not text or type(text) ~= 'string' or text == '' or text == 'NULL' then return nil end
+    local cleaned = text:gsub('^%s*%d+[%s%.:]*', ''):gsub('^%s+', '')
+    if cleaned == '' then return nil end
+
+    local up = cleaned:upper()
+    if up:find('^LEVEL') or up:find('^LVL') then return nil end
+
+    local code3 = up:sub(1, 3)
+    if MQSHORT[code3] then return MQSHORT[code3] end
+
+    local code2 = up:sub(1, 2)
+    if MQSHORT[code2] then return MQSHORT[code2] end
+
+    for word in cleaned:gmatch('%a+') do
+        local wup = word:upper()
+        if MQSHORT[wup] then return MQSHORT[wup] end
+    end
+
+    return nil
+end
+
+local function scanOneNode(node, found)
+    if not node or not node() then return end
+    pcall(function()
+        local items = node.Items()
+        if items and items > 0 then
+            for i = 1, items do
+                local ok, text = pcall(function() return node.List(i)() end)
+                if ok and text and text ~= '' and text ~= 'NULL' then
+                    local norm = parseClassLine(text)
+                    if norm then
+                        local dup = false
+                        for _, existing in ipairs(found) do
+                            if existing == norm then dup = true; break end
+                        end
+                        if not dup then found[#found + 1] = norm end
+                    end
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local text = node.Text()
+        if text and text ~= '' and text ~= 'NULL' then
+            for line in text:gmatch('[^\r\n]+') do
+                local norm = parseClassLine(line)
+                if norm then
+                    local dup = false
+                    for _, existing in ipairs(found) do
+                        if existing == norm then dup = true; break end
+                    end
+                    if not dup then found[#found + 1] = norm end
+                end
+            end
+        end
+    end)
+end
+
+local function walkChildTree(parentNode, found, depth)
+    if not parentNode or not parentNode() then return end
+    depth = depth or 0
+    if depth > 15 then return end
+    local okChild, child = pcall(function() return parentNode.FirstChild end)
+    if not okChild or not child or not child() then return end
+    local visited = 0
+    while child and child() and visited < 200 do
+        visited = visited + 1
+        scanOneNode(child, found)
+        walkChildTree(child, found, depth + 1)
+        local okNext, nxt = pcall(function() return child.Next end)
+        if not okNext or not nxt or not nxt() then break end
+        child = nxt
+    end
+end
+
 local function detectClasses()
     -- 1. Try saved classes from mq.configDir/triune_loadout.lua
     local myName = nil
@@ -927,45 +1003,79 @@ local function detectClasses()
         end
     end
 
-    -- 2. Try MacroQuest Window Title
-    local okTitle, title = pcall(function() return mq.TLO.MacroQuest.Title() end) ---@diagnostic disable-line: undefined-field
-    if okTitle and type(title) == 'string' and title ~= '' then
-        local found = {}
-        for word in title:gmatch('%a+') do
-            local up = word:upper()
-            if MQSHORT[up] then
-                local abbr = MQSHORT[up]
-                local duplicate = false
-                for _, existing in ipairs(found) do
-                    if existing == abbr then
-                        duplicate = true; break
-                    end
-                end
-                if not duplicate then found[#found + 1] = abbr end
-            end
-        end
-        if #found > 0 then return found end
+    -- 2. Live InventoryWindow scan
+    local wasOpen = false
+    pcall(function() wasOpen = mq.TLO.Window('InventoryWindow').Open() end)
+    if not wasOpen then
+        mq.cmd('/windowstate InventoryWindow open')
+        mq.delay(250)
     end
 
-    -- 3. Try InventoryWindow IW_ClassList
     local foundInv = {}
+
+    -- Check IW_ClassAbbr ("SHD\nMAG\nBST")
     pcall(function()
-        for i = 1, 3 do
-            local text = mq.TLO.Window('InventoryWindow').Child('IW_ClassList').List(i)()
-            if text and text ~= '' then
-                local firstWord = text:match('^(%a+)')
-                if firstWord then
-                    local up = firstWord:upper()
-                    if MQSHORT[up] then
-                        foundInv[#foundInv + 1] = MQSHORT[up]
+        local invWin = mq.TLO.Window('InventoryWindow')
+        if not invWin or not invWin() then return end
+        local abbrChild = invWin.Child('IW_ClassAbbr')
+        if abbrChild and abbrChild() then
+            local text = abbrChild.Text()
+            if text and text ~= '' and text ~= 'NULL' then
+                for line in text:gmatch('[^\r\n]+') do
+                    local norm = parseClassLine(line)
+                    if norm then
+                        local dup = false
+                        for _, existing in ipairs(foundInv) do
+                            if existing == norm then dup = true; break end
+                        end
+                        if not dup then foundInv[#foundInv + 1] = norm end
                     end
                 end
             end
         end
     end)
+
+    -- Check IW_Class ("DreadLord\nArchConvoker\nFeralLord")
+    if #foundInv == 0 then
+        pcall(function()
+            local invWin = mq.TLO.Window('InventoryWindow')
+            if not invWin or not invWin() then return end
+            local clsChild = invWin.Child('IW_Class')
+            if clsChild and clsChild() then
+                local text = clsChild.Text()
+                if text and text ~= '' and text ~= 'NULL' then
+                    for line in text:gmatch('[^\r\n]+') do
+                        local norm = parseClassLine(line)
+                        if norm then
+                            local dup = false
+                            for _, existing in ipairs(foundInv) do
+                                if existing == norm then dup = true; break end
+                            end
+                            if not dup then foundInv[#foundInv + 1] = norm end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- Tree walk fallback
+    if #foundInv == 0 then
+        pcall(function()
+            local invWin = mq.TLO.Window('InventoryWindow')
+            if invWin and invWin() then
+                walkChildTree(invWin, foundInv, 0)
+            end
+        end)
+    end
+
+    if not wasOpen then
+        mq.cmd('/windowstate InventoryWindow close')
+    end
+
     if #foundInv > 0 then return foundInv end
 
-    -- 4. Fallback to single primary class
+    -- 3. Fallback to single primary class
     local ok, mainClass = pcall(function() return mq.TLO.Me.Class.ShortName() end)
     if ok and mainClass and mainClass ~= '' and mainClass ~= 'NULL' then
         return { mainClass }
