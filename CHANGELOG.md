@@ -2,7 +2,7 @@
 
 ## 2026-08-09
 
-- **Bumped version to v1.4.1.**
+- **Bumped version to v1.4.2.**
 - **Fixed character class detection and manual class selection dropdowns in `triune.lua` and `triune_spellbook.lua`.**
   - Removed `classesFromTitle` completely from both scripts so title bar text (e.g. MacroQuest window title containing "Bard") is never used for class detection.
   - Enforced Inventory Window as the sole source of live auto-detection: checks `IW_ClassAbbr` (`Text="SHD\nMAG\nBST"`), `IW_Class` (`Text="DreadLord\nArchConvoker\nFeralLord"`), `IW_ClassList`, and full `FirstChild`/`Next` tree traversal, falling back only to `Me.Class.ShortName()` for single-class characters.
