@@ -1,6 +1,6 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- Triune Cursor Manager v1.4
+-- Triune Cursor Manager v1.4.1
 -- Standalone ImGui window for inspecting, auto-inventorying, and destroying
 -- items currently held on the character's cursor with live session logging.
 -- Action handlers are queued and executed on the yieldable main thread to prevent
