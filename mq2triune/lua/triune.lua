@@ -287,23 +287,31 @@ local WHENS = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff
 -- Local Theme & Common Helpers (Self-Contained Module)
 -- ============================================================================
 local MQSHORT = {
-    WARRIOR = 'War',
-    CLERIC = 'Clr',
-    PALADIN = 'Pal',
-    RANGER = 'Rng',
-    SHADOWKNIGHT = 'SK',
-    DRUID = 'Dru',
-    MONK = 'Mnk',
-    BARD = 'Brd',
-    ROGUE = 'Rog',
-    SHAMAN = 'Shm',
-    NECROMANCER = 'Nec',
-    WIZARD = 'Wiz',
-    MAGICIAN = 'Mag',
-    ENCHANTER = 'Enc',
-    BEASTLORD = 'Bst',
-    BERSERKER = 'Ber'
+    WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
+    CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
+    PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
+    RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
+    SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
+    DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
+    MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
+    BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
+    ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
+    SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
+    NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
+    WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
+    MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
+    ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
+    BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
+    BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber'
 }
+
+local function toCanonicalClassAbbr(str)
+    if not str then return nil end
+    local s = tostring(str)
+    if s == '' or s == 'nil' or s == 'NULL' then return nil end
+    local up = s:upper():gsub('%s+', '')
+    return MQSHORT[up] or (ALL_ABBR and idxOf(ALL_ABBR, s) > 0 and s) or nil
+end
 
 local SLOT_COLORS = {
     { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
@@ -378,25 +386,35 @@ local function getScribedSpellSet()
 
     local set = {}
     pcall(function()
-        local count = mq.TLO.Me.BookCount() or 720 ---@diagnostic disable-line: undefined-field
-        for slot = 1, count do
-            local bName = nil
-            pcall(function() bName = mq.TLO.Me.Book(slot).Name() end)
-            if not bName or bName == "" or bName == "NULL" then
-                pcall(function()
-                    local res = mq.TLO.Me.Book(slot)()
-                    if type(res) == "string" and res ~= "" and res ~= "NULL" then bName = res end
-                end)
+        local count = 720
+        pcall(function()
+            local c = mq.TLO.Me.BookCount()
+            if c and tonumber(tostring(c)) and tonumber(tostring(c)) > 0 then
+                count = tonumber(tostring(c))
             end
+        end)
 
-            if bName and bName ~= "" and bName ~= "NULL" then
-                set[bName] = true
-                set[bName:lower()] = true
-                local cleaned = cleanSpellName(bName):lower()
-                set[cleaned] = true
-                local norm = normalizeSpellName(bName)
-                if norm ~= "" then set[norm] = true end
-            end
+        for slot = 1, count do
+            pcall(function()
+                local spellObj = mq.TLO.Me.Book(slot)
+                if spellObj then
+                    local id = spellObj.ID()
+                    if id and tonumber(tostring(id)) and tonumber(tostring(id)) > 0 then
+                        local rawName = spellObj.Name() or spellObj()
+                        if rawName then
+                            local bName = tostring(rawName)
+                            if bName ~= "" and bName ~= "NULL" and bName ~= "nil" then
+                                set[bName] = true
+                                set[bName:lower()] = true
+                                local cleaned = cleanSpellName(bName):lower()
+                                if cleaned ~= "" then set[cleaned] = true end
+                                local norm = normalizeSpellName(bName)
+                                if norm ~= "" then set[norm] = true end
+                            end
+                        end
+                    end
+                end
+            end)
         end
     end)
 
@@ -407,32 +425,46 @@ end
 
 local function isScribed(nm)
     if not nm or nm == "" then return false end
+    local strNm = tostring(nm)
+    if strNm == "" or strNm == "NULL" or strNm == "nil" then return false end
 
     -- 1. Check cached spellbook map (fastest & handles unindexed TLO names)
     local sbSet = getScribedSpellSet()
-    if sbSet[nm] or sbSet[nm:lower()] then return true end
+    if sbSet[strNm] or sbSet[strNm:lower()] then return true end
 
-    local cleaned = cleanSpellName(nm):lower()
+    local cleaned = cleanSpellName(strNm):lower()
     if cleaned ~= "" and sbSet[cleaned] then return true end
 
-    local norm = normalizeSpellName(nm)
+    local norm = normalizeSpellName(strNm)
     if norm ~= "" and sbSet[norm] then return true end
 
-    -- 2. Direct TLO Book query fallback (Me.Book(name) returns slot index integer > 0 if scribed)
-    local ok, res = pcall(function() return mq.TLO.Me.Book(nm)() end)
-    if ok and type(res) == 'number' and res > 0 then return true end
+    -- 2. Direct TLO Book query fallback
+    local ok, res = pcall(function() return mq.TLO.Me.Book(strNm)() end)
+    if ok and res ~= nil then
+        local num = tonumber(tostring(res))
+        if num and num > 0 then return true end
+    end
 
     if cleaned ~= "" then
         local okC, resC = pcall(function() return mq.TLO.Me.Book(cleaned)() end)
-        if okC and type(resC) == 'number' and resC > 0 then return true end
+        if okC and resC ~= nil then
+            local numC = tonumber(tostring(resC))
+            if numC and numC > 0 then return true end
+        end
     end
 
     -- 3. RankName lookup via TLO Spell
-    local okR, rName = pcall(function() return mq.TLO.Spell(nm).RankName() end)
-    if okR and type(rName) == 'string' and rName ~= "" and rName ~= nm then
-        if sbSet[rName] or sbSet[rName:lower()] then return true end
-        local okRB, resRB = pcall(function() return mq.TLO.Me.Book(rName)() end)
-        if okRB and type(resRB) == 'number' and resRB > 0 then return true end
+    local okR, rNameObj = pcall(function() return mq.TLO.Spell(strNm).RankName() end)
+    if okR and rNameObj ~= nil then
+        local rName = tostring(rNameObj)
+        if rName ~= "" and rName ~= "NULL" and rName ~= "nil" and rName ~= strNm then
+            if sbSet[rName] or sbSet[rName:lower()] then return true end
+            local okRB, resRB = pcall(function() return mq.TLO.Me.Book(rName)() end)
+            if okRB and resRB ~= nil then
+                local numRB = tonumber(tostring(resRB))
+                if numRB and numRB > 0 then return true end
+            end
+        end
     end
 
     return false
@@ -814,8 +846,10 @@ end
 local PURE_MELEE_CLASSES = { War = true, WAR = true, Mnk = true, MNK = true, Rog = true, ROG = true, Ber = true, BER = true }
 
 local filteredSpellsCache = {}
-local lastFilteredCacheTime = 0
-local lastFilterState = {}
+
+local function clearFilteredSpellsCache()
+    filteredSpellsCache = {}
+end
 
 local function isDisciplineSpell(abbr, spellName)
     if not abbr or not spellName or spellName == "" then return false end
@@ -1022,24 +1056,21 @@ local function filteredSpells(abbr)
     end
     local now = os.clock()
     local scribedOnly = ctrl and ctrl.scribed_only or false
-    local myClassAbbr = nil
-    pcall(function() myClassAbbr = mq.TLO.Me.Class.ShortName() end)
-    local isMyClass = myClassAbbr and (abbr:upper() == myClassAbbr:upper())
 
-    if filteredSpellsCache[abbr] and (now - lastFilteredCacheTime) < 2.0
-        and lastFilterState.lvlMin == lvlMin
-        and lastFilterState.lvlMax == lvlMax
-        and lastFilterState.scribedOnly == scribedOnly then
-        return filteredSpellsCache[abbr].names, filteredSpellsCache[abbr].lookup
+    local cached = filteredSpellsCache[abbr]
+    if cached and (now - cached.time) < 2.0
+        and cached.lvlMin == lvlMin
+        and cached.lvlMax == lvlMax
+        and cached.scribedOnly == scribedOnly then
+        return cached.names, cached.lookup
     end
 
     local names, lookup = {}, {}
     local src = lookupSpells(abbr)
     for _, row in ipairs(src) do
         local nm, lv, bene, dbKind = row[1], row[2], row[3], row[4]
-        local checkScribed = scribedOnly and isMyClass
         if not isDisciplineSpell(abbr, nm) then
-            if lv >= lvlMin and lv <= lvlMax and (not checkScribed or isScribed(nm)) then
+            if lv >= lvlMin and lv <= lvlMax and (not scribedOnly or isScribed(nm)) then
                 local kind = mapTLOCategoryToKind(nil, nm)
                 if not kind or kind == 'other' then kind = dbKind or 'other' end
                 local label       = KIND_LABEL[kind]
@@ -1050,9 +1081,14 @@ local function filteredSpells(abbr)
         end
     end
 
-    filteredSpellsCache[abbr] = { names = names, lookup = lookup }
-    lastFilteredCacheTime = now
-    lastFilterState = { lvlMin = lvlMin, lvlMax = lvlMax, scribedOnly = scribedOnly }
+    filteredSpellsCache[abbr] = {
+        names = names,
+        lookup = lookup,
+        time = now,
+        lvlMin = lvlMin,
+        lvlMax = lvlMax,
+        scribedOnly = scribedOnly
+    }
     return names, lookup
 end
 
@@ -1227,6 +1263,7 @@ local function applyEntry(e)
     if type(e) ~= 'table' then return end
     if type(e.classes) == 'table' and #e.classes > 0 then myClasses = e.classes end
     lvlMin           = e.lvlMin or lvlMin; lvlMax = e.lvlMax or lvlMax
+    clearFilteredSpellsCache()
     loadout.gems     = e.gems or {}
     loadout.buffGems = e.buffGems or {}
     loadout.aas      = {}
@@ -1840,12 +1877,18 @@ function UI.drawGemTabHeader(gemsTable, isBuffSet)
     ImGui.Dummy(0, 4)
     ImGui.TextDisabled('Level band:')
     ImGui.SameLine(); ImGui.SetNextItemWidth(110)
-    lvlMin = ImGui.InputInt('##lmin' .. (isBuffSet and 'b' or ''), lvlMin); if lvlMin < 1 then lvlMin = 1 end
+    local newLvlMin = ImGui.InputInt('##lmin' .. (isBuffSet and 'b' or ''), lvlMin); if newLvlMin < 1 then newLvlMin = 1 end
+    if newLvlMin ~= lvlMin then lvlMin = newLvlMin; clearFilteredSpellsCache() end
     ImGui.SameLine(); ImGui.Text('to'); ImGui.SameLine(); ImGui.SetNextItemWidth(110)
-    lvlMax = ImGui.InputInt('##lmax' .. (isBuffSet and 'b' or ''), lvlMax); if lvlMax > 65 then lvlMax = 65 end
+    local newLvlMax = ImGui.InputInt('##lmax' .. (isBuffSet and 'b' or ''), lvlMax); if newLvlMax > 65 then newLvlMax = 65 end
+    if newLvlMax ~= lvlMax then lvlMax = newLvlMax; clearFilteredSpellsCache() end
     if lvlMin > lvlMax then lvlMin = lvlMax end
     ImGui.SameLine(); ImGui.TextDisabled('(spells learned in this band)')
-    ctrl.scribed_only = ImGui.Checkbox('Scribed Only', ctrl.scribed_only)
+    local newScribed = ImGui.Checkbox('Scribed Only', ctrl.scribed_only)
+    if newScribed ~= ctrl.scribed_only then
+        ctrl.scribed_only = newScribed
+        clearFilteredSpellsCache()
+    end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Only show spells actually in your spellbook, not every spell your\nclass could ever learn in this level range. Updates live the moment\nyou scribe something new. Turn off to browse/plan ahead.')

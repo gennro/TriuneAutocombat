@@ -1,5 +1,17 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-09
+
+- Fixed spell gem dropdown spell filtering and "Scribed Only" checkbox toggle reactivity in `triune.lua`.
+  - Removed the `isMyClass` gate from `filteredSpells()` that was preventing the Scribed Only filter from ever applying. The old logic only checked `isScribed()` when the dropdown's class matched `Me.Class.ShortName()`, but the class comparison was always failing (different string formats between MQ TLO return and Triune abbreviations), making the checkbox a complete no-op. Now `isScribed()` is called directly when `scribed_only` is on, for every class — `Me.Book()` naturally returns false for classes the character hasn't scribed.
+  - Added `toCanonicalClassAbbr(str)` helper and expanded `MQSHORT` table to map 3-letter MQ ShortName codes (`SHD`, `CLR`, `MAG`, `ENC`, etc.) to Triune class abbreviations.
+  - Converted MQ TLO return objects via `tostring()` across `toCanonicalClassAbbr`, `getScribedSpellSet`, and `isScribed`, preventing Lua `userdata` type check rejections.
+  - Isolated individual spellbook slot queries in `getScribedSpellSet()` with per-slot `pcall` blocks and checked `spellObj.ID() > 0`, ensuring unscribed/empty slots do not break spellbook indexing.
+  - Refactored `filteredSpellsCache` to store `lvlMin`, `lvlMax`, `scribedOnly`, and timestamp per class abbreviation, eliminating global filter state collisions across gem rows.
+  - Added `clearFilteredSpellsCache()` triggers when toggling "Scribed Only", altering level band filters, or loading saved loadouts in `UI.drawGemTabHeader` and `applyEntry`.
+
+---
+
 ## 2026-08-08
 
 - Updated `README.md` documentation to include MacroQuest (MQ2) setup instructions.
