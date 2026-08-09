@@ -8,7 +8,20 @@
   - Converted MQ TLO return objects via `tostring()` across `toCanonicalClassAbbr`, `getScribedSpellSet`, and `isScribed`, preventing Lua `userdata` type check rejections.
   - Isolated individual spellbook slot queries in `getScribedSpellSet()` with per-slot `pcall` blocks and checked `spellObj.ID() > 0`, ensuring unscribed/empty slots do not break spellbook indexing.
   - Refactored `filteredSpellsCache` to store `lvlMin`, `lvlMax`, `scribedOnly`, and timestamp per class abbreviation, eliminating global filter state collisions across gem rows.
-  - Added `clearFilteredSpellsCache()` triggers when toggling "Scribed Only", altering level band filters, or loading saved loadouts in `UI.drawGemTabHeader` and `applyEntry`.
+- Added cross-platform GitHub Release updater (`triune_updater.py`, `update.bat`, `update.sh`, and `triune_updater.lua`).
+  - Implemented `triune_updater.py` using Python 3 standard library (`urllib.request`, `zipfile`, `shutil`) for zero-dependency updates on both Windows and Linux.
+  - Added `update.bat` and `update.sh` OS shell wrappers with PowerShell (`Invoke-RestMethod` / `Expand-Archive`) and Linux `curl`/`unzip` fallback paths when Python is absent.
+  - Created standalone ImGui release updater window (`mq2triune/lua/triune_updater.lua`) with version comparison, GitHub release notes display, and in-game update execution with automatic Lua script reloading.
+  - Integrated `[Updater]` header button and `/ac update` (`/ac checkupdate`) slash command in `triune.lua`.
+  - Enforced user configuration preservation (`triune_loadout.lua`, `MacroQuest.ini`, character INIs are explicitly protected from overwrite).
+  - Added multi-stage fallback (VBScript `MSXML2.ServerXMLHTTP` -> Python CLI -> direct `curl`/`curl.exe` -> PowerShell TLS 1.2) in `triune_updater.lua` for zero-dependency HTTP downloads under native Windows, Linux, and Wine/Lutris environments.
+  - Implemented raw GitHub content individual text file downloads with HTTP 404 fallback for legacy release tag paths, ensuring seamless updates under Wine without binary `ADODB.Stream` limitations.
+  - Fixed MacroQuest script reload sequence to use `/lua stop triune` followed by `/lua run triune`.
+- Enhanced stuck recovery logic in `triune.lua` with a multi-step directional attempt sequence (`stuckState.attempts`).
+  - Attempt 1: Backs up for 1200ms and jumps to clear immediate frontal collisions.
+  - Attempt 2: If still stuck on the obstacle, backs up briefly and strafes left for 1000ms to maneuver around the left side.
+  - Attempt 3: If still stuck, backs up briefly and strafes right for 1800ms to step past the initial point to the right side.
+  - Resets attempt progression after 20 seconds of clear movement or when `fullStop()` is called.
 
 ---
 

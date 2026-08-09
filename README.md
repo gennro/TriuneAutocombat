@@ -72,6 +72,15 @@ A standalone ImGui DPS parser for tracking player and pet combat performance:
 - **Chat Reporting**: Post formatted DPS reports to `/group`, `/say`, `/guild`, or `/raid` with `/dps report`.
 - **Launch via**: `/lua run triune_dps` or slash command `/dps`.
 
+### 🔄 Release Updater (`triune_updater.py` / `triune_updater.lua`)
+
+A cross-platform updater for Windows and Linux to pull and apply GitHub release updates:
+- **Zero-Dependency Python Script (`triune_updater.py`)**: Uses Python 3 standard library (`urllib.request`, `zipfile`, `shutil`) to check releases, download zip packages, and extract updated engine files.
+- **OS Launchers (`update.bat` / `update.sh`)**: One-click scripts for Windows and Linux with PowerShell and `curl`/`unzip` fallbacks if Python is absent.
+- **In-Game ImGui Updater (`triune_updater.lua`)**: Check for updates, inspect release notes, and update/reload scripts on the fly without leaving EverQuest.
+- **Preserved User Configuration**: Engine updates never touch or overwrite `triune_loadout.lua`, character settings, or custom INI files.
+- **Launch via**: `/ac update`, `/lua run triune_updater`, `mq2triune/update.bat` (Windows), or `mq2triune/update.sh` (Linux).
+
 ### 🗺️ Navigation & Movement
 
 - NavMesh (`/nav`) with automatic fallback to `/stick` when nav is unavailable
@@ -123,6 +132,7 @@ A standalone ImGui DPS parser for tracking player and pet combat performance:
 | `/ac spellbook` | `/ac book` | Open the Spellbook browser window |
 | `/ac cursorui` | `/ac cursorwin`, `/ac cursormgr` | Open the Cursor Manager window |
 | `/ac clearcursor` | `/ac autoinv`, `/ac cursor` | Manually drain all cursor items to inventory |
+| `/ac update` | `/ac updater`, `/ac checkupdate` | Launch the Release Updater window and check for GitHub release updates |
 | `/lua run triune_buffbot` | | Launch the standalone Interactive Buffbot window |
 | `/dps` | `/triunedps`, `/ac dps`, `/lua run triune_dps` | Toggle or control the standalone DPS Parser window (`/dps compact`, `/dps report [chan]`, `/dps reset`, `/dps pause`) |
 
@@ -132,14 +142,19 @@ A standalone ImGui DPS parser for tracking player and pet combat performance:
 
 ```
 TriuneAutocombat/
-├── lua/
-│   ├── triune.lua           # Main autocombat engine & loadout UI
-│   ├── triune_spellbook.lua # Standalone spellbook browser & memorization window
-│   ├── triune_cursor.lua    # Standalone cursor item manager window
-│   ├── triune_buffbot.lua   # Standalone interactive tell buffbot window
-│   └── triune_dps.lua       # Standalone ImGui DPS parser for player & pet damage
-├── config/
-│   └── triune_data.lua      # Era-correct spell/disc/AA database (generated)
+├── mq2triune/
+│   ├── triune_updater.py    # Standalone cross-platform Python 3 updater script
+│   ├── update.bat           # Windows updater launcher (Python / PowerShell fallback)
+│   ├── update.sh            # Linux updater launcher (Python 3 / curl fallback)
+│   ├── lua/
+│   │   ├── triune.lua           # Main autocombat engine & loadout UI
+│   │   ├── triune_updater.lua   # Standalone ImGui release updater window
+│   │   ├── triune_spellbook.lua # Standalone spellbook browser & memorization window
+│   │   ├── triune_cursor.lua    # Standalone cursor item manager window
+│   │   ├── triune_buffbot.lua   # Standalone interactive tell buffbot window
+│   │   └── triune_dps.lua       # Standalone ImGui DPS parser for player & pet damage
+│   ├── config/
+│   │   └── triune_data.lua      # Era-correct spell/disc/AA database (generated)
 ├── README.md                # This file
 └── CHANGELOG.md             # Version history
 ```

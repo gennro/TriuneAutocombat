@@ -235,6 +235,7 @@ local stuckState = {
     lastX = 0,
     lastY = 0,
     counter = 0,
+    attempts = 0,
     lastDoorClickAt = 0,
     combatStallSince = nil,
     lastStuckRecoveryAt = nil,
@@ -1628,6 +1629,18 @@ function UI.drawHeaderBar()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or toggles the standalone Triune DPS Parser window.')
     end
+    ImGui.SameLine()
+    if ImGui.Button('Updater##hdrUpdate') then
+        local s = mq.TLO.Lua.Script('triune_updater')
+        if s() and s.Status() == 'RUNNING' then
+            mq.cmd('/lua stop triune_updater')
+        else
+            mq.cmd('/lua run triune_updater')
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
+    end
     if not DATA_OK then
         accent(WARN,
             'No triune_data.lua found in your MQ config folder -- run extract_spells.py and copy it there. Spell/AA lists will be empty.')
@@ -1730,6 +1743,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac cursorui',         desc = 'Toggle the standalone cursor item manager window' },
                 { cmd = '/ac clearcursor',      desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
                 { cmd = '/ac dps / /dps',       desc = 'Toggle or launch the standalone DPS Parser window' },
+                { cmd = '/ac update',           desc = 'Check for GitHub updates and launch the Triune Release Updater' },
                 { cmd = '/dps compact',         desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
                 { cmd = '/dps report [chan]',   desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
                 { cmd = '/dps reset',           desc = 'Reset active combat damage counters' },
@@ -3486,21 +3500,35 @@ local function tryOpenNearbyDoor(force)
 end
 
 local function performUnstuck()
-    stuckState.lastStuckRecoveryAt = os.clock()
+    local now = os.clock()
     if tryOpenNearbyDoor(true) then
         print('\ay[Triune]\ax stuck -- tried opening a nearby door.')
         mq.delay(600)
         stuckState.counter = 0
+        stuckState.lastStuckRecoveryAt = now
         pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil
         return
     end
+
+    -- Increment attempt sequence for recurring stuck events near the same obstacle.
+    -- If previous recovery was > 20s ago, reset attempts counter to 1.
+    if not stuckState.lastStuckRecoveryAt or (now - stuckState.lastStuckRecoveryAt) > 20 then
+        stuckState.attempts = 1
+    else
+        stuckState.attempts = (stuckState.attempts or 0) + 1
+        if stuckState.attempts > 3 then
+            stuckState.attempts = 1
+        end
+    end
+    stuckState.lastStuckRecoveryAt = now
+
     -- Report the target distance at the moment of firing -- if this still
     -- fires right next to a live mob despite the checkStuck deferral above,
     -- this number is what tells us so instead of guessing again.
     local tgt = mq.TLO.Target
     local tgtNote = (tgt() and tgt.Type() == 'NPC') and
         string.format(' (target dist %.0f, desired %.0f)', distToId(tgt.ID()), desiredRange()) or ''
-    print('\ay[Triune]\ax stuck -- backing up and pivoting.' .. tgtNote)
+
     if navLoaded() then
         local navActive = false
         pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
@@ -3511,16 +3539,38 @@ local function performUnstuck()
         pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
         if stickActive then mq.cmd('/stick off') end
     end
-    mq.cmd('/keypress back hold')
-    mq.delay(1200)
-    mq.cmd('/keypress back')
-    if math.random(2) == 1 then
-        mq.cmd('/keypress strafe_left hold'); mq.delay(400); mq.cmd('/keypress strafe_left')
-    else
-        mq.cmd('/keypress strafe_right hold'); mq.delay(400); mq.cmd('/keypress strafe_right')
+
+    if stuckState.attempts == 1 then
+        -- Step 1: back up and jump
+        print('\ay[Triune]\ax stuck (Attempt 1) -- backing up.' .. tgtNote)
+        mq.cmd('/keypress back hold')
+        mq.delay(1200)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress jump')
+    elseif stuckState.attempts == 2 then
+        -- Step 2: back up briefly then step left
+        print('\ay[Triune]\ax stuck (Attempt 2) -- stepping left.' .. tgtNote)
+        mq.cmd('/keypress back hold')
+        mq.delay(400)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress strafe_left hold')
+        mq.delay(1000)
+        mq.cmd('/keypress strafe_left')
+        mq.cmd('/keypress jump')
+    elseif stuckState.attempts == 3 then
+        -- Step 3: back up briefly then step right past initial position
+        print('\ay[Triune]\ax stuck (Attempt 3) -- stepping right past initial position.' .. tgtNote)
+        mq.cmd('/keypress back hold')
+        mq.delay(400)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress strafe_right hold')
+        mq.delay(1800)
+        mq.cmd('/keypress strafe_right')
+        mq.cmd('/keypress jump')
     end
-    mq.cmd('/keypress jump')
+
     stuckState.counter = 0
+    stuckState.lastX, stuckState.lastY = mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0
     pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil -- force a fresh /nav command next tick
 end
 
@@ -3899,6 +3949,8 @@ fullStop = function()
     if runtime.medBreakActive then
         runtime.medBreakActive = false; if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
     end
+    stuckState.counter = 0
+    stuckState.attempts = 0
 end
 
 onZoned = function()
@@ -4571,10 +4623,12 @@ local function triuneCommand(...)
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()
+    elseif cmd == 'update' or cmd == 'updater' or cmd == 'checkupdate' then
+        mq.cmd('/lua run triune_updater')
     elseif setTriuneMode(cmd) then
         -- mode command handled
     else
-        print('\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|status|spellbook|cursorui|dps|clearcursor|<mode>]')
+        print('\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|status|spellbook|cursorui|dps|update|clearcursor|<mode>]')
     end
 end
 
