@@ -81,6 +81,16 @@ A cross-platform updater for Windows and Linux to pull and apply GitHub release 
 - **Preserved User Configuration**: Engine updates never touch or overwrite `triune_loadout.lua`, character settings, or custom INI files.
 - **Launch via**: `/ac update`, `/lua run triune_updater`, `mq2triune/update.bat` (Windows), or `mq2triune/update.sh` (Linux).
 
+### 🎯 Zone Tracker (`triune_track.lua`)
+
+A standalone ImGui window for tracking and navigating to NPCs in the current zone:
+- **Live Zone NPC Listing**: Displays all active NPCs in the zone with live distance updates (in yards), level, consideration color badge, line of sight, and spawn ID.
+- **Clean Name First Layout**: Displays clean mob name prominently in column 1 followed by Level, Distance, Con, ID, LoS, and Action buttons.
+- **Consideration & Search Filtering**: Filter by consideration color (`Red / Dark Red`, `Yellow`, `White`, `Blue`, `Light Blue`, `Green`, `Grey`) and search text matching mob names or IDs.
+- **Sorting Options**: Sort by `Nearest First`, `Farthest First`, `Level (High -> Low)`, `Level (Low -> High)`, or `Name (A - Z)`.
+- **Double-Click Target & Nav**: Double-clicking any cell on an NPC row (or clicking `[Nav]`) acquires target (`/target id`) and initiates navigation (`/nav id` with `/stick` fallback).
+- **Launch via**: `/ac track`, `/lua run triune_track`, or the **Zone Tracker** header button.
+
 ### 🗺️ Navigation & Movement
 
 - NavMesh (`/nav`) with automatic fallback to `/stick` when nav is unavailable
@@ -127,12 +137,14 @@ A cross-platform updater for Windows and Linux to pull and apply GitHub release 
 | `/ac run` | | Start autocombat |
 | `/ac pause` | | Pause autocombat |
 | `/ac burn [on|off]` | `/ac burn` | Toggle burn mode (enables "Burn Only" spells, AAs, discs) |
+| `/ac compact` | `/ac mini`, `/ac hud` | Toggle compact mini-window HUD mode |
 | `/ac status` | | Print current status to console |
 | `/ac <mode>` | | Switch mode (`/ac hunter`, `/ac garrison`, `/ac tank`, etc.) |
 | `/ac spellbook` | `/ac book` | Open the Spellbook browser window |
 | `/ac cursorui` | `/ac cursorwin`, `/ac cursormgr` | Open the Cursor Manager window |
 | `/ac clearcursor` | `/ac autoinv`, `/ac cursor` | Manually drain all cursor items to inventory |
 | `/ac update` | `/ac updater`, `/ac checkupdate` | Launch the Release Updater window and check for GitHub release updates |
+| `/ac track` | `/ac tracker`, `/ac trackui`, `/lua run triune_track` | Open the Zone NPC Tracker window for live targeting and navigation |
 | `/lua run triune_buffbot` | | Launch the standalone Interactive Buffbot window |
 | `/dps` | `/triunedps`, `/ac dps`, `/lua run triune_dps` | Toggle or control the standalone DPS Parser window (`/dps compact`, `/dps report [chan]`, `/dps reset`, `/dps pause`) |
 
@@ -148,6 +160,7 @@ TriuneAutocombat/
 │   ├── update.sh            # Linux updater launcher (Python 3 / curl fallback)
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & loadout UI
+│   │   ├── triune_track.lua     # Standalone ImGui zone NPC tracking & navigation window
 │   │   ├── triune_updater.lua   # Standalone ImGui release updater window
 │   │   ├── triune_spellbook.lua # Standalone spellbook browser & memorization window
 │   │   ├── triune_cursor.lua    # Standalone cursor item manager window
@@ -180,6 +193,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.4.2**
+Current version: **1.4.3**
 
 See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.

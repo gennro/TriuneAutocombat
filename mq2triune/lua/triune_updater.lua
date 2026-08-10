@@ -105,43 +105,44 @@ local function diag(msg)
     print('\ay[TriuneUpdater]\ax ' .. tostring(msg))
 end
 
--- Helper to execute an OS command and capture its stdout output reliably via file redirection
+-- Helper to execute an OS command safely and capture its stdout output
 local function execCommand(cmd, outputFile)
     diag('execCommand starting: ' .. cmd)
-    pcall(os.remove, outputFile)
+    if outputFile then pcall(os.remove, outputFile) end
 
-    -- os.execute() on Windows already invokes cmd.exe /c internally — do NOT double-wrap
-    local fullCmd = cmd .. ' > "' .. outputFile .. '" 2>&1'
-    diag('fullCmd: ' .. fullCmd)
-
-    local res = os.execute(fullCmd)
-    diag('os.execute result: ' .. tostring(res))
-
-    local output = nil
-    local f = io.open(outputFile, 'r')
-    if f then
-        output = f:read('*a')
-        f:close()
-        diag('File read successfully. Length: ' .. tostring(output and #output or 0) .. ' bytes')
-        pcall(os.remove, outputFile)
-    else
-        diag('Failed to open output file: ' .. tostring(outputFile))
-    end
-
-    -- If file redirection output was empty, fallback to io.popen
-    if not output or #output == 0 then
-        diag('File output empty/missing; trying io.popen fallback...')
-        local pipe = io.popen(cmd .. ' 2>&1')
-        if pipe then
-            output = pipe:read('*a')
-            pipe:close()
-            diag('io.popen read finished. Length: ' .. tostring(output and #output or 0) .. ' bytes')
-        else
-            diag('io.popen failed to execute.')
+    -- Primary: Use io.popen for non-blocking stream execution (prevents cmd window popups & thread hangs)
+    local okPipe, pipe = pcall(io.popen, cmd .. ' 2>&1')
+    if okPipe and pipe then
+        local output = pipe:read('*a')
+        pipe:close()
+        diag('io.popen read finished. Length: ' .. tostring(output and #output or 0) .. ' bytes')
+        if output and #output > 0 then
+            if outputFile then
+                local f = io.open(outputFile, 'w')
+                if f then
+                    f:write(output)
+                    f:close()
+                end
+            end
+            return output
         end
     end
 
-    return output
+    -- Fallback: os.execute with redirection if io.popen returned empty or failed
+    if outputFile then
+        diag('io.popen empty; trying os.execute fallback with redirection...')
+        local fullCmd = cmd .. ' > "' .. outputFile .. '" 2>&1'
+        pcall(os.execute, fullCmd)
+        local f = io.open(outputFile, 'r')
+        if f then
+            local output = f:read('*a')
+            f:close()
+            pcall(os.remove, outputFile)
+            return output
+        end
+    end
+
+    return nil
 end
 
 -- Generate a VBScript that downloads a URL to a file using MSXML2 COM objects.
@@ -245,19 +246,7 @@ local function checkForUpdates()
 
     local candidates = {}
 
-    -- Candidate 1: VBScript MSXML2 HTTP (works on native Windows + Wine, zero external deps)
-    if sep == '\\' then
-        table.insert(candidates, {
-            name = 'VBScript MSXML2',
-            run = function()
-                local vbsFile = configDir .. sep .. 'triune_check.vbs'
-                local checkUrl = API_URL .. '?t=' .. os.time()
-                return runVBScriptDownload(checkUrl, tmpFile, vbsFile)
-            end
-        })
-    end
-
-    -- Candidate 2: curl CLI (works on Linux, Windows 10+ with curl in PATH)
+    -- Candidate 1: curl CLI (built-in on Win 10/11 & Linux, zero WSH/VBScript dependency)
     table.insert(candidates, {
         name = 'curl CLI',
         run = function()
@@ -265,7 +254,7 @@ local function checkForUpdates()
         end
     })
 
-    -- Candidate 3: wget CLI (works on Linux, some Windows installs)
+    -- Candidate 2: wget CLI (works on Linux & custom Windows installs)
     table.insert(candidates, {
         name = 'wget CLI',
         run = function()
@@ -273,7 +262,7 @@ local function checkForUpdates()
         end
     })
 
-    -- Candidate 4: Python updater script
+    -- Candidate 3: Python updater script
     table.insert(candidates, {
         name = 'Python Updater Script',
         run = function()
@@ -282,7 +271,7 @@ local function checkForUpdates()
         end
     })
 
-    -- Candidate 5: PowerShell .ps1 script (native Windows)
+    -- Candidate 4: PowerShell .ps1 script (native Windows)
     if sep == '\\' then
         table.insert(candidates, {
             name = 'PowerShell Script (.ps1)',
@@ -319,6 +308,18 @@ local function checkForUpdates()
                     end
                 end
                 return nil
+            end
+        })
+    end
+
+    -- Candidate 5: VBScript MSXML2 HTTP (fallback for older Windows systems if enabled)
+    if sep == '\\' then
+        table.insert(candidates, {
+            name = 'VBScript MSXML2',
+            run = function()
+                local vbsFile = configDir .. sep .. 'triune_check.vbs'
+                local checkUrl = API_URL .. '?t=' .. os.time()
+                return runVBScriptDownload(checkUrl, tmpFile, vbsFile)
             end
         })
     end
@@ -631,7 +632,7 @@ local function executeUpdate()
                 end
             end
 
-            if isRunningScript then
+            if isRunningScript and s ~= 'triune_updater' then
                 table.insert(toRestart, s)
                 diag('Stopping running script: ' .. s)
                 mq.cmdf('/lua stop %s', s)
@@ -661,9 +662,14 @@ local function drawUpdaterWindow()
     if not isOpen then return end
 
     pushTheme()
-    local open, draw = ImGui.Begin('Triune Update Manager##UpdaterWin', isOpen)
+    local open, show = ImGui.Begin('Triune Update Manager##UpdaterWin', isOpen)
     if not open then
         isOpen = false
+        ImGui.End()
+        popTheme()
+        return
+    end
+    if not show then
         ImGui.End()
         popTheme()
         return
@@ -758,8 +764,8 @@ end
 -- Register ImGui render callback
 mq.imgui.init('TriuneUpdaterWin', drawUpdaterWindow)
 
--- Automatically trigger initial check on launch
-checkForUpdates()
+-- Queue initial update check safely on yieldable coroutine thread
+local pendingAction = 'check'
 
 -- Main loop for executing queued pending actions safely outside render callback
 while isRunning and isOpen do
@@ -773,3 +779,6 @@ while isRunning and isOpen do
         executeUpdate()
     end
 end
+
+-- Unregister ImGui callback cleanly on exit
+pcall(function() mq.imgui.destroy('TriuneUpdaterWin') end)

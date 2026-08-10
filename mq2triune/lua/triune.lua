@@ -156,7 +156,8 @@ local function defaultCtrl()
         pet_assist_at        = 100,
         pet_hold_enabled     = true,
         show_map_radius      = true,
-        burn                 = false
+        burn                 = false,
+        compact              = false
     }
 end
 local ctrl = defaultCtrl()
@@ -200,7 +201,12 @@ local runtime = {
     lastGemDiagAt = 0,
     lastAssistCmdAt = 0,
     sungBuffs = {},
-    lastMapDraw = { active = false, type = nil, key = '' }
+    lastMapDraw = { active = false, type = nil, key = '' },
+    trackStartTime = nil,
+    startAA = nil,
+    currentAA = 0,
+    startPlat = nil,
+    currentPlat = 0
 }
 
 local petState = {
@@ -288,22 +294,56 @@ local WHENS = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff
 -- Local Theme & Common Helpers (Self-Contained Module)
 -- ============================================================================
 local MQSHORT = {
-    WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
-    CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
-    PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
-    RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
-    SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
-    DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
-    MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
-    BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
-    ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
-    SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
-    NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
-    WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
-    MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
-    ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
-    BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
-    BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber'
+    WARRIOR = 'War',
+    WAR = 'War',
+    WARRIORS = 'War',
+    CLERIC = 'Clr',
+    CLR = 'Clr',
+    CLERICS = 'Clr',
+    PALADIN = 'Pal',
+    PAL = 'Pal',
+    PALADINS = 'Pal',
+    RANGER = 'Rng',
+    RNG = 'Rng',
+    RANGERS = 'Rng',
+    SHADOWKNIGHT = 'SK',
+    SHADOW = 'SK',
+    SHD = 'SK',
+    SK = 'SK',
+    SHADOWKNIGHTS = 'SK',
+    DRUID = 'Dru',
+    DRU = 'Dru',
+    DRUIDS = 'Dru',
+    MONK = 'Mnk',
+    MNK = 'Mnk',
+    MONKS = 'Mnk',
+    BARD = 'Brd',
+    BRD = 'Brd',
+    BARDS = 'Brd',
+    ROGUE = 'Rog',
+    ROG = 'Rog',
+    ROGUES = 'Rog',
+    SHAMAN = 'Shm',
+    SHM = 'Shm',
+    SHAMANS = 'Shm',
+    NECROMANCER = 'Nec',
+    NEC = 'Nec',
+    NECROMANCERS = 'Nec',
+    WIZARD = 'Wiz',
+    WIZ = 'Wiz',
+    WIZARDS = 'Wiz',
+    MAGICIAN = 'Mag',
+    MAG = 'Mag',
+    MAGICIANS = 'Mag',
+    ENCHANTER = 'Enc',
+    ENC = 'Enc',
+    ENCHANTERS = 'Enc',
+    BEASTLORD = 'Bst',
+    BST = 'Bst',
+    BEASTLORDS = 'Bst',
+    BERSERKER = 'Ber',
+    BER = 'Ber',
+    BERSERKERS = 'Ber'
 }
 
 local function toCanonicalClassAbbr(str)
@@ -549,7 +589,9 @@ local function scanOneNode(node, found)
                     if norm then
                         local dup = false
                         for _, existing in ipairs(found) do
-                            if existing == norm then dup = true; break end
+                            if existing == norm then
+                                dup = true; break
+                            end
                         end
                         if not dup then found[#found + 1] = norm end
                     end
@@ -565,7 +607,9 @@ local function scanOneNode(node, found)
                 if norm then
                     local dup = false
                     for _, existing in ipairs(found) do
-                        if existing == norm then dup = true; break end
+                        if existing == norm then
+                            dup = true; break
+                        end
                     end
                     if not dup then found[#found + 1] = norm end
                 end
@@ -615,7 +659,9 @@ local function classesFromInventoryWindow(loud, force)
                     if norm then
                         local dup = false
                         for _, existing in ipairs(found) do
-                            if existing == norm then dup = true; break end
+                            if existing == norm then
+                                dup = true; break
+                            end
                         end
                         if not dup then found[#found + 1] = norm end
                     end
@@ -638,7 +684,9 @@ local function classesFromInventoryWindow(loud, force)
                         if norm then
                             local dup = false
                             for _, existing in ipairs(found) do
-                                if existing == norm then dup = true; break end
+                                if existing == norm then
+                                    dup = true; break
+                                end
                             end
                             if not dup then found[#found + 1] = norm end
                         end
@@ -662,7 +710,9 @@ local function classesFromInventoryWindow(loud, force)
                         if norm then
                             local dup = false
                             for _, existing in ipairs(found) do
-                                if existing == norm then dup = true; break end
+                                if existing == norm then
+                                    dup = true; break
+                                end
                             end
                             if not dup then found[#found + 1] = norm end
                         end
@@ -676,7 +726,9 @@ local function classesFromInventoryWindow(loud, force)
                             if norm then
                                 local dup = false
                                 for _, existing in ipairs(found) do
-                                    if existing == norm then dup = true; break end
+                                    if existing == norm then
+                                        dup = true; break
+                                    end
                                 end
                                 if not dup then found[#found + 1] = norm end
                             end
@@ -1147,13 +1199,19 @@ local function mapTLOCategoryToKind(sp, name)
 
     -- 2. SPA-based checks (most authoritative for non-beneficial SPA mechanics)
     if checkHasSPA(tloSpell, name, sp, 103) then return 'pet' end
-    if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then return
-        'util' end
-    if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then return
-        'util' end
+    if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then
+        return
+        'util'
+    end
+    if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then
+        return
+        'util'
+    end
     if checkHasSPA(tloSpell, name, sp, 81) or checkHasSPA(tloSpell, name, sp, 91) then return 'util' end
-    if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then return
-        'util' end
+    if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then
+        return
+        'util'
+    end
     if not bene then
         if checkHasSPA(tloSpell, name, sp, 11) or checkHasSPA(tloSpell, name, sp, 46) or checkHasSPA(tloSpell, name, sp, 23)
             or checkHasSPA(tloSpell, name, sp, 4) or checkHasSPA(tloSpell, name, sp, 5) or checkHasSPA(tloSpell, name, sp, 6) or checkHasSPA(tloSpell, name, sp, 7) then
@@ -1397,7 +1455,7 @@ end
 local function applyEntry(e)
     if type(e) ~= 'table' then return end
     if type(e.classes) == 'table' and #e.classes > 0 then myClasses = e.classes end
-    lvlMin           = e.lvlMin or lvlMin; lvlMax = e.lvlMax or lvlMax
+    lvlMin = e.lvlMin or lvlMin; lvlMax = e.lvlMax or lvlMax
     clearFilteredSpellsCache()
     loadout.gems     = e.gems or {}
     loadout.buffGems = e.buffGems or {}
@@ -1417,11 +1475,10 @@ local function applyEntry(e)
         if not e.control.combat_style then
             ctrl.combat_style = e.control.use_ranged and 'Ranged' or 'Melee'
         end
-        -- The combat anchor is a zone-specific position (like camp_loc): never
+        -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
-        -- be in a different location or zone. They can set a new one in-game.
-        ctrl.hunter_combat_loc    = nil
-        ctrl.hunter_combat_radius = 0
+        -- be in a different location or zone. Keep the user's radius setting intact.
+        ctrl.hunter_combat_loc = nil
     end
 end
 
@@ -1521,7 +1578,7 @@ local function loadoutSig()
         tostring(ctrl.medbreak_hp_on), tostring(ctrl.medbreak_hp_start), tostring(ctrl.medbreak_hp_stop),
         tostring(ctrl.medbreak_mana_on), tostring(ctrl.medbreak_mana_start), tostring(ctrl.medbreak_mana_stop),
         tostring(ctrl.medbreak_end_on), tostring(ctrl.medbreak_end_start), tostring(ctrl.medbreak_end_stop),
-        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec), tostring(ctrl.min_mana_pct),
+        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec), tostring(ctrl.min_mana_pct), tostring(ctrl.compact), tostring(ctrl.hunter_combat_radius),
         c and string.format('%.1f,%.1f,%.1f', c.x, c.y, c.z) or 'nocamp',
         a and string.format('%.1f,%.1f,%.1f,r%d', a.x, a.y, a.z, ctrl.hunter_combat_radius or 0) or 'noanchor' }, '~')
     return table.concat(p, '|')
@@ -1693,19 +1750,112 @@ local function drawEmblem(size)
     ImGui.Dummy(size, size) -- reserve the layout space even if the draw above failed
 end
 
+-- Session Tracker Helpers (AA / Platinum)
+local function getCurrentAA()
+    local okTotal, total = pcall(function() return mq.TLO.Me.AAPointsTotal() end)
+    local okSpent, spent = pcall(function() return mq.TLO.Me.AAPointsSpent() end)
+    local okUnspent, unspent = pcall(function() return mq.TLO.Me.AAPoints() end)
+    local okPct, pct = pcall(function() return mq.TLO.Me.PctAAExp() end)
+
+    local aaCount = nil
+    if okTotal and type(total) == 'number' then
+        aaCount = total
+    elseif (okSpent and type(spent) == 'number') or (okUnspent and type(unspent) == 'number') then
+        aaCount = (spent or 0) + (unspent or 0)
+    end
+
+    if aaCount and okPct and type(pct) == 'number' then
+        aaCount = aaCount + (pct / 100)
+    end
+    return aaCount
+end
+
+local function getCurrentPlat()
+    local okCash, cash = pcall(function() return mq.TLO.Me.Cash() end)
+    if okCash and type(cash) == 'number' and cash >= 0 then
+        return math.floor(cash / 1000)
+    end
+    local okPlat, plat = pcall(function() return mq.TLO.Me.Platinum() end)
+    if okPlat and type(plat) == 'number' then
+        return plat
+    end
+    return nil
+end
+
+local function resetTracker()
+    runtime.trackStartTime = os.time()
+    runtime.startAA = getCurrentAA()
+    runtime.currentAA = runtime.startAA or 0
+    runtime.startPlat = getCurrentPlat()
+    runtime.currentPlat = runtime.startPlat or 0
+end
+
+local function updateTracker()
+    if not runtime.trackStartTime then
+        runtime.trackStartTime = os.time()
+    end
+    local aa = getCurrentAA()
+    if aa ~= nil then
+        if runtime.startAA == nil then runtime.startAA = aa end
+        runtime.currentAA = aa
+    end
+    local plat = getCurrentPlat()
+    if plat ~= nil then
+        if runtime.startPlat == nil then runtime.startPlat = plat end
+        runtime.currentPlat = plat
+    end
+end
+
 local UI = {}
 
 function UI.drawHeaderBar()
     drawEmblem(22)
     ImGui.SameLine()
-    accent(GOLD, 'TRIUNE')
-    ImGui.SameLine(); accent(MUTED, '> AutoCombat')
-    ImGui.SameLine(); accent(ARC, myName or '(no character)')
+    accent(ARC, myName or '(no character)')
     ImGui.SameLine(); ImGui.TextDisabled(string.format('| %s / %s / %s',
         myClasses[1] or '?', myClasses[2] or '?', myClasses[3] or '?'))
     ImGui.SameLine(); ImGui.TextDisabled(string.format('| PoP exp %d | v%s',
         DATA.era_expansion or 5, VERSION))
+
+    updateTracker()
+    local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
+    local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
+    local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or 0
+    local aaRate = (elapsedHrs > 0.0001) and (aaGained / elapsedHrs) or 0.0
+    local platGained = (runtime.startPlat and runtime.currentPlat) and (runtime.currentPlat - runtime.startPlat) or 0
+    local platRate = (elapsedHrs > 0.0001) and (platGained / elapsedHrs) or 0.0
+
+    ImGui.SameLine(); ImGui.TextDisabled(string.format('| AA/hr: %.1f | Plat/hr: %.1f',
+        aaRate, platRate))
+    if ImGui.IsItemHovered() then
+        local m = math.floor(elapsedSec / 60)
+        local s = elapsedSec % 60
+        local h = math.floor(m / 60)
+        m = m % 60
+        local timeStr = h > 0 and string.format('%dh %dm %ds', h, m, s) or string.format('%dm %ds', m, s)
+        ImGui.SetTooltip(string.format(
+            "Session Tracker (%s):\n" ..
+            "-------------------------------\n" ..
+            "AA/hr Rate:   %.2f / hr\n" ..
+            "Total AA:     %+.2f gained (Current: %.2f | Start: %.2f)\n" ..
+            "-------------------------------\n" ..
+            "Plat/hr Rate: %.1f p/hr\n" ..
+            "Total Plat:   %+d p gained (Current: %dp | Start: %dp)\n" ..
+            "-------------------------------\n" ..
+            "Click 'Reset' to restart session.",
+            timeStr, aaRate, aaGained, runtime.currentAA or 0, runtime.startAA or 0,
+            platRate, platGained, runtime.currentPlat or 0, runtime.startPlat or 0
+        ))
+    end
     ImGui.SameLine()
+    if ImGui.Button('Reset##hdrResetTrack') then
+        resetTracker()
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Resets AA and Platinum session tracking values to 0.')
+    end
+
+    -- Toolbar buttons (on line below script info and trackers)
     if ImGui.Button('Open Spellbook##hdrBook') then
         local s = mq.TLO.Lua.Script('triune_spellbook')
         if s() and s.Status() == 'RUNNING' then
@@ -1753,6 +1903,27 @@ function UI.drawHeaderBar()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
     end
+    ImGui.SameLine()
+    if ImGui.Button('Zone Tracker##hdrTrack') then
+        local s = mq.TLO.Lua.Script('triune_track')
+        if s() and s.Status() == 'RUNNING' then
+            mq.cmd('/lua stop triune_track')
+        else
+            mq.cmd('/lua run triune_track')
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Launches or closes the standalone Triune Zone Tracker interface.')
+    end
+    ImGui.SameLine()
+    if ImGui.Button('Compact Mode##hdrCompact') then
+        ctrl.compact = true
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Switches Triune AutoCombat into a sleek compact HUD overlay window.')
+    end
+
     if not DATA_OK then
         accent(WARN,
             'No triune_data.lua found in your MQ config folder -- run extract_spells.py and copy it there. Spell/AA lists will be empty.')
@@ -1760,7 +1931,8 @@ function UI.drawHeaderBar()
     ImGui.Separator()
 end
 
-local CLASS_PICKER_OPTIONS = { '-- None --', 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm', 'Nec', 'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
+local CLASS_PICKER_OPTIONS = { '-- None --', 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm', 'Nec',
+    'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
 
 function UI.drawClassPicker()
     if ImGui.CollapsingHeader('Character Classes & Loadout') then
@@ -2013,10 +2185,14 @@ function UI.drawGemTabHeader(gemsTable, isBuffSet)
     ImGui.TextDisabled('Level band:')
     ImGui.SameLine(); ImGui.SetNextItemWidth(110)
     local newLvlMin = ImGui.InputInt('##lmin' .. (isBuffSet and 'b' or ''), lvlMin); if newLvlMin < 1 then newLvlMin = 1 end
-    if newLvlMin ~= lvlMin then lvlMin = newLvlMin; clearFilteredSpellsCache() end
+    if newLvlMin ~= lvlMin then
+        lvlMin = newLvlMin; clearFilteredSpellsCache()
+    end
     ImGui.SameLine(); ImGui.Text('to'); ImGui.SameLine(); ImGui.SetNextItemWidth(110)
     local newLvlMax = ImGui.InputInt('##lmax' .. (isBuffSet and 'b' or ''), lvlMax); if newLvlMax > 65 then newLvlMax = 65 end
-    if newLvlMax ~= lvlMax then lvlMax = newLvlMax; clearFilteredSpellsCache() end
+    if newLvlMax ~= lvlMax then
+        lvlMax = newLvlMax; clearFilteredSpellsCache()
+    end
     if lvlMin > lvlMax then lvlMin = lvlMax end
     ImGui.SameLine(); ImGui.TextDisabled('(spells learned in this band)')
     local newScribed = ImGui.Checkbox('Scribed Only', ctrl.scribed_only)
@@ -2140,7 +2316,8 @@ function UI.drawAATab()
                                     local xti = ImGui.Combo('##aamxt', curXt, xtOpts)
                                     entry.min_xtar = xti
                                     if ImGui.IsItemHovered() then
-                                        ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this AA to fire.')
+                                        ImGui.SetTooltip(
+                                            'Minimum number of active NPCs on XTarget required for this AA to fire.')
                                     end
                                     ImGui.SameLine()
                                     local aaboVal = ImGui.Checkbox('Burn##bo', entry.burn_only or false)
@@ -2211,7 +2388,8 @@ function UI.drawDiscTab()
                         local xti = ImGui.Combo('##dmxt', curXt, xtOpts)
                         entry.min_xtar = xti
                         if ImGui.IsItemHovered() then
-                            ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this discipline to fire.')
+                            ImGui.SetTooltip(
+                                'Minimum number of active NPCs on XTarget required for this discipline to fire.')
                         end
                         ImGui.SameLine()
                         local dboVal = ImGui.Checkbox('Boss Only##bo', entry.boss_only)
@@ -2337,7 +2515,7 @@ function UI.drawControlTab()
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
-        'Enable/disable Burn Mode. When enabled, spells, AAs, and disciplines marked "Burn Only" will fire.\nTurns off automatically when extended target list clears.')
+            'Enable/disable Burn Mode. When enabled, spells, AAs, and disciplines marked "Burn Only" will fire.\nTurns off automatically when extended target list clears.')
     end
 
     ImGui.Dummy(0, 6)
@@ -2375,9 +2553,11 @@ function UI.drawControlTab()
         ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
         if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
 
-        ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##hunter', ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
+        ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##hunter',
+            ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('While traveling to a distant target, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
+            ImGui.SetTooltip(
+                'While traveling to a distant target, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
         end
 
         -- Combat Radius anchor -- keeps Hunter from roaming the whole world
@@ -2417,7 +2597,7 @@ function UI.drawControlTab()
         -- Radius slider (editable whether an anchor is set or not)
         ImGui.SetNextItemWidth(220)
         local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl.hunter_combat_radius or
-        250
+            250
         local newRadius, changed = ImGui.SliderInt('Combat Radius##hunter', curRadius, 1, 2000)
         if changed then
             ctrl.hunter_combat_radius = newRadius
@@ -2492,9 +2672,11 @@ function UI.drawControlTab()
             ctrl.pull_max_level = ImGui.SliderInt('Max NPC Level', ctrl.pull_max_level or 100, 1, 100)
             if ctrl.pull_min_level > ctrl.pull_max_level then ctrl.pull_min_level = ctrl.pull_max_level end
 
-            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##puller', ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
+            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##puller',
+                ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
             if ImGui.IsItemHovered() then
-                ImGui.SetTooltip('While traveling out to pull a mob, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
+                ImGui.SetTooltip(
+                    'While traveling out to pull a mob, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
             end
         end
     end
@@ -2545,6 +2727,10 @@ function UI.drawSettingsTab()
         ImGui.SetTooltip(
             'Draws green radius circles on the in-game map window\n'
             .. 'for Hunter, Anchor, and Pull/Camp radii.')
+    end
+    ctrl.compact = ImGui.Checkbox('Compact Mini-Window HUD Mode', ctrl.compact or false)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Switches the Triune AutoCombat interface into a small, sleek HUD overlay widget.')
     end
 
     ImGui.Dummy(0, 4)
@@ -2635,8 +2821,188 @@ function UI.drawSettingsTab()
     ImGui.EndTabItem()
 end
 
-local function draw()
-    if not open then return end
+local function drawMiniGui()
+    if not open or not ctrl.compact then return end
+    pushTheme()
+    local show
+    open, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', open, ImGuiWindowFlags.AlwaysAutoResize)
+    if not open then
+        ctrl.compact = false
+        ImGui.End()
+        popTheme()
+        return
+    end
+
+    if show then
+        -- Row 1: Header / Status & Mode Selector
+        if ctrl.running then
+            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'RUNNING')
+        else
+            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'PAUSED')
+        end
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(140)
+        local curIdx = idxOf(MODES, ctrl.mode)
+        local newModeIdx = ImGui.Combo('##miniModeCombo', curIdx, MODES)
+        if newModeIdx ~= curIdx then
+            local newMode = MODES[newModeIdx]
+            if ctrl.mode == 'Manual Hunter' and newMode ~= 'Manual Hunter' then
+                setManualHunterPetHold(false)
+            elseif newMode == 'Manual Hunter' then
+                if not ctrl.running or not isCombat() then
+                    setManualHunterPetHold(true, true)
+                end
+            end
+            ctrl.mode = newMode
+            saveLoadout(true)
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Full Window##miniFull', 95, 22) then
+            ctrl.compact = false
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Expand back to full tabbed Triune AutoCombat window')
+        end
+
+        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
+
+        -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
+        if ctrl.running then
+            if ImGui.Button('Pause##miniRunBtn', 65, 22) then
+                if ctrl.mode == 'Manual Hunter' then
+                    setManualHunterPetHold(true, true)
+                else
+                    setManualHunterPetHold(false, true)
+                end
+                ctrl.running = false
+                fullStop()
+            end
+        else
+            if ImGui.Button('Run##miniRunBtn', 65, 22) then
+                ctrl.running = true
+            end
+        end
+        ImGui.SameLine()
+        if ctrl.burn then
+            ImGui.PushStyleColor(ImGuiCol.Button, 0.8, 0.2, 0.2, 1.0)
+            if ImGui.Button('BURN ON##miniBurnBtn', 75, 22) then
+                ctrl.burn = false
+            end
+            ImGui.PopStyleColor()
+        else
+            if ImGui.Button('Burn##miniBurnBtn', 65, 22) then
+                ctrl.burn = true
+            end
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
+        end
+
+        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
+
+        -- Row 3: Session Tracker Banner
+        updateTracker()
+        local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
+        local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
+        local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or 0
+        local aaRate = (elapsedHrs > 0.0001) and (aaGained / elapsedHrs) or 0.0
+        local platGained = (runtime.startPlat and runtime.currentPlat) and (runtime.currentPlat - runtime.startPlat) or 0
+        local platRate = (elapsedHrs > 0.0001) and (platGained / elapsedHrs) or 0.0
+
+        ImGui.TextDisabled(string.format('AA/hr: %.1f | Plat/hr: %.1f', aaRate, platRate))
+        if ImGui.IsItemHovered() then
+            local m = math.floor(elapsedSec / 60)
+            local s = elapsedSec % 60
+            local h = math.floor(m / 60)
+            m = m % 60
+            local timeStr = h > 0 and string.format('%dh %dm %ds', h, m, s) or string.format('%dm %ds', m, s)
+            ImGui.SetTooltip(string.format(
+                "Session Tracker (%s):\n" ..
+                "-------------------------------\n" ..
+                "AA/hr Rate:   %.2f / hr\n" ..
+                "Total AA:     %+.2f gained (Current: %.2f | Start: %.2f)\n" ..
+                "-------------------------------\n" ..
+                "Plat/hr Rate: %.1f p/hr\n" ..
+                "Total Plat:   %+d p gained (Current: %dp | Start: %dp)\n" ..
+                "-------------------------------\n" ..
+                "Click 'Reset' to restart session.",
+                timeStr, aaRate, aaGained, runtime.currentAA or 0, runtime.startAA or 0,
+                platRate, platGained, runtime.currentPlat or 0, runtime.startPlat or 0
+            ))
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Reset##miniResetTrack', 55, 20) then
+            resetTracker()
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Resets AA and Platinum session tracking values to 0.')
+        end
+
+        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
+
+        -- Row 4: Sub-module Launcher Buttons Toolbar
+        if ImGui.Button('Spellbook##miniBook', 75, 22) then
+            local s = mq.TLO.Lua.Script('triune_spellbook')
+            if s() and s.Status() == 'RUNNING' then
+                mq.cmd('/lua stop triune_spellbook')
+            else
+                mq.cmd('/lua run triune_spellbook')
+            end
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes standalone Spellbook interface') end
+
+        ImGui.SameLine()
+        if ImGui.Button('Cursor##miniCursor', 55, 22) then
+            local s = mq.TLO.Lua.Script('triune_cursor')
+            if s() and s.Status() == 'RUNNING' then
+                mq.cmd('/lua stop triune_cursor')
+            else
+                mq.cmd('/lua run triune_cursor')
+            end
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes standalone Cursor Manager') end
+
+        ImGui.SameLine()
+        if ImGui.Button('DPS##miniDPS', 42, 22) then
+            local s = mq.TLO.Lua.Script('triune_dps')
+            if s() and s.Status() == 'RUNNING' then
+                mq.cmd('/dps toggle')
+            else
+                mq.cmd('/lua run triune_dps')
+            end
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or toggles standalone DPS Parser window') end
+
+        ImGui.SameLine()
+        if ImGui.Button('Update##miniUpdate', 58, 22) then
+            local s = mq.TLO.Lua.Script('triune_updater')
+            if s() and s.Status() == 'RUNNING' then
+                mq.cmd('/lua stop triune_updater')
+            else
+                mq.cmd('/lua run triune_updater')
+            end
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes Release Updater window') end
+
+        ImGui.SameLine()
+        if ImGui.Button('Tracker##miniTrack', 60, 22) then
+            local s = mq.TLO.Lua.Script('triune_track')
+            if s() and s.Status() == 'RUNNING' then
+                mq.cmd('/lua stop triune_track')
+            else
+                mq.cmd('/lua run triune_track')
+            end
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes Zone Tracker window') end
+    end
+
+    ImGui.End()
+    popTheme()
+end
+
+local function drawFullGui()
+    if not open or ctrl.compact then return end
     pushTheme()
     ImGui.SetNextWindowSize(720, 640, ImGuiCond.FirstUseEver)
     local show
@@ -2662,6 +3028,15 @@ local function draw()
 
     ImGui.End()
     popTheme()
+end
+
+local function draw()
+    if not open then return end
+    if ctrl.compact then
+        drawMiniGui()
+    else
+        drawFullGui()
+    end
 end
 
 -- ============================================================================
@@ -3637,7 +4012,7 @@ local function performUnstuck()
         stuckState.attempts = 1
     else
         stuckState.attempts = (stuckState.attempts or 0) + 1
-        if stuckState.attempts > 3 then
+        if stuckState.attempts > 4 then
             stuckState.attempts = 1
         end
     end
@@ -3688,6 +4063,43 @@ local function performUnstuck()
         mq.delay(1800)
         mq.cmd('/keypress strafe_right')
         mq.cmd('/keypress jump')
+    elseif stuckState.attempts >= 4 then
+        -- Step 4: All directional unstuck attempts failed; mark target unreachable & search for a new target
+        local currentTgtId = nil
+        pcall(function()
+            if tgt() and tgt.Type() == 'NPC' and (tgt.ID() or 0) > 0 then
+                currentTgtId = tgt.ID()
+            end
+        end)
+        if not currentTgtId and pursuit.id and pursuit.id > 0 then
+            currentTgtId = pursuit.id
+        end
+        if not currentTgtId and runtime.pullTargetId and runtime.pullTargetId > 0 then
+            currentTgtId = runtime.pullTargetId
+        end
+
+        if currentTgtId and currentTgtId > 0 then
+            print(string.format(
+                '\ay[Triune]\ax stuck (Attempt 4) -- all directional maneuvers failed. Abandoning target #%d and searching for a new target.',
+                currentTgtId))
+            markUnreachable(currentTgtId)
+            mq.cmd('/target clear')
+        else
+            print(
+                '\ay[Triune]\ax stuck (Attempt 4) -- all directional maneuvers failed. Clearing pursuit to find a new target/path.')
+        end
+
+        pursuit.id = 0
+        pursuit.lastNavTargetId = 0
+        pursuit.lastNavLoc = nil
+        pursuit.wanderLoc = nil
+        runtime.pullTargetId = 0
+        runtime.pullState = 'IDLE'
+
+        stuckState.attempts = 0
+        stuckState.counter = 0
+        stuckState.lastX, stuckState.lastY = mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0
+        return
     end
 
     stuckState.counter = 0
@@ -3907,7 +4319,8 @@ local function pullerTick()
                 runtime.pullState = 'TO_CAMP'
             end
         elseif (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
-            local closerId, candDist, curDist = checkCloserTarget(runtime.pullTargetId, ctrl.camp_radius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
+            local closerId, candDist, curDist = checkCloserTarget(runtime.pullTargetId, ctrl.camp_radius, ctrl.camp_z,
+                ctrl.pull_min_level, ctrl.pull_max_level)
             if closerId and setTarget(closerId) then
                 stopMoving()
                 pursuit.id = 0
@@ -4022,7 +4435,8 @@ local function checkAggroSwitch()
             end)
             -- NPC is directly hitting us: no distance cap — always consider it.
             -- Otherwise: Hunter/Manual Hunter/Pet Tank use 60, other modes use 25.
-            local maxRange = isHittingMe and 999 or ((ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Pet Tank') and 60 or 25)
+            local maxRange = isHittingMe and 999 or
+                ((ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Pet Tank') and 60 or 25)
             if d < maxRange and d < bestDist then
                 bestDist = d
                 bestId = xt.ID()
@@ -4238,13 +4652,15 @@ local function combatTick()
         if haveNPC then
             if not isXTargetId(mq.TLO.Target.ID()) and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
                 local curId = mq.TLO.Target.ID()
-                local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
+                    ctrl.hunter_max_level)
                 if closerId and setTarget(closerId) then
                     stopMoving()
                     pursuit.id = 0
                     pursuit.lastNavTargetId = 0
                     pursuit.hasRetargeted = true
-                    print(string.format('\ay[Triune]\ax Hunter: Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
+                    print(string.format(
+                        '\ay[Triune]\ax Hunter: Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
                         closerId, tostring(mq.TLO.Target.CleanName()), candDist, curDist))
                 end
             end
@@ -4332,7 +4748,8 @@ local function combatTick()
                     pursuit.id = 0
                     pursuit.lastNavTargetId = 0
                     pursuit.hasRetargeted = true
-                    print(string.format('\ay[Triune]\ax Pet Tank: Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
+                    print(string.format(
+                        '\ay[Triune]\ax Pet Tank: Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
                         closerId, tostring(mq.TLO.Target.CleanName()), candDist, curDist))
                 end
             end
@@ -4508,8 +4925,11 @@ local function combatTick()
     -- Garrison) are exempt: their own findRoamTarget/firstNPCXtarget selection
     -- is the safety gate, and they need to initiate combat on fresh targets.
     local ENGINE_TARGETS_MODE = {
-        ['Hunter'] = true, ['Puller'] = true, ['Pull & Assist'] = true,
-        ['Pet Tank'] = true, ['Garrison'] = true,
+        ['Hunter'] = true,
+        ['Puller'] = true,
+        ['Pull & Assist'] = true,
+        ['Pet Tank'] = true,
+        ['Garrison'] = true,
     }
     local combatReady = true
     if haveNPC and engage and not ENGINE_TARGETS_MODE[ctrl.mode] then
@@ -4607,7 +5027,8 @@ local function combatTick()
                     local condOk = id and conditionMet(g.when, g.pct, g.spell, id, g.cls)
                     if condOk then
                         local isDet = isDetrimentalAction(g.spell, g.target, g)
-                        local targetValid = not isDet or isXTargetId(id) or (ctrl.mode == 'Puller' and id == runtime.pullTargetId)
+                        local targetValid = not isDet or isXTargetId(id) or
+                            (ctrl.mode == 'Puller' and id == runtime.pullTargetId)
                         if targetValid and castGem(i, g, id) then
                             if g.when == 'missing buff' then
                                 local bene = false
@@ -4624,7 +5045,8 @@ local function combatTick()
                         local thp = (ts() and ts.PctHPs()) or -1
                         print(string.format(
                             '\ao[Triune debug]\ax gem %d "%s" skipped -- tgtTok="%s"(base="%s") id=%s (rawTgt=%d type=%s hp=%d) condOk=%s xtOk=%s(%d>=%d)',
-                            i, g.spell, tostring(g.target), tostring(baseTok(g.target)), tostring(id), tid, ttype, thp, tostring(condOk), tostring(xtOk), numXtar, minXt))
+                            i, g.spell, tostring(g.target), tostring(baseTok(g.target)), tostring(id), tid, ttype, thp,
+                            tostring(condOk), tostring(xtOk), numXtar, minXt))
                     end
                 elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
                     runtime.lastGemDiagAt = os.clock()
@@ -4746,10 +5168,24 @@ local function triuneCommand(...)
         clearCursor()
     elseif cmd == 'update' or cmd == 'updater' or cmd == 'checkupdate' then
         mq.cmd('/lua run triune_updater')
+    elseif cmd == 'track' or cmd == 'tracker' or cmd == 'trackui' or cmd == 'zone' then
+        local s = mq.TLO.Lua.Script('triune_track')
+        if s() and s.Status() == 'RUNNING' then
+            mq.cmd('/lua stop triune_track')
+            print('\ag[Triune]\ax stopping zone tracker window...')
+        else
+            mq.cmd('/lua run triune_track')
+            print('\ag[Triune]\ax launching zone tracker window...')
+        end
+    elseif cmd == 'compact' or cmd == 'mini' or cmd == 'hud' then
+        ctrl.compact = not ctrl.compact
+        saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Compact HUD mode %s.', ctrl.compact and 'ENABLED' or 'DISABLED'))
     elseif setTriuneMode(cmd) then
         -- mode command handled
     else
-        print('\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|status|spellbook|cursorui|dps|update|clearcursor|<mode>]')
+        print(
+            '\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|compact|status|spellbook|cursorui|dps|track|update|clearcursor|<mode>]')
     end
 end
 
@@ -4879,6 +5315,7 @@ local function runMainLoop()
         if nm and nm ~= '' and nm ~= myName then
             myName = nm
             onCharacterChanged()
+            resetTracker()
             -- camp restored from a save; no map circle is drawn
             reconcileSungBuffs()                                      -- don't re-sing bard buffs that are already up
             reconcilePets()                                           -- don't re-summon pets that are already out

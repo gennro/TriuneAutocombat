@@ -1,5 +1,36 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-10
+
+- **Added standalone Zone NPC Tracker window (`mq2triune/lua/triune_track.lua`).**
+  - Displays all active NPCs in the current zone with real-time distance updates (in yards), level, consideration color badge, line of sight indicator, and spawn ID.
+  - Formatted table layout with Clean Name as Column 1 (`Name`), followed by Level (`Lvl`), Distance (`Dist`), Consideration (`Con`), Spawn ID (`ID`), Line of Sight (`LoS`), and Action buttons (`Actions`).
+  - Added consideration color filtering (`All`, `Red / Dark Red`, `Yellow`, `White`, `Blue`, `Light Blue`, `Green`, `Grey`).
+  - Added live search text filter matching NPC clean names and spawn IDs.
+  - Added sorting options (`Nearest First`, `Farthest First`, `Level High -> Low`, `Level Low -> High`, `Name A - Z`) and interactive column header sorting.
+  - Double-clicking any cell on an NPC row (or clicking `[Nav]`) acquires target (`/target id <ID>`) and issues nav command (`/nav id <ID>` with `/stick 10` fallback).
+- **Added AA/hr and Plat/hr session tracking in `triune.lua` header bar.**
+  - Displayed real-time AA per hour (`AA/hr: 12.4`) and Platinum per hour (`Plat/hr: 120.5`) with an inline `Reset` button on the header script info line.
+  - Hovering over the tracker text reveals a detailed tooltip showing elapsed session time, AA/hr rate, total AA gained, Plat/hr rate, and total session Platinum gained (with start & current balances).
+- **Added Compact Window Mode (Mini HUD) for `triune.lua`.**
+  - Added `ctrl.compact` state variable persisted per-character in `triune_loadout.lua`.
+  - Created `drawMiniGui()` auto-resizing HUD overlay window titled `Triune AutoCombat Mini v1.4.3###triuneMini`.
+  - Compact Mini HUD includes live combat mode selector combo dropdown, Pause/Run toggle button, Burn toggle button (highlighted bright red when active), AA/plat session rate tracking banner with hover tooltip and reset button, sub-module launcher buttons (`Spellbook`, `Cursor`, `DPS`, `Update`, `Tracker`), and `[Full Window]` expand button.
+  - Added `Compact Mode` header button in full tabbed window and `Compact Mini-Window HUD Mode` checkbox in Settings tab.
+  - Added `/ac compact` (`/ac mini`, `/ac hud`) slash command toggle.
+- **Fixed Hunter Combat Radius persistence & compact HUD toolbar in `triune.lua`.**
+  - Removed `Set Camp` button from the compact mini HUD action controls toolbar.
+  - Removed initial loadout reset (`ctrl.hunter_combat_radius = 0`) in `applyEntry()` that was wiping saved Hunter combat radius settings.
+  - Added `ctrl.hunter_combat_radius` to `loadoutSig()` serialization, ensuring user-configured combat radius settings persist across sessions and anchor re-locations.
+- **Fixed game crash when clicking `[Updater]` button (`mq2triune/lua/triune_updater.lua`).**
+  - Deferred initial release update check (`checkForUpdates()`) from chunk-load level to the main yieldable coroutine thread (`pendingAction = 'check'`), preventing blocking process execution inside ImGui frame render callbacks.
+  - Re-ordered HTTP query candidates in `checkForUpdates()` to prioritize native `curl CLI` (`io.popen`) over legacy `VBScript MSXML2` (`cscript.exe`), avoiding Windows Script Host popups and process thread hangs.
+  - Refactored `execCommand()` to execute commands via `io.popen` streams first without popping up console windows or blocking MacroQuest's Direct3D rendering loop.
+  - Added clean `mq.imgui.destroy('TriuneUpdaterWin')` unregistration when the window exits to eliminate dangling C++ render callback access violations.
+  - Excluded `triune_updater` from self-termination during active script restart loops in `executeUpdate()`.
+
+---
+
 ## 2026-08-09
 
 - **Bumped version to v1.4.2.**
@@ -28,6 +59,7 @@
   - Attempt 1: Backs up for 1200ms and jumps to clear immediate frontal collisions.
   - Attempt 2: If still stuck on the obstacle, backs up briefly and strafes left for 1000ms to maneuver around the left side.
   - Attempt 3: If still stuck, backs up briefly and strafes right for 1800ms to step past the initial point to the right side.
+  - Attempt 4: If all directional maneuvers fail, marks current target unreachable (`markUnreachable`), clears target (`/target clear`), resets pursuit state, and forces the bot to search for a new target.
   - Resets attempt progression after 20 seconds of clear movement or when `fullStop()` is called.
 
 ---
