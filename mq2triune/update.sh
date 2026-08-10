@@ -4,12 +4,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if command -v python3 &>/dev/null; then
+if [ -f "${SCRIPT_DIR}/triune_updater.py" ] && command -v python3 &>/dev/null; then
     echo "[INFO] Launching Python 3 updater..."
     exec python3 "${SCRIPT_DIR}/triune_updater.py" "$@"
 fi
 
-if command -v python &>/dev/null; then
+if [ -f "${SCRIPT_DIR}/triune_updater.py" ] && command -v python &>/dev/null; then
     echo "[INFO] Launching Python updater..."
     exec python "${SCRIPT_DIR}/triune_updater.py" "$@"
 fi

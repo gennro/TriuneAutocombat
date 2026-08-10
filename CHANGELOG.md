@@ -4,6 +4,11 @@
 
 - **Bumped project version to v1.5.**
   - Updated `README.md` documentation, feature list (Compact Mini HUD, AA & Plat Session Rate Tracker, Zone NPC Tracker), commands table, and directory file structure tree.
+- **Fixed Release Updater button responses and execution pipeline (`mq2triune/lua/triune_updater.lua`, `mq2triune/triune_updater.py`, `update.sh`, `update.bat`).**
+  - Resolved scope variable shadowing bug on `pendingAction` in `triune_updater.lua` where `local pendingAction = 'check'` declared in the script body created a shadowed local variable, causing ImGui button clicks (`Check for Updates` and `Update Now`) to be ignored by the main execution coroutine.
+  - Added Candidate 0 direct `curl CLI` individual file downloader to `executeUpdate()` in `triune_updater.lua`, enabling zero-dependency release file updates on Linux, macOS, and Windows.
+  - Created standalone Python 3 updater script `mq2triune/triune_updater.py` using standard library (`urllib.request`, `json`, `zipfile`, `shutil`, `argparse`) for release checking and archive extraction.
+  - Added existence checks (`[ -f "${SCRIPT_DIR}/triune_updater.py" ]` and `if exist "%~dp0triune_updater.py"`) to `update.sh` and `update.bat` so fallback execution paths (`curl`/`unzip` or PowerShell) run smoothly when Python scripts are omitted.
 - **Fixed combat initiation & auto-attack cancellation on fresh targets in `triune.lua`.**
   - Fixed a critical issue where `/attack on` and `/autofire on` were being immediately cancelled by `not xtarActive` checks when navigating to a fresh target that had not yet entered XTarget.
   - Updated detrimental action gates for Spells, AAs, and Discs to allow all engine auto-targeting modes (`Hunter`, `Manual Hunter`, `Pet Tank`, `Puller`, `Pull & Assist`, `Garrison`) to cast offensive spells/abilities to initiate combat on fresh non-XTarget targets.

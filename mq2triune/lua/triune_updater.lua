@@ -432,6 +432,55 @@ local function executeUpdate()
 
     local updateSuccess = false
 
+    -- Candidate 0: Direct curl CLI individual file download (works cross-platform: Linux, macOS, Win 10/11)
+    if not updateSuccess and latestTag then
+        diag('Trying curl CLI individual file download...')
+        local rawBase = 'https://raw.githubusercontent.com/' .. GITHUB_REPO .. '/' .. latestTag
+        local curlOkCount = 0
+
+        for _, item in ipairs(UPDATE_MAP) do
+            local url = rawBase .. '/' .. item.repo .. '?t=' .. os.time()
+            local destFile = item.target
+            local destDir = destFile:match('(.+)/[^/]+$') or '.'
+
+            if sep == '\\' then
+                pcall(os.execute, 'mkdir "' .. destDir:gsub('/', '\\') .. '" 2>nul')
+            else
+                pcall(os.execute, 'mkdir -p "' .. destDir .. '" 2>/dev/null')
+            end
+
+            local tmpDlFile = configDir .. sep .. 'triune_dl.tmp'
+            local cmd = 'curl -sL -H "User-Agent: TriuneUpdater" "' .. url .. '"'
+            local content = execCommand(cmd, tmpDlFile)
+
+            local isValidContent = content and #content > 0 and not content:find('404: Not Found') and not content:find('404 Page Not Found')
+            if not isValidContent and item.repo:sub(1,10) == 'mq2triune/' then
+                -- Fallback for legacy tags without mq2triune/ path prefix
+                local fallbackUrl = rawBase .. '/' .. item.repo:sub(11) .. '?t=' .. os.time()
+                local cmd2 = 'curl -sL -H "User-Agent: TriuneUpdater" "' .. fallbackUrl .. '"'
+                content = execCommand(cmd2, tmpDlFile)
+                isValidContent = content and #content > 0 and not content:find('404: Not Found') and not content:find('404 Page Not Found')
+            end
+
+            if isValidContent then
+                local f = io.open(destFile, 'w')
+                if f then
+                    f:write(content)
+                    f:close()
+                    curlOkCount = curlOkCount + 1
+                    diag('curl updated: ' .. item.repo .. ' -> ' .. destFile)
+                end
+            end
+        end
+
+        if curlOkCount > 0 then
+            updateSuccess = true
+            diag('curl individual file update succeeded with ' .. tostring(curlOkCount) .. ' files updated.')
+        else
+            diag('curl individual file update produced 0 updated files.')
+        end
+    end
+
     -- Candidate 1: VBScript individual file download (works on native Windows + Wine)
     -- Downloads each file from GitHub raw content as text — no ZIP or binary handling.
     if sep == '\\' and latestTag then
@@ -765,7 +814,7 @@ end
 mq.imgui.init('TriuneUpdaterWin', drawUpdaterWindow)
 
 -- Queue initial update check safely on yieldable coroutine thread
-local pendingAction = 'check'
+pendingAction = 'check'
 
 -- Main loop for executing queued pending actions safely outside render callback
 while isRunning and isOpen do

@@ -3,18 +3,20 @@ setlocal
 echo [TriuneAutocombat Updater]
 
 :: Check if Python is available
-where python >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    echo Launching Python updater...
-    python "%~dp0triune_updater.py" %*
-    goto :end
-)
+if exist "%~dp0triune_updater.py" (
+    where python >nul 2>nul
+    if %ERRORLEVEL% equ 0 (
+        echo Launching Python updater...
+        python "%~dp0triune_updater.py" %*
+        goto :end
+    )
 
-where py >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    echo Launching Python updater via py launcher...
-    py "%~dp0triune_updater.py" %*
-    goto :end
+    where py >nul 2>nul
+    if %ERRORLEVEL% equ 0 (
+        echo Launching Python updater via py launcher...
+        py "%~dp0triune_updater.py" %*
+        goto :end
+    )
 )
 
 echo Python 3 is not installed on this system. Running PowerShell fallback updater...
