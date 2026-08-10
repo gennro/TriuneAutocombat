@@ -118,13 +118,27 @@ A standalone ImGui window for tracking and navigating to NPCs in the current zon
 - **Spell failure tracking**: per-spell fizzle, interrupt, out-of-range, LoS, and immune counters with configurable retry limit and lockout duration
 - **Med break system**: optional auto-meditate when HP/Mana/Endurance drops below a configurable threshold, resuming when recovered
 
+### 📱 Compact Mini HUD Mode
+
+- **Minimal Floating Overlay**: Essential combat controls in a minimal, space-saving mini-window (`Triune AutoCombat Mini`).
+- **Live Combat Controls**: Mode selector dropdown, Start/Pause toggle button, and Burn toggle button (highlighted bright red when active).
+- **Session Rate Banner**: Displays real-time AA/hr and Plat/hr rates with hover tooltip and inline Reset button.
+- **Quick Module Launchers**: One-click launcher buttons for `Spellbook`, `Cursor`, `DPS`, `Update`, and `Tracker`.
+- **Toggle via**: `/ac compact`, `/ac mini`, `/ac hud`, the **Compact Mode** header button, or Settings tab.
+
+### 📈 AA & Platinum Session Rate Tracker
+
+- **Real-Time Efficiency Metrics**: Tracks total session elapsed time, AA/hr rate (`AA/hr: 12.4`), total AAs gained, Plat/hr rate (`Plat/hr: 120.5`), and total Platinum earned.
+- **Interactive Tooltip**: Hovering over the rate banner in the main header or Compact HUD displays a complete breakdown of session start and current balances.
+- **Reset Button**: One-click session reset to start a fresh tracking period.
+
 ### 🖼️ ImGui Interface
 
 - Unified dark theme across all windows (Midnight Blue backgrounds, Steel Blue borders, Arc Cyan highlights, Amber sliders, Emerald checkmarks)
 - Color-coded class trio emblems — one distinct, colorblind-safe hue per slot
 - Collapsible header sections to keep the UI compact
 - **Control tab**: Status / Start-Pause, mode selector, Hunter radius & level range, Main Assist settings, camp location, pet settings
-- **Settings tab**: Combat style (Melee / Ranged / Spell), navigation options, spell failure sliders, med break configuration
+- **Settings tab**: Combat style (Melee / Ranged / Spell), navigation options, spell failure sliders, med break configuration, Compact Mode toggle
 - Debug mode for verbose console output
 
 ---
@@ -159,7 +173,7 @@ TriuneAutocombat/
 │   ├── update.bat           # Windows updater launcher (Python / PowerShell fallback)
 │   ├── update.sh            # Linux updater launcher (Python 3 / curl fallback)
 │   ├── lua/
-│   │   ├── triune.lua           # Main autocombat engine & loadout UI
+│   │   ├── triune.lua           # Main autocombat engine, loadout UI & Compact Mini HUD
 │   │   ├── triune_track.lua     # Standalone ImGui zone NPC tracking & navigation window
 │   │   ├── triune_updater.lua   # Standalone ImGui release updater window
 │   │   ├── triune_spellbook.lua # Standalone spellbook browser & memorization window
@@ -168,7 +182,7 @@ TriuneAutocombat/
 │   │   └── triune_dps.lua       # Standalone ImGui DPS parser for player & pet damage
 │   ├── config/
 │   │   └── triune_data.lua      # Era-correct spell/disc/AA database (generated)
-├── README.md                # This file
+├── README.md                # User-facing documentation & feature overview
 └── CHANGELOG.md             # Version history
 ```
 
@@ -193,6 +207,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.4.3**
+Current version: **1.5**
 
 See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.

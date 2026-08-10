@@ -2,6 +2,17 @@
 
 ## 2026-08-10
 
+- **Bumped project version to v1.5.**
+  - Updated `README.md` documentation, feature list (Compact Mini HUD, AA & Plat Session Rate Tracker, Zone NPC Tracker), commands table, and directory file structure tree.
+- **Fixed combat initiation & auto-attack cancellation on fresh targets in `triune.lua`.**
+  - Fixed a critical issue where `/attack on` and `/autofire on` were being immediately cancelled by `not xtarActive` checks when navigating to a fresh target that had not yet entered XTarget.
+  - Updated detrimental action gates for Spells, AAs, and Discs to allow all engine auto-targeting modes (`Hunter`, `Manual Hunter`, `Pet Tank`, `Puller`, `Pull & Assist`, `Garrison`) to cast offensive spells/abilities to initiate combat on fresh non-XTarget targets.
+  - Added `Manual Hunter` to `ENGINE_TARGETS_MODE` so `combatReady` remains `true` when engaging fresh targets.
+  - Expanded auto-attack & auto-fire distance tolerances upon arrival (`MELEE_RANGE + 4` and `ranged_dist + 5`) to prevent navigation stall freezes where `/nav` arrived at target boundary but auto-attack failed to activate.
+- **Updated XTarget handling & added Non-XTarget attack timeout in `triune.lua`.**
+  - Removed level restrictions from `findFirstNPCXtarget()`, `firstNPCXtarget()`, and `checkAggroSwitch()`: any hostile mob that enters the player's Extended Target list (XTarget) is now targeted and attacked immediately, regardless of level.
+  - Initial target selection in `findRoamTarget()` and non-XTarget `haveNPC` validation still enforce `hunter_min_level`/`hunter_max_level` and `pull_min_level`/`pull_max_level`.
+  - Added a 4.0-second non-XTarget engagement timeout: when attempting to attack an NPC that fails to join `Me.XTarget` after 4 seconds of active engagement (e.g. un-aggroable, non-hostile, or bugged NPC), the script marks the mob as unreachable, clears target, and moves on to the next mob.
 - **Added standalone Zone NPC Tracker window (`mq2triune/lua/triune_track.lua`).**
   - Displays all active NPCs in the current zone with real-time distance updates (in yards), level, consideration color badge, line of sight indicator, and spawn ID.
   - Formatted table layout with Clean Name as Column 1 (`Name`), followed by Level (`Lvl`), Distance (`Dist`), Consideration (`Con`), Spawn ID (`ID`), Line of Sight (`LoS`), and Action buttons (`Actions`).
