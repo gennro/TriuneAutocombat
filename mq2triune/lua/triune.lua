@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.5.1'
+local VERSION           = '1.5.2'
 local open              = true
 local cfg               = mq.configDir
 
@@ -3289,28 +3289,77 @@ local function isSpawnPetOrPlayer(id)
     local s = mq.TLO.Spawn(id)
     if not s() then return false end
     local stype = s.Type() or ''
-    if stype == 'PC' then return true end
-    local hasMaster = false
-    pcall(function() hasMaster = s.Master() and (s.Master.ID() or 0) > 0 end)
-    if hasMaster then return true end
+    if stype == 'PC' or stype == 'Pet' or stype == 'Mercenary' then return true end
+    local masterIsPC = false
+    pcall(function()
+        if s.Master() and (s.Master.ID() or 0) > 0 then
+            local mt = s.Master.Type() or ''
+            if mt == 'PC' or s.Master.ID() == mq.TLO.Me.ID() then
+                masterIsPC = true
+            end
+        end
+    end)
+    if masterIsPC then return true end
+    local ownerIsPC = false
+    pcall(function()
+        if s.Owner() and (s.Owner.ID() or 0) > 0 then
+            local ot = s.Owner.Type() or ''
+            if ot == 'PC' or s.Owner.ID() == mq.TLO.Me.ID() then
+                ownerIsPC = true
+            end
+        end
+    end)
+    if ownerIsPC then return true end
     return false
 end
 
 -- Returns true when the given spawn ID is a confirmed hostile target that
 -- should receive offensive actions (spells, AAs, discs, auto-attack).
 -- Prevents the engine from accidentally casting on friendly NPCs (merchants,
--- quest givers, guards, bankers) that happen to be targeted.
+-- quest givers, guards, bankers) or pets that happen to be targeted.
 local function isHostileTarget(id)
     if not id or id <= 0 then return false end
+    if isSpawnPetOrPlayer(id) then return false end
+
+    local s = mq.TLO.Spawn(id)
+    if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
+    local stype = s.Type() or ''
+    if stype ~= 'NPC' then return false end
+
+    -- Exclude non-combat classes (Banker, Merchant, Guildmaster, Trader)
+    local cls = ''
+    pcall(function() cls = s.Class.ShortName() or '' end)
+    if cls == 'MER' or cls == 'BNK' or cls == 'GMD' then return false end
+    local isTrader = false
+    pcall(function() isTrader = (s.Trader() or s.Buyer()) end)
+    if isTrader then return false end
+
     -- On XTarget list (mob is aggroed on us or group)
     if isXTargetId(id) then return true end
-    -- Player is actively attacking this target
+
+    -- Active pull target in Puller / Pull & Assist mode
+    if (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist') and id == runtime.pullTargetId then
+        return true
+    end
+
+    -- Engine-targeting and manual-hunter modes (Hunter, Manual Hunter, Puller, Pull & Assist, Pet Tank, Garrison)
+    -- when this mob is currently targeted by player or engine
+    local ENGINE_TARGETS_MODE = {
+        ['Hunter'] = true,
+        ['Manual Hunter'] = true,
+        ['Puller'] = true,
+        ['Pull & Assist'] = true,
+        ['Pet Tank'] = true,
+        ['Garrison'] = true,
+    }
     local curTargetId = mq.TLO.Target.ID() or 0
+    if ENGINE_TARGETS_MODE[ctrl.mode] and curTargetId == id then
+        return true
+    end
+
+    -- Player is actively attacking this target (Combat or AutoFire on, or TargetOfTarget points to player)
     if curTargetId == id then
-        if isSpawnPetOrPlayer(id) then return false end
-        if mq.TLO.Me.Combat() then return true end
-        if mq.TLO.Me.AutoFire() then return true end
-        -- Player has aggro on this target (target-of-target points back at us)
+        if mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then return true end
         local myId = mq.TLO.Me.ID() or 0
         if myId > 0 then
             local totId = 0
@@ -3318,11 +3367,11 @@ local function isHostileTarget(id)
             if totId == myId then return true end
         end
     end
-    -- NPC is already damaged (being fought by someone), but not a pet or player
-    if not isSpawnPetOrPlayer(id) then
-        local hp = pctHP(id) or 100
-        if hp < 100 then return true end
-    end
+
+    -- NPC is already damaged (being fought by someone)
+    local hp = pctHP(id) or 100
+    if hp < 100 then return true end
+
     return false
 end
 
@@ -4554,22 +4603,31 @@ local function combatTick()
         local myHp = pctHP(mq.TLO.Me.ID())
         local myMana = mq.TLO.Me.PctMana() or 100
         local myEnd = mq.TLO.Me.PctEndurance() or 100
+        local xtarPresent = anyXtarAlive()
         if not runtime.medBreakActive then
-            if (ctrl.medbreak_hp_on and myHp <= ctrl.medbreak_hp_start)
-                or (ctrl.medbreak_mana_on and myMana <= ctrl.medbreak_mana_start)
-                or (ctrl.medbreak_end_on and myEnd <= ctrl.medbreak_end_start) then
-                fullStop()
-                runtime.medBreakActive = true
-                print('\ay[Triune]\ax Med Break -- resting to recover.')
+            if not xtarPresent then
+                if (ctrl.medbreak_hp_on and myHp <= ctrl.medbreak_hp_start)
+                    or (ctrl.medbreak_mana_on and myMana <= ctrl.medbreak_mana_start)
+                    or (ctrl.medbreak_end_on and myEnd <= ctrl.medbreak_end_start) then
+                    fullStop()
+                    runtime.medBreakActive = true
+                    print('\ay[Triune]\ax Med Break -- resting to recover.')
+                end
             end
         else
-            local hpOk = not ctrl.medbreak_hp_on or myHp >= ctrl.medbreak_hp_stop
-            local manaOk = not ctrl.medbreak_mana_on or myMana >= ctrl.medbreak_mana_stop
-            local endOk = not ctrl.medbreak_end_on or myEnd >= ctrl.medbreak_end_stop
-            if hpOk and manaOk and endOk then
+            if xtarPresent then
                 runtime.medBreakActive = false
                 if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
-                print('\ag[Triune]\ax Med Break over -- resuming.')
+                print('\ay[Triune]\ax Med Break cancelled -- NPC on XTarget!')
+            else
+                local hpOk = not ctrl.medbreak_hp_on or myHp >= ctrl.medbreak_hp_stop
+                local manaOk = not ctrl.medbreak_mana_on or myMana >= ctrl.medbreak_mana_stop
+                local endOk = not ctrl.medbreak_end_on or myEnd >= ctrl.medbreak_end_stop
+                if hpOk and manaOk and endOk then
+                    runtime.medBreakActive = false
+                    if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+                    print('\ag[Triune]\ax Med Break over -- resuming.')
+                end
             end
         end
     end
@@ -4743,7 +4801,7 @@ local function combatTick()
 
         if not haveNPC then
             local xtarId = firstNPCXtarget(false)
-            if xtarId and setTarget(xtarId) then
+            if xtarId and isHostileTarget(xtarId) and setTarget(xtarId) then
                 haveNPC = true
                 stopMoving()
                 pursuit.id = 0
@@ -4755,7 +4813,11 @@ local function combatTick()
 
         if haveNPC then
             local id = mq.TLO.Target.ID()
-            if moveToward(id, desiredRange()) then engage = true end
+            if not isHostileTarget(id) then
+                haveNPC = false
+            elseif moveToward(id, desiredRange()) then
+                engage = true
+            end
         end
     elseif ctrl.mode == 'Pet Tank' then
         if haveNPC and isUnreachable(mq.TLO.Target.ID()) then
@@ -5019,7 +5081,7 @@ local function combatTick()
                 local id = resolveTargetId(a.target, a.cls)
                 if id and conditionMet(a.when, a.pct, name, id, a.cls) then
                     local isDet = isDetrimentalAction(name, a.target, a)
-                    if not isDet or isXTargetId(id) or (ENGINE_TARGETS_MODE[ctrl.mode] and id == mq.TLO.Target.ID()) or (ctrl.mode == 'Puller' and id == runtime.pullTargetId) then
+                    if not isDet or isHostileTarget(id) then
                         fireAA(name, a, id)
                     end
                 end
@@ -5046,7 +5108,7 @@ local function combatTick()
                     end
                     if bossOk then
                         local isDet = isDetrimentalAction(name, d.target, d)
-                        if not isDet or isXTargetId(id) or (ENGINE_TARGETS_MODE[ctrl.mode] and id == mq.TLO.Target.ID()) or (ctrl.mode == 'Puller' and id == runtime.pullTargetId) then
+                        if not isDet or isHostileTarget(id) then
                             eligibleDiscs[#eligibleDiscs + 1] = { name = name, entry = d, id = id }
                         end
                     end
@@ -5099,9 +5161,7 @@ local function combatTick()
                     local condOk = id and conditionMet(g.when, g.pct, g.spell, id, g.cls)
                     if condOk then
                         local isDet = isDetrimentalAction(g.spell, g.target, g)
-                        local targetValid = not isDet or isXTargetId(id) or
-                            (ENGINE_TARGETS_MODE[ctrl.mode] and id == mq.TLO.Target.ID()) or
-                            (ctrl.mode == 'Puller' and id == runtime.pullTargetId)
+                        local targetValid = not isDet or isHostileTarget(id)
                         if targetValid and castGem(i, g, id) then
                             if g.when == 'missing buff' then
                                 local bene = false

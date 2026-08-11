@@ -1,5 +1,20 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-11
+
+- **Fixed auto casting on non-hostile targets, player pets, and friendly NPCs in `triune.lua`.**
+  - **Bumped version to v1.5.2.** Updated `README.md` to reflect `v1.5.2`.
+  - Fixed a critical regression in `Manual Hunter` and engine-targeting modes where targeted pets or non-hostile targets caused endless auto-casting of detrimental (offensive) spells, AAs, and disciplines until mana was depleted.
+  - Enhanced `isSpawnPetOrPlayer(id)` to check spawn `Type` (`'PC'`, `'Pet'`, `'Mercenary'`), owner/master relationships (`s.Master` / `s.Owner` where master/owner is a PC or local character), `Me.Pet.ID()`, and `petState.myPets`, ensuring friendly pets, player pets, and allies are 100% recognized.
+  - Hardened `isHostileTarget(id)` to reject player/group pets, PCs, corpses, merchants (`'MER'`), bankers (`'BNK'`), guildmasters (`'GMD'`), traders, and buyers.
+  - Updated `haveNPC` in `combatTick` to exclude `isSpawnPetOrPlayer(id)`, preventing pets or player targets from being treated as combat targets in `Manual Hunter`, `Hunter`, `Pet Tank`, or `Garrison` modes.
+  - Replaced flawed `ENGINE_TARGETS_MODE` target overrides in AA, Disc, and Spell Gem loops (`tryGems`, `tryAAs`, `tryDiscs`) with strict `not isDet or isHostileTarget(id)` checks, guaranteeing detrimental actions are never cast on pets or non-hostile targets while allowing beneficial spells (heals, buffs) to function properly on allies and pets.
+- **Gated Med Break resting on XTarget status in `triune.lua`.**
+  - Added an `anyXtarAlive()` check before entering Med Break (`runtime.medBreakActive` activation), ensuring characters will not sit down to meditate if any live hostile NPCs are present on the Extended Target list.
+  - Added an active XTarget check while resting: if a hostile NPC enters XTarget while Med Break is active, the script immediately cancels Med Break (`runtime.medBreakActive = false`), issues `/stand`, and resumes combat readiness.
+
+---
+
 ## 2026-08-10
 
 - **Bumped project version to v1.5.**

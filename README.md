@@ -207,6 +207,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.5**
+Current version: **1.5.2**
 
 See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
