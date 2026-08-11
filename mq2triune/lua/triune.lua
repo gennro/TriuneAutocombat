@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.5'
+local VERSION           = '1.5.1'
 local open              = true
 local cfg               = mq.configDir
 
@@ -1580,7 +1580,8 @@ local function loadoutSig()
         tostring(ctrl.medbreak_hp_on), tostring(ctrl.medbreak_hp_start), tostring(ctrl.medbreak_hp_stop),
         tostring(ctrl.medbreak_mana_on), tostring(ctrl.medbreak_mana_start), tostring(ctrl.medbreak_mana_stop),
         tostring(ctrl.medbreak_end_on), tostring(ctrl.medbreak_end_start), tostring(ctrl.medbreak_end_stop),
-        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec), tostring(ctrl.min_mana_pct), tostring(ctrl.compact), tostring(ctrl.hunter_combat_radius),
+        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec), tostring(ctrl.min_mana_pct), tostring(ctrl
+        .compact), tostring(ctrl.hunter_combat_radius),
         c and string.format('%.1f,%.1f,%.1f', c.x, c.y, c.z) or 'nocamp',
         a and string.format('%.1f,%.1f,%.1f,r%d', a.x, a.y, a.z, ctrl.hunter_combat_radius or 0) or 'noanchor' }, '~')
     return table.concat(p, '|')
@@ -2827,7 +2828,8 @@ local function drawMiniGui()
     if not open or not ctrl.compact then return end
     pushTheme()
     local show
-    open, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', open, ImGuiWindowFlags.AlwaysAutoResize)
+    open, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', open,
+        ImGuiWindowFlags.AlwaysAutoResize)
     if not open then
         ctrl.compact = false
         ImGui.End()
@@ -2907,7 +2909,8 @@ local function drawMiniGui()
         updateTracker()
         local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
         local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
-        local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or 0
+        local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or
+            0
         local aaRate = (elapsedHrs > 0.0001) and (aaGained / elapsedHrs) or 0.0
         local platGained = (runtime.startPlat and runtime.currentPlat) and (runtime.currentPlat - runtime.startPlat) or 0
         local platRate = (elapsedHrs > 0.0001) and (platGained / elapsedHrs) or 0.0
@@ -4768,7 +4771,8 @@ local function combatTick()
         if haveNPC then
             if not isXTargetId(mq.TLO.Target.ID()) and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
                 local curId = mq.TLO.Target.ID()
-                local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
+                    ctrl.hunter_max_level)
                 if closerId and setTarget(closerId) then
                     stopMoving()
                     pursuit.id = 0
