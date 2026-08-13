@@ -16,30 +16,22 @@ The script reads an era-correct spell and activated-AA database (`triune_data.lu
 
 ### ⚔️ Combat Modes
 
-Triune supports **11 distinct combat modes** modelled on classic autocombat concepts:
+Triune supports **3 primary combat modes** with dynamic submodes:
 
-| Mode | Description |
-|---|---|
-| **Manual** | No auto-targeting; your loadout fires on whatever you manually target. |
-| **Hunter** | Roams and solo-kills the nearest valid mob within a configurable radius. |
-| **Manual Hunter** | Fights your current target automatically, but does not roam for new mobs. Great for swarming. |
-| **Puller** | Pulls mobs back to camp and tanks them yourself. |
-| **Pull & Assist** | Pulls to camp then holds for the Main Assist — does not self-tank. |
-| **Assist** | Assists the Main Assist; chases to stay in range, returns to camp when idle. |
-| **Chase Assist** | Same as Assist — chases the Main Assist everywhere. |
-| **Backline** | Assists the Main Assist but never moves or melees — ranged/caster support only. |
-| **Tank** | Assists the Main Assist and commits to melee immediately. |
-| **Garrison** | Holds a camp point and reactively tanks whatever aggros — does not roam. |
-| **Pet Tank** | Roams for targets, closes to ranged distance, and sends pets in to tank while you free-cast from range. |
+| Mode | Submodes | Description |
+|---|---|---|
+| **Manual** | *(None)* | Auto-attacks and casts loadout on your current/acquired target; does not roam. Includes Set Camp and radius slider to auto-return to camp when idle after combat, plus an **Auto-Target Hostiles on XTarget** toggle to switch between auto-engaging XTarget hostiles or only fighting manually selected targets. |
+| **Puller** | **`Hunt`** / **`Camp`** | **`Hunt`**: Roams within search radius looking for valid mobs and kills them on the spot.<br>**`Camp`**: Scouts mobs within radius, tags them via chosen Pull Method (**Melee**, **Spell**, **Pet**, or **Ranged**), and pulls back to camp to tank/fight at camp. Supports **Engagement Distance** slider (15-250 units) and **Stand Back (Let Pet Tank)** option to stay ranged during combat. |
+| **Assist** | **`Chase`** / **`Camp`** / **`Backline`** | **`Chase`**: Follows Main Assist everywhere and assists on MA target.<br>**`Camp`**: Holds camp position and assists MA, returning to camp when target dies.<br>**`Backline`**: Ranged/caster support; assists MA without moving to melee. |
 
 ### 🔮 Spell & Ability Loadout Builder
 
-- **12 combat gem slots** + **12 buff gem slots** (independently edited; only one set is memorized at a time)
+- **12 spell gem slots** (per-slot class, target, trigger condition, percent threshold, Min XTarget, and Burn Only toggle)
 - **AA (Alternate Advancement)** ability slots with per-ability enable/disable toggles
 - **Discipline** slots (fired via `/disc`) — separate from AAs but using the same entry shape
 - Per-slot configuration: spell/ability, target type, firing condition (`HP <=`, `target HP <=`, `missing buff`, `in combat`, `always`, and more), fire percentage threshold, **Min XTarget** (1-10 NPCs), and **Burn Only** mode toggle
 - **Min XTarget Dropdown (1-10)**: Restricts spell gems, AAs, and disciplines to fire only when the specified number of active hostiles are present on your XTarget list (ideal for gating AE spells or heavy cooldowns to multi-mob pulls).
-- **Smart Active Effect Checking**: Duration-based spells (DoTs, debuffs, slows, snares, CC, and buffs) automatically check if their effect is active on the target before casting, preventing mana waste and recast loops on `always`, `in combat`, or `on Named / burn` settings. Instant spells (nukes, heals) bypass this check to fire freely.
+- **Smart Active Effect Checking**: Duration-based spells (DoTs, debuffs, slows, snares, CC, and buffs) automatically check if their effect is active on the target before casting, preventing mana waste and recast loops on `always` or `in combat` settings. Instant spells (nukes, heals) bypass this check to fire freely.
 - **Min Mana % Threshold**: Configurable minimum mana slider in Settings halts automatic spell casting when mana falls below the threshold (automatically ignored during Burn Mode).
 - Loadout is automatically saved to `triune_loadout.lua` and reloaded on next run
 
@@ -137,7 +129,7 @@ A standalone ImGui window for tracking and navigating to NPCs in the current zon
 - Unified dark theme across all windows (Midnight Blue backgrounds, Steel Blue borders, Arc Cyan highlights, Amber sliders, Emerald checkmarks)
 - Color-coded class trio emblems — one distinct, colorblind-safe hue per slot
 - Collapsible header sections to keep the UI compact
-- **Control tab**: Status / Start-Pause, mode selector, Hunter radius & level range, Main Assist settings, camp location, pet settings
+- **Control tab**: Status / Start-Pause, mode selector, Hunter radius & level range, Main Assist settings, camp location, pet settings, Puller Target Filters (NPCs to Pull include list & NPCs to Ignore list)
 - **Settings tab**: Combat style (Melee / Ranged / Spell), navigation options, spell failure sliders, med break configuration, Compact Mode toggle
 - Debug mode for verbose console output
 
@@ -153,7 +145,7 @@ A standalone ImGui window for tracking and navigating to NPCs in the current zon
 | `/ac burn [on|off]` | `/ac burn` | Toggle burn mode (enables "Burn Only" spells, AAs, discs) |
 | `/ac compact` | `/ac mini`, `/ac hud` | Toggle compact mini-window HUD mode |
 | `/ac status` | | Print current status to console |
-| `/ac <mode>` | | Switch mode (`/ac hunter`, `/ac garrison`, `/ac tank`, etc.) |
+| `/ac <mode> [submode]` | | Switch primary mode and submode (`/ac manual`, `/ac puller hunt`, `/ac puller camp`, `/ac assist chase`, etc.) |
 | `/ac spellbook` | `/ac book` | Open the Spellbook browser window |
 | `/ac cursorui` | `/ac cursorwin`, `/ac cursormgr` | Open the Cursor Manager window |
 | `/ac clearcursor` | `/ac autoinv`, `/ac cursor` | Manually drain all cursor items to inventory |

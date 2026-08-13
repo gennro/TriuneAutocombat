@@ -94,27 +94,87 @@ local NUM_GEMS       = 12
 local lvlMin, lvlMax = 1, 65
 
 -- loadout.gems[i] = { cls=, spell=, target=, when=, pct= }  (or nil)
--- loadout.buffGems is the same shape as loadout.gems -- a second, independently
--- edited set of 12 gem slots for pet-summon/buff spells (e.g. Nec/Mag pet
--- summons, Bst buffs) that don't fit on the bar alongside your combat spells.
--- Only one of the two is ever actually memmed at a time (ctrl.buff_mode picks
--- which); "Mem All to Bar" on either tab both memorizes AND activates that set.
 -- loadout.aas and loadout.discs are maps: name -> { cls=, target=, when=, enabled=, pct= }
 -- (discs = disciplines, e.g. Mend/Lay on Hands/Hand of Piety -- fired via
 -- /disc, not /alt act; kept separate from aas since they're a different
 -- activation command and data source, but use the identical entry shape)
-local loadout        = { gems = {}, buffGems = {}, aas = {}, discs = {} }
+local loadout        = { gems = {}, aas = {}, discs = {} }
 
 -- combat control state (Control tab). NOTE: this is the control surface; wiring it
 -- into the actual casting/movement engine is phase 2.
+-- Primary Combat Modes & Submodes
+local PRIMARY_MODES  = { 'Manual', 'Puller', 'Assist' }
+local SUBMODES       = {
+    Puller = { 'Hunt', 'Camp' },
+    Assist = { 'Chase', 'Camp', 'Backline' }
+}
+local PULL_STYLES    = { 'Melee', 'Spell', 'Pet', 'Ranged' }
+
+local MODE_DESC      = {
+    Manual = 'Fights your current or acquired target automatically. Does not roam.',
+    Puller = 'Pulling & hunting engine. Hunt roams and solo-kills; Camp pulls mobs back to set camp.',
+    Assist = 'Assists the Main Assist. Chase follows MA; Camp holds camp spot; Backline is ranged/caster support.'
+}
+
+local SUBMODE_DESC   = {
+    ['Puller:Hunt']     = 'Roams within search radius looking for valid mobs and kills them on the spot.',
+    ['Puller:Camp']     = 'Pulls mobs within radius back to set camp location and tanks/fights them at camp.',
+    ['Assist:Chase']    = 'Follows Main Assist everywhere and assists on MA target.',
+    ['Assist:Camp']     = 'Holds set camp position and assists MA on MA target, returning to camp when idle.',
+    ['Assist:Backline'] = 'Ranged/caster support; assists MA without moving to melee range.'
+}
+
+local ctrl -- forward declaration for lexical scoping in helpers
+
+-- Backward compatibility and mode validation sanitizer
+local function sanitizeModeConfig(c)
+    c = c or ctrl
+    if not c then return end
+    local m = c.mode
+    if m == 'Manual Hunter' then
+        c.mode = 'Manual'
+        c.submode = 'Hunt'
+    elseif m == 'Hunter' or m == 'Pet Tank' then
+        c.mode = 'Puller'
+        c.submode = 'Hunt'
+    elseif m == 'Pull & Assist' then
+        c.mode = 'Puller'
+        c.submode = 'Camp'
+    elseif m == 'Chase Assist' then
+        c.mode = 'Assist'
+        c.submode = 'Chase'
+    elseif m == 'Garrison' or m == 'Tank' then
+        c.mode = 'Assist'
+        c.submode = 'Camp'
+    end
+
+    if c.mode ~= 'Manual' and c.mode ~= 'Puller' and c.mode ~= 'Assist' then
+        c.mode = 'Manual'
+    end
+
+    if c.mode == 'Puller' then
+        if c.submode ~= 'Hunt' and c.submode ~= 'Camp' then c.submode = 'Hunt' end
+    elseif c.mode == 'Assist' then
+        if c.submode ~= 'Chase' and c.submode ~= 'Camp' and c.submode ~= 'Backline' then c.submode = 'Chase' end
+    else
+        c.submode = 'Hunt'
+    end
+end
+
 -- Single source of truth for ctrl's defaults -- used both at module load and
--- on every character switch (onCharacterChanged). Was previously written out
--- twice, byte-for-byte, in both places; a field added to one copy and missed
--- in the other would silently default to nil after a character switch.
+-- on every character switch (onCharacterChanged).
 local function defaultCtrl()
     return {
         running              = false,
-        mode                 = 'Assist',
+        mode                 = 'Manual',
+        submode              = 'Hunt',
+        manual_auto_xtarget  = true,
+        pull_style           = 'Melee',
+        pull_spell           = '',
+        pull_spell_gem       = 1,
+        pull_engage_dist     = 100,
+        pull_stand_back      = false,
+        xtar_nav_dist        = 150,
         combat_style         = 'Melee',
         ranged_dist          = 40,
         ma_name              = '',
@@ -136,7 +196,6 @@ local function defaultCtrl()
         check_closer_mobs    = true,
         nav_fallback_stick   = false,
         debug_mode           = false,
-        buff_mode            = false,
         scribed_only         = true,
         aa_purchased_only    = true,
         disc_trained_only    = true,
@@ -160,28 +219,8 @@ local function defaultCtrl()
         compact              = false
     }
 end
-local ctrl = defaultCtrl()
--- Modelled on KissAssist's 9 modes, renamed to our own vocabulary (see the
--- triune-mode-roadmap project memory). Most of these are combinations of the
--- same primitives (chase/camp/pull/engage-immediately) rather than separate
--- systems -- see the combatTick dispatch below.
-local MODES = { 'Manual', 'Hunter', 'Manual Hunter', 'Puller', 'Pull & Assist',
-    'Assist', 'Chase Assist', 'Backline', 'Tank', 'Garrison', 'Pet Tank' }
-local MODE_DESC = {
-    Manual            = 'No auto-targeting, chasing, or pulling. Your loadout still fires on whatever YOU target.',
-    Hunter            = 'Roams and solo-kills the nearest valid mob.',
-    ['Manual Hunter'] = 'Fights your current target automatically, but does not roam or search for new mobs.',
-    Puller            = 'Pulls mobs back to camp and tanks them yourself.',
-    ['Pull & Assist'] = 'Pulls mobs back to camp and holds them for the Main Assist -- does not self-tank.',
-    Assist            = 'Assists the Main Assist; chases to stay in range, or returns to camp when idle if one is set.',
-    ['Chase Assist']  = 'Same as Assist -- chases and assists the Main Assist everywhere.',
-    Backline          = 'Assists the Main Assist but NEVER moves or melees -- ranged/caster support only.',
-    Tank              =
-    'Assists the Main Assist and commits to melee immediately, ignoring Assist At %. Returns to camp when idle if one is set.',
-    Garrison          = 'Holds a camp point and reactively tanks whatever aggros -- does not roam looking for fights.',
-    ['Pet Tank']      =
-    'Roams for targets like Hunter, closes to Ranged Distance (never melee range) and sends pets in to tank while you free-cast/ranged from there.',
-}
+ctrl = defaultCtrl()
+sanitizeModeConfig(ctrl)
 
 -- Runtime & state management tables
 local runtime = {
@@ -206,7 +245,11 @@ local runtime = {
     startAA = nil,
     currentAA = 0,
     startPlat = nil,
-    currentPlat = 0
+    currentPlat = 0,
+    ignoreList = {},
+    pullList = {},
+    ignoreInput = '',
+    pullInput = ''
 }
 
 local petState = {
@@ -280,16 +323,15 @@ end
 -- it tried to attack by mistake). Shared across ALL your characters (stored at
 -- ALLDATA.__ignore, not per-character), since a friendly name is friendly no
 -- matter which toon is playing. Never filters Assist or a target you pick yourself.
-local ignoreList  = {}
-local ignoreInput = ''
 
-local FRIENDLY    = { 'Myself', 'Main Assist', 'Tank', 'Lowest-HP Ally', 'Whole Group', 'Pet' }
-local ENEMY       = { 'Current Target', 'Assist Target', 'Nearest Add', 'Unmezzed Add', 'All Enemies' }
-local TARGETS     = {}
+
+local FRIENDLY = { 'Myself', 'Main Assist', 'Tank', 'Lowest-HP Ally', 'Whole Group', 'Pet' }
+local ENEMY    = { 'Current Target', 'Assist Target', 'Nearest Add', 'Unmezzed Add', 'All Enemies' }
+local TARGETS  = {}
 for _, t in ipairs(FRIENDLY) do TARGETS[#TARGETS + 1] = 'F: ' .. t end
 for _, t in ipairs(ENEMY) do TARGETS[#TARGETS + 1] = 'E: ' .. t end
 local WHENS = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff', 'missing pet', 'has Poison/Disease',
-    'ally is Dead', 'add is loose', 'twist while fighting', 'in combat', 'on Named / burn',
+    'ally is Dead', 'add is loose', 'twist while fighting', 'in combat',
     'always' }
 
 -- ============================================================================
@@ -348,6 +390,14 @@ local MQSHORT = {
     BERSERKERS = 'Ber'
 }
 
+local function idxOf(tbl, val)
+    if not tbl then return 1 end
+    for i, v in ipairs(tbl) do
+        if v == val then return i end
+    end
+    return 1
+end
+
 local function toCanonicalClassAbbr(str)
     if not str then return nil end
     local s = tostring(str)
@@ -381,14 +431,6 @@ local function classPlausible(abbr)
         if a == abbr then return true end
     end
     return false
-end
-
-local function idxOf(tbl, val)
-    if not tbl then return 1 end
-    for i, v in ipairs(tbl) do
-        if v == val then return i end
-    end
-    return 1
 end
 
 local function defaultsForKind(kind, bene)
@@ -510,6 +552,36 @@ local function isScribed(nm)
         end
     end
 
+    return false
+end
+
+local function isGemMatching(slotOrName, targetSpellName)
+    if not targetSpellName or targetSpellName == '' then return false end
+    local gemName = nil
+    if type(slotOrName) == 'number' then
+        pcall(function() gemName = mq.TLO.Me.Gem(slotOrName).Name() end)
+    else
+        gemName = slotOrName
+    end
+    if not gemName or gemName == '' or gemName == 'NULL' or gemName == 'nil' then return false end
+    if gemName == targetSpellName then return true end
+
+    local cleanGem = cleanSpellName(gemName):lower()
+    local cleanTarget = cleanSpellName(targetSpellName):lower()
+    if cleanGem ~= '' and cleanGem == cleanTarget then return true end
+
+    local normGem = normalizeSpellName(gemName)
+    local normTarget = normalizeSpellName(targetSpellName)
+    if normGem ~= '' and normGem == normTarget then return true end
+
+    local ok1, r1 = pcall(function() return mq.TLO.Spell(gemName).RankName() end)
+    local ok2, r2 = pcall(function() return mq.TLO.Spell(targetSpellName).RankName() end)
+    if ok1 and ok2 and r1 and r2 then
+        local str1, str2 = tostring(r1), tostring(r2)
+        if str1 ~= '' and str1 ~= 'NULL' and str1 == str2 then
+            return true
+        end
+    end
     return false
 end
 
@@ -876,7 +948,8 @@ local function stopMoving()
     pursuit.lastNavLoc = nil
 end
 
-local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn)
+local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist)
+    maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
     local chosenId, lowestHp = nil, 101
     pcall(function()
         local count = mq.TLO.Me.XTarget() or 0
@@ -889,8 +962,10 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn)
                     if s() then
                         local stype = s.Type() or ''
                         local cname = s.CleanName() or ''
+                        local dist = s.Distance3D() or 999
                         if (stype == 'NPC' or stype == 'Pet')
                             and (s.PctHPs() or 0) > 0 and not s.Dead()
+                            and dist <= maxDist
                             and (not isIgnoredFn or not isIgnoredFn(cname))
                             and (not isUnreachableFn or not isUnreachableFn(id)) then
                             if not unmezzedOnly or not buffActive(id, 'Mez') then
@@ -983,18 +1058,82 @@ end
 
 local function tryMem(slot, name)
     if not slot or not name or name == '' then return false end
-    local current = nil
-    pcall(function() current = mq.TLO.Me.Gem(slot).Name() end)
-    if current == name then return true end
 
+    -- 1. Already memorized in target slot? (matches exact string, clean name, rank name, or normalized name)
+    if isGemMatching(slot, name) then return true end
+
+    -- 2. Check combat/moving conditions
+    if mq.TLO.Me.Combat() then
+        print(string.format('\ay[Triune]\ax Cannot memorize "%s" into gem %d while in combat.', name, slot))
+        return false
+    end
+    if mq.TLO.Me.Moving() then
+        print(string.format('\ay[Triune]\ax Stand still to memorize "%s" into gem %d.', name, slot))
+        return false
+    end
+
+    -- 3. Verify spell is scribed
+    if not isScribed(name) then
+        print(string.format('\ar[Triune]\ax Cannot memorize "%s" -- not scribed in spellbook!', name))
+        return false
+    end
+
+    -- 4. Unmemorize duplicate instances of this spell in other gem slots
+    for s = 1, NUM_GEMS do
+        if s ~= slot and isGemMatching(s, name) then
+            pcall(function()
+                mq.cmdf('/unmemspell %d', s)
+                mq.delay(200)
+            end)
+            break
+        end
+    end
+
+    -- 5. Clear cursor before starting
     clearCursor()
+
+    -- 6. Unmemorize target slot if occupied by a different spell
+    local currentGemName = nil
+    pcall(function() currentGemName = mq.TLO.Me.Gem(slot).Name() end)
+    if currentGemName and currentGemName ~= '' and currentGemName ~= 'NULL' then
+        pcall(function()
+            mq.cmdf('/unmemspell %d', slot)
+            mq.delay(300)
+        end)
+    end
+
+    -- 7. Stand up if sitting
+    if mq.TLO.Me.Sitting() then
+        mq.cmd('/stand')
+        mq.delay(200)
+    end
+
+    -- 8. Issue /memspell command
+    print(string.format('\ay[Triune]\ax Memorizing "%s" into gem %d...', name, slot))
     pcall(function()
         mq.cmdf('/memspell %d "%s"', slot, name)
-        mq.delay(2000, function() return (mq.TLO.Me.Gem(slot).Name() or '') == name end)
     end)
+
+    -- 9. Poll up to 6.5s for spell memorization to finish
     local landed = false
-    pcall(function() landed = (mq.TLO.Me.Gem(slot).Name() or '') == name end)
+    local startWait = os.clock()
+    while (os.clock() - startWait) < 6.5 do
+        if isGemMatching(slot, name) then
+            landed = true
+            break
+        end
+        if mq.TLO.Me.Combat() or mq.TLO.Me.Moving() then break end
+        mq.delay(200)
+    end
+
     clearCursor()
+
+    if landed then
+        print(string.format('\ag[Triune]\ax Successfully memorized "%s" -> gem %d', name, slot))
+    else
+        print(string.format('\ar[Triune]\ax Memorization of "%s" (gem %d) timed out or failed.', name, slot))
+    end
+
     return landed
 end
 
@@ -1412,26 +1551,25 @@ end
 -- yet -- skips any slot with a mem still queued/in-progress for that reason.
 local gemSyncWarned = {}
 local lastGemSyncCheckAt = 0
-local lastStuckRecoveryAt = nil       -- for the status panel: "recovered from being stuck Ns ago"
-local lastCombatStallRecoveryAt = nil -- for the status panel: "recovered from a combat stall Ns ago"
 local function checkGemMemSync()
     local now = os.clock()
     if (now - lastGemSyncCheckAt) < 10.0 then return end
     lastGemSyncCheckAt = now
     if mq.TLO.Window('SpellBookWnd').Open() then return end -- actively memming right now -- don't check mid-swap
-    local activeGems = ctrl.buff_mode and loadout.buffGems or loadout.gems
     for i = 1, NUM_GEMS do
-        local g = activeGems[i]
+        local g = loadout.gems[i]
         if g and g.spell and g.spell ~= '' and not runtime.pendingMem[i] then
-            local memmed
-            pcall(function() memmed = mq.TLO.Me.Gem(i).Name() end)
-            if memmed and memmed ~= '' and memmed ~= 'NULL' and memmed ~= g.spell then
-                if not gemSyncWarned[i] then
-                    gemSyncWarned[i] = true
-                    print(string.format(
-                        '\ay[Triune]\ax gem %d mismatch -- configured for "%s" but the bar actually has "%s" memmed there. '
-                        .. 'It will never successfully cast/detect correctly like this -- use Mem All to Bar, or re-pick the spell for this gem.',
-                        i, g.spell, memmed))
+            if not isGemMatching(i, g.spell) then
+                local memmed
+                pcall(function() memmed = mq.TLO.Me.Gem(i).Name() end)
+                if memmed and memmed ~= '' and memmed ~= 'NULL' then
+                    if not gemSyncWarned[i] then
+                        gemSyncWarned[i] = true
+                        print(string.format(
+                            '\ay[Triune]\ax gem %d mismatch -- configured for "%s" but the bar actually has "%s" memmed there. '
+                            .. 'It will never successfully cast/detect correctly like this -- use Mem All to Bar, or re-pick the spell for this gem.',
+                            i, g.spell, memmed))
+                    end
                 end
             else
                 gemSyncWarned[i] = nil -- resolved (or slot empty) -- allow a future mismatch to warn again
@@ -1448,7 +1586,6 @@ local function collectEntry()
         lvlMin = lvlMin,
         lvlMax = lvlMax,
         gems = loadout.gems,
-        buffGems = loadout.buffGems,
         aas = loadout.aas,
         discs = loadout.discs,
         control = ctrl
@@ -1459,9 +1596,8 @@ local function applyEntry(e)
     if type(e.classes) == 'table' and #e.classes > 0 then myClasses = e.classes end
     lvlMin = e.lvlMin or lvlMin; lvlMax = e.lvlMax or lvlMax
     clearFilteredSpellsCache()
-    loadout.gems     = e.gems or {}
-    loadout.buffGems = e.buffGems or {}
-    loadout.aas      = {}
+    loadout.gems = e.gems or {}
+    loadout.aas  = {}
     if type(e.aas) == 'table' then
         for k, v in pairs(e.aas) do
             if not tonumber(k) and type(v) == 'table' then
@@ -1472,6 +1608,7 @@ local function applyEntry(e)
     loadout.discs = e.discs or {}
     if type(e.control) == 'table' then
         for k, v in pairs(e.control) do ctrl[k] = v end
+        sanitizeModeConfig()
         -- Migrate pre-3.6 saves (separate use_melee/use_ranged checkboxes) to the
         -- single combat_style radio -- old saves have no combat_style field at all.
         if not e.control.combat_style then
@@ -1490,13 +1627,15 @@ local function loadAll()
     local ok, t = pcall(fn)
     if ok and type(t) == 'table' then
         ALLDATA = t
-        if type(ALLDATA.__ignore) == 'table' then ignoreList = ALLDATA.__ignore end
+        if type(ALLDATA.__ignore) == 'table' then runtime.ignoreList = ALLDATA.__ignore end
+        if type(ALLDATA.__pullList) == 'table' then runtime.pullList = ALLDATA.__pullList end
     end
 end
 
 local function saveLoadout(silent)
     if myName then ALLDATA[myName] = collectEntry() end
-    ALLDATA.__ignore = ignoreList
+    ALLDATA.__ignore = runtime.ignoreList
+    ALLDATA.__pullList = runtime.pullList
     local f = io.open(cfg .. '/triune_loadout.lua', 'w')
     if not f then return end
     f:write('return '); serialize(ALLDATA, f, 1); f:close()
@@ -1506,54 +1645,106 @@ end
 -- ignore-list helpers: applies only to Hunter/Puller AUTO-targeting (see findRoamTarget
 -- below); Assist and anything you target yourself are never filtered.
 local function isIgnored(name)
-    if not name or name == '' then return false end
-    for _, n in ipairs(ignoreList) do if n == name then return true end end
+    if not name then return false end
+    local cleanName = tostring(name)
+    if cleanName == '' then return false end
+    if not runtime.ignoreList then return false end
+    for _, n in ipairs(runtime.ignoreList) do
+        if tostring(n) == cleanName then return true end
+    end
     return false
 end
 local function addIgnore(name)
     if not name or name == '' or isIgnored(name) then return end
-    table.insert(ignoreList, name)
-    table.sort(ignoreList)
+    table.insert(runtime.ignoreList, name)
+    table.sort(runtime.ignoreList)
     saveLoadout(true)
     print('\ag[Triune]\ax added to ignore list: ' .. name)
 end
 local function removeIgnore(name)
-    for i, n in ipairs(ignoreList) do
+    for i, n in ipairs(runtime.ignoreList) do
         if n == name then
-            table.remove(ignoreList, i); break
+            table.remove(runtime.ignoreList, i); break
         end
     end
     saveLoadout(true)
     print('\ag[Triune]\ax removed from ignore list: ' .. name)
 end
 
+-- pull-list (include-list) helpers for Puller mode:
+local function isPullListed(name)
+    if not name or name == '' then return false end
+    for _, n in ipairs(runtime.pullList) do if n == name then return true end end
+    return false
+end
+local function addPull(name)
+    if not name or name == '' or isPullListed(name) then return end
+    table.insert(runtime.pullList, name)
+    table.sort(runtime.pullList)
+    saveLoadout(true)
+    print('\ag[Triune]\ax added to pull list: ' .. name)
+end
+local function removePull(name)
+    for i, n in ipairs(runtime.pullList) do
+        if n == name then
+            table.remove(runtime.pullList, i); break
+        end
+    end
+    saveLoadout(true)
+    print('\ag[Triune]\ax removed from pull list: ' .. name)
+end
+
+local function isPullAllowed(name)
+    if not name then return false end
+    local cleanName = tostring(name)
+    if cleanName == '' then return false end
+    if isIgnored(cleanName) then return false end
+    if not runtime.pullList or #runtime.pullList == 0 then return true end
+    for _, n in ipairs(runtime.pullList) do
+        local strN = tostring(n)
+        if strN ~= '' and (cleanName == strN or cleanName:find(strN, 1, true)) then
+            return true
+        end
+    end
+    return false
+end
+
 -- lightweight signature of the loadout, for auto-save change detection
 local function loadoutSig()
     local p = { table.concat(myClasses or {}, ','), tostring(lvlMin), tostring(lvlMax) }
     for i = 1, NUM_GEMS do
-        local g = loadout.gems[i]
-        p[#p + 1] = g and (tostring(g.cls) .. '~' .. tostring(g.spell) .. '~' .. tostring(g.target)
-            .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct) .. '~' .. tostring(g.burn_only)) or '-'
+        local g = loadout.gems and loadout.gems[i]
+        if type(g) == 'table' then
+            p[#p + 1] = tostring(i) ..
+                '~' ..
+                tostring(g.enabled) ..
+                '~' ..
+                tostring(g.spell) ..
+                '~' ..
+                tostring(g.target) ..
+                '~' ..
+                tostring(g.when) ..
+                '~' ..
+                tostring(g.pct) ..
+                '~' ..
+                tostring(g.boss_only) ..
+                '~' .. tostring(g.burn_only) .. '~' .. tostring(g.priority) .. '~' .. tostring(g.max_xtargets)
+        end
     end
-    for i = 1, NUM_GEMS do
-        local g = loadout.buffGems[i]
-        p[#p + 1] = g and (tostring(g.cls) .. '~' .. tostring(g.spell) .. '~' .. tostring(g.target)
-            .. '~' .. tostring(g.when) .. '~' .. tostring(g.pct) .. '~' .. tostring(g.burn_only)) or '-'
-    end
-    local keys = {}
-    for nm in pairs(loadout.aas or {}) do keys[#keys + 1] = tostring(nm) end
-    table.sort(keys)
-    for _, nm in ipairs(keys) do
-        local a = loadout.aas and loadout.aas[nm]
+    local akeys = {}
+    if loadout.aas then for k in pairs(loadout.aas) do akeys[#akeys + 1] = k end end
+    table.sort(akeys)
+    for _, nm in ipairs(akeys) do
+        local a = loadout.aas[nm]
         if type(a) == 'table' then
             p[#p + 1] = nm ..
                 '~' ..
                 tostring(a.enabled) .. '~' .. tostring(a.target) .. '~' .. tostring(a.when) .. '~' .. tostring(a.pct)
-                .. '~' .. tostring(a.burn_only)
+                .. '~' .. tostring(a.boss_only) .. '~' .. tostring(a.burn_only) .. '~' .. tostring(a.priority)
         end
     end
     local dkeys = {}
-    for nm in pairs(loadout.discs or {}) do dkeys[#dkeys + 1] = tostring(nm) end
+    if loadout.discs then for k in pairs(loadout.discs) do dkeys[#dkeys + 1] = k end end
     table.sort(dkeys)
     for _, nm in ipairs(dkeys) do
         local d = loadout.discs and loadout.discs[nm]
@@ -1564,26 +1755,23 @@ local function loadoutSig()
                 .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.burn_only) .. '~' .. tostring(d.priority)
         end
     end
-    local c = ctrl.camp_loc
-    local a = ctrl.hunter_combat_loc
-    p[#p + 1] = table.concat({ ctrl.mode, tostring(ctrl.combat_style),
-        tostring(ctrl.ranged_dist), tostring(ctrl.ma_name), tostring(ctrl.assist_at),
-        tostring(ctrl.chase), tostring(ctrl.chase_dist), tostring(ctrl.automem),
-        tostring(ctrl.hunter_radius), tostring(ctrl.hunter_z), tostring(ctrl
-        .camp_radius), tostring(ctrl.camp_z),
-        tostring(ctrl.pet_assist_at), tostring(ctrl.pet_hold_enabled), tostring(ctrl.show_map_radius),
-        tostring(ctrl.nav_fallback_stick), tostring(ctrl.debug_mode), tostring(ctrl.buff_mode), tostring(ctrl.burn),
-        tostring(ctrl
-            .scribed_only),
-        tostring(ctrl.aa_purchased_only), tostring(ctrl.disc_trained_only),
-        tostring(ctrl.medbreak_enabled),
-        tostring(ctrl.medbreak_hp_on), tostring(ctrl.medbreak_hp_start), tostring(ctrl.medbreak_hp_stop),
-        tostring(ctrl.medbreak_mana_on), tostring(ctrl.medbreak_mana_start), tostring(ctrl.medbreak_mana_stop),
-        tostring(ctrl.medbreak_end_on), tostring(ctrl.medbreak_end_start), tostring(ctrl.medbreak_end_stop),
-        tostring(ctrl.cast_max_retries), tostring(ctrl.cast_lockout_sec), tostring(ctrl.min_mana_pct), tostring(ctrl
-        .compact), tostring(ctrl.hunter_combat_radius),
-        c and string.format('%.1f,%.1f,%.1f', c.x, c.y, c.z) or 'nocamp',
-        a and string.format('%.1f,%.1f,%.1f,r%d', a.x, a.y, a.z, ctrl.hunter_combat_radius or 0) or 'noanchor' }, '~')
+    local ckeys = {}
+    if ctrl then for k in pairs(ctrl) do ckeys[#ckeys + 1] = k end end
+    table.sort(ckeys)
+    local ctrlParts = {}
+    for _, k in ipairs(ckeys) do
+        local v = ctrl[k]
+        if type(v) == 'table' then
+            if k == 'camp_loc' or k == 'hunter_combat_loc' then
+                ctrlParts[#ctrlParts + 1] = string.format('%s=%.1f,%.1f,%.1f', k, v.x or 0, v.y or 0, v.z or 0)
+            end
+        else
+            ctrlParts[#ctrlParts + 1] = string.format('%s=%s', k, tostring(v))
+        end
+    end
+    p[#p + 1] = table.concat(ctrlParts, '~')
+    if runtime.ignoreList then p[#p + 1] = 'ignore:' .. table.concat(runtime.ignoreList, ',') end
+    if runtime.pullList then p[#p + 1] = 'pull:' .. table.concat(runtime.pullList, ',') end
     return table.concat(p, '|')
 end
 
@@ -1599,7 +1787,7 @@ end
 -- Called when the logged-in character changes: load that toon's saved setup, or
 -- detect classes fresh if it's new.
 local function onCharacterChanged()
-    loadout = { gems = {}, buffGems = {}, aas = {}, discs = {} }
+    loadout = { gems = {}, aas = {}, discs = {} }
     ctrl = defaultCtrl()
     runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
     lvlMin, lvlMax = 1, 65
@@ -1972,51 +2160,6 @@ function UI.drawClassPicker()
     end
 end
 
--- "Up top" so it's reachable from any tab -- if Hunter/Puller swings on a
--- friendly NPC, one click stops it and remembers forever (shared across all
--- your characters).
-function UI.drawIgnoreTab()
-    if not ImGui.BeginTabItem('Ignore List') then return end
-    ImGui.Dummy(0, 4)
-    accent(MUTED, 'Hunter / Puller will never auto-target these names.')
-    accent(MUTED, 'Only filters auto-targeting -- Assist and anything you target yourself are never blocked.')
-    ImGui.Dummy(0, 4)
-
-    if ImGui.Button('Ignore Current Target', 200, 26) then
-        local nm
-        pcall(function() nm = mq.TLO.Target.CleanName() end)
-        if nm and nm ~= '' then
-            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-            addIgnore(nm)
-        else
-            print('\ay[Triune]\ax no target selected.')
-        end
-    end
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(220)
-    ignoreInput = ImGui.InputText('##ignoreAdd', ignoreInput)
-    ImGui.SameLine()
-    if ImGui.Button('Add##ignoreAddBtn') then
-        if ignoreInput ~= '' then
-            addIgnore(ignoreInput); ignoreInput = ''
-        end
-    end
-    ImGui.Dummy(0, 6)
-    ImGui.Separator()
-
-    if #ignoreList == 0 then
-        ImGui.TextDisabled('(empty)')
-    else
-        for i, nm in ipairs(ignoreList) do
-            ImGui.PushID('ig' .. i)
-            if ImGui.Button('x') then removeIgnore(nm) end
-            ImGui.SameLine(); ImGui.Text(nm)
-            ImGui.PopID()
-        end
-    end
-    ImGui.EndTabItem()
-end
-
 function UI.drawHelpTab()
     if not ImGui.BeginTabItem('Help') then return end
     ImGui.Dummy(0, 4)
@@ -2069,12 +2212,23 @@ function UI.drawHelpTab()
             ImGui.TableSetupColumn('Behavior Description', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableHeadersRow()
 
-            for _, modeName in ipairs(MODES) do
-                ImGui.TableNextRow()
-                ImGui.TableNextColumn()
-                accent(GOOD, modeName)
-                ImGui.TableNextColumn()
-                ImGui.TextWrapped(MODE_DESC[modeName] or '')
+            for _, primaryName in ipairs(PRIMARY_MODES) do
+                if SUBMODES[primaryName] then
+                    for _, subName in ipairs(SUBMODES[primaryName]) do
+                        local fullKey = primaryName .. ':' .. subName
+                        ImGui.TableNextRow()
+                        ImGui.TableNextColumn()
+                        accent(GOOD, primaryName .. ' (' .. subName .. ')')
+                        ImGui.TableNextColumn()
+                        ImGui.TextWrapped(SUBMODE_DESC[fullKey] or '')
+                    end
+                else
+                    ImGui.TableNextRow()
+                    ImGui.TableNextColumn()
+                    accent(GOOD, primaryName)
+                    ImGui.TableNextColumn()
+                    ImGui.TextWrapped(MODE_DESC[primaryName] or '')
+                end
             end
             ImGui.EndTable()
         end
@@ -2083,15 +2237,11 @@ function UI.drawHelpTab()
     ImGui.EndTabItem()
 end
 
--- Shared row-rendering for both the Spell Gems tab and the Buff Loadout tab --
--- same class -> spell -> target -> when -> percent picker either way, just
--- pointed at a different 12-slot table. isActiveSet gates auto-mem-on-pick so
--- editing the INACTIVE set (planning ahead) never clobbers whatever's actually
--- memmed right now; only editing the currently-active set mems immediately.
+-- Row-rendering for the Spell Gems tab.
 -- UI: spell/gem list editor
 function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
     if allowBurn == nil then allowBurn = true end
-    if ImGui.BeginChild('gemlist_' .. idPrefix, ImVec2(0, 0), nil, 0) then
+    if ImGui.BeginChild('gemlist_' .. idPrefix, 0, 0) then
         for i = 1, NUM_GEMS do
             ImGui.PushID(idPrefix .. i)
             local g = gemsTable[i]
@@ -2180,19 +2330,17 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
     ImGui.EndChild()
 end
 
--- Header controls shared by both gem tabs: level band, auto-mem, import, and the
--- "Mem All to Bar" button that both memorizes this set AND makes it the active
--- one (ctrl.buff_mode follows whichever tab you last hit that button on).
-function UI.drawGemTabHeader(gemsTable, isBuffSet)
+-- Header controls for the Spell Gems tab: level band, auto-mem, import, and "Mem All to Bar".
+function UI.drawGemTabHeader(gemsTable)
     ImGui.Dummy(0, 4)
     ImGui.TextDisabled('Level band:')
     ImGui.SameLine(); ImGui.SetNextItemWidth(110)
-    local newLvlMin = ImGui.InputInt('##lmin' .. (isBuffSet and 'b' or ''), lvlMin); if newLvlMin < 1 then newLvlMin = 1 end
+    local newLvlMin = ImGui.InputInt('##lmin', lvlMin); if newLvlMin < 1 then newLvlMin = 1 end
     if newLvlMin ~= lvlMin then
         lvlMin = newLvlMin; clearFilteredSpellsCache()
     end
     ImGui.SameLine(); ImGui.Text('to'); ImGui.SameLine(); ImGui.SetNextItemWidth(110)
-    local newLvlMax = ImGui.InputInt('##lmax' .. (isBuffSet and 'b' or ''), lvlMax); if newLvlMax > 65 then newLvlMax = 65 end
+    local newLvlMax = ImGui.InputInt('##lmax', lvlMax); if newLvlMax > 65 then newLvlMax = 65 end
     if newLvlMax ~= lvlMax then
         lvlMax = newLvlMax; clearFilteredSpellsCache()
     end
@@ -2211,19 +2359,15 @@ function UI.drawGemTabHeader(gemsTable, isBuffSet)
     ctrl.automem = ImGui.Checkbox('Auto-mem on pick', ctrl.automem)
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
-            'When on, choosing a spell for a gem in the ACTIVE set immediately /memspell-s it into that slot (out of combat).')
+            'When on, choosing a spell for a gem immediately /memspell-s it into that slot (out of combat).')
     end
     ImGui.SameLine()
     if ImGui.Button('Import Memmed Gems') then
-        if ctrl.buff_mode ~= isBuffSet then
-            print(
-                '\ay[Triune]\ax warning: your bar right now is memmed for the OTHER loadout -- imported that instead of this one.')
-        end
         importCurrentGems(gemsTable)
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
-            'Read the spells already on your gem bar into this loadout -- no re-memming. Only accurate if this is the currently active/memmed set.')
+            'Read the spells already on your gem bar into this loadout -- no re-memming.')
     end
     ImGui.SameLine()
     local pendingCount = 0
@@ -2236,36 +2380,22 @@ function UI.drawGemTabHeader(gemsTable, isBuffSet)
                 local gg = gemsTable[i]
                 if gg and gg.spell then runtime.pendingMem[i] = gg.spell end
             end
-            ctrl.buff_mode = isBuffSet
         end
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
-            'Memorizes every gem in THIS list onto your bar and makes it the active loadout the combat engine casts from. Takes a few seconds per gem -- out of combat only.')
+            'Memorizes every gem in this list onto your bar. Takes a few seconds per gem -- out of combat only.')
     end
     if pendingCount > 0 then
         ImGui.SameLine(); accent(WARN, string.format('memming... %d queued', pendingCount))
     end
-    local activeName = ctrl.buff_mode and 'Buff Loadout' or 'Spell Gems'
-    accent(ctrl.buff_mode == isBuffSet and GOOD or MUTED,
-        (ctrl.buff_mode == isBuffSet) and ('ACTIVE -- the engine is currently casting from ' .. activeName)
-        or ('inactive -- currently casting from ' .. activeName .. " (this tab's spells aren't memmed right now)"))
     ImGui.Separator()
 end
 
 function UI.drawGemTab()
     if not ImGui.BeginTabItem('Spell Gems') then return end
-    UI.drawGemTabHeader(loadout.gems, false)
-    UI.drawGemList(loadout.gems, 'gem', not ctrl.buff_mode, true)
-    ImGui.EndTabItem()
-end
-
-function UI.drawBuffTab()
-    if not ImGui.BeginTabItem('Buff Loadout') then return end
-    accent(MUTED,
-        'A second gem set for pet summons / buffs that don\'t fit alongside your combat spells -- e.g. Nec/Mag pet summons, Bst buffs. Build it here, hit Mem All to Bar to swap it onto your bar, buff up, then switch back on the Spell Gems tab.')
-    UI.drawGemTabHeader(loadout.buffGems, true)
-    UI.drawGemList(loadout.buffGems, 'bgem', ctrl.buff_mode, false)
+    UI.drawGemTabHeader(loadout.gems)
+    UI.drawGemList(loadout.gems, 'gem', true, true)
     ImGui.EndTabItem()
 end
 
@@ -2284,7 +2414,7 @@ function UI.drawAATab()
     end
     ImGui.Separator()
 
-    if ImGui.BeginChild('aalist', ImVec2(0, 0), nil, 0) then
+    if ImGui.BeginChild('aalist', 0, 0) then
         for _, tier in ipairs(TIER_ORDER) do
             local any = false
             for _, cls in ipairs(myClasses) do
@@ -2359,7 +2489,7 @@ function UI.drawDiscTab()
             'Only show disciplines you\'ve actually trained, not every disc your\nclass could ever learn. Updates live as you train new ones. Turn\noff to browse/plan ahead.')
     end
     ImGui.Separator()
-    if ImGui.BeginChild('disclist', ImVec2(0, 0), nil, 0) then
+    if ImGui.BeginChild('disclist', 0, 0) then
         local anyDisc = false
         for _, cls in ipairs(myClasses) do
             for _, row in ipairs(DATA.discs[cls] or {}) do
@@ -2456,7 +2586,7 @@ function UI.drawControlTab()
         if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Text), 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
         if ImGui.Button('PAUSE', 150, 30) then
-            if ctrl.mode == 'Manual Hunter' then
+            if ctrl.mode == 'Manual' then
                 setManualHunterPetHold(true, true)
             else
                 setManualHunterPetHold(false, true)
@@ -2522,151 +2652,269 @@ function UI.drawControlTab()
     end
 
     ImGui.Dummy(0, 6)
-    accent(GOLD, 'Mode')
-    ImGui.SetNextItemWidth(220)
-    local modeIdx = ImGui.Combo('##mode', idxOf(MODES, ctrl.mode), MODES)
-    local newMode = MODES[modeIdx]
-    if newMode ~= ctrl.mode then
-        if ctrl.mode == 'Manual Hunter' and newMode ~= 'Manual Hunter' then
+    accent(GOLD, 'Combat Mode')
+    ImGui.SetNextItemWidth(160)
+    local curPrimaryIdx = idxOf(PRIMARY_MODES, ctrl.mode)
+    local newPrimaryIdx = ImGui.Combo('##primaryMode', curPrimaryIdx, PRIMARY_MODES)
+    local newPrimaryMode = PRIMARY_MODES[newPrimaryIdx]
+
+    if newPrimaryMode ~= ctrl.mode then
+        if ctrl.mode == 'Manual' and newPrimaryMode ~= 'Manual' then
             setManualHunterPetHold(false)
-        elseif newMode == 'Manual Hunter' then
+        elseif newPrimaryMode == 'Manual' then
             if not ctrl.running or not isCombat() then
                 setManualHunterPetHold(true, true)
             end
         end
-        ctrl.mode = newMode
-    end
-    accent(MUTED, MODE_DESC[ctrl.mode] or '')
-
-    local usesMA   = (ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist'
-        or ctrl.mode == 'Backline' or ctrl.mode == 'Tank')
-    local usesCamp = (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist' or ctrl.mode == 'Garrison'
-        or ctrl.mode == 'Assist' or ctrl.mode == 'Tank')
-
-    if ctrl.mode == 'Hunter' or ctrl.mode == 'Pet Tank' then
-        accent(ARC, ctrl.mode)
-        ImGui.SetNextItemWidth(180)
-        ctrl.hunter_radius = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000)
-        ImGui.SetNextItemWidth(180)
-        ctrl.hunter_z = ImGui.SliderInt('Max Height Diff (Z)', ctrl.hunter_z or 75, 10, 300)
-        ImGui.SetNextItemWidth(180)
-        ctrl.hunter_min_level = ImGui.SliderInt('Min NPC Level', ctrl.hunter_min_level or 1, 1, 100)
-        ImGui.SameLine()
-        ImGui.SetNextItemWidth(180)
-        ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
-        if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
-
-        ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##hunter',
-            ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(
-                'While traveling to a distant target, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
-        end
-
-        -- Combat Radius anchor -- keeps Hunter from roaming the whole world
-        ImGui.Dummy(0, 2)
-        accent(GOLD, 'Combat Radius (optional)')
-        if ctrl.hunter_combat_loc then
-            ImGui.Text(string.format('Anchor: %.1f, %.1f, %.1f',
-                ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.z))
+        ctrl.mode = newPrimaryMode
+        if SUBMODES[ctrl.mode] then
+            ctrl.submode = SUBMODES[ctrl.mode][1]
         else
-            accent(MUTED, 'No anchor set -- Hunter roams freely.')
+            ctrl.submode = 'Hunt'
         end
+    end
 
-        if ImGui.Button('Set Anchor##hunter') then
-            local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
-            if mx and my and mz then
-                ctrl.hunter_combat_loc = { x = mx, y = my, z = mz }
-                if (ctrl.hunter_combat_radius or 0) <= 0 then
-                    ctrl.hunter_combat_radius = 250
-                end
-                if updateMapRadiusVisuals then updateMapRadiusVisuals() end
-            end
-        end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(
-                'Saves your current position as the anchor.\nHunter will only wander and find mobs within the Combat Radius of this point.')
-        end
+    if SUBMODES[ctrl.mode] then
         ImGui.SameLine()
-        if ImGui.Button('Clear Anchor##hunter') then
-            ctrl.hunter_combat_loc = nil
-            pursuit.wanderLoc = nil -- ditch any wander-point that might be outside the old zone
-            if updateMapRadiusVisuals then updateMapRadiusVisuals() end
-        end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Remove the anchor -- Hunter will roam freely again.')
-        end
-
-        -- Radius slider (editable whether an anchor is set or not)
-        ImGui.SetNextItemWidth(220)
-        local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl.hunter_combat_radius or
-            250
-        local newRadius, changed = ImGui.SliderInt('Combat Radius##hunter', curRadius, 1, 2000)
-        if changed then
-            ctrl.hunter_combat_radius = newRadius
-            if updateMapRadiusVisuals then updateMapRadiusVisuals() end
-        end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(
-                'Maximum distance from the anchor the Hunter will roam\n'
-                .. 'and search for targets. Mobs outside this radius are ignored.\n'
-                .. 'Takes effect whenever an anchor location is set.')
-        end
+        ImGui.SetNextItemWidth(140)
+        local subList = SUBMODES[ctrl.mode]
+        local curSubIdx = idxOf(subList, ctrl.submode)
+        local newSubIdx = ImGui.Combo('##submode', curSubIdx, subList)
+        ctrl.submode = subList[newSubIdx]
     end
 
-    if usesMA then
-        accent(GOLD, 'Main Assist')
-        ImGui.SetNextItemWidth(160)
-        ctrl.ma_name = ImGui.InputText('MA Name', ctrl.ma_name or '')
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Character to assist. Leave blank to assist group leader.') end
-        ImGui.SetNextItemWidth(160)
-        local assistVal = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%')
-        ctrl.assist_at = assistVal
-
-        ctrl.chase = ImGui.Checkbox('Chase MA', ctrl.chase)
-        if ctrl.chase then
-            ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-            ctrl.chase_dist = ImGui.SliderInt('Chase Range', ctrl.chase_dist or 15, 5, 100)
-        end
+    local descKey = ctrl.mode
+    if SUBMODES[ctrl.mode] then
+        descKey = string.format('%s:%s', ctrl.mode, ctrl.submode)
     end
+    accent(MUTED, SUBMODE_DESC[descKey] or MODE_DESC[ctrl.mode] or '')
 
-    if usesCamp then
-        accent(GOLD, 'Camp Location')
+    -- Manual Mode Contextual Controls
+    if ctrl.mode == 'Manual' then
+        ImGui.Dummy(0, 4)
+        accent(GOLD, 'Camp Location (optional)')
         if ctrl.camp_loc then
             ImGui.Text(string.format('Camp set at: %.1f, %.1f, %.1f',
                 ctrl.camp_loc.x, ctrl.camp_loc.y, ctrl.camp_loc.z))
         else
-            accent(WARN, 'No camp location set.')
+            accent(MUTED, 'No camp set -- toon stays put wherever fights end.')
         end
 
-        if ImGui.Button('Set Here') then
+        if ImGui.Button('Set Here##manualCamp') then
             local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
             if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
         end
         ImGui.SameLine()
-        if ImGui.Button('Clear Camp') then
-            ctrl.camp_loc = nil; runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
+        if ImGui.Button('Clear Camp##manualCamp') then
+            ctrl.camp_loc = nil
         end
         if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Clears camp location. Player will not auto-return after combat.')
+        end
+
+        if ctrl.camp_loc then
+            ImGui.SetNextItemWidth(180)
+            ctrl.camp_radius = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500)
+        end
+
+        ImGui.Dummy(0, 4)
+        ctrl.manual_auto_xtarget = ImGui.Checkbox('Auto-Target Hostiles on XTarget##manualAutoXtar',
+            ctrl.manual_auto_xtarget ~= false)
+        if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Also wipes any other map circles (e.g. an old one\nleft over from before camp-clearing was fixed).')
+                'Checked: Automatically acquires and fights hostile NPCs that enter your Extended Target (XTarget) list.\nUnchecked: Only fights targets you manually select.')
         end
-
-        if ctrl.mode == 'Garrison' then
-            accent(MUTED,
-                'Garrison holds this camp spot and reactively tanks whatever aggros. It returns here whenever idle.')
-        end
-
-        if ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist' then
+        if ctrl.manual_auto_xtarget ~= false then
             ImGui.SetNextItemWidth(180)
-            ctrl.camp_radius = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500)
-
-            ImGui.SetNextItemWidth(180)
-            ctrl.camp_z = ImGui.SliderInt('Pull Height Diff (Z)', ctrl.camp_z or 75, 10, 300)
+            ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##manualXtarDist', ctrl.xtar_nav_dist or 150, 25,
+                300)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                    'Ignores mobs more than this far above or below camp --\nkeeps it from dragging back something from another\nfloor, ledge, or balcony.')
+                'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
+        end
+    end
+
+    -- Puller Mode Contextual Controls
+    if ctrl.mode == 'Puller' then
+        ImGui.Dummy(0, 2)
+        ImGui.SetNextItemWidth(160)
+        local curPullStyleIdx = 1
+        for idx, ps in ipairs(PULL_STYLES) do
+            if ps == (ctrl.pull_style or 'Melee') then
+                curPullStyleIdx = idx; break
+            end
+        end
+        local newPullStyleIdx = ImGui.Combo('Pull Method##pullStyle', curPullStyleIdx, PULL_STYLES)
+        ctrl.pull_style = PULL_STYLES[newPullStyleIdx]
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Method used to pull/tag target mob:\n- Melee: Closes to melee range and attacks\n- Spell: Casts spell from range\n- Pet: Sends pet out to tag mob\n- Ranged: Fires bow/ranged from distance')
+        end
+
+        if ctrl.pull_style == 'Spell' then
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(200)
+
+            local memGems = {}
+            local gemSlots = {}
+            for i = 1, NUM_GEMS do
+                local name
+                pcall(function() name = mq.TLO.Me.Gem(i).Name() end)
+                if not name or name == '' then
+                    local g = loadout.gems and loadout.gems[i]
+                    if g and g.spell and g.spell ~= '' then name = g.spell end
+                end
+                if name and name ~= '' then
+                    table.insert(memGems, string.format('Gem %d: %s', i, name))
+                    table.insert(gemSlots, i)
+                end
+            end
+
+            if #memGems == 0 then
+                memGems = { '(No Spells Memorized)' }
+                gemSlots = { 1 }
+            end
+
+            local curIdx = 1
+            local curSpell = ctrl.pull_spell or ''
+            for idx, slotNum in ipairs(gemSlots) do
+                local gName
+                pcall(function() gName = mq.TLO.Me.Gem(slotNum).Name() end)
+                if not gName or gName == '' then
+                    local g = loadout.gems and loadout.gems[slotNum]
+                    if g then gName = g.spell end
+                end
+                if gName == curSpell or slotNum == (ctrl.pull_spell_gem or 1) then
+                    curIdx = idx
+                    break
+                end
+            end
+
+            local newIdx = ImGui.Combo('Pull Spell##pullSpellCombo', curIdx, memGems)
+            local chosenSlot = gemSlots[newIdx] or 1
+            ctrl.pull_spell_gem = chosenSlot
+
+            local chosenName
+            pcall(function() chosenName = mq.TLO.Me.Gem(chosenSlot).Name() end)
+            if not chosenName or chosenName == '' then
+                local g = loadout.gems and loadout.gems[chosenSlot]
+                if g then chosenName = g.spell end
+            end
+            ctrl.pull_spell = chosenName or ''
+
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Select the memorized spell gem to use for ranged pulling')
+            end
+        end
+
+        if (ctrl.pull_style or 'Melee') ~= 'Melee' then
+            ImGui.Dummy(0, 2)
+            ImGui.SetNextItemWidth(180)
+            ctrl.pull_engage_dist = ImGui.SliderInt('Engagement Distance##pullEngageDist', ctrl.pull_engage_dist or 100,
+                15, 250)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                'Distance (units) to close to before sending in pets, casting pull spell, or firing bow.')
+            end
+
+            ctrl.pull_stand_back = ImGui.Checkbox('Stand Back (Let Pet Tank / Stay Ranged)##pullStandBack',
+                ctrl.pull_stand_back == true)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                'Checked: Stays back at engagement distance during combat and lets pet tank or stays ranged without closing into melee range.')
+            end
+        end
+
+        ImGui.Dummy(0, 4)
+
+        if ctrl.submode == 'Hunt' then
+            accent(ARC, 'Puller (Hunt)')
+            ImGui.SetNextItemWidth(180)
+            ctrl.hunter_radius = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000)
+            ImGui.SetNextItemWidth(180)
+            ctrl.hunter_z = ImGui.SliderInt('Max Height Diff (Z)', ctrl.hunter_z or 75, 10, 300)
+            ImGui.SetNextItemWidth(180)
+            ctrl.hunter_min_level = ImGui.SliderInt('Min NPC Level', ctrl.hunter_min_level or 1, 1, 100)
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(180)
+            ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
+            if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
+
+            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##pullerHunt',
+                ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'While traveling to a distant target, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
+            end
+
+            ImGui.SetNextItemWidth(180)
+            ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##pullerHuntXtar', ctrl.xtar_nav_dist or 150, 25,
+                300)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
+            end
+
+            ImGui.Dummy(0, 2)
+            accent(GOLD, 'Combat Radius Anchor (optional)')
+            if ctrl.hunter_combat_loc then
+                ImGui.Text(string.format('Anchor: %.1f, %.1f, %.1f',
+                    ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.z))
+            else
+                accent(MUTED, 'No anchor set -- Puller roams freely within Search Radius.')
+            end
+
+            if ImGui.Button('Set Anchor##pullerAnchor') then
+                local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
+                if mx and my and mz then
+                    ctrl.hunter_combat_loc = { x = mx, y = my, z = mz }
+                    if (ctrl.hunter_combat_radius or 0) <= 0 then
+                        ctrl.hunter_combat_radius = 250
+                    end
+                    if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+                end
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Saves your current position as anchor for roaming.')
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Clear Anchor##pullerAnchor') then
+                ctrl.hunter_combat_loc = nil
+                pursuit.wanderLoc = nil
+                if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+            end
+
+            ImGui.SetNextItemWidth(220)
+            local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl
+            .hunter_combat_radius or 250
+            local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000)
+            if changed then
+                ctrl.hunter_combat_radius = newRadius
+                if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+            end
+        elseif ctrl.submode == 'Camp' then
+            accent(GOLD, 'Puller Camp Location')
+            if ctrl.camp_loc then
+                ImGui.Text(string.format('Camp set at: %.1f, %.1f, %.1f',
+                    ctrl.camp_loc.x, ctrl.camp_loc.y, ctrl.camp_loc.z))
+            else
+                accent(WARN, 'No camp location set -- puller requires a camp position.')
+            end
+
+            if ImGui.Button('Set Here##pullerCamp') then
+                local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
+                if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Clear Camp##pullerCamp') then
+                ctrl.camp_loc = nil; runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
+            end
+
+            ImGui.SetNextItemWidth(180)
+            ctrl.camp_radius = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500)
+            ImGui.SetNextItemWidth(180)
+            ctrl.camp_z = ImGui.SliderInt('Pull Height Diff (Z)', ctrl.camp_z or 75, 10, 300)
 
             ImGui.SetNextItemWidth(180)
             ctrl.pull_min_level = ImGui.SliderInt('Min NPC Level', ctrl.pull_min_level or 1, 1, 100)
@@ -2675,12 +2923,137 @@ function UI.drawControlTab()
             ctrl.pull_max_level = ImGui.SliderInt('Max NPC Level', ctrl.pull_max_level or 100, 1, 100)
             if ctrl.pull_min_level > ctrl.pull_max_level then ctrl.pull_min_level = ctrl.pull_max_level end
 
-            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##puller',
+            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##pullerCampClose',
                 ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
+
+            ImGui.SetNextItemWidth(180)
+            ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##pullerCampXtar', ctrl.xtar_nav_dist or 150, 25,
+                300)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                    'While traveling out to pull a mob, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
+                'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
+        end
+
+        -- Puller Mob Filtering: Pull List & Ignore List
+        ImGui.Dummy(0, 4)
+        ImGui.Separator()
+        ImGui.Dummy(0, 4)
+        accent(GOLD, 'Puller Target Filters')
+
+        accent(GOLD, 'NPCs to Pull (Include List)')
+        accent(MUTED, 'If empty, pulls any mob in radius. If populated, ONLY pulls listed names.')
+        ImGui.Dummy(0, 2)
+
+        if ImGui.Button('Pull Current Target##pullCurTgt', 170, 24) then
+            local nm
+            pcall(function() nm = mq.TLO.Target.CleanName() end)
+            if nm and nm ~= '' then
+                addPull(nm)
+            else
+                print('\ay[Triune]\ax no target selected.')
+            end
+        end
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        runtime.pullInput = ImGui.InputText('##pullAddInput', runtime.pullInput or '')
+        ImGui.SameLine()
+        if ImGui.Button('Add##pullAddBtn') then
+            if runtime.pullInput and runtime.pullInput ~= '' then
+                addPull(runtime.pullInput); runtime.pullInput = ''
+            end
+        end
+
+        ImGui.Dummy(0, 2)
+        if ImGui.BeginChild('pullListFrame', 0, 90, true) then
+            if not runtime.pullList or #runtime.pullList == 0 then
+                ImGui.TextDisabled('(all mobs allowed)')
+            else
+                for i, nm in ipairs(runtime.pullList) do
+                    ImGui.PushID('pl_' .. i)
+                    if ImGui.Button('x') then removePull(nm) end
+                    ImGui.SameLine(); ImGui.Text(tostring(nm))
+                    ImGui.PopID()
+                end
+            end
+        end
+        ImGui.EndChild()
+
+        ImGui.Dummy(0, 4)
+        accent(GOLD, 'NPCs to Ignore (Ignore List)')
+        accent(MUTED, 'Puller will NEVER auto-target these names (shared across all characters).')
+        ImGui.Dummy(0, 2)
+
+        if ImGui.Button('Ignore Current Target##ignoreCurTgt', 170, 24) then
+            local nm
+            pcall(function() nm = mq.TLO.Target.CleanName() end)
+            if nm and nm ~= '' then
+                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+                addIgnore(nm)
+            else
+                print('\ay[Triune]\ax no target selected.')
+            end
+        end
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        runtime.ignoreInput = ImGui.InputText('##ignoreAddInput', runtime.ignoreInput or '')
+        ImGui.SameLine()
+        if ImGui.Button('Add##ignoreAddBtn') then
+            if runtime.ignoreInput and runtime.ignoreInput ~= '' then
+                addIgnore(runtime.ignoreInput); runtime.ignoreInput = ''
+            end
+        end
+
+        ImGui.Dummy(0, 2)
+        if ImGui.BeginChild('ignoreListFrame', 0, 90, true) then
+            if not runtime.ignoreList or #runtime.ignoreList == 0 then
+                ImGui.TextDisabled('(none ignored)')
+            else
+                for i, nm in ipairs(runtime.ignoreList) do
+                    ImGui.PushID('ig_' .. i)
+                    if ImGui.Button('x') then removeIgnore(nm) end
+                    ImGui.SameLine(); ImGui.Text(tostring(nm))
+                    ImGui.PopID()
+                end
+            end
+        end
+        ImGui.EndChild()
+    end
+
+    -- Assist Mode Contextual Controls
+    if ctrl.mode == 'Assist' then
+        accent(GOLD, 'Main Assist Settings')
+        ImGui.SetNextItemWidth(160)
+        ctrl.ma_name = ImGui.InputText('MA Name', ctrl.ma_name or '')
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Character to assist. Leave blank to assist group leader.') end
+        ImGui.SetNextItemWidth(160)
+        ctrl.assist_at = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%')
+
+        if ctrl.submode == 'Chase' then
+            ctrl.chase = ImGui.Checkbox('Chase MA', ctrl.chase)
+            if ctrl.chase then
+                ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                ctrl.chase_dist = ImGui.SliderInt('Chase Range', ctrl.chase_dist or 15, 5, 100)
+            end
+        elseif ctrl.submode == 'Camp' then
+            accent(GOLD, 'Assist Camp Location')
+            if ctrl.camp_loc then
+                ImGui.Text(string.format('Camp set at: %.1f, %.1f, %.1f',
+                    ctrl.camp_loc.x, ctrl.camp_loc.y, ctrl.camp_loc.z))
+            else
+                accent(WARN, 'No camp location set -- character will stay at current spot.')
+            end
+
+            if ImGui.Button('Set Here##assistCamp') then
+                local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
+                if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Clear Camp##assistCamp') then
+                ctrl.camp_loc = nil
+            end
+        elseif ctrl.submode == 'Backline' then
+            accent(MUTED, 'Backline stays in position and assists MA with ranged/spells without moving to melee.')
         end
     end
 
@@ -2845,20 +3218,37 @@ local function drawMiniGui()
             ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'PAUSED')
         end
         ImGui.SameLine()
-        ImGui.SetNextItemWidth(140)
-        local curIdx = idxOf(MODES, ctrl.mode)
-        local newModeIdx = ImGui.Combo('##miniModeCombo', curIdx, MODES)
-        if newModeIdx ~= curIdx then
-            local newMode = MODES[newModeIdx]
-            if ctrl.mode == 'Manual Hunter' and newMode ~= 'Manual Hunter' then
+        ImGui.SetNextItemWidth(100)
+        local curPrimaryIdx = idxOf(PRIMARY_MODES, ctrl.mode)
+        local newPrimaryIdx = ImGui.Combo('##miniPrimaryCombo', curPrimaryIdx, PRIMARY_MODES)
+        if newPrimaryIdx ~= curPrimaryIdx then
+            local newPrimaryMode = PRIMARY_MODES[newPrimaryIdx]
+            if ctrl.mode == 'Manual' and newPrimaryMode ~= 'Manual' then
                 setManualHunterPetHold(false)
-            elseif newMode == 'Manual Hunter' then
+            elseif newPrimaryMode == 'Manual' then
                 if not ctrl.running or not isCombat() then
                     setManualHunterPetHold(true, true)
                 end
             end
-            ctrl.mode = newMode
+            ctrl.mode = newPrimaryMode
+            if SUBMODES[ctrl.mode] then
+                ctrl.submode = SUBMODES[ctrl.mode][1]
+            else
+                ctrl.submode = 'Hunt'
+            end
             saveLoadout(true)
+        end
+
+        if SUBMODES[ctrl.mode] then
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(90)
+            local subList = SUBMODES[ctrl.mode]
+            local curSubIdx = idxOf(subList, ctrl.submode)
+            local newSubIdx = ImGui.Combo('##miniSubCombo', curSubIdx, subList)
+            if newSubIdx ~= curSubIdx then
+                ctrl.submode = subList[newSubIdx]
+                saveLoadout(true)
+            end
         end
         ImGui.SameLine()
         if ImGui.Button('Full Window##miniFull', 95, 22) then
@@ -2874,7 +3264,7 @@ local function drawMiniGui()
         -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
         if ctrl.running then
             if ImGui.Button('Pause##miniRunBtn', 65, 22) then
-                if ctrl.mode == 'Manual Hunter' then
+                if ctrl.mode == 'Manual' then
                     setManualHunterPetHold(true, true)
                 else
                     setManualHunterPetHold(false, true)
@@ -2889,11 +3279,15 @@ local function drawMiniGui()
         end
         ImGui.SameLine()
         if ctrl.burn then
-            ImGui.PushStyleColor(ImGuiCol.Button, 0.8, 0.2, 0.2, 1.0)
+            local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol
+            local getCol = function(id) return ImGuiColType and ImGuiColType(id) or id end
+            local pCount = 0
+            if ImGuiColType and pcall(ImGui.PushStyleColor, getCol(ImGuiColType.Button), 0.8, 0.2, 0.2, 1.0) then pCount =
+                pCount + 1 end
             if ImGui.Button('BURN ON##miniBurnBtn', 75, 22) then
                 ctrl.burn = false
             end
-            ImGui.PopStyleColor()
+            if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
         else
             if ImGui.Button('Burn##miniBurnBtn', 65, 22) then
                 ctrl.burn = true
@@ -3023,10 +3417,8 @@ local function drawFullGui()
         UI.drawControlTab()
         UI.drawSettingsTab()
         UI.drawGemTab()
-        UI.drawBuffTab()
         UI.drawAATab()
         UI.drawDiscTab()
-        UI.drawIgnoreTab()
         UI.drawHelpTab()
         ImGui.EndTabBar()
     end
@@ -3337,20 +3729,16 @@ local function isHostileTarget(id)
     -- On XTarget list (mob is aggroed on us or group)
     if isXTargetId(id) then return true end
 
-    -- Active pull target in Puller / Pull & Assist mode
-    if (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist') and id == runtime.pullTargetId then
+    -- Active pull target in Puller mode
+    if ctrl.mode == 'Puller' and id == runtime.pullTargetId then
         return true
     end
 
-    -- Engine-targeting and manual-hunter modes (Hunter, Manual Hunter, Puller, Pull & Assist, Pet Tank, Garrison)
+    -- Engine-targeting modes (Manual, Puller)
     -- when this mob is currently targeted by player or engine
     local ENGINE_TARGETS_MODE = {
-        ['Hunter'] = true,
-        ['Manual Hunter'] = true,
+        ['Manual'] = true,
         ['Puller'] = true,
-        ['Pull & Assist'] = true,
-        ['Pet Tank'] = true,
-        ['Garrison'] = true,
     }
     local curTargetId = mq.TLO.Target.ID() or 0
     if ENGINE_TARGETS_MODE[ctrl.mode] and curTargetId == id then
@@ -3429,6 +3817,31 @@ local function isDetrimentalAction(name, targetToken, entry)
     return false
 end
 
+local function isTargetInRange(name, targetId)
+    if not targetId or targetId == 0 then return false end
+    local myId = mq.TLO.Me.ID() or 0
+    if targetId == myId then return true end
+
+    local dist = distToId(targetId)
+    if dist < 0 then return false end
+
+    local maxRange = 100
+    if name and name ~= '' then
+        pcall(function()
+            local sp = mq.TLO.Spell(name)
+            if sp() then
+                local r = sp.Range() or 0
+                if r > 0 then maxRange = r end
+            end
+        end)
+    end
+    if ctrl and ctrl.pull_engage_dist and ctrl.pull_engage_dist > 0 then
+        maxRange = math.max(maxRange, ctrl.pull_engage_dist)
+    end
+
+    return dist <= (maxRange + 5)
+end
+
 local function maPcId()
     return findMaPcId(ctrl and ctrl.ma_name)
 end
@@ -3453,7 +3866,7 @@ end
 local function maTargetId()
     local maId = maPcId()
     if not maId then return nil end
-    local gated = (ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline')
+    local gated = (ctrl.mode == 'Assist')
     if gated and not anyNearbyEngagedNpc(150) then
         return nil -- nothing nearby is actually being fought -- don't even peek via /assist
     end
@@ -3502,7 +3915,7 @@ local function resolveTargetId(token, cls)
     elseif b == 'Nearest Add' or b == 'All Enemies' then
         id = firstNPCXtarget(false)
         if not id then
-            local isPulling = (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist')
+            local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
             local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
             local maxL = isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100)
             for i = 1, 10 do
@@ -3531,7 +3944,7 @@ local function resolveTargetId(token, cls)
     local cname = ''
     pcall(function() cname = s.CleanName() or '' end)
     if cname ~= '' and isIgnored(cname) then return nil end
-    if (stype == 'NPC' or stype == 'Pet') and (ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' or ctrl.mode == 'Backline')
+    if (stype == 'NPC' or stype == 'Pet') and (ctrl.mode == 'Assist')
         and not targetIsEngaged(id) then
         return nil
     end
@@ -3564,7 +3977,6 @@ local function reconcileSungBuffs()
         end
     end
     scanGemTable(loadout.gems)
-    scanGemTable(loadout.buffGems)
     if found > 0 then
         print('\ag[Triune]\ax found ' .. found .. ' bard buff(s) already active -- wont re-sing them.')
     end
@@ -3622,8 +4034,8 @@ local function conditionMet(when, pct, spellName, targetId, cls)
     end
     if when == 'has Poison/Disease' then
         local s = mq.TLO.Spawn(targetId)
-        return s() and (s.Poisoned() ~= nil and s.Poisoned()() ~= nil or s.Diseased() ~= nil and s.Diseased()() ~= nil) or ---@diagnostic disable-line: undefined-field
-            false
+        return (s() and ((s.Poisoned() ~= nil and s.Poisoned()() ~= nil) or (s.Diseased() ~= nil and s.Diseased()() ~= nil))) or
+        false
     end
     if when == 'add is loose' then return firstNPCXtarget(true) ~= nil end
     return true
@@ -3664,12 +4076,7 @@ local function castGem(i, g, id)
     if not sp() then return false end
     local isMemmed = false
     pcall(function()
-        local gemName = mq.TLO.Me.Gem(i).Name()
-        if gemName == g.spell then
-            isMemmed = true
-        else
-            isMemmed = (mq.TLO.Me.Gem(g.spell)() ~= nil)
-        end
+        isMemmed = isGemMatching(i, g.spell) or (mq.TLO.Me.Gem(g.spell)() ~= nil)
     end)
     if not isMemmed then return false end -- not memmed
     if (mq.TLO.Me.CurrentMana() or 0) < (sp.Mana() or 0) then return false end
@@ -3829,6 +4236,9 @@ local MELEE_RANGE = 14
 -- with no correction.
 local LOS_TRUST_RANGE = 8
 local function desiredRange()
+    if ctrl.pull_stand_back then
+        return ctrl.pull_engage_dist or 100
+    end
     return (ctrl.combat_style ~= 'Melee') and (ctrl.ranged_dist or 40) or MELEE_RANGE
 end
 
@@ -3861,6 +4271,11 @@ end
 local lastCombatFaceAt = 0
 local function moveToward(id, dist, followOnly)
     local d = distToId(id)
+    local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+    if isXTargetId(id) and d > maxNav then
+        stopMoving()
+        return false
+    end
     -- Already actively fighting this exact target AND actually close enough
     -- for that to be believable -- never let a flaky/transient LoS raycast
     -- (common at melee range on stairs/uneven terrain/prop geometry) restart
@@ -4232,7 +4647,7 @@ end
 -- self-engage (Manual: no automation at all; Backline/Pet Tank: never
 -- move/melee by design, so "stationary and not fighting" is often correct).
 local function checkCombatStall()
-    if ctrl.mode == 'Manual' or ctrl.mode == 'Backline' or ctrl.mode == 'Pet Tank' then
+    if ctrl.mode == 'Manual' or (ctrl.mode == 'Assist' and ctrl.submode == 'Backline') then
         stuckState.combatStallSince = nil
         return
     end
@@ -4295,53 +4710,79 @@ end
 -- Hunter standing still. NearestSpawn(i, ...) returning a falsy spawn () is what
 -- actually marks "no more candidates."
 local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
-    local isPulling    = (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist')
+    local isPulling    = (ctrl.mode == 'Puller')
+    local isCampMode   = isPulling and (ctrl.submode == 'Camp')
     local minLv        = minLevel or (isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
     local maxLv        = maxLevel or (isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
-    -- Hunter combat anchor: if set and radius > 0, reject any candidate outside the circle.
-    local anchorLoc    = ctrl.hunter_combat_loc
-    local anchorRadius = anchorLoc and (ctrl.hunter_combat_radius or 0) or 0
-    local function outsideAnchor(sx, sy)
+
+    local anchorLoc    = isCampMode and ctrl.camp_loc or ctrl.hunter_combat_loc
+    local anchorRadius = isCampMode and (searchRadius or ctrl.camp_radius or 100) or
+    (anchorLoc and (ctrl.hunter_combat_radius or 0) or 0)
+
+    -- Fixed: Explicit Y/X handling to account for EQ's (Y, X) standard
+    local function outsideAnchor(sy, sx)
         if anchorRadius <= 0 or not anchorLoc then return false end
-        local dx = sx - anchorLoc.x
-        local dy = sy - anchorLoc.y
+        local ay = anchorLoc.y or anchorLoc[1] or 0
+        local ax = anchorLoc.x or anchorLoc[2] or 0
+        local dy = sy - ay
+        local dx = sx - ax
         return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
     end
+
+    local radius = searchRadius or (isCampMode and (ctrl.camp_radius or 100) or (ctrl.hunter_radius or 200))
+    local maxZ   = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
+    local myZ    = mq.TLO.Me.Z() or 0
+
+    -- 1. Check XTarget first (with distance/level validations applied)
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead()
-            and not isIgnored(xt.CleanName()) and not isUnreachable(xt.ID()) then
-            return xt.ID()
-        end
-    end
-    local radius = searchRadius or ctrl.hunter_radius or 200
-    local maxZ = searchMaxZ or ctrl.hunter_z or 75
-    local myZ = mq.TLO.Me.Z() or 0
-    local search = string.format('npc targetable radius %d', radius)
-    for i = 1, 30 do
-        local s = mq.TLO.NearestSpawn(i, search)
-        if not s() then break end -- ran out of candidates
-        if s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName())
-            and not isUnreachable(s.ID()) then
-            local lvl = s.Level() or 0
-            if lvl >= minLv and lvl <= maxLv then
-                local sz = s.Z() or myZ
-                if math.abs(sz - myZ) <= maxZ then
-                    local sx, sy = s.X() or 0, s.Y() or 0
-                    if not outsideAnchor(sx, sy) then return s.ID() end
+        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
+            local id = xt.ID()
+            local dist = xt.Distance3D() or 999
+            local lvl = xt.Level() or 0
+            if dist <= radius and lvl >= minLv and lvl <= maxLv then
+                if isPullAllowed(xt.CleanName()) and not isUnreachable(id) then
+                    if not outsideAnchor(xt.Y() or 0, xt.X() or 0) then
+                        return id
+                    end
                 end
             end
         end
     end
+
+    -- 2. Scan Zone Spawns (Fixed: 'continue' instead of 'break' on missing index)
+    local search     = string.format('npc targetable radius %d', radius)
+    local spawnCount = mq.TLO.SpawnCount(search)() or 0
+    local maxSearch  = math.min(spawnCount, 50) -- Scan up to 50 valid matches
+
+    for i = 1, maxSearch do
+        local s = mq.TLO.NearestSpawn(i, search)
+        if s() and s.ID() > 0 then
+            if s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
+                local lvl = s.Level() or 0
+                if lvl >= minLv and lvl <= maxLv then
+                    local sz = s.Z() or myZ
+                    if math.abs(sz - myZ) <= maxZ then
+                        local sy, sx = s.Y() or 0, s.X() or 0
+                        if not outsideAnchor(sy, sx) then
+                            if isPullAllowed(s.CleanName()) and not isUnreachable(s.ID()) then
+                                return s.ID()
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     return nil
 end
-
 local function checkCloserTarget(curTargetId, searchRadius, searchMaxZ, minLevel, maxLevel)
     if not curTargetId or curTargetId <= 0 then return nil end
     if ctrl.check_closer_mobs == false then return nil end
     if pursuit.hasRetargeted then return nil end
 
-    local isPulling = (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist')
+    local isPulling = (ctrl.mode == 'Puller')
     local minL = minLevel or (isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
     local maxL = maxLevel or (isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
 
@@ -4365,6 +4806,12 @@ local function pullerTick()
     if not ctrl.camp_loc then return end
 
     if runtime.pullState == 'IDLE' then
+        local addId = firstNPCXtarget(false)
+        if addId and setTarget(addId) then
+            runtime.pullTargetId = addId
+            runtime.pullState = 'FIGHTING'
+            return
+        end
         if mq.TLO.Me.Combat() then return end -- already fighting something; don't pull yet
         local id = findRoamTarget(ctrl.camp_radius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
         if id and setTarget(id) then
@@ -4405,16 +4852,84 @@ local function pullerTick()
     local s = mq.TLO.Spawn(runtime.pullTargetId)
     local alive = s() and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
     if not alive then
-        runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving(); return
+        local addId = firstNPCXtarget(false)
+        if addId and setTarget(addId) then
+            runtime.pullTargetId = addId
+            runtime.pullState = 'FIGHTING'
+        else
+            runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving(); return
+        end
     end
 
     if runtime.pullState == 'TO_MOB' then
         if isUnreachable(runtime.pullTargetId) then
             print('\ay[Triune]\ax pull target unreachable -- picking a different mob.')
             runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
-        elseif moveToward(runtime.pullTargetId, desiredRange()) then
-            if ctrl.combat_style == 'Melee' and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-            runtime.pullState = 'TO_CAMP'
+        else
+            local pullStyle = ctrl.pull_style or 'Melee'
+            local reqRange = MELEE_RANGE
+            if pullStyle ~= 'Melee' then
+                reqRange = ctrl.pull_engage_dist or 100
+            end
+
+            if moveToward(runtime.pullTargetId, reqRange) then
+                local tid = runtime.pullTargetId
+                local tagged = false
+
+                if pullStyle == 'Melee' then
+                    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+                    tagged = true
+                elseif pullStyle == 'Ranged' then
+                    mq.cmd('/face fast')
+                    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                    if isXTargetId(tid) or distToId(tid) <= 25 then
+                        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+                        tagged = true
+                    end
+                elseif pullStyle == 'Pet' then
+                    mq.cmd('/face fast')
+                    local petId = mq.TLO.Me.Pet.ID() or 0
+                    petState.petHoldActive = false
+                    if petId > 0 then
+                        mq.cmd('/pet attack')
+                    end
+                    mq.cmd('/say #petcmd attack all')
+                    local petTgtId = 0
+                    pcall(function() petTgtId = mq.TLO.Pet.Target.ID() or 0 end)
+                    if isXTargetId(tid) or distToId(tid) <= 35 or (petTgtId > 0 and petTgtId == tid) then
+                        tagged = true
+                    end
+                elseif pullStyle == 'Spell' then
+                    mq.cmd('/face fast')
+                    if isXTargetId(tid) or distToId(tid) <= 30 then
+                        tagged = true
+                    else
+                        local slotToCast = ctrl.pull_spell_gem or 1
+                        local g = loadout.gems and loadout.gems[slotToCast]
+                        local spellName = ctrl.pull_spell
+                        if not spellName or spellName == '' then
+                            pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
+                        end
+
+                        if spellName and spellName ~= '' then
+                            local dummyEntry = g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }
+                            castGem(slotToCast, dummyEntry, tid)
+                        else
+                            for i = 1, NUM_GEMS do
+                                local lg = loadout.gems and loadout.gems[i]
+                                if lg and lg.spell and lg.spell ~= '' then
+                                    local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
+                                    if isDet and castGem(i, lg, tid) then break end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if tagged then
+                    runtime.pullState = 'TO_CAMP'
+                end
+            end
         end
     elseif runtime.pullState == 'TO_CAMP' then
         local c = ctrl.camp_loc
@@ -4501,10 +5016,9 @@ local function checkAggroSwitch()
                     isHittingMe = true
                 end
             end)
-            -- NPC is directly hitting us: no distance cap — always consider it.
-            -- Otherwise: Hunter/Manual Hunter/Pet Tank use 60, other modes use 25.
-            local maxRange = isHittingMe and 999 or
-                ((ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Pet Tank') and 60 or 25)
+            local isHunterMode = (ctrl.mode == 'Manual' or (ctrl.mode == 'Puller' and ctrl.submode == 'Hunt'))
+            local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+            local maxRange = isHittingMe and 999 or (isHunterMode and maxNav or 40)
             if d < maxRange and d < bestDist then
                 bestDist = d
                 bestId = xt.ID()
@@ -4542,7 +5056,7 @@ fullStop = function()
     if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
     if mq.TLO.Me.Casting.ID() then mq.cmd('/stopsong') end
-    if ctrl.mode ~= 'Manual Hunter' then setManualHunterPetHold(false) end
+    if ctrl.mode ~= 'Manual' then setManualHunterPetHold(false) end
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
@@ -4647,19 +5161,17 @@ local function combatTick()
     checkStuck()
     checkCombatStall()
     checkGemMemSync()
-    if ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist'
-        or ctrl.mode == 'Garrison' or ctrl.mode == 'Pet Tank' then
+    if (ctrl.mode == 'Manual' and ctrl.manual_auto_xtarget ~= false) or ctrl.mode == 'Puller' or (ctrl.mode == 'Assist' and ctrl.submode == 'Camp') then
         checkAggroSwitch()
     end
 
     local t = mq.TLO.Target
     local haveNPC = t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead()
-    if haveNPC and (ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist'
-            or ctrl.mode == 'Garrison' or ctrl.mode == 'Pet Tank') then
+    if haveNPC and (ctrl.mode == 'Manual' or ctrl.mode == 'Puller') then
         if isIgnored(t.CleanName()) then
             haveNPC = false
         elseif not isXTargetId(t.ID()) then
-            local isPulling = (ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist')
+            local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
             local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
             local maxL = isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100)
             local lvl = t.Level() or 0
@@ -4671,142 +5183,19 @@ local function combatTick()
     local engage = false
 
     if ctrl.mode == 'Manual' then
-        if haveNPC then engage = true end
-    elseif ctrl.mode == 'Assist' or ctrl.mode == 'Chase Assist' then
-        local id = maTargetId()
-        local closingOnMob = false
-        if id then
-            if mq.TLO.Target.ID() ~= id then setTarget(id) end
-            haveNPC = true
-            if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) then
-                closingOnMob = true
-                if moveToward(id, desiredRange()) then engage = true end
-            end
-        else
-            haveNPC = false
-            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-        end
-        if not closingOnMob then
-            if ctrl.mode == 'Assist' then idleReturn() else chaseMA() end
-        end
-    elseif ctrl.mode == 'Backline' then
-        local id = maTargetId()
-        if id then
-            if mq.TLO.Target.ID() ~= id then setTarget(id) end
-            haveNPC = true
-            if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) and distToId(id) <= desiredRange() and hasLoS(id) then
-                engage = true
-            end
-        else
-            haveNPC = false
-            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-        end
-    elseif ctrl.mode == 'Tank' then
-        local id = maTargetId()
-        local closingOnMob = false
-        if id then
-            if mq.TLO.Target.ID() ~= id then setTarget(id) end
-            haveNPC = true
-            closingOnMob = true
-            if moveToward(id, MELEE_RANGE) then engage = true end
-        else
-            haveNPC = false
-            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-        end
-        if not closingOnMob then idleReturn() end
-    elseif ctrl.mode == 'Hunter' then
         if haveNPC and isUnreachable(mq.TLO.Target.ID()) then
             haveNPC = false
         end
 
-        local xtarId = firstNPCXtarget(false)
-        if xtarId then
-            local curId = haveNPC and mq.TLO.Target.ID() or 0
-            if curId == 0 or not isXTargetId(curId) then
-                if curId ~= xtarId then
-                    stopMoving()
-                    pursuit.id = 0
-                    pursuit.lastNavTargetId = 0
-                    if setTarget(xtarId) then
-                        print(string.format('\ay[Triune]\ax Hunter aggro -- switching to XTarget #%d (%s)',
-                            xtarId, tostring(mq.TLO.Target.CleanName())))
-                    end
-                end
-                haveNPC = true
-            end
-        end
-
-        if haveNPC then
-            if not isXTargetId(mq.TLO.Target.ID()) and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
-                local curId = mq.TLO.Target.ID()
-                local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
-                    ctrl.hunter_max_level)
-                if closerId and setTarget(closerId) then
-                    stopMoving()
-                    pursuit.id = 0
-                    pursuit.lastNavTargetId = 0
-                    pursuit.hasRetargeted = true
-                    print(string.format(
-                        '\ay[Triune]\ax Hunter: Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
-                        closerId, tostring(mq.TLO.Target.CleanName()), candDist, curDist))
-                end
-            end
-        else
-            local id = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
-            if id and setTarget(id) then
-                haveNPC = true
-                pursuit.wanderLoc = nil
-                pursuit.hasRetargeted = false
-                runtime.lastHunterMsgKey = nil -- reset missing mob log state on finding a target
-                print(string.format('\ay[Triune]\ax Hunter target acquired: #%d (%s) dist %.1f',
-                    id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
-            elseif not anyXtarAlive() then
-                -- No NPCs found and xtar is clean: stop moving/sit and log diagnostic message.
-                -- Clear wander location so player doesn't keep running to a previous random location.
-                if pursuit.wanderLoc then
-                    pursuit.wanderLoc = nil
-                    if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
-                    if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
-                end
-
-                local radius = ctrl.hunter_radius or 1500
-                local minLv = ctrl.hunter_min_level or 1
-                local maxLv = ctrl.hunter_max_level or 100
-                local zDiff = ctrl.hunter_z or 75
-                local anchorKey = ''
-                if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
-                    anchorKey = string.format('; anchor R%d @ %.0f,%.0f,%.0f',
-                        ctrl.hunter_combat_radius, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y,
-                        ctrl.hunter_combat_loc.z)
-                end
-                local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
-
-                if runtime.lastHunterMsgKey ~= currentKey then
-                    runtime.lastHunterMsgKey = currentKey
-                    print(string.format(
-                        '\ay[Triune]\ax Hunter: No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',
-                        minLv, maxLv, radius, zDiff, anchorKey))
-                end
-            end
-        end
-
-        if haveNPC then
-            local id = mq.TLO.Target.ID()
-            if moveToward(id, desiredRange()) then engage = true end
-        end
-    elseif ctrl.mode == 'Manual Hunter' then
-        if haveNPC and isUnreachable(mq.TLO.Target.ID()) then
-            haveNPC = false
-        end
-
-        if not haveNPC then
+        local autoXtar = (ctrl.manual_auto_xtarget ~= false)
+        if not haveNPC and autoXtar then
             local xtarId = firstNPCXtarget(false)
             if xtarId and isHostileTarget(xtarId) and setTarget(xtarId) then
                 haveNPC = true
                 stopMoving()
                 pursuit.id = 0
                 pursuit.lastNavTargetId = 0
-                print(string.format('\ay[Triune]\ax Manual Hunter target acquired: #%d (%s)',
+                print(string.format('\ay[Triune]\ax Manual target acquired: #%d (%s)',
                     xtarId, tostring(mq.TLO.Target.CleanName())))
             end
         end
@@ -4818,60 +5207,177 @@ local function combatTick()
             elseif moveToward(id, desiredRange()) then
                 engage = true
             end
+        elseif ctrl.camp_loc then
+            moveTowardLoc(ctrl.camp_loc.x, ctrl.camp_loc.y, ctrl.camp_loc.z, 15)
         end
-    elseif ctrl.mode == 'Pet Tank' then
-        if haveNPC and isUnreachable(mq.TLO.Target.ID()) then
-            haveNPC = false
-        end
-        if not haveNPC then
-            local id = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
-            if id and setTarget(id) then
-                haveNPC = true
-                pursuit.hasRetargeted = false
+    elseif ctrl.mode == 'Puller' then
+        if ctrl.submode == 'Camp' then
+            pullerTick()
+            local pt = mq.TLO.Target
+            haveNPC = pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0
+            engage = (runtime.pullState == 'FIGHTING')
+        else -- Submode 'Hunt'
+            if haveNPC then
+                local tid = mq.TLO.Target.ID() or 0
+                local tspawn = mq.TLO.Spawn(tid)
+                if not tspawn() or tspawn.Dead() or (tspawn.PctHPs() or 0) <= 0 or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
+                    haveNPC = false
+                    mq.cmd('/target clear')
+                end
             end
-        end
-        if haveNPC then
-            if not isXTargetId(mq.TLO.Target.ID()) and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
-                local curId = mq.TLO.Target.ID()
-                local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
-                    ctrl.hunter_max_level)
-                if closerId and setTarget(closerId) then
+
+            local xtarId = firstNPCXtarget(false)
+            if xtarId then
+                local curId = haveNPC and mq.TLO.Target.ID() or 0
+                if curId == 0 or not isXTargetId(curId) then
                     stopMoving()
                     pursuit.id = 0
                     pursuit.lastNavTargetId = 0
-                    pursuit.hasRetargeted = true
-                    print(string.format(
-                        '\ay[Triune]\ax Pet Tank: Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
-                        closerId, tostring(mq.TLO.Target.CleanName()), candDist, curDist))
+                    if setTarget(xtarId) then
+                        print(string.format('\ay[Triune]\ax Puller (Hunt) aggro -- switching to XTarget #%d (%s)',
+                            xtarId, tostring(mq.TLO.Target.CleanName())))
+                    end
+                    haveNPC = true
                 end
             end
-            local id = mq.TLO.Target.ID()
-            if moveToward(id, ctrl.ranged_dist or 40) then engage = true end
+
+            if haveNPC then
+                if not isXTargetId(mq.TLO.Target.ID()) and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
+                    local curId = mq.TLO.Target.ID()
+                    local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
+                        ctrl.hunter_max_level)
+                    if closerId and setTarget(closerId) then
+                        stopMoving()
+                        pursuit.id = 0
+                        pursuit.lastNavTargetId = 0
+                        pursuit.hasRetargeted = true
+                        print(string.format(
+                            '\ay[Triune]\ax Puller (Hunt): Found closer NPC while traveling -- retargeting #%d (%s) [dist %.1f vs %.1f]',
+                            closerId, tostring(mq.TLO.Target.CleanName()), candDist, curDist))
+                    end
+                end
+            else
+                local id = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                if id and setTarget(id) then
+                    haveNPC = true
+                    pursuit.wanderLoc = nil
+                    pursuit.hasRetargeted = false
+                    runtime.lastHunterMsgKey = nil
+                    print(string.format('\ay[Triune]\ax Puller (Hunt) target acquired: #%d (%s) dist %.1f',
+                        id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
+                elseif not anyXtarAlive() then
+                    if pursuit.wanderLoc then
+                        pursuit.wanderLoc = nil
+                        if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+                        if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
+                    end
+
+                    local radius = ctrl.hunter_radius or 1500
+                    local minLv = ctrl.hunter_min_level or 1
+                    local maxLv = ctrl.hunter_max_level or 100
+                    local zDiff = ctrl.hunter_z or 75
+                    local anchorKey = ''
+                    if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+                        anchorKey = string.format('; anchor R%d @ %.0f,%.0f,%.0f',
+                            ctrl.hunter_combat_radius, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y,
+                            ctrl.hunter_combat_loc.z)
+                    end
+                    local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
+
+                    if runtime.lastHunterMsgKey ~= currentKey then
+                        runtime.lastHunterMsgKey = currentKey
+                        print(string.format(
+                            '\ay[Triune]\ax Puller (Hunt): No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',
+                            minLv, maxLv, radius, zDiff, anchorKey))
+                    end
+                end
+            end
+
+            if haveNPC then
+                local id = mq.TLO.Target.ID()
+                local pullStyle = ctrl.pull_style or 'Melee'
+                local reqRange = MELEE_RANGE
+                if pullStyle ~= 'Melee' then
+                    reqRange = ctrl.pull_engage_dist or 100
+                end
+
+                local arrived = moveToward(id, reqRange)
+                if arrived then
+                    engage = true
+                    if pullStyle == 'Melee' then
+                        if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+                    elseif pullStyle == 'Ranged' then
+                        mq.cmd('/face fast')
+                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                    elseif pullStyle == 'Pet' then
+                        mq.cmd('/face fast')
+                        petState.petHoldActive = false
+                        local petId = mq.TLO.Me.Pet.ID() or 0
+                        if petId > 0 then mq.cmd('/pet attack') end
+                        mq.cmd('/say #petcmd attack all')
+                    elseif pullStyle == 'Spell' then
+                        mq.cmd('/face fast')
+                        local slotToCast = ctrl.pull_spell_gem or 1
+                        local g = loadout.gems and loadout.gems[slotToCast]
+                        local spellName = ctrl.pull_spell
+                        if not spellName or spellName == '' then
+                            pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
+                        end
+                        if spellName and spellName ~= '' then
+                            local dummyEntry = g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }
+                            castGem(slotToCast, dummyEntry, id)
+                        else
+                            for i = 1, NUM_GEMS do
+                                local lg = loadout.gems and loadout.gems[i]
+                                if lg and lg.spell and lg.spell ~= '' then
+                                    local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
+                                    if isDet and castGem(i, lg, id) then break end
+                                end
+                            end
+                        end
+                    end
+                elseif isXTargetId(id) then
+                    if distToId(id) <= (ctrl.xtar_nav_dist or 150) and hasLoS(id) then
+                        engage = true
+                    end
+                end
+            end
         end
-    elseif ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist' then
-        pullerTick()
-        local pt = mq.TLO.Target
-        haveNPC = pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0
-        engage = (runtime.pullState == 'FIGHTING' and ctrl.mode == 'Puller')
-    elseif ctrl.mode == 'Garrison' then
-        if haveNPC and isUnreachable(mq.TLO.Target.ID()) then haveNPC = false end
-        if not haveNPC then
-            local id = firstNPCXtarget(false)
-            if id and setTarget(id) then haveNPC = true end
-        end
-        if haveNPC then
-            local id = mq.TLO.Target.ID()
-            if moveToward(id, MELEE_RANGE) then engage = true end
-        elseif ctrl.camp_loc then
-            moveTowardLoc(ctrl.camp_loc.x, ctrl.camp_loc.y, ctrl.camp_loc.z, 15)
+    elseif ctrl.mode == 'Assist' then
+        if ctrl.submode == 'Backline' then
+            local id = maTargetId()
+            if id then
+                if mq.TLO.Target.ID() ~= id then setTarget(id) end
+                haveNPC = true
+                if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) and distToId(id) <= desiredRange() and hasLoS(id) then
+                    engage = true
+                end
+            else
+                haveNPC = false
+                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+            end
+        else -- 'Chase' or 'Camp'
+            local id = maTargetId()
+            local closingOnMob = false
+            if id then
+                if mq.TLO.Target.ID() ~= id then setTarget(id) end
+                haveNPC = true
+                if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) then
+                    closingOnMob = true
+                    if moveToward(id, desiredRange()) then engage = true end
+                end
+            else
+                haveNPC = false
+                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+            end
+            if not closingOnMob then
+                if ctrl.submode == 'Camp' then idleReturn() else chaseMA() end
+            end
         end
     end
 
     -- Non-XTarget engagement timeout check:
-    -- If we are attempting to attack/engage an active target but it fails to join
-    -- the Extended Target (XTarget) list within 4.0s (e.g. non-hostile, un-aggroable,
-    -- invulnerable, or bugged NPC), mark it unreachable and skip to the next mob.
-    if haveNPC and (ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter' or ctrl.mode == 'Pet Tank' or ctrl.mode == 'Puller' or ctrl.mode == 'Pull & Assist') then
+    if haveNPC and (ctrl.mode == 'Manual' or ctrl.mode == 'Puller') then
         local tid = mq.TLO.Target.ID() or 0
         if tid > 0 and not isXTargetId(tid) then
             if pursuit.nonXtarTargetId ~= tid then
@@ -4908,8 +5414,8 @@ local function combatTick()
         pursuit.nonXtarEngageAt = 0
     end
 
-    if ctrl.debug_mode and ctrl.mode ~= 'Manual' and ctrl.mode ~= 'Assist' and ctrl.mode ~= 'Chase Assist'
-        and ctrl.mode ~= 'Backline' and (os.clock() - (runtime.lastHunterDiagAt or 0)) > 3.0 then
+    if ctrl.debug_mode and ctrl.mode ~= 'Manual' and ctrl.mode ~= 'Assist'
+        and (os.clock() - (runtime.lastHunterDiagAt or 0)) > 3.0 then
         runtime.lastHunterDiagAt = os.clock()
         local t = mq.TLO.Target
         local tid = (t() and t.ID()) or 0
@@ -4929,24 +5435,25 @@ local function combatTick()
     -- Engage autoattack/autofire only when target exists, engage=true (within range),
     -- and target is within desired range / melee range.
     -- Turn off autoattack/autofire whenever out of range or when no NPCs remain on XTarget list.
-    -- For player-directed modes (Manual, Manual Hunter, Assist, Chase Assist,
-    -- Backline, Tank), also require the NPC to be confirmed hostile before
+    -- For player-directed modes (Manual, Assist), also require the NPC to be confirmed hostile before
     -- initiating auto-attack — prevents hitting friendly NPCs (merchants, etc.).
     local xtarActive = anyXtarAlive()
     local autoAttackOk = true
     if haveNPC and engage then
-        local engineMode = ctrl.mode == 'Hunter' or ctrl.mode == 'Puller'
-            or ctrl.mode == 'Pull & Assist' or ctrl.mode == 'Pet Tank'
-            or ctrl.mode == 'Garrison'
+        local engineMode = (ctrl.mode == 'Puller')
         if not engineMode then
             local tid = mq.TLO.Target.ID() or 0
             if not isHostileTarget(tid) then autoAttackOk = false end
         end
     end
-    if ctrl.combat_style == 'Melee' and ctrl.mode ~= 'Pet Tank' then
-        if autoAttackOk and haveNPC and engage and distToId(mq.TLO.Target.ID()) <= (MELEE_RANGE + 4) then
-            if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-        elseif not haveNPC or not engage then
+    if ctrl.combat_style == 'Melee' then
+        if not ctrl.pull_stand_back then
+            if autoAttackOk and haveNPC and engage and distToId(mq.TLO.Target.ID()) <= (MELEE_RANGE + 4) then
+                if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+            elseif not haveNPC or not engage then
+                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+            end
+        else
             if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
         end
     elseif ctrl.combat_style == 'Ranged' then
@@ -4999,25 +5506,50 @@ local function combatTick()
     local assistThreshold = ctrl.pet_assist_at or 100
     local petHoldEnabled = (ctrl.pet_hold_enabled ~= false) and trioHasPetClass()
 
-    if petHoldEnabled and not (haveNPC and engage) then
+    -- Puller Camp Mode: Keep pets on HOLD while traveling to mob or dragging mob back to camp,
+    -- until the mob is brought within camp fight range.
+    local isPullingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState ~= 'FIGHTING')
+    if ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and (ctrl.pull_style or 'Melee') == 'Pet' and runtime.pullState == 'TO_MOB' then
+        isPullingToCamp = false
+    end
+    if isPullingToCamp and ctrl.camp_loc then
+        pcall(function()
+            local tid = mq.TLO.Target.ID() or 0
+            if tid > 0 then
+                local ts = mq.TLO.Spawn(tid)
+                if ts() then
+                    local tx = ts.X()
+                    local ty = ts.Y()
+                    if tx and ty then
+                        local dx = tx - ctrl.camp_loc.x
+                        local dy = ty - ctrl.camp_loc.y
+                        if (dx * dx + dy * dy) <= (35 * 35) then
+                            isPullingToCamp = false -- Mob has arrived at camp!
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    if petHoldEnabled and (not (haveNPC and engage) or isPullingToCamp) then
         if not petState.petHoldActive then
             mq.cmd('/say #petcmd hold all')
             petState.petHoldActive = true
         end
     end
 
-    if haveNPC and engage and trioHasPetClass() then
-        if ctrl.mode == 'Manual Hunter' then
+    if haveNPC and engage and trioHasPetClass() and not isPullingToCamp then
+        if ctrl.mode == 'Manual' then
             setManualHunterPetHold(false)
         end
-        local tid = t.ID() or 0
+        local tid = mq.TLO.Target.ID() or 0
         local dueForRetry = (os.clock() - (petState.lastCmdAt or 0)) > 5.0
         if (tid ~= petState.lastCmdTargetId or dueForRetry) and not mq.TLO.Me.Casting.ID() then
             local tgtHp = pctHP(tid) or 100
             -- Self-directed modes: character is leading combat directly, skip external MA aggro gate.
             -- Assist modes: require player/tank has started hitting AND HP threshold met.
-            local selfDirected = (ctrl.mode == 'Pet Tank' or ctrl.mode == 'Hunter' or ctrl.mode == 'Manual Hunter'
-                or ctrl.mode == 'Garrison' or ctrl.mode == 'Tank' or ctrl.mode == 'Puller')
+            local selfDirected = (ctrl.mode == 'Manual' or ctrl.mode == 'Puller')
             local engageOk = selfDirected or (playerHasAggro(tid) and playerIsEngagingTarget(tid))
             if tgtHp <= assistThreshold then
                 if engageOk then
@@ -5035,9 +5567,9 @@ local function combatTick()
             end
         end
     else
-        -- No active NPC target: reset command tracking.
+        -- No active NPC target or still pulling back to camp: reset command tracking.
         petState.lastCmdTargetId = 0
-        if ctrl.mode == 'Manual Hunter' and not mq.TLO.Me.Combat() then
+        if ctrl.mode == 'Manual' and not mq.TLO.Me.Combat() then
             setManualHunterPetHold(true)
         end
     end
@@ -5058,14 +5590,9 @@ local function combatTick()
     -- Garrison) are exempt: their own findRoamTarget/firstNPCXtarget selection
     -- is the safety gate, and they need to initiate combat on fresh targets.
     local ENGINE_TARGETS_MODE = {
-        ['Hunter'] = true,
-        ['Manual Hunter'] = true,
         ['Puller'] = true,
-        ['Pull & Assist'] = true,
-        ['Pet Tank'] = true,
-        ['Garrison'] = true,
     }
-    local combatReady = true
+    local combatReady = (not haveNPC or engage)
     if haveNPC and engage and not ENGINE_TARGETS_MODE[ctrl.mode] then
         local tid = mq.TLO.Target.ID() or 0
         if not isHostileTarget(tid) then
@@ -5081,7 +5608,7 @@ local function combatTick()
                 local id = resolveTargetId(a.target, a.cls)
                 if id and conditionMet(a.when, a.pct, name, id, a.cls) then
                     local isDet = isDetrimentalAction(name, a.target, a)
-                    if not isDet or isHostileTarget(id) then
+                    if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
                         fireAA(name, a, id)
                     end
                 end
@@ -5108,7 +5635,7 @@ local function combatTick()
                     end
                     if bossOk then
                         local isDet = isDetrimentalAction(name, d.target, d)
-                        if not isDet or isHostileTarget(id) then
+                        if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
                             eligibleDiscs[#eligibleDiscs + 1] = { name = name, entry = d, id = id }
                         end
                     end
@@ -5148,12 +5675,11 @@ local function combatTick()
     end
 
     if not isCasting() and not isMoveActive() then
-        local activeGems = ctrl.buff_mode and loadout.buffGems or loadout.gems
         for i = 1, NUM_GEMS do
-            local g = activeGems[i]
+            local g = loadout.gems[i]
             if g and g.spell and g.spell ~= '' then
                 local minXt = tonumber(g.min_xtar) or 1
-                local xtOk = ctrl.buff_mode or (numXtar >= minXt)
+                local xtOk = (numXtar >= minXt)
                 local burnOk = (not g.burn_only or ctrl.burn)
                 local lockedOut = castTracker.isLockedOut(g.spell)
                 if burnOk and xtOk and not lockedOut then
@@ -5161,7 +5687,7 @@ local function combatTick()
                     local condOk = id and conditionMet(g.when, g.pct, g.spell, id, g.cls)
                     if condOk then
                         local isDet = isDetrimentalAction(g.spell, g.target, g)
-                        local targetValid = not isDet or isHostileTarget(id)
+                        local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
                         if targetValid and castGem(i, g, id) then
                             if g.when == 'missing buff' then
                                 local bene = false
@@ -5198,29 +5724,72 @@ local function combatTick()
     end
 end
 
-local MODE_ALIASES = {}
 local function normalizeCommandKey(text)
-    return tostring(text):lower():gsub('[^%w]', '')
+    return tostring(text or ''):lower():gsub('[^%w]', '')
 end
 
-do
-    for _, m in ipairs(MODES) do
-        MODE_ALIASES[normalizeCommandKey(m)] = m
+local function setTriuneMode(arg1, arg2)
+    if not arg1 or arg1 == '' then return false end
+    local k1 = normalizeCommandKey(arg1)
+    local k2 = arg2 and normalizeCommandKey(arg2) or ''
+
+    local newMode, newSubmode
+
+    if k1 == 'manual' or k1 == 'manualhunter' then
+        newMode = 'Manual'
+        newSubmode = 'Hunt'
+    elseif k1 == 'puller' then
+        newMode = 'Puller'
+        if k2 == 'hunt' or k2 == 'hunter' or k2 == 'roam' then
+            newSubmode = 'Hunt'
+        elseif k2 == 'camp' or k2 == 'pull' then
+            newSubmode = 'Camp'
+        else
+            newSubmode = ctrl.submode or 'Camp'
+        end
+    elseif k1 == 'hunter' or k1 == 'pethunter' or k1 == 'pettank' then
+        newMode = 'Puller'
+        newSubmode = 'Hunt'
+    elseif k1 == 'pull' or k1 == 'pullassist' then
+        newMode = 'Puller'
+        newSubmode = 'Camp'
+    elseif k1 == 'assist' then
+        newMode = 'Assist'
+        if k2 == 'chase' then
+            newSubmode = 'Chase'
+        elseif k2 == 'camp' or k2 == 'garrison' or k2 == 'tank' then
+            newSubmode = 'Camp'
+        elseif k2 == 'backline' or k2 == 'ranged' then
+            newSubmode = 'Backline'
+        else
+            newSubmode = ctrl.submode or 'Chase'
+        end
+    elseif k1 == 'chase' or k1 == 'chaseassist' then
+        newMode = 'Assist'
+        newSubmode = 'Chase'
+    elseif k1 == 'garrison' or k1 == 'tank' then
+        newMode = 'Assist'
+        newSubmode = 'Camp'
+    elseif k1 == 'backline' then
+        newMode = 'Assist'
+        newSubmode = 'Backline'
+    else
+        return false
     end
-end
 
-local function setTriuneMode(modeKey)
-    local newMode = MODE_ALIASES[normalizeCommandKey(modeKey)]
-    if not newMode then return nil end
-    if ctrl.mode == 'Manual Hunter' and newMode ~= 'Manual Hunter' then
+    if ctrl.mode == 'Manual' and newMode ~= 'Manual' then
         setManualHunterPetHold(false, false)
     end
-    if ctrl.mode == newMode then
-        print('\ay[Triune]\ax mode already set to ' .. newMode .. '.')
-        return true
-    end
+
     ctrl.mode = newMode
-    print('\ag[Triune]\ax mode set to ' .. newMode .. '.')
+    ctrl.submode = newSubmode
+
+    if SUBMODES[ctrl.mode] then
+        print(string.format('\ag[Triune]\ax mode set to %s (%s).', ctrl.mode, ctrl.submode))
+    else
+        print(string.format('\ag[Triune]\ax mode set to %s.', ctrl.mode))
+    end
+    saveLoadout(true)
     return true
 end
 
@@ -5229,7 +5798,7 @@ local function triuneCommand(...)
     local args = { ... }
     local cmd = ''
     if #args > 0 then
-        cmd = normalizeCommandKey(table.concat(args, ''))
+        cmd = normalizeCommandKey(args[1])
     end
     if cmd == '' then
         triuneToggle()
@@ -5246,7 +5815,7 @@ local function triuneCommand(...)
         if not ctrl.running then
             print('\ay[Triune]\ax already paused.')
         else
-            if ctrl.mode == 'Manual Hunter' then
+            if ctrl.mode == 'Manual' then
                 setManualHunterPetHold(true, true)
             else
                 setManualHunterPetHold(false, true)
@@ -5256,8 +5825,10 @@ local function triuneCommand(...)
             print('\ag[Triune]\ax paused.')
         end
     elseif cmd == 'status' then
+        local modeStr = ctrl.mode
+        if SUBMODES[ctrl.mode] then modeStr = modeStr .. ' (' .. ctrl.submode .. ')' end
         print(string.format('\ag[Triune]\ax status: %s, mode: %s, burn: %s', ctrl.running and 'running' or 'paused',
-            ctrl.mode, ctrl.burn and 'ON' or 'OFF'))
+            modeStr, ctrl.burn and 'ON' or 'OFF'))
     elseif cmd == 'burn' or cmd == 'burnon' or cmd == 'burnoff' or cmd == 'burn1' or cmd == 'burn0' or cmd == 'burntoggle' then
         local sub = args[2] and string.lower(args[2]) or ''
         if sub == 'on' or sub == '1' or cmd == 'burnon' or cmd == 'burn1' then
@@ -5314,17 +5885,17 @@ local function triuneCommand(...)
         ctrl.compact = not ctrl.compact
         saveLoadout(true)
         print(string.format('\ag[Triune]\ax Compact HUD mode %s.', ctrl.compact and 'ENABLED' or 'DISABLED'))
-    elseif setTriuneMode(cmd) then
+    elseif setTriuneMode(args[1], args[2]) then
         -- mode command handled
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn [on|off]|compact|status|spellbook|cursorui|dps|track|update|clearcursor|<mode>]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|update|clearcursor|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 
 triuneToggle = function()
     if ctrl.running then
-        if ctrl.mode == 'Manual Hunter' then
+        if ctrl.mode == 'Manual' then
             setManualHunterPetHold(true, true)
         else
             setManualHunterPetHold(false, true)
@@ -5375,29 +5946,46 @@ updateMapRadiusVisuals = function()
     end
 
     local mode = ctrl.mode
+    local submode = ctrl.submode
     local drawType = nil
     local radius = 0
     local loc = nil
     local label = ''
 
-    if mode == 'Puller' or mode == 'Pull & Assist' or mode == 'Manual Puller' then
-        radius = ctrl.camp_radius or 100
+    if mode == 'Manual' then
         if ctrl.camp_loc then
             drawType = 'maploc'
+            radius = ctrl.camp_radius or 100
             loc = ctrl.camp_loc
             label = 'Camp'
-        else
-            drawType = 'pullradius'
         end
-    elseif mode == 'Hunter' or mode == 'Manual Hunter' then
-        if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+    elseif mode == 'Puller' then
+        if submode == 'Camp' then
+            radius = ctrl.camp_radius or 100
+            if ctrl.camp_loc then
+                drawType = 'maploc'
+                loc = ctrl.camp_loc
+                label = 'Camp'
+            else
+                drawType = 'pullradius'
+            end
+        else -- Submode 'Hunt'
+            if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+                drawType = 'maploc'
+                radius = ctrl.hunter_combat_radius
+                loc = ctrl.hunter_combat_loc
+                label = 'Anchor'
+            else
+                drawType = 'castradius'
+                radius = ctrl.hunter_radius or 1500
+            end
+        end
+    elseif mode == 'Assist' then
+        if submode == 'Camp' and ctrl.camp_loc then
             drawType = 'maploc'
-            radius = ctrl.hunter_combat_radius
-            loc = ctrl.hunter_combat_loc
-            label = 'Anchor'
-        else
-            drawType = 'castradius'
-            radius = ctrl.hunter_radius or 1500
+            radius = 30
+            loc = ctrl.camp_loc
+            label = 'Camp'
         end
     end
 
@@ -5461,9 +6049,9 @@ local function runMainLoop()
         end
         -- (Cursor items are cleared on-demand prior to actions/mems or post-cast completion)
         updateMapRadiusVisuals()
-        -- drain one queued spell-mem per pass, out of combat and while not casting
+        -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting
         local memmed = false
-        if not mq.TLO.Me.Casting.ID() then
+        if not mq.TLO.Me.Casting.ID() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
             for slot, name in pairs(runtime.pendingMem) do
                 runtime.pendingMem[slot] = nil
                 tryMem(slot, name) -- verifies + reports; blocks briefly while it lands
@@ -5494,3 +6082,4 @@ end
 
 runMainLoop()
 clearMapRadiusVisuals()
+saveLoadout(true)

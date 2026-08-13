@@ -2,6 +2,60 @@
 
 ## 2026-08-11
 
+- **Fixed code safety issues and combat mode logic in `triune.lua`.**
+  - **Puller (Camp) Add Handling**: Enhanced `pullerTick()` so when a target dies or when in `IDLE` state at camp with active adds/XTargets present, the puller immediately switches to the next live XTarget NPC and remains in `FIGHTING` state, eliminating auto-attack toggling off/on hiccups and state resets when handling multiple mobs at camp.
+  - **Camp Mode Roam Filtering**: Updated `findRoamTarget()` in `Puller (Camp)` mode to validate candidate mobs against `ctrl.camp_loc` and `ctrl.camp_radius` to guarantee mobs outside the camp radius are never pulled.
+  - **ImGui Child Window Safety**: Replaced `ImVec2(0, 0)` in `ImGui.BeginChild` calls across `drawGemList`, `drawAATab`, and `drawDiscTab` with explicit numeric dimensions (`0, 0`) for consistency and safety across MacroQuest ImGui builds.
+  - **Mini GUI Style Color Safety**: Wrapped `PushStyleColor` / `PopStyleColor` calls in the Mini GUI Burn button handler with `pcall` guards to prevent crashes if `ImGuiCol` enums fail to resolve on certain MQ builds.
+  - **Puller (Hunt) Navigation Engagement Fix**: Fixed a critical logic flaw in `Puller (Hunt)` mode where `isXTargetId(id)` was setting `engage = true` without calling `moveToward(id, reqRange)`. This caused characters to freeze in place after killing the first mob whenever a second mob/add was on XTarget beyond melee range. `moveToward()` now runs continuously to navigate to targets, allowing characters to close distance and attack subsequent XTarget mobs seamlessly.
+  - **Cleaned Up Function Declarations & Dead Variables**: Moved `idxOf()` definition above `toCanonicalClassAbbr()` so it is defined before invocation, removed unused local variables `lastStuckRecoveryAt` and `lastCombatStallRecoveryAt`, added explicit parentheses to the `has Poison/Disease` condition for precedence clarity, and updated pet dispatch logic to query `mq.TLO.Target.ID()` directly for target verification.
+
+- **Redesigned combat mode architecture into Primary Modes and Submodes in `triune.lua`.**
+  - Streamlined the 11 legacy combat modes (`Manual`, `Hunter`, `Manual Hunter`, `Puller`, `Pull & Assist`, `Assist`, `Chase Assist`, `Backline`, `Tank`, `Garrison`, `Pet Tank`) into 3 clean Primary Modes: **Manual**, **Puller**, and **Assist**.
+  - **Manual**: Acts as the primary manual target engagement mode (former Manual Hunter), auto-attacking and casting loadout spells/AAs/discs on acquired targets. Added a **Camp Location** setting and radius slider so characters automatically return to camp position when idle after combat, protecting AFK players if a mob flees. Added an **Auto-Target Hostiles on XTarget** setting to toggle between auto-engaging incoming XTarget mobs or exclusively fighting manually targeted NPCs.
+  - **Puller**: Features dynamic submodes **`Hunt`** (continuous roaming solo hunt — former Hunter) and **`Camp`** (tags mob within radius and pulls back to camp — former Puller).
+  - **Assist**: Features dynamic submodes **`Chase`** (follows MA everywhere), **`Camp`** (holds camp position while assisting MA), and **`Backline`** (ranged/caster support staying in position).
+  - Added `sanitizeModeConfig()` migration helper in `triune.lua` to automatically map legacy loadout configs to the new Primary Mode and Submode structure.
+  - Fixed a lexical scope error in `sanitizeModeConfig()` by forward-declaring `ctrl` and passing the target configuration table parameter.
+  - Enforced pet hold (`#petcmd hold all`) during **`Puller (Camp)`** mode while scouting or pulling mobs back to camp, delaying pet attack commands (`#petcmd attack all`) until mobs are brought back within camp range.
+- **Removed standalone Mob Ignore tab and added Puller Target Filters in `triune.lua`.**
+  - Removed the standalone `Mob Ignore` tab from the top navigation bar.
+  - Added a 2-column **Puller Target Filters** section directly under the `Puller` mode controls in the Control tab.
+  - **NPCs to Pull (Include List)**: Allows specifying exact NPC names to target. When populated, Puller will *only* pull mobs matching an entry in the list; when empty, all mobs within radius are pulled as usual.
+  - **NPCs to Ignore (Ignore List)**: Integrated the global mob ignore list directly into the Puller filter view with quick "Ignore Current Target" and manual entry/removal controls.
+  - Moved `ignoreList`, `pullList`, `ignoreInput`, and `pullInput` into `runtime` state table to preserve Lua 200 main-chunk local variable limits.
+  - Resolved an ImGui C++ access violation crash caused by nested `ImGui.BeginTable` / `ImGui.BeginChild` layouts by converting Puller filter lists into clean sequential child frames.
+  - Added `pcall` guards around spawn distance calculations and `tostring` type hardening in `isPullAllowed()` to ensure non-string or stale TLO objects never throw unhandled exceptions.
+  - Updated `updateMapRadiusVisuals()` to map search, camp, and anchor radius circles on the in-game map correctly for **Manual**, **Puller (Hunt / Camp)**, and **Assist (Camp)** primary modes and submodes.
+  - Updated `findRoamTarget()` to evaluate candidate spawns against `isPullAllowed(name)` (checking both ignore list and include list).
+
+- **Added customizable Pull Method selector for Puller mode in `triune.lua`.**
+  - Added `ctrl.pull_style` configuration field with options: **Melee**, **Spell**, **Pet**, and **Ranged**.
+  - **Melee**: Closes range to target NPC and turns on `/attack on` to tag mob.
+  - **Spell**: Added a dynamic **Pull Spell** ImGui combo dropdown populated from currently memorized spell gems (`Gem X: <SpellName>`), allowing players to select the exact spell gem to cast when pulling.
+  - **Pet**: Closes to range (100 units) and issues native `/pet attack` and `/say #petcmd attack all` to send pet out to tag mob. Fixed an issue where general camp pet hold logic was overriding the pet attack command mid-frame during `TO_MOB` state.
+  - **Ranged**: Closes to ranged distance and fires bow via `/autofire on` until mob is tagged.
+  - Added full Pull Method engagement support (**Melee**, **Spell**, **Pet**, **Ranged**) to **`Puller (Hunt)`** submode in `combatTick()`, allowing roaming hunters to initiate combat using their chosen pull style.
+  - Added **Engagement Distance** slider (`ctrl.pull_engage_dist`, 15–250 units) for non-melee pull methods to control how close the character approaches before casting a pull spell, sending pets, or firing ranged attacks.
+  - Added **Stand Back (Let Pet Tank / Stay Ranged)** checkbox (`ctrl.pull_stand_back`), allowing characters to hold position at engagement distance during combat and let pets tank without running into melee range or turning on auto-attack.
+  - Added `isTargetInRange(name, targetId)` distance checker and required `engage` to be true when an NPC target is selected before setting `combatReady`. Prevents AAs, Discs, and loadout spells from prematurely firing at distant targets while approaching.
+  - Fixed target acquisition in **`Puller (Hunt)`** submode so character automatically clears dead target handles and switches to the next living NPC on XTarget (and updated `checkAggroSwitch()` mode matching for 150-unit XTarget aggro switches).
+  - Added customizable **Max XTarget Chase Range** slider (`ctrl.xtar_nav_dist`, 25–300 units, default 150) located directly below `Check for Closer NPCs while Traveling` in `Puller` mode (and under `Auto-Target Hostiles` in `Manual` mode) to control maximum navigation distance for XTarget hostiles in `findFirstNPCXtarget()`, `moveToward()`, and `checkAggroSwitch()`.
+  - Moved Pull Method combo selector and Pull Spell dropdown to the top of `Puller` mode controls directly above Search Radius and Pull Radius sliders for improved UI accessibility.
+
+- **Enhanced Configuration Persistence & Dynamic Change Detection in `triune.lua`.**
+  - Rewrote `loadoutSig()` to dynamically hash all keys in `ctrl` along with `runtime.ignoreList` and `runtime.pullList`. Ensures all new and future configuration settings (e.g. Pull Method, Pull Spell, Engagement Distance, Stand Back, Manual Auto-Target XTarget, NPCs to Pull, NPCs to Ignore) automatically trigger auto-saving ~1.5s after modification.
+  - Fixed `sanitizeModeConfig()` legacy migration logic so valid primary modes (`Puller`, `Assist`) preserve their saved `submode` (`Hunt`, `Camp`, `Chase`, `Backline`) instead of resetting `Puller` back to `Camp`.
+  - Added explicit `saveLoadout(true)` execution upon main loop script exit to guarantee configuration changes are persisted when closing windows or stopping script execution.
+
+- **Fixed Spell Gem auto-memorization and gem synchronization in `triune.lua`.**
+  - Added `isGemMatching(slotOrName, targetSpellName)` helper to compare spell names against gem bar spells by exact string, cleaned name, normalized name (stripping `Rk. II` / `Rk. III` suffixes), and MacroQuest TLO `Spell(name).RankName()`.
+  - Refactored `tryMem(slot, name)` to unmemorize occupied gem slots (`/unmemspell slot`) and duplicate spell instances in other gem slots before issuing `/memspell`.
+  - Added combat and movement checks (`mq.TLO.Me.Combat()`, `mq.TLO.Me.Moving()`) and scribed spell verification (`isScribed(name)`) before attempting memorization.
+  - Increased spell memorization poll timeout from 2.0s to 6.5s to accommodate full EQ spell memorization casting bar durations.
+  - Guarded `runtime.pendingMem` queue processing in the main loop to only drain when stationary, out of combat, and not casting (`not mq.TLO.Me.Casting.ID() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving()`), preventing queued requests from being discarded while moving or fighting.
+  - Updated `checkGemMemSync()` and `castGem()` to use `isGemMatching`, eliminating false gem mismatch warnings and false casting failures for rank-based spells.
+
 - **Fixed auto casting on non-hostile targets, player pets, and friendly NPCs in `triune.lua`.**
   - **Bumped version to v1.5.2.** Updated `README.md` to reflect `v1.5.2`.
   - Fixed a critical regression in `Manual Hunter` and engine-targeting modes where targeted pets or non-hostile targets caused endless auto-casting of detrimental (offensive) spells, AAs, and disciplines until mana was depleted.
@@ -12,6 +66,21 @@
 - **Gated Med Break resting on XTarget status in `triune.lua`.**
   - Added an `anyXtarAlive()` check before entering Med Break (`runtime.medBreakActive` activation), ensuring characters will not sit down to meditate if any live hostile NPCs are present on the Extended Target list.
   - Added an active XTarget check while resting: if a hostile NPC enters XTarget while Med Break is active, the script immediately cancels Med Break (`runtime.medBreakActive = false`), issues `/stand`, and resumes combat readiness.
+
+- **Resolved mode refactoring bugs and restored missing `normalizeCommandKey` helper in `triune.lua`.**
+  - Re-defined `normalizeCommandKey(text)` before `setTriuneMode()`, fixing a runtime error (`attempt to call global 'normalizeCommandKey' (a nil value)`) when running slash commands (`/ac`).
+  - Fixed PAUSE button in `drawControlTab()` and pet hold logic in `fullStop()` to check for primary mode `'Manual'`.
+  - Updated legacy mode string checks (`Manual Hunter`, `Hunter`, `Pull & Assist`, `Chase Assist`, `Backline`, `Pet Tank`, `Garrison`) in `ENGINE_TARGETS_MODE`, `checkCombatStall()`, `findRoamTarget()`, `checkCloserTarget()`, `checkAggroSwitch()`, debug diagnostics, and auto-attack gates to use updated Primary Modes (`Manual`, `Puller`, `Assist`) and Submodes (`Hunt`, `Camp`, `Chase`, `Backline`).
+
+- **Removed Buff Loadout tab and related code (`mq2triune/lua/triune.lua`, `README.md`).**
+  - Removed secondary `Buff Loadout` tab, `loadout.buffGems` table, and `ctrl.buff_mode` state toggle from `triune.lua`.
+  - Simplified `Spell Gems` tab header UI (`UI.drawGemTabHeader`), auto-mem, and import controls for the single active spell gem loadout.
+  - Streamlined `checkGemMemSync()`, `tryGems()`, `collectEntry()`, `applyEntry()`, `loadoutSig()`, and character initialization routines to operate directly on `loadout.gems`.
+  - Updated `README.md` documentation to reflect the single 12-slot spell gem loadout.
+
+- **Removed obsolete `'on Named / burn'` condition option (`mq2triune/lua/triune.lua`, `README.md`).**
+  - Removed `'on Named / burn'` from the `WHENS` trigger condition dropdown array in `triune.lua`, cleaning up the condition selection for Spell Gems, Abilities & AAs, and Disciplines.
+  - Updated `README.md` documentation to remove references to `'on Named / burn'`.
 
 ---
 
