@@ -1,5 +1,85 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-13
+
+- **Fixed Lexical Scoping, Undefined Globals, ImGui ID Collisions, and Lockout Tracking in `triune.lua`.**
+  - **Forward Declarations & Lexical Scoping**: Added forward declarations for `buffActive`, `updateMapRadiusVisuals`, and `isGroupOrRaidMember` at module initialization to prevent runtime `attempt to call global 'X' (a nil value)` errors when invoked before their definitions.
+  - **Implemented `isGroupOrRaidMember()`**: Added a full group and raid membership checker covering player, player pet, group members, group member pets, and raid members to support Target-of-Target engagement verification in `targetIsEngaged()`.
+  - **Enhanced `buffActive()` Spawn Fallback**: Added a fallback query against arbitrary spawn IDs via `mq.TLO.Spawn(id)` so non-targeted secondary adds on XTarget can have their buffs/debuffs (e.g. Mez) inspected correctly.
+  - **Fixed ImGui Button ID Collisions**: Disambiguated duplicate `##id` tokens on "Set" and "Clear" buttons across the Manual, Puller, and Assist control panels (`##manualCampSet`/`##manualCampClear`, `##pullerAnchorSet`/`##pullerAnchorClear`, `##pullerCampSet`/`##pullerCampClear`, `##assistCampSet`/`##assistCampClear`, `##castLockoutSec`) to guarantee 100% reliable click routing.
+  - **Repaired Spell Fail-Count & Lockout Tracker**: Updated `createCastTracker()` to fall back to `tracker.activeSpell or tracker.lastSpell` when `mq.TLO.Me.Casting.Name()` is cleared following a fizzle/interrupt/resist event, and set `tracker.failed = true` so `recordSuccess()` does not immediately reset failure counters upon cast conclusion.
+  - **Gated `isCombat()` Hostile & Engaged State**: Updated `isCombat()` to verify `isHostileTarget(t.ID())` and `targetIsEngaged(t.ID())` before reporting combat state on targeted NPCs, preventing peaceful vendors, bankers, and quest NPCs from triggering combat status badges and bard combat twisting.
+  - **State Table Migration for LuaJIT 200-Local Limit**: Migrated cache locals (`spellbookSetCache`, `lastSpellbookCacheTime`, `hasAACache`, `knownDiscSet`, `filteredSpellsCache`, `gemSyncWarned`, `lastGemSyncCheckAt`, theme counters, and `lastCombatFaceAt`) into `runtime` and `pursuit` state tables, safely reducing the main-chunk local count from 201 to 191 in strict compliance with Lua 5.1 / LuaJIT limits.
+
+- **Fixed Faction Consideration Filtering in `triune.lua`.**
+  - **Synchronous `/consider` Polling & Pre-Pull Validation**: Added synchronous event pumping to `verifyTargetCon()` upon initial target acquisition in Puller (Camp) and Puller (Hunt) modes so faction consideration responses (`scowls`, `threateningly`, `indifferently`, `amiably`, `kindly`, etc.) are captured immediately before traveling or pulling. If a target's faction tier is unchecked in the UI filter, it is instantly rejected and cleared (`/target clear`), and subsequent spawn scans bypass the mob name directly via `isConAllowed()`.
+  - **Robust Chat Event Line Extraction**: Added `runtime.extractConName()` to parse the NPC name directly from `/consider` chat text if `Target.CleanName()` is blank.
+
+- **Eliminated All Mid-Combat `/attack off` Calls in `triune.lua`.**
+  - **Natural EverQuest Combat Disengagement**: In accordance with EverQuest mechanics, auto-attack turns ON once in melee range (`dist <= desiredRange + 15`) and is **never** turned off by the script during combat. When an NPC dies, EverQuest naturally turns off auto-attack on its own. Removed `/attack off` from all mid-combat handlers, restricting `/attack off` solely to manual script pauses / script shutdown (`not ctrl.running`).
+  - **Preserved Combat State Across Target Selection (`setTarget`)**: Updated `setTarget()` to capture pre-switch combat state (`wasCombat = mq.TLO.Me.Combat()`) and immediately re-engage `/attack on` whenever EverQuest disengages combat during target changes.
+  - **Locked Out Closer-Mob Retargeting During Active Combat**: Guarded `checkCloserTarget()` and Puller mode aggro-switching with `not mq.TLO.Me.Combat()` and `dist <= 35ft` so the bot cannot swap targets or cycle auto-attack off while actively fighting a mob.
+  - **Un-gated Auto-Attack from Spellcasting**: Removed `not isCasting()` restrictions from `/attack on` so auto-attack remains engaged continuously even while casting spells and disciplines.
+  - **Fixed Med-Break Mid-Combat Trigger (`fullStop`)**: Added active combat detection (`mq.TLO.Me.Combat()` and target proximity `<= 60ft`) to `MedBreak` so low-health/mana/endurance resting triggers cannot execute `fullStop()` or `/attack off` while actively fighting non-XTarget mobs.
+  - **Fixed Puller (Camp) Auto-Attack Suppression (`isPullingToCamp`)**: Fixed a bug where `isPullingToCamp` was evaluated as `runtime.pullState ~= 'FIGHTING'`, causing the engine to aggressively issue `/attack off` whenever `pullState` was in `IDLE` or approaching a target. Changed `isDraggingToCamp` to strictly check `runtime.pullState == 'TO_CAMP'`, allowing auto-attack to engage and stay on without being suppressed.
+  - **Fixed `pullerTick()` IDLE-to-FIGHTING State Transition**: In `pullerTick()`, if a valid NPC target is already acquired (`haveNPC`), immediately transition `runtime.pullState` to `'FIGHTING'` rather than waiting for `firstNPCXtarget()`, preventing the puller from getting stuck in `IDLE` state during active combat.
+  - **Aggro-Switch Debouncing & Hysteresis (`checkAggroSwitch`)**: Added a 2.0-second debounce timer (`runtime.lastAggroSwitchAt`) and a 15-unit distance hysteresis check to `checkAggroSwitch()` to eliminate rapid target switching and auto-attack drops when multiple mobs are near each other.
+  - **Eliminated Rapid On/Off Auto-Attack Oscillation Loop**: Fixed a circular disengagement loop between `moveToward()` navigation and `combatTick()` auto-attack gating where `moveToward()` evaluated `Me.Combat() == false` during spell/ability casts and triggered `/nav`, which immediately turned combat off again. Added `isXTargetId(id) or d <= dist + 15` to `moveToward()`'s proximity bypass so position is maintained without repeatedly toggling `/nav id ...` and `/nav stop` mid-combat.
+  - **Bypassed Faction Target-Clearing Mid-Combat**: Prevented `verifyTargetCon()` from executing `/target clear` or disengaging `/attack off` mid-fight when `engage`, `mq.TLO.Me.Combat()`, or `isXTargetId(id)` is active. Fixed `isConAllowed()` and `verifyTargetCon()` logic so unconfigured/un-cached faction tiers default to allowed (`true`) rather than returning `false` and clearing targets.
+  - **Restored Continuous Auto-Attack Engagement**: Ensured `/attack on` stays engaged continuously throughout combat in all Puller submodes and immediately re-engages after spell or ability casts complete.
+  - **Camp Submode Positioning in FIGHTING State**: Added `moveToward(id, desiredRange())` execution during `FIGHTING` state in Puller (Camp) submode so melee pullers step into melee range (14 units) of mobs at camp rather than standing stationary out of range.
+
+- **Fixed Mid-Fight Auto-Attack Disengagement Across Abilities & Assist in `triune.lua`.**
+  - **Restored Auto-Attack Across Ability & Spell Executions**: Updated `fireAA()`, `fireDisc()`, `fireSkill()`, and `castGem()` to track pre-cast combat state (`wasAttacking`) and immediately re-engage `/attack on` if EverQuest or MacroQuest disengaged combat during ability target switches.
+  - **Removed Erroneous `/attack off` in `maTargetId()`**: Removed a periodic `mq.cmd('/attack off')` call inside `maTargetId()` that was disengaging combat every 1.0 second during target assist checks.
+  - **Bypassed Non-XTarget Timeout in Melee Range**: Added a `distToId(tid) > 30` distance check to the non-XTarget engagement timeout, preventing the engine from clearing targets or disengaging `/attack off` mid-combat.
+
+- **Updated Project Version to `1.6`.**
+  - Updated `VERSION` constant in `mq2triune/lua/triune.lua` to `'1.6'`.
+  - Updated version string in `README.md` to `1.6`.
+
+- **Fixed Faction Consideration Target Filtering in `triune.lua`.**
+  - **Replaced Invalid TLO Access & Fixed Initial Spawn Candidate Scan**: Replaced invalid calls to `s.Consideration()` and `s.Standing()` with exact `runtime.conCache` lookup. Fixed untargeted spawn scanning in `isConAllowed(s)` so `s.Aggressive() == false` does not falsely block candidate zone mobs when "Hostile Only" is selected, restoring Puller (Hunt) target acquisition.
+  - **Bulletproof `/consider` Chat Event Listeners**: Registered `mq.event` handlers with wildcard patterns (`#*#scowls#*#`, `#*#threateningly#*#`, `#*#dubiously#*#`, `#*#apprehensively#*#`, `#*#indifferently#*#`, `#*#amiably#*#`, `#*#kindly#*#`, `#*#warmly#*#`, `#*#an ally#*#`) and `mq.TLO.Target.CleanName()` caching, bypassing timestamp/chat formatting inconsistencies.
+  - **Target Acquisition `/consider` Trigger & Cache Enforcer**: Automatically issues `mq.cmd('/consider')` upon selecting a new roam candidate in `findRoamTarget()`. Verifies `runtime.conCache[cleanName]` prior to starting movement, clearing target (`/target clear`) instantly if its faction is disabled, and caching the mob's clean name so `findRoamTarget()` skips all future mobs of that type in 0ms. Bypasses all faction checks for active XTarget mobs.
+  - **Lexical Scoping & Forward Declaration Fix**: Added top-level `local isXTargetId` forward declaration near module initialization so helper functions defined above line 4000 can invoke `isXTargetId` without throwing `attempt to call global 'isXTargetId' (a nil value)` runtime errors.
+  - **Config Sanitization & Auto-Save**: Added `pull_con_filter` table sanitization in `sanitizeModeConfig()` and serialized `pull_con_filter` keys in `loadoutSig()` for loadout auto-save change detection.
+
+- **Added Waypoint Patrol System to Puller Mode in `triune.lua`.**
+  - **Sequential 3D Waypoint Patrol Loop**: Implemented `runtime.wpTick()` to navigate Puller through user-defined 3D waypoints (`ctrl.waypoints`) in a continuous loop while scanning for valid targets.
+  - **Target Scan Interruption & Seamless Resume**: Continuously scans for valid targetable NPCs via `findRoamTarget()` during waypoint traversal; upon acquiring a target, waypoint navigation pauses immediately and resumes seamlessly once combat ends and XTarget clears.
+  - **ImGui Puller Waypoint Controls & Lua 5.1 Syntax Fix**: Added a dedicated **Puller Waypoint Patrol** section in the main ImGui UI with Enable Waypoint Patrol checkbox, Arrival Radius slider, active waypoint table (`#`, `Name`, `Coordinates`, `Distance`, `Active NEXT indicator`), and interactive control buttons (`Add Current Location`, `Clear All`, `Set Active`, `Move Up`, `Move Down`, `Delete`). Used `bit.bor()` for `ImGuiTableFlags` in compliance with Lua 5.1 / LuaJIT compatibility rules.
+  - **Slash Command Integration**: Added `/ac wp [add [name]|clear|delete [idx]|on|off|toggle|list]` slash commands to manage and query patrol routes directly from EQ chat.
+  - **Loadout Persistence & Main-Chunk Safety**: Serialized `waypoints` array in `loadoutSig()` for automatic loadout save/load persistence across character sessions, while scoping all waypoint engine methods on the `runtime` state table to respect LuaJIT's 200 main-chunk local variable limit.
+
+> **TLDR:** Added Waypoint Patrol loop system to Puller mode with ImGui table controls, target scan interruption, `/ac wp` slash commands, and persistent loadout saving.
+
+---
+
+## 2026-08-12
+
+- **Enforced complete character and pet disengagement when paused in Manual mode and across all modes in `triune.lua`.**
+  - **Spell Casting Cancellation**: Added `/stopcast` to `fullStop()` alongside `/stopsong` so non-bard spellcasting is immediately interrupted when pausing.
+  - **Pet Attack Recall & Hold**: Updated `setManualHunterPetHold()` to issue `#petcmd hold all`, `#petcmd ghold on`, and `/pet back off` when hold is requested, ordering active pets to immediately disengage combat and return to player hold when paused.
+  - **Combat Loop Pause Guard**: Added an explicit `if not ctrl.running then return end` guard at the top of `combatTick()` to prevent combat logic execution while paused.
+  - **Chat Event Movement Guard**: Added a pause check to `repositionCloser()` so out-of-range chat events do not initiate `/nav` or `/stick` movement when paused.
+  - **Continuous Paused Enforcement**: Added a main loop check while `ctrl.running` is false to immediately disengage `/attack`, `/autofire`, `/nav`, and `/stick` if active while paused.
+
+- **Updated slash commands, mode aliases, chat output, and UI Help tab across `triune.lua` and `README.md`.**
+  - **Buffbot Slash Command Integration**: Added `/ac buffbot`, `/ac buff`, and `/ac buffui` commands to `triuneCommand()` to launch or stop `triune_buffbot.lua` dynamically.
+  - **Chat Help Command**: Added `/ac help`, `/ac h`, and `/ac ?` command handlers to print a formatted summary of all available `/ac` slash commands directly into EverQuest chat.
+  - **Expanded Mode Command Aliases**: Updated `setTriuneMode()` so `/ac ranged` maps to `Assist (Backline)` alongside `/ac backline`, `/ac tank` and `/ac garrison` map to `Assist (Camp)`, and `/ac hunter` maps to `Puller (Hunt)`.
+  - **Enhanced UI Help Tab**: Updated `UI.drawHelpTab()` in `triune.lua` with all missing standalone window commands (`/ac track`, `/ac buffbot`, `/ac help`), updated usage descriptions, and added command alias references to the Combat Modes table.
+  - **Added Faction Consideration Target Filtering to Puller Mode in `triune.lua`.**
+  - **Multi-Select Consideration Filtering**: Added `ctrl.pull_con_filter` supporting multi-selection across all 9 EverQuest consideration tiers (`Scowling`, `Threateningly`, `Dubious`, `Apprehensive`, `Indifferent`, `Amiably`, `Kindly`, `Warmly`, `Ally`), with all 9 considerations enabled by default.
+  - **Puller Target Selection Guard**: Added `isConAllowed(spawn)` helper to query spawn consideration standing via `Consideration()`, `Standing()`, or `Aggressive()` fallback in `findRoamTarget()` for XTarget and NearestSpawn candidate selection.
+  - **ImGui Puller UI Controls**: Added **Target Faction Considerations** multi-select grid layout and quick preset buttons (`Select All`, `Hostile Only`, `Hostile + Indifferent`, `Clear All`) under Puller Target Filters in `renderPullerTab()`.
+  - **Slash Command & Persistence**: Added `/ac pullcon [tier] [on|off]` and `/ac pullcon preset [all|hostile|indifferent|none]` slash commands and updated loadout serialization (`collectEntry` / `applyEntry`).
+
+> **TLDR:** Added multi-select Faction Consideration target filtering to Puller mode, with all 9 consideration tiers enabled by default, ImGui presets/checkboxes, and slash command integration.
+
+---
+
 ## 2026-08-11
 
 - **Fixed code safety issues and combat mode logic in `triune.lua`.**

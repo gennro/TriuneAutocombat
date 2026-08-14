@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.5.2'
+local VERSION           = '1.6'
 local open              = true
 local cfg               = mq.configDir
 
@@ -109,6 +109,17 @@ local SUBMODES       = {
     Assist = { 'Chase', 'Camp', 'Backline' }
 }
 local PULL_STYLES    = { 'Melee', 'Spell', 'Pet', 'Ranged' }
+local PULL_CON_LIST  = {
+    'Scowling',
+    'Threateningly',
+    'Dubious',
+    'Apprehensive',
+    'Indifferent',
+    'Amiably',
+    'Kindly',
+    'Warmly',
+    'Ally',
+}
 
 local MODE_DESC      = {
     Manual = 'Fights your current or acquired target automatically. Does not roam.',
@@ -124,7 +135,11 @@ local SUBMODE_DESC   = {
     ['Assist:Backline'] = 'Ranged/caster support; assists MA without moving to melee range.'
 }
 
-local ctrl -- forward declaration for lexical scoping in helpers
+local ctrl                   -- forward declaration for lexical scoping in helpers
+local isXTargetId            -- forward declaration for lexical scoping in helpers
+local isGroupOrRaidMember    -- forward declaration for lexical scoping in helpers
+local buffActive             -- forward declaration for lexical scoping in helpers
+local updateMapRadiusVisuals -- forward declaration for lexical scoping in UI & helpers
 
 -- Backward compatibility and mode validation sanitizer
 local function sanitizeModeConfig(c)
@@ -158,6 +173,15 @@ local function sanitizeModeConfig(c)
         if c.submode ~= 'Chase' and c.submode ~= 'Camp' and c.submode ~= 'Backline' then c.submode = 'Chase' end
     else
         c.submode = 'Hunt'
+    end
+
+    if type(c.pull_con_filter) ~= 'table' then
+        c.pull_con_filter = {}
+    end
+    for _, conName in ipairs(PULL_CON_LIST) do
+        if c.pull_con_filter[conName] == nil then
+            c.pull_con_filter[conName] = true
+        end
     end
 end
 
@@ -193,6 +217,17 @@ local function defaultCtrl()
         hunter_combat_loc    = nil, -- {x,y,z} anchor; nil = no constraint
         pull_min_level       = 1,
         pull_max_level       = 100,
+        pull_con_filter      = {
+            ['Scowling']      = true,
+            ['Threateningly'] = true,
+            ['Dubious']       = true,
+            ['Apprehensive']  = true,
+            ['Indifferent']   = true,
+            ['Amiably']       = true,
+            ['Kindly']        = true,
+            ['Warmly']        = true,
+            ['Ally']          = true,
+        },
         check_closer_mobs    = true,
         nav_fallback_stick   = false,
         debug_mode           = false,
@@ -216,7 +251,11 @@ local function defaultCtrl()
         pet_hold_enabled     = true,
         show_map_radius      = true,
         burn                 = false,
-        compact              = false
+        compact              = false,
+        use_waypoints        = false,
+        waypoint_radius      = 20,
+        current_waypoint_idx = 1,
+        waypoints            = {}
     }
 end
 ctrl = defaultCtrl()
@@ -249,7 +288,18 @@ local runtime = {
     ignoreList = {},
     pullList = {},
     ignoreInput = '',
-    pullInput = ''
+    pullInput = '',
+    conCache = {},
+    lastConReqAt = 0,
+    spellbookSetCache = nil,
+    lastSpellbookCacheTime = 0,
+    hasAACache = {},
+    knownDiscSet = nil,
+    filteredSpellsCache = {},
+    gemSyncWarned = {},
+    lastGemSyncCheckAt = 0,
+    colN = 0,
+    varN = 0
 }
 
 local petState = {
@@ -278,7 +328,8 @@ local pursuit = {
     lastTooFarRepositionAt = 0,
     hasRetargeted = false,
     nonXtarTargetId = 0,
-    nonXtarEngageAt = 0
+    nonXtarEngageAt = 0,
+    lastCombatFaceAt = 0
 }
 
 local stuckState = {
@@ -460,13 +511,10 @@ local function normalizeSpellName(name)
     return s
 end
 
-local spellbookSetCache = nil
-local lastSpellbookCacheTime = 0
-
 local function getScribedSpellSet()
     local now = os.clock()
-    if spellbookSetCache and (now - lastSpellbookCacheTime) < 3.0 then
-        return spellbookSetCache
+    if runtime.spellbookSetCache and (now - (runtime.lastSpellbookCacheTime or 0)) < 3.0 then
+        return runtime.spellbookSetCache
     end
 
     local set = {}
@@ -503,8 +551,8 @@ local function getScribedSpellSet()
         end
     end)
 
-    spellbookSetCache = set
-    lastSpellbookCacheTime = now
+    runtime.spellbookSetCache = set
+    runtime.lastSpellbookCacheTime = now
     return set
 end
 
@@ -585,29 +633,28 @@ local function isGemMatching(slotOrName, targetSpellName)
     return false
 end
 
-local hasAACache = {}
 local function hasAA(nm)
     if not nm or nm == "" or tonumber(nm) ~= nil then return false end
     local now = os.clock()
-    if hasAACache[nm] ~= nil and (now - (hasAACache[nm].time or 0)) < 5.0 then
-        return hasAACache[nm].val
+    runtime.hasAACache = runtime.hasAACache or {}
+    if runtime.hasAACache[nm] ~= nil and (now - (runtime.hasAACache[nm].time or 0)) < 5.0 then
+        return runtime.hasAACache[nm].val
     end
     local ok, res = pcall(function() return mq.TLO.Me.AltAbility(nm).Rank() end)
     local hasIt = (ok and res ~= nil and res > 0)
-    hasAACache[nm] = { val = hasIt, time = now }
+    runtime.hasAACache[nm] = { val = hasIt, time = now }
     return hasIt
 end
 
-local knownDiscSet = nil
 local function scanKnownDiscs()
-    knownDiscSet = {}
+    runtime.knownDiscSet = {}
     pcall(function()
         local count = mq.TLO.Me.CombatAbilityCount() or 0 ---@diagnostic disable-line: undefined-field
         for i = 1, count do
             local name = mq.TLO.Me.CombatAbility(i).Name()
             if name and name ~= "" then
-                knownDiscSet[name] = true
-                knownDiscSet[name:lower()] = true
+                runtime.knownDiscSet[name] = true
+                runtime.knownDiscSet[name:lower()] = true
             end
         end
     end)
@@ -615,8 +662,8 @@ end
 
 local function isDiscKnown(discName)
     if not discName or discName == "" then return false end
-    if not knownDiscSet then scanKnownDiscs() end
-    local kSet = knownDiscSet or {}
+    if not runtime.knownDiscSet then scanKnownDiscs() end
+    local kSet = runtime.knownDiscSet or {}
     local nm = cleanSpellName(discName) or ""
     if (nm ~= "" and (kSet[nm] or kSet[nm:lower()])) or kSet[discName] or kSet[discName:lower()] then
         return true
@@ -998,6 +1045,8 @@ local function createCastTracker()
     local failureCount = {}
     local lockouts = {}
 
+    local tracker = {}
+
     local function recordFailure(spellName, maxRetries, lockoutSec)
         if not spellName then return end
         failureCount[spellName] = (failureCount[spellName] or 0) + 1
@@ -1020,7 +1069,11 @@ local function createCastTracker()
     local function onFailureEvent(reason, maxRetries, lockoutSec)
         local castingName = nil
         pcall(function() castingName = mq.TLO.Me.Casting.Name() end)
+        if not castingName or castingName == '' then
+            castingName = tracker.activeSpell or tracker.lastSpell
+        end
         if castingName and castingName ~= '' then
+            tracker.failed = true
             recordFailure(castingName, maxRetries, lockoutSec)
         end
     end
@@ -1031,15 +1084,19 @@ local function createCastTracker()
         lockouts[spellName] = nil
     end
 
-    return {
-        recordFailure = recordFailure,
-        recordSuccess = recordSuccess,
-        isLockedOut = isLockedOut,
-        onFailureEvent = onFailureEvent,
-        clear = function()
-            failureCount = {}; lockouts = {}
-        end
-    }
+    tracker.recordFailure = recordFailure
+    tracker.recordSuccess = recordSuccess
+    tracker.isLockedOut = isLockedOut
+    tracker.onFailureEvent = onFailureEvent
+    tracker.clear = function()
+        failureCount = {}; lockouts = {}
+    end
+    tracker.failed = false
+    tracker.activeSpell = nil
+    tracker.lastSpell = nil
+    tracker.wasCasting = false
+
+    return tracker
 end
 
 local function clearCursor()
@@ -1173,10 +1230,8 @@ end
 
 local PURE_MELEE_CLASSES = { War = true, WAR = true, Mnk = true, MNK = true, Rog = true, ROG = true, Ber = true, BER = true }
 
-local filteredSpellsCache = {}
-
 local function clearFilteredSpellsCache()
-    filteredSpellsCache = {}
+    runtime.filteredSpellsCache = {}
 end
 
 local function isDisciplineSpell(abbr, spellName)
@@ -1391,7 +1446,8 @@ local function filteredSpells(abbr)
     local now = os.clock()
     local scribedOnly = ctrl and ctrl.scribed_only or false
 
-    local cached = filteredSpellsCache[abbr]
+    runtime.filteredSpellsCache = runtime.filteredSpellsCache or {}
+    local cached = runtime.filteredSpellsCache[abbr]
     if cached and (now - cached.time) < 2.0
         and cached.lvlMin == lvlMin
         and cached.lvlMax == lvlMax
@@ -1415,7 +1471,7 @@ local function filteredSpells(abbr)
         end
     end
 
-    filteredSpellsCache[abbr] = {
+    runtime.filteredSpellsCache[abbr] = {
         names = names,
         lookup = lookup,
         time = now,
@@ -1549,12 +1605,11 @@ end
 -- once per mismatch (not every check) rather than auto-fixing, since
 -- auto-correcting could clobber a spell you just picked and haven't memmed
 -- yet -- skips any slot with a mem still queued/in-progress for that reason.
-local gemSyncWarned = {}
-local lastGemSyncCheckAt = 0
 local function checkGemMemSync()
     local now = os.clock()
-    if (now - lastGemSyncCheckAt) < 10.0 then return end
-    lastGemSyncCheckAt = now
+    if (now - (runtime.lastGemSyncCheckAt or 0)) < 10.0 then return end
+    runtime.lastGemSyncCheckAt = now
+    runtime.gemSyncWarned = runtime.gemSyncWarned or {}
     if mq.TLO.Window('SpellBookWnd').Open() then return end -- actively memming right now -- don't check mid-swap
     for i = 1, NUM_GEMS do
         local g = loadout.gems[i]
@@ -1563,8 +1618,8 @@ local function checkGemMemSync()
                 local memmed
                 pcall(function() memmed = mq.TLO.Me.Gem(i).Name() end)
                 if memmed and memmed ~= '' and memmed ~= 'NULL' then
-                    if not gemSyncWarned[i] then
-                        gemSyncWarned[i] = true
+                    if not runtime.gemSyncWarned[i] then
+                        runtime.gemSyncWarned[i] = true
                         print(string.format(
                             '\ay[Triune]\ax gem %d mismatch -- configured for "%s" but the bar actually has "%s" memmed there. '
                             .. 'It will never successfully cast/detect correctly like this -- use Mem All to Bar, or re-pick the spell for this gem.',
@@ -1572,10 +1627,10 @@ local function checkGemMemSync()
                     end
                 end
             else
-                gemSyncWarned[i] = nil -- resolved (or slot empty) -- allow a future mismatch to warn again
+                runtime.gemSyncWarned[i] = nil -- resolved (or slot empty) -- allow a future mismatch to warn again
             end
         else
-            gemSyncWarned[i] = nil
+            runtime.gemSyncWarned[i] = nil
         end
     end
 end
@@ -1694,6 +1749,63 @@ local function removePull(name)
     print('\ag[Triune]\ax removed from pull list: ' .. name)
 end
 
+-- Waypoint Patrol helpers for Puller mode (attached to runtime table to respect 200 local limit)
+function runtime.wpAdd(name)
+    local y, x, z = mq.TLO.Me.Y(), mq.TLO.Me.X(), mq.TLO.Me.Z()
+    if not x or not y or not z then return false end
+    ctrl.waypoints = ctrl.waypoints or {}
+    local wpNum = #ctrl.waypoints + 1
+    local wpName = (name and name ~= '') and name or string.format('WP %d', wpNum)
+    table.insert(ctrl.waypoints,
+        { name = wpName, x = math.floor(x * 10) / 10, y = math.floor(y * 10) / 10, z = math.floor(z * 10) / 10 })
+    saveLoadout(true)
+    return wpNum, wpName, x, y, z
+end
+
+function runtime.wpClear()
+    ctrl.waypoints = {}
+    ctrl.current_waypoint_idx = 1
+    saveLoadout(true)
+end
+
+function runtime.wpDelete(idx)
+    if not ctrl.waypoints or not ctrl.waypoints[idx] then return false end
+    table.remove(ctrl.waypoints, idx)
+    if not ctrl.current_waypoint_idx or ctrl.current_waypoint_idx > #ctrl.waypoints then
+        ctrl.current_waypoint_idx = 1
+    end
+    saveLoadout(true)
+    return true
+end
+
+function runtime.wpMoveUp(idx)
+    if not ctrl.waypoints or idx <= 1 or idx > #ctrl.waypoints then return false end
+    local tmp = ctrl.waypoints[idx]
+    ctrl.waypoints[idx] = ctrl.waypoints[idx - 1]
+    ctrl.waypoints[idx - 1] = tmp
+    if ctrl.current_waypoint_idx == idx then
+        ctrl.current_waypoint_idx = idx - 1
+    elseif ctrl.current_waypoint_idx == idx - 1 then
+        ctrl.current_waypoint_idx = idx
+    end
+    saveLoadout(true)
+    return true
+end
+
+function runtime.wpMoveDown(idx)
+    if not ctrl.waypoints or idx < 1 or idx >= #ctrl.waypoints then return false end
+    local tmp = ctrl.waypoints[idx]
+    ctrl.waypoints[idx] = ctrl.waypoints[idx + 1]
+    ctrl.waypoints[idx + 1] = tmp
+    if ctrl.current_waypoint_idx == idx then
+        ctrl.current_waypoint_idx = idx + 1
+    elseif ctrl.current_waypoint_idx == idx + 1 then
+        ctrl.current_waypoint_idx = idx
+    end
+    saveLoadout(true)
+    return true
+end
+
 local function isPullAllowed(name)
     if not name then return false end
     local cleanName = tostring(name)
@@ -1707,6 +1819,103 @@ local function isPullAllowed(name)
         end
     end
     return false
+end
+
+function runtime.extractConName(line)
+    if not line or line == '' then return nil end
+    local name = line:match('^(.-)%s+scowls')
+        or line:match('^(.-)%s+glares')
+        or line:match('^(.-)%s+glowers')
+        or line:match('^(.-)%s+looks')
+        or line:match('^(.-)%s+regards')
+        or line:match('^(.-)%s+judges')
+        or line:match('^(.-)%s+judge')
+    if name then
+        name = name:gsub('^%s*(.-)%s*$', '%1')
+        if name ~= '' then return name end
+    end
+    return nil
+end
+
+function runtime.recordTargetCon(tier, line)
+    runtime.conCache = runtime.conCache or {}
+    local tgtName = mq.TLO.Target.CleanName()
+    if not tgtName or tgtName == '' then
+        tgtName = runtime.extractConName(line)
+    end
+    if not tgtName or tgtName == '' or not tier then return end
+    runtime.conCache[tgtName] = tier
+    if ctrl and ctrl.debug_mode then
+        print(string.format('\ag[Triune]\ax Captured faction consideration for "%s": %s', tgtName, tier))
+    end
+end
+
+mq.event('TriuneConScowl', '#*#scowls#*#', function(line) runtime.recordTargetCon('Scowling', line) end)
+mq.event('TriuneConThreat', '#*#threateningly#*#', function(line) runtime.recordTargetCon('Threateningly', line) end)
+mq.event('TriuneConDubious', '#*#dubiously#*#', function(line) runtime.recordTargetCon('Dubious', line) end)
+mq.event('TriuneConApprehens', '#*#apprehensively#*#', function(line) runtime.recordTargetCon('Apprehensive', line) end)
+mq.event('TriuneConIndiff', '#*#indifferently#*#', function(line) runtime.recordTargetCon('Indifferent', line) end)
+mq.event('TriuneConAmiable', '#*#amiably#*#', function(line) runtime.recordTargetCon('Amiably', line) end)
+mq.event('TriuneConKindly', '#*#kindly#*#', function(line) runtime.recordTargetCon('Kindly', line) end)
+mq.event('TriuneConWarmly', '#*#warmly#*#', function(line) runtime.recordTargetCon('Warmly', line) end)
+mq.event('TriuneConAlly', '#*#an ally#*#', function(line) runtime.recordTargetCon('Ally', line) end)
+
+local function isConAllowed(s)
+    if not s or not s() then return false end
+    if not ctrl or not ctrl.pull_con_filter then return true end
+
+    local cname = nil
+    local okName, nameVal = pcall(function() return s.CleanName() end)
+    if okName and nameVal and nameVal ~= '' then
+        cname = nameVal
+    end
+
+    -- 1. Check runtime cache if exact consideration was previously captured via /con
+    if cname and runtime.conCache and runtime.conCache[cname] then
+        local cachedTier = runtime.conCache[cname]
+        if ctrl and ctrl.pull_con_filter and ctrl.pull_con_filter[cachedTier] == false then
+            return false
+        end
+    end
+
+    -- 2. If un-cached, allow initial candidate targeting (faction will be cached upon /con)
+    return true
+end
+
+function runtime.verifyTargetCon(id, blockUntilCached)
+    if not id or id <= 0 then return true end
+    if isXTargetId(id) then return true end
+
+    local tgt = mq.TLO.Target
+    if not tgt() or (tgt.ID() or 0) ~= id then return true end
+
+    local cname = tgt.CleanName()
+    if not cname or cname == '' then return true end
+
+    runtime.conCache = runtime.conCache or {}
+    if not runtime.conCache[cname] then
+        mq.cmd('/consider')
+        if blockUntilCached then
+            local waited = 0
+            while waited < 400 do
+                mq.delay(20)
+                mq.doevents()
+                waited = waited + 20
+                if runtime.conCache[cname] then break end
+            end
+        else
+            mq.doevents()
+        end
+    end
+
+    local cachedTier = runtime.conCache[cname]
+    if cachedTier and ctrl and ctrl.pull_con_filter then
+        if ctrl.pull_con_filter[cachedTier] == false then
+            return false
+        end
+    end
+
+    return true
 end
 
 -- lightweight signature of the loadout, for auto-save change detection
@@ -1764,6 +1973,18 @@ local function loadoutSig()
         if type(v) == 'table' then
             if k == 'camp_loc' or k == 'hunter_combat_loc' then
                 ctrlParts[#ctrlParts + 1] = string.format('%s=%.1f,%.1f,%.1f', k, v.x or 0, v.y or 0, v.z or 0)
+            elseif k == 'pull_con_filter' then
+                local conStr = {}
+                for ck, cv in pairs(v) do conStr[#conStr + 1] = ck .. '=' .. tostring(cv) end
+                table.sort(conStr)
+                ctrlParts[#ctrlParts + 1] = 'pull_con_filter:' .. table.concat(conStr, ',')
+            elseif k == 'waypoints' then
+                local wpStr = {}
+                for idx, wp in ipairs(v) do
+                    wpStr[#wpStr + 1] = string.format('%d:%s=%.1f,%.1f,%.1f', idx, wp.name or ('WP ' .. idx), wp.x or 0,
+                        wp.y or 0, wp.z or 0)
+                end
+                ctrlParts[#ctrlParts + 1] = 'waypoints:' .. table.concat(wpStr, ';')
             end
         else
             ctrlParts[#ctrlParts + 1] = string.format('%s=%s', k, tostring(v))
@@ -1823,12 +2044,11 @@ loadAll()
 local function accent(c, txt) ImGui.TextColored(c[1], c[2], c[3], c[4], txt) end
 
 -- UI: theme and style helpers
-local _colN, _varN = 0, 0
 local function pushCol(id, r, g, b, a)
     if id == nil then return end
     local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
     local enumVal = ImGuiColType and ImGuiColType(id) or id
-    if pcall(ImGui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end
+    if pcall(ImGui.PushStyleColor, enumVal, r, g, b, a) then runtime.colN = (runtime.colN or 0) + 1 end
 end
 local function pushVar(id, a, b)
     if id == nil then return end
@@ -1846,11 +2066,11 @@ local function pushVar(id, a, b)
     else
         ok = pcall(ImGui.PushStyleVar, enumVal, a)
     end
-    if ok then _varN = _varN + 1 end
+    if ok then runtime.varN = (runtime.varN or 0) + 1 end
 end
 
 local function pushTheme()
-    _colN, _varN = 0, 0
+    runtime.colN, runtime.varN = 0, 0
     local ImGuiCol = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol or ImGuiCol ---@diagnostic disable-line: undefined-field
     local ImGuiStyleVar = (mq.imgui and mq.imgui.StyleVar) or _G.ImGuiStyleVar or
         ImGuiStyleVar ---@diagnostic disable-line: undefined-field
@@ -1900,11 +2120,11 @@ local function pushTheme()
 end
 
 local function popTheme()
-    if _varN > 0 then
-        pcall(ImGui.PopStyleVar, _varN); _varN = 0
+    if (runtime.varN or 0) > 0 then
+        pcall(ImGui.PopStyleVar, runtime.varN); runtime.varN = 0
     end
-    if _colN > 0 then
-        pcall(ImGui.PopStyleColor, _colN); _colN = 0
+    if (runtime.colN or 0) > 0 then
+        pcall(ImGui.PopStyleColor, runtime.colN); runtime.colN = 0
     end
 end
 
@@ -2174,20 +2394,26 @@ function UI.drawHelpTab()
             ImGui.TableHeadersRow()
 
             local commands = {
-                { cmd = '/ac run',              desc = 'Start / unpause auto-combat execution' },
-                { cmd = '/ac pause / /ac stop', desc = 'Pause auto-combat execution & halt movement' },
-                { cmd = '/ac burn [on|off]',    desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
-                { cmd = '/ac status',           desc = 'Print current running state and combat mode to chat' },
-                { cmd = '/ac spellbook',        desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
-                { cmd = '/ac cursorui',         desc = 'Toggle the standalone cursor item manager window' },
-                { cmd = '/ac clearcursor',      desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
-                { cmd = '/ac dps / /dps',       desc = 'Toggle or launch the standalone DPS Parser window' },
-                { cmd = '/ac update',           desc = 'Check for GitHub updates and launch the Triune Release Updater' },
-                { cmd = '/dps compact',         desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
-                { cmd = '/dps report [chan]',   desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
-                { cmd = '/dps reset',           desc = 'Reset active combat damage counters' },
-                { cmd = '/ac <mode>',           desc = 'Switch combat mode (e.g. /ac assist, /ac hunter, /ac tank)' },
-                { cmd = '/triunerun',           desc = 'Quick keybind command to toggle run / pause' },
+                { cmd = '/ac run / /ac start',                desc = 'Start / unpause auto-combat execution' },
+                { cmd = '/ac pause / /ac stop',               desc = 'Pause auto-combat execution, halt movement & disengage pet' },
+                { cmd = '/ac burn [on|off]',                  desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
+                { cmd = '/ac status',                         desc = 'Print current running state and combat mode to chat' },
+                { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
+                { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
+                { cmd = '/ac spellbook',                      desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
+                { cmd = '/ac cursorui',                       desc = 'Toggle the standalone cursor item manager window' },
+                { cmd = '/ac clearcursor',                    desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
+                { cmd = '/ac buffbot / /ac buff',             desc = 'Toggle the standalone Interactive Buffbot window' },
+                { cmd = '/ac track / /ac zone',               desc = 'Toggle the standalone Zone NPC Tracker window for live targeting & navigation' },
+                { cmd = '/ac update',                         desc = 'Check for GitHub updates and launch the Triune Release Updater' },
+                { cmd = '/ac dps / /dps',                     desc = 'Toggle or launch the standalone DPS Parser window' },
+                { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
+                { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
+                { cmd = '/dps reset',                         desc = 'Reset active combat damage counters' },
+                { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
+                { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
+                { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
+                { cmd = '/triunerun',                         desc = 'Quick keybind command to toggle run / pause' },
             }
 
             for _, entry in ipairs(commands) do
@@ -2208,7 +2434,7 @@ function UI.drawHelpTab()
         ImGui.Dummy(0, 2)
         local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
         if ImGui.BeginTable('##HelpModeTable', 2, tableFlags) then
-            ImGui.TableSetupColumn('Mode', ImGuiTableColumnFlags.WidthFixed, 140)
+            ImGui.TableSetupColumn('Mode', ImGuiTableColumnFlags.WidthFixed, 180)
             ImGui.TableSetupColumn('Behavior Description', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableHeadersRow()
 
@@ -2560,13 +2786,17 @@ end
 local function setManualHunterPetHold(on, force)
     if on then
         if force or petState.manualHunterHold ~= true then
+            mq.cmd('/say #petcmd hold all')
             mq.cmd('/say #petcmd ghold on')
+            mq.cmd('/pet back off')
             petState.manualHunterHold = true
+            petState.petHoldActive = true
         end
     else
         if force or petState.manualHunterHold ~= false then
             mq.cmd('/say #petcmd ghold off')
             petState.manualHunterHold = false
+            petState.petHoldActive = false
         end
     end
 end
@@ -2700,12 +2930,12 @@ function UI.drawControlTab()
             accent(MUTED, 'No camp set -- toon stays put wherever fights end.')
         end
 
-        if ImGui.Button('Set Here##manualCamp') then
+        if ImGui.Button('Set Here##manualCampSet') then
             local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
             if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
         end
         ImGui.SameLine()
-        if ImGui.Button('Clear Camp##manualCamp') then
+        if ImGui.Button('Clear Camp##manualCampClear') then
             ctrl.camp_loc = nil
         end
         if ImGui.IsItemHovered() then
@@ -2730,7 +2960,7 @@ function UI.drawControlTab()
                 300)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
+                    'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
         end
     end
@@ -2815,14 +3045,14 @@ function UI.drawControlTab()
                 15, 250)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                'Distance (units) to close to before sending in pets, casting pull spell, or firing bow.')
+                    'Distance (units) to close to before sending in pets, casting pull spell, or firing bow.')
             end
 
             ctrl.pull_stand_back = ImGui.Checkbox('Stand Back (Let Pet Tank / Stay Ranged)##pullStandBack',
                 ctrl.pull_stand_back == true)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                'Checked: Stays back at engagement distance during combat and lets pet tank or stays ranged without closing into melee range.')
+                    'Checked: Stays back at engagement distance during combat and lets pet tank or stays ranged without closing into melee range.')
             end
         end
 
@@ -2853,7 +3083,7 @@ function UI.drawControlTab()
                 300)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
+                    'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
 
             ImGui.Dummy(0, 2)
@@ -2865,7 +3095,7 @@ function UI.drawControlTab()
                 accent(MUTED, 'No anchor set -- Puller roams freely within Search Radius.')
             end
 
-            if ImGui.Button('Set Anchor##pullerAnchor') then
+            if ImGui.Button('Set Anchor##pullerAnchorSet') then
                 local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
                 if mx and my and mz then
                     ctrl.hunter_combat_loc = { x = mx, y = my, z = mz }
@@ -2879,7 +3109,7 @@ function UI.drawControlTab()
                 ImGui.SetTooltip('Saves your current position as anchor for roaming.')
             end
             ImGui.SameLine()
-            if ImGui.Button('Clear Anchor##pullerAnchor') then
+            if ImGui.Button('Clear Anchor##pullerAnchorClear') then
                 ctrl.hunter_combat_loc = nil
                 pursuit.wanderLoc = nil
                 if updateMapRadiusVisuals then updateMapRadiusVisuals() end
@@ -2887,7 +3117,7 @@ function UI.drawControlTab()
 
             ImGui.SetNextItemWidth(220)
             local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl
-            .hunter_combat_radius or 250
+                .hunter_combat_radius or 250
             local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000)
             if changed then
                 ctrl.hunter_combat_radius = newRadius
@@ -2902,12 +3132,12 @@ function UI.drawControlTab()
                 accent(WARN, 'No camp location set -- puller requires a camp position.')
             end
 
-            if ImGui.Button('Set Here##pullerCamp') then
+            if ImGui.Button('Set Here##pullerCampSet') then
                 local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
                 if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
             end
             ImGui.SameLine()
-            if ImGui.Button('Clear Camp##pullerCamp') then
+            if ImGui.Button('Clear Camp##pullerCampClear') then
                 ctrl.camp_loc = nil; runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
             end
 
@@ -2931,15 +3161,185 @@ function UI.drawControlTab()
                 300)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
+                    'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
         end
 
-        -- Puller Mob Filtering: Pull List & Ignore List
+        -- Puller Waypoint Patrol Section
+        ImGui.Dummy(0, 4)
+        accent(GOLD, 'Puller Waypoint Patrol')
+        local useWp = ImGui.Checkbox('Enable Waypoint Patrol##useWaypoints', ctrl.use_waypoints == true)
+        if useWp ~= ctrl.use_waypoints then
+            ctrl.use_waypoints = useWp
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'When checked, Puller systematically travels through configured 3D waypoints in a loop to search for mobs instead of remaining stationary.')
+        end
+
+        if ctrl.use_waypoints then
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(160)
+            local newRad, changedRad = ImGui.SliderInt('Arrival Radius##wpRadius', ctrl.waypoint_radius or 20, 5, 100)
+            if changedRad then
+                ctrl.waypoint_radius = newRad
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Distance in units to reach a waypoint before advancing to the next one in the loop.')
+            end
+
+            if ImGui.Button('Add Current Location##addWpLoc') then
+                runtime.wpAdd()
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Captures your current position (Y, X, Z) and adds it to the waypoint patrol loop.')
+            end
+
+            ImGui.SameLine()
+            if ImGui.Button('Clear All Waypoints##clearWps') then
+                runtime.wpClear()
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Removes all saved waypoints from the patrol route.')
+            end
+
+            local wps = ctrl.waypoints or {}
+            if #wps > 0 then
+                local wpTableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg,
+                    ImGuiTableFlags.SizingFixedFit)
+                if ImGui.BeginTable('WaypointTable', 6, wpTableFlags) then
+                    ImGui.TableSetupColumn('#', ImGuiTableColumnFlags.WidthFixed, 25)
+                    ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthFixed, 100)
+                    ImGui.TableSetupColumn('Coordinates (Y, X, Z)', ImGuiTableColumnFlags.WidthFixed, 150)
+                    ImGui.TableSetupColumn('Distance', ImGuiTableColumnFlags.WidthFixed, 60)
+                    ImGui.TableSetupColumn('Active', ImGuiTableColumnFlags.WidthFixed, 50)
+                    ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 130)
+                    ImGui.TableHeadersRow()
+
+                    for idx, wp in ipairs(wps) do
+                        ImGui.TableNextRow()
+                        ImGui.TableNextColumn()
+                        ImGui.Text(tostring(idx))
+
+                        ImGui.TableNextColumn()
+                        ImGui.Text(wp.name or ('WP ' .. idx))
+
+                        ImGui.TableNextColumn()
+                        ImGui.Text(string.format('%.1f, %.1f, %.1f', wp.y or 0, wp.x or 0, wp.z or 0))
+
+                        ImGui.TableNextColumn()
+                        local dist = distToLoc(wp.x, wp.y, wp.z)
+                        ImGui.Text(string.format('%.0f', dist))
+
+                        ImGui.TableNextColumn()
+                        if (ctrl.current_waypoint_idx or 1) == idx then
+                            accent(GOOD, '>> NEXT')
+                        else
+                            ImGui.Text('')
+                        end
+
+                        ImGui.TableNextColumn()
+                        if ImGui.Button(string.format('Set##wpSet_%d', idx)) then
+                            ctrl.current_waypoint_idx = idx
+                            saveLoadout(true)
+                        end
+                        if ImGui.IsItemHovered() then ImGui.SetTooltip('Set this as the next target waypoint') end
+
+                        ImGui.SameLine()
+                        if ImGui.Button(string.format('^##wpUp_%d', idx)) then
+                            runtime.wpMoveUp(idx)
+                        end
+                        if ImGui.IsItemHovered() then ImGui.SetTooltip('Move waypoint up in loop sequence') end
+
+                        ImGui.SameLine()
+                        if ImGui.Button(string.format('v##wpDn_%d', idx)) then
+                            runtime.wpMoveDown(idx)
+                        end
+                        if ImGui.IsItemHovered() then ImGui.SetTooltip('Move waypoint down in loop sequence') end
+
+                        ImGui.SameLine()
+                        if ImGui.Button(string.format('X##wpDel_%d', idx)) then
+                            runtime.wpDelete(idx)
+                        end
+                        if ImGui.IsItemHovered() then ImGui.SetTooltip('Delete this waypoint') end
+                    end
+                    ImGui.EndTable()
+                end
+            else
+                accent(MUTED,
+                    'No waypoints configured. Stand at desired search locations and click "Add Current Location".')
+            end
+        end
+
+        -- Puller Mob Filtering: Faction Considerations, Pull List & Ignore List
         ImGui.Dummy(0, 4)
         ImGui.Separator()
         ImGui.Dummy(0, 4)
         accent(GOLD, 'Puller Target Filters')
+
+        accent(GOLD, 'Target Faction Considerations')
+        accent(MUTED, 'Select which NPC faction considerations Puller is allowed to auto-target.')
+        ImGui.Dummy(0, 2)
+
+        ctrl.pull_con_filter = ctrl.pull_con_filter or {
+            ['Scowling'] = true,
+            ['Threateningly'] = true,
+            ['Dubious'] = true,
+            ['Apprehensive'] = true,
+            ['Indifferent'] = true,
+            ['Amiably'] = true,
+            ['Kindly'] = true,
+            ['Warmly'] = true,
+            ['Ally'] = true,
+        }
+
+        if ImGui.Button('Select All##pullConAllBtn') then
+            for _, conName in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[conName] = true end
+            saveLoadout(true)
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Hostile Only##pullConHostileBtn') then
+            for _, conName in ipairs(PULL_CON_LIST) do
+                ctrl.pull_con_filter[conName] = (conName == 'Scowling' or conName == 'Threateningly' or conName == 'Dubious' or conName == 'Apprehensive')
+            end
+            saveLoadout(true)
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Hostile + Indifferent##pullConHostileIndiffBtn') then
+            for _, conName in ipairs(PULL_CON_LIST) do
+                ctrl.pull_con_filter[conName] = (conName == 'Scowling' or conName == 'Threateningly' or conName == 'Dubious' or conName == 'Apprehensive' or conName == 'Indifferent')
+            end
+            saveLoadout(true)
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Clear All##pullConClearBtn') then
+            for _, conName in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[conName] = false end
+            saveLoadout(true)
+        end
+
+        ImGui.Dummy(0, 4)
+
+        local tableFlags = bit.bor(ImGuiTableFlags.BordersOuter, ImGuiTableFlags.SizingFixedSame)
+        if ImGui.BeginTable('PullConTable', 3, tableFlags) then
+            for idx, conName in ipairs(PULL_CON_LIST) do
+                if (idx - 1) % 3 == 0 then
+                    ImGui.TableNextRow()
+                end
+                ImGui.TableSetColumnIndex((idx - 1) % 3)
+
+                local curState = ctrl.pull_con_filter[conName] == true
+                local newState, changed = ImGui.Checkbox(conName .. '##pullCon_' .. conName, curState)
+                if changed then
+                    ctrl.pull_con_filter[conName] = newState
+                    saveLoadout(true)
+                end
+            end
+            ImGui.EndTable()
+        end
+
+        ImGui.Dummy(0, 6)
 
         accent(GOLD, 'NPCs to Pull (Include List)')
         accent(MUTED, 'If empty, pulls any mob in radius. If populated, ONLY pulls listed names.')
@@ -3044,12 +3444,12 @@ function UI.drawControlTab()
                 accent(WARN, 'No camp location set -- character will stay at current spot.')
             end
 
-            if ImGui.Button('Set Here##assistCamp') then
+            if ImGui.Button('Set Here##assistCampSet') then
                 local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
                 if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
             end
             ImGui.SameLine()
-            if ImGui.Button('Clear Camp##assistCamp') then
+            if ImGui.Button('Clear Camp##assistCampClear') then
                 ctrl.camp_loc = nil
             end
         elseif ctrl.submode == 'Backline' then
@@ -3120,7 +3520,7 @@ function UI.drawSettingsTab()
     end
     ImGui.SameLine()
     ImGui.SetNextItemWidth(140)
-    local lockoutVal = ImGui.SliderInt('Lockout Time (s)##cls', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
+    local lockoutVal = ImGui.SliderInt('Lockout Time (s)##castLockoutSec', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
     ctrl.cast_lockout_sec = lockoutVal
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('How many seconds to wait before trying a locked-out spell again.\nDefault: 30 seconds.')
@@ -3282,8 +3682,10 @@ local function drawMiniGui()
             local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol
             local getCol = function(id) return ImGuiColType and ImGuiColType(id) or id end
             local pCount = 0
-            if ImGuiColType and pcall(ImGui.PushStyleColor, getCol(ImGuiColType.Button), 0.8, 0.2, 0.2, 1.0) then pCount =
-                pCount + 1 end
+            if ImGuiColType and pcall(ImGui.PushStyleColor, getCol(ImGuiColType.Button), 0.8, 0.2, 0.2, 1.0) then
+                pCount =
+                    pCount + 1
+            end
             if ImGui.Button('BURN ON##miniBurnBtn', 75, 22) then
                 ctrl.burn = false
             end
@@ -3457,25 +3859,17 @@ local function setTarget(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
     if s.Type() == 'NPC' and (s.PctHPs() or 0) <= 0 then return false end
     if mq.TLO.Target.ID() == id then return true end
+    local wasCombat = mq.TLO.Me.Combat()
     mq.cmdf('/target id %d', id)
     local t = 0
     while mq.TLO.Target.ID() ~= id and t < 300 do
         mq.delay(20); t = t + 20
     end
-    return mq.TLO.Target.ID() == id
-end
-
-
-isCombat = function()
-    if mq.TLO.Me.Combat() then return true end
-    if mq.TLO.Me.CombatState() == 'COMBAT' then return true end
-    local t = mq.TLO.Target
-    if t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead() then return true end
-    for i = 1, 13 do
-        local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then return true end
+    local success = mq.TLO.Target.ID() == id
+    if success and wasCombat and ctrl and ctrl.combat_style == 'Melee' and not mq.TLO.Me.Combat() then
+        mq.cmd('/attack on')
     end
-    return false
+    return success
 end
 
 -- true if the target already has the effect. Checks BOTH the buff window and the
@@ -3552,7 +3946,7 @@ local function hasNamedBuff(spawnObj, name, isMe)
     end
     return found
 end
-local function buffActive(id, name)
+buffActive = function(id, name)
     if not id or id == 0 then return false end
     if id == mq.TLO.Me.ID() then
         if hasNamedBuff(mq.TLO.Me, name, true) then return true end
@@ -3582,6 +3976,10 @@ local function buffActive(id, name)
     end
     if mq.TLO.Target.ID() == id then
         return hasNamedBuff(mq.TLO.Target, name)
+    end
+    local s = mq.TLO.Spawn(id)
+    if s and s() then
+        return hasNamedBuff(s, name)
     end
     return false
 end
@@ -3653,7 +4051,7 @@ local function anyXtarAlive()
     return countNPCXtarget() > 0
 end
 
-local function isXTargetId(id)
+isXTargetId = function(id)
     if not id or id <= 0 then return false end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
@@ -3665,6 +4063,36 @@ local function isXTargetId(id)
             if stype == 'NPC' or stype == 'Pet' then
                 return true
             end
+        end
+    end
+    return false
+end
+
+-- Returns true if the spawn ID belongs to the player, their pet, any group member,
+-- any group member pet, or any raid member.
+isGroupOrRaidMember = function(id)
+    if not id or id <= 0 then return false end
+    if id == mq.TLO.Me.ID() then return true end
+    local myPetId = mq.TLO.Me.Pet.ID() or 0
+    if myPetId > 0 and id == myPetId then return true end
+    for _, petId in pairs(petState.myPets) do
+        if petId == id then return true end
+    end
+    local grpCount = mq.TLO.Group.Members() or 0
+    for i = 1, grpCount do
+        local m = mq.TLO.Group.Member(i)
+        if m and m() then
+            if m.ID() == id then return true end
+            local mPet = m.Pet
+            if mPet and mPet() and mPet.ID() == id then return true end
+        end
+    end
+    local raidCount = 0
+    pcall(function() raidCount = mq.TLO.Raid.Members() or 0 end)
+    if raidCount > 0 then
+        for i = 1, raidCount do
+            local rm = mq.TLO.Raid.Member(i)
+            if rm and rm() and rm.ID() == id then return true end
         end
     end
     return false
@@ -3726,41 +4154,7 @@ local function isHostileTarget(id)
     pcall(function() isTrader = (s.Trader() or s.Buyer()) end)
     if isTrader then return false end
 
-    -- On XTarget list (mob is aggroed on us or group)
-    if isXTargetId(id) then return true end
-
-    -- Active pull target in Puller mode
-    if ctrl.mode == 'Puller' and id == runtime.pullTargetId then
-        return true
-    end
-
-    -- Engine-targeting modes (Manual, Puller)
-    -- when this mob is currently targeted by player or engine
-    local ENGINE_TARGETS_MODE = {
-        ['Manual'] = true,
-        ['Puller'] = true,
-    }
-    local curTargetId = mq.TLO.Target.ID() or 0
-    if ENGINE_TARGETS_MODE[ctrl.mode] and curTargetId == id then
-        return true
-    end
-
-    -- Player is actively attacking this target (Combat or AutoFire on, or TargetOfTarget points to player)
-    if curTargetId == id then
-        if mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then return true end
-        local myId = mq.TLO.Me.ID() or 0
-        if myId > 0 then
-            local totId = 0
-            pcall(function() totId = mq.TLO.Target.TargetOfTarget.ID() or 0 end)
-            if totId == myId then return true end
-        end
-    end
-
-    -- NPC is already damaged (being fought by someone)
-    local hp = pctHP(id) or 100
-    if hp < 100 then return true end
-
-    return false
+    return true
 end
 
 -- Returns true if an action (spell, AA, disc, skill) is detrimental (offensive).
@@ -3847,18 +4241,52 @@ local function maPcId()
 end
 
 local function targetIsEngaged(id)
-    if not id then return false end
+    if not id or id <= 0 then return false end
+    if isXTargetId(id) then return true end
     local s = mq.TLO.Spawn(id)
-    if not s() then return false end
-    return (s.PctHPs() or 100) < 100
+    if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
+    if (s.PctHPs() or 100) < 100 then return true end
+
+    -- Check if target of target is player or group member
+    local totId = 0
+    pcall(function() totId = s.TargetOfTarget.ID() or 0 end)
+    if totId > 0 then
+        if isGroupOrRaidMember(totId) or totId == (mq.TLO.Me.ID() or 0) then
+            return true
+        end
+    end
+
+    -- If in Assist, Manual, or Puller mode, valid NPC targets selected by engine/MA are engaged
+    if ctrl and (ctrl.mode == 'Assist' or ctrl.mode == 'Manual' or ctrl.mode == 'Puller') then
+        return true
+    end
+
+    return false
+end
+
+isCombat = function()
+    if mq.TLO.Me.Combat() then return true end
+    if mq.TLO.Me.CombatState() == 'COMBAT' then return true end
+    local t = mq.TLO.Target
+    if t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead() and isHostileTarget(t.ID()) and targetIsEngaged(t.ID()) then
+        return true
+    end
+    for i = 1, 13 do
+        local xt = mq.TLO.Me.XTarget(i)
+        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then return true end
+    end
+    return false
 end
 
 local function anyNearbyEngagedNpc(radius)
+    if anyXtarAlive() then return true end
     local filt = string.format('npc radius %d', radius or 150)
     local n = mq.TLO.SpawnCount(filt)() or 0
     for i = 1, n do
         local s = mq.TLO.NearestSpawn(i, filt)
-        if s() and (s.PctHPs() or 100) < 100 then return true end
+        if s() and s.ID() > 0 then
+            if targetIsEngaged(s.ID()) then return true end
+        end
     end
     return false
 end
@@ -3877,12 +4305,6 @@ local function maTargetId()
         if nm and nm ~= '' then
             mq.cmdf('/assist %s', nm)
             mq.delay(150)
-            if gated and mq.TLO.Me.Combat() then
-                local nt = mq.TLO.Target
-                if not (nt() and nt.Type() == 'NPC' and targetIsEngaged(nt.ID())) then
-                    mq.cmd('/attack off')
-                end
-            end
         end
     end
     local t = mq.TLO.Target
@@ -4035,7 +4457,7 @@ local function conditionMet(when, pct, spellName, targetId, cls)
     if when == 'has Poison/Disease' then
         local s = mq.TLO.Spawn(targetId)
         return (s() and ((s.Poisoned() ~= nil and s.Poisoned()() ~= nil) or (s.Diseased() ~= nil and s.Diseased()() ~= nil))) or
-        false
+            false
     end
     if when == 'add is loose' then return firstNPCXtarget(true) ~= nil end
     return true
@@ -4092,6 +4514,7 @@ local function castGem(i, g, id)
 
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
+    local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
 
     castTracker.lastSpell   = g.spell
@@ -4149,6 +4572,7 @@ local function fireAA(name, a, id)
     end
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
+    local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
     clearCursor()
     mq.cmdf('/alt act %d', aa.ID())
@@ -4158,6 +4582,9 @@ local function fireAA(name, a, id)
     if not selfCast and orig ~= id then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+    end
+    if wasAttacking and not mq.TLO.Me.Combat() and ctrl and ctrl.combat_style == 'Melee' then
+        mq.cmd('/attack on')
     end
     return true
 end
@@ -4169,6 +4596,7 @@ local function fireDisc(name, a, id)
     if not mq.TLO.Me.CombatAbilityReady(name)() then return false end
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
+    local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
     clearCursor()
     mq.cmdf('/disc "%s"', name)
@@ -4179,6 +4607,9 @@ local function fireDisc(name, a, id)
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
+    if wasAttacking and not mq.TLO.Me.Combat() and ctrl and ctrl.combat_style == 'Melee' then
+        mq.cmd('/attack on')
+    end
     return true
 end
 
@@ -4188,6 +4619,7 @@ local function fireSkill(name, a, id)
     if not mq.TLO.Me.AbilityReady(name)() then return false end
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
+    local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
     clearCursor()
     mq.cmdf('/doability "%s"', name)
@@ -4197,6 +4629,9 @@ local function fireSkill(name, a, id)
     if not selfCast and orig ~= id then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+    end
+    if wasAttacking and not mq.TLO.Me.Combat() and ctrl and ctrl.combat_style == 'Melee' then
+        mq.cmd('/attack on')
     end
     return true
 end
@@ -4268,7 +4703,6 @@ end
 -- itself errors, so a broken check can't wedge movement forever.
 
 
-local lastCombatFaceAt = 0
 local function moveToward(id, dist, followOnly)
     local d = distToId(id)
     local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
@@ -4290,13 +4724,12 @@ local function moveToward(id, dist, followOnly)
     -- before actually reaching it. Without it, Me.Combat()==true stopped
     -- being proof of arrival: confirmed live via debug output showing
     -- dist=734.9, engage=true, combat=true, navActive=false -- this bypass
-    -- fired from 700+ units away, called stopMoving(), and froze the
+    -- fired from 700+ units aware, called stopMoving(), and froze the
     -- character in place, never actually approaching the target at all.
-    if mq.TLO.Me.Combat() and mq.TLO.Target.ID() == id and d <= dist + 15 and hasLoS(id) then
+    if (mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() or isXTargetId(id) or d <= dist + 15) and mq.TLO.Target.ID() == id and d <= dist + 20 then
         stopMoving()
-        pursuit.id = 0
-        if (os.clock() - (lastCombatFaceAt or 0)) > 1.0 then
-            lastCombatFaceAt = os.clock()
+        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 1.0 then
+            pursuit.lastCombatFaceAt = os.clock()
             mq.cmd('/face fast')
         end
         return true
@@ -4386,8 +4819,7 @@ local function repositionCloser()
     local tgt = mq.TLO.Target
     if not (tgt() and tgt.Type() == 'NPC' and not tgt.Dead()) then return end
     local tid = tgt.ID()
-    if not tid or tid <= 0 then return end
-
+    if not ctrl.running then return end
     if (os.clock() - pursuit.lastTooFarRepositionAt) < 1.0 then return end
     pursuit.lastTooFarRepositionAt = os.clock()
 
@@ -4446,6 +4878,31 @@ local function moveTowardLoc(x, y, z, dist)
         end
     end
     return false -- /stick has no raw-location form; camp return needs MQ2Nav
+end
+
+function runtime.wpTick()
+    if not ctrl.use_waypoints or not ctrl.waypoints or #ctrl.waypoints == 0 then return end
+    if not ctrl.current_waypoint_idx or ctrl.current_waypoint_idx < 1 or ctrl.current_waypoint_idx > #ctrl.waypoints then
+        ctrl.current_waypoint_idx = 1
+    end
+    local wp = ctrl.waypoints[ctrl.current_waypoint_idx]
+    if not wp or not wp.x or not wp.y or not wp.z then return end
+
+    local radius = ctrl.waypoint_radius or 20
+    local dist = distToLoc(wp.x, wp.y, wp.z)
+
+    if dist <= radius then
+        -- Advance to next waypoint in loop
+        ctrl.current_waypoint_idx = (ctrl.current_waypoint_idx % #ctrl.waypoints) + 1
+        local nextWp = ctrl.waypoints[ctrl.current_waypoint_idx]
+        if nextWp then
+            print(string.format('\ay[Triune]\ax Reached %s -- patrolling to %s (#%d)',
+                wp.name or 'waypoint', nextWp.name or 'waypoint', ctrl.current_waypoint_idx))
+            moveTowardLoc(nextWp.x, nextWp.y, nextWp.z, radius)
+        end
+    else
+        moveTowardLoc(wp.x, wp.y, wp.z, radius)
+    end
 end
 
 -- Stuck detection/recovery, ported from autocombat.lua's proven perform_unstuck_maneuver.
@@ -4647,30 +5104,27 @@ end
 -- self-engage (Manual: no automation at all; Backline/Pet Tank: never
 -- move/melee by design, so "stationary and not fighting" is often correct).
 local function checkCombatStall()
-    if ctrl.mode == 'Manual' or (ctrl.mode == 'Assist' and ctrl.submode == 'Backline') then
+    if ctrl.mode == 'Manual' or (ctrl.mode == 'Assist' and ctrl.submode == 'Backline')
+        or (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState ~= 'FIGHTING') then
         stuckState.combatStallSince = nil
         return
     end
     local t = mq.TLO.Target
     local haveLiveNPC = t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead()
-    local notPursuingThis = (pursuit.id == 0) or not (haveLiveNPC and pursuit.id == t.ID())
-    local closeEnough = haveLiveNPC and distToId(t.ID()) <= (desiredRange() + 10)
-    local stationary = not isMoveActive()
-    local notFighting = not mq.TLO.Me.Combat() and not mq.TLO.Me.AutoFire() and not mq.TLO.Me.Casting.ID()
-    if haveLiveNPC and notPursuingThis and closeEnough and stationary and notFighting then
-        if not stuckState.combatStallSince then
-            stuckState.combatStallSince = os.clock()
-        elseif (os.clock() - stuckState.combatStallSince) > 3.0 then
-            print('\ay[Triune]\ax in range but combat never started -- resetting to retry.')
-            stuckState.lastCombatStallRecoveryAt = os.clock()
-            pursuit.id = 0
-            pursuit.lastNavTargetId = 0
-            mq.cmd('/face fast')
-            stuckState.combatStallSince = os.clock() -- don't re-spam every tick
-        end
-    else
+    if not haveLiveNPC then
         stuckState.combatStallSince = nil
+        return
     end
+
+    local d = distToId(t.ID())
+    if d <= 35 then
+        if ctrl.combat_style == 'Melee' and not ctrl.pull_stand_back then
+            if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+        elseif ctrl.combat_style == 'Ranged' then
+            if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+        end
+    end
+    stuckState.combatStallSince = nil
 end
 
 local function chaseMA()
@@ -4717,7 +5171,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
 
     local anchorLoc    = isCampMode and ctrl.camp_loc or ctrl.hunter_combat_loc
     local anchorRadius = isCampMode and (searchRadius or ctrl.camp_radius or 100) or
-    (anchorLoc and (ctrl.hunter_combat_radius or 0) or 0)
+        (anchorLoc and (ctrl.hunter_combat_radius or 0) or 0)
 
     -- Fixed: Explicit Y/X handling to account for EQ's (Y, X) standard
     local function outsideAnchor(sy, sx)
@@ -4765,7 +5219,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                     if math.abs(sz - myZ) <= maxZ then
                         local sy, sx = s.Y() or 0, s.X() or 0
                         if not outsideAnchor(sy, sx) then
-                            if isPullAllowed(s.CleanName()) and not isUnreachable(s.ID()) then
+                            if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(s.ID()) then
                                 return s.ID()
                             end
                         end
@@ -4787,7 +5241,7 @@ local function checkCloserTarget(curTargetId, searchRadius, searchMaxZ, minLevel
     local maxL = maxLevel or (isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
 
     local curDist = distToId(curTargetId)
-    if curDist <= 35 then return nil end
+    if curDist <= 35 or mq.TLO.Me.Combat() then return nil end
 
     local candId = findRoamTarget(searchRadius, searchMaxZ, minL, maxL)
     if candId and candId ~= curTargetId then
@@ -4806,17 +5260,29 @@ local function pullerTick()
     if not ctrl.camp_loc then return end
 
     if runtime.pullState == 'IDLE' then
+        local pt = mq.TLO.Target
+        local hasTarget = pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0 and not pt.Dead()
         local addId = firstNPCXtarget(false)
-        if addId and setTarget(addId) then
-            runtime.pullTargetId = addId
+        if (addId and setTarget(addId)) or hasTarget then
+            runtime.pullTargetId = addId or pt.ID()
             runtime.pullState = 'FIGHTING'
             return
         end
         if mq.TLO.Me.Combat() then return end -- already fighting something; don't pull yet
         local id = findRoamTarget(ctrl.camp_radius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
         if id and setTarget(id) then
+            if not runtime.verifyTargetCon(id, true) then
+                print(string.format(
+                    '\ay[Triune]\ax Puller: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
+                    id, tostring(mq.TLO.Target.CleanName())))
+                mq.cmd('/target clear')
+                runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
+                return
+            end
             runtime.pullTargetId = id; runtime.pullState = 'TO_MOB'
             pursuit.hasRetargeted = false
+        elseif ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+            runtime.wpTick()
         end
         return
     end
@@ -4824,7 +5290,7 @@ local function pullerTick()
     -- If another mob attacks while heading out to pull (TO_MOB state), switch to incoming aggro immediately and pull back
     if runtime.pullState == 'TO_MOB' then
         local aggroId = firstNPCXtarget(false)
-        if aggroId and aggroId ~= runtime.pullTargetId then
+        if aggroId and aggroId ~= runtime.pullTargetId and (distToId(runtime.pullTargetId) > 35 and not mq.TLO.Me.Combat()) then
             stopMoving()
             if setTarget(aggroId) then
                 print(string.format(
@@ -4833,7 +5299,7 @@ local function pullerTick()
                 runtime.pullTargetId = aggroId
                 runtime.pullState = 'TO_CAMP'
             end
-        elseif (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
+        elseif not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
             local closerId, candDist, curDist = checkCloserTarget(runtime.pullTargetId, ctrl.camp_radius, ctrl.camp_z,
                 ctrl.pull_min_level, ctrl.pull_max_level)
             if closerId and setTarget(closerId) then
@@ -4862,7 +5328,13 @@ local function pullerTick()
     end
 
     if runtime.pullState == 'TO_MOB' then
-        if isUnreachable(runtime.pullTargetId) then
+        if not isXTargetId(runtime.pullTargetId) and not runtime.verifyTargetCon(runtime.pullTargetId) then
+            print(string.format(
+                '\ay[Triune]\ax Puller: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
+                runtime.pullTargetId, tostring(mq.TLO.Target.CleanName())))
+            mq.cmd('/target clear')
+            runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
+        elseif isUnreachable(runtime.pullTargetId) then
             print('\ay[Triune]\ax pull target unreachable -- picking a different mob.')
             runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
         else
@@ -4998,12 +5470,22 @@ local function playerIsEngagingTarget(tid)
 end
 
 local function checkAggroSwitch()
+    if (os.clock() - (runtime.lastAggroSwitchAt or 0)) < 2.0 then return false end
     local cur = mq.TLO.Target
     local curId = (cur() and cur.Type() == 'NPC') and cur.ID() or 0
     local curDist = (curId > 0) and (cur.Distance3D() or 999) or 999
     local bestId, bestDist = 0, 999
     local bestIsHittingMe = false
+    local curIsHittingMe = false
     local myId = mq.TLO.Me.ID() or 0
+
+    if curId > 0 and cur() then
+        pcall(function()
+            if cur.TargetOfTarget.ID() == myId or cur.AggroHolder.ID() == myId or (cur.PctAggro() or 0) >= 100 then
+                curIsHittingMe = true
+            end
+        end)
+    end
 
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
@@ -5027,10 +5509,11 @@ local function checkAggroSwitch()
         end
     end
     if bestId == 0 then return false end
-    -- Always switch when the new NPC is directly hitting us, or when the
-    -- current target isn't on XTarget, or when the new NPC is closer.
-    if bestIsHittingMe or curId == 0 or not isXTargetId(curId) or (curDist > 20 and bestDist < curDist) then
+    -- Only switch when a new mob is hitting us while current target is not,
+    -- or when current target is missing/dead, or when another mob is significantly closer (>15 units closer).
+    if (bestIsHittingMe and not curIsHittingMe) or curId == 0 or (curDist > 25 and bestDist < (curDist - 15)) then
         if setTarget(bestId) then
+            runtime.lastAggroSwitchAt = os.clock()
             stopMoving()
             pursuit.id = 0
             pursuit.lastNavTargetId = 0
@@ -5053,10 +5536,17 @@ fullStop = function()
         pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
         if stickActive then mq.cmd('/stick off') end
     end
-    if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-    if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-    if mq.TLO.Me.Casting.ID() then mq.cmd('/stopsong') end
-    if ctrl.mode ~= 'Manual' then setManualHunterPetHold(false) end
+    if not ctrl.running and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+    if not ctrl.running and mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    if mq.TLO.Me.Casting.ID() then
+        mq.cmd('/stopsong')
+        mq.cmd('/stopcast')
+    end
+    if ctrl.mode == 'Manual' or not ctrl.running then
+        setManualHunterPetHold(true, true)
+    else
+        setManualHunterPetHold(false)
+    end
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
@@ -5096,6 +5586,7 @@ onZoned = function()
 end
 
 local function combatTick()
+    if not ctrl.running then return end
     if mq.TLO.Me.Dead() then
         if not runtime.deathGuardFired then
             runtime.deathGuardFired = true
@@ -5117,7 +5608,7 @@ local function combatTick()
         local myHp = pctHP(mq.TLO.Me.ID())
         local myMana = mq.TLO.Me.PctMana() or 100
         local myEnd = mq.TLO.Me.PctEndurance() or 100
-        local xtarPresent = anyXtarAlive()
+        local xtarPresent = anyXtarAlive() or mq.TLO.Me.Combat() or ((mq.TLO.Target() and mq.TLO.Target.Type() == 'NPC') and distToId(mq.TLO.Target.ID() or 0) <= 60)
         if not runtime.medBreakActive then
             if not xtarPresent then
                 if (ctrl.medbreak_hp_on and myHp <= ctrl.medbreak_hp_start)
@@ -5132,7 +5623,7 @@ local function combatTick()
             if xtarPresent then
                 runtime.medBreakActive = false
                 if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
-                print('\ay[Triune]\ax Med Break cancelled -- NPC on XTarget!')
+                print('\ay[Triune]\ax Med Break cancelled -- combat / hostile nearby!')
             else
                 local hpOk = not ctrl.medbreak_hp_on or myHp >= ctrl.medbreak_hp_stop
                 local manaOk = not ctrl.medbreak_mana_on or myMana >= ctrl.medbreak_mana_stop
@@ -5215,7 +5706,16 @@ local function combatTick()
             pullerTick()
             local pt = mq.TLO.Target
             haveNPC = pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0
-            engage = (runtime.pullState == 'FIGHTING')
+            if haveNPC and runtime.pullState == 'FIGHTING' then
+                local id = pt.ID()
+                if moveToward(id, desiredRange()) then
+                    engage = true
+                else
+                    engage = (distToId(id) <= (desiredRange() + 15) or isXTargetId(id))
+                end
+            else
+                engage = (runtime.pullState == 'FIGHTING')
+            end
         else -- Submode 'Hunt'
             if haveNPC then
                 local tid = mq.TLO.Target.ID() or 0
@@ -5229,7 +5729,7 @@ local function combatTick()
             local xtarId = firstNPCXtarget(false)
             if xtarId then
                 local curId = haveNPC and mq.TLO.Target.ID() or 0
-                if curId == 0 or not isXTargetId(curId) then
+                if curId == 0 or (not isXTargetId(curId) and distToId(curId) > 35 and not mq.TLO.Me.Combat()) then
                     stopMoving()
                     pursuit.id = 0
                     pursuit.lastNavTargetId = 0
@@ -5242,7 +5742,7 @@ local function combatTick()
             end
 
             if haveNPC then
-                if not isXTargetId(mq.TLO.Target.ID()) and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
+                if not isXTargetId(mq.TLO.Target.ID()) and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
                     local curId = mq.TLO.Target.ID()
                     local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
                         ctrl.hunter_max_level)
@@ -5259,6 +5759,15 @@ local function combatTick()
             else
                 local id = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
                 if id and setTarget(id) then
+                    if not runtime.verifyTargetCon(id, true) then
+                        print(string.format(
+                            '\ay[Triune]\ax Puller (Hunt): target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
+                            id, tostring(mq.TLO.Target.CleanName())))
+                        mq.cmd('/target clear')
+                        haveNPC = false
+                        pursuit.id = 0
+                        return
+                    end
                     haveNPC = true
                     pursuit.wanderLoc = nil
                     pursuit.hasRetargeted = false
@@ -5266,56 +5775,75 @@ local function combatTick()
                     print(string.format('\ay[Triune]\ax Puller (Hunt) target acquired: #%d (%s) dist %.1f',
                         id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
                 elseif not anyXtarAlive() then
-                    if pursuit.wanderLoc then
-                        pursuit.wanderLoc = nil
-                        if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
-                        if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
-                    end
+                    if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                        runtime.wpTick()
+                    else
+                        if pursuit.wanderLoc then
+                            pursuit.wanderLoc = nil
+                            if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+                            if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
+                        end
 
-                    local radius = ctrl.hunter_radius or 1500
-                    local minLv = ctrl.hunter_min_level or 1
-                    local maxLv = ctrl.hunter_max_level or 100
-                    local zDiff = ctrl.hunter_z or 75
-                    local anchorKey = ''
-                    if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
-                        anchorKey = string.format('; anchor R%d @ %.0f,%.0f,%.0f',
-                            ctrl.hunter_combat_radius, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y,
-                            ctrl.hunter_combat_loc.z)
-                    end
-                    local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
+                        local radius = ctrl.hunter_radius or 1500
+                        local minLv = ctrl.hunter_min_level or 1
+                        local maxLv = ctrl.hunter_max_level or 100
+                        local zDiff = ctrl.hunter_z or 75
+                        local anchorKey = ''
+                        if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+                            anchorKey = string.format('; anchor R%d @ %.0f,%.0f,%.0f',
+                                ctrl.hunter_combat_radius, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y,
+                                ctrl.hunter_combat_loc.z)
+                        end
+                        local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
 
-                    if runtime.lastHunterMsgKey ~= currentKey then
-                        runtime.lastHunterMsgKey = currentKey
-                        print(string.format(
-                            '\ay[Triune]\ax Puller (Hunt): No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',
-                            minLv, maxLv, radius, zDiff, anchorKey))
+                        if runtime.lastHunterMsgKey ~= currentKey then
+                            runtime.lastHunterMsgKey = currentKey
+                            print(string.format(
+                                '\ay[Triune]\ax Puller (Hunt): No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',
+                                minLv, maxLv, radius, zDiff, anchorKey))
+                        end
                     end
+                end
+            end
+
+
+
+            if haveNPC and not engage and not mq.TLO.Me.Combat() then
+                local id = mq.TLO.Target.ID()
+                if id and id > 0 and not isXTargetId(id) and not runtime.verifyTargetCon(id) then
+                    print(string.format(
+                        '\ay[Triune]\ax Hunter: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
+                        id, tostring(mq.TLO.Target.CleanName())))
+                    mq.cmd('/target clear')
+                    pursuit.id = 0
+                    stopMoving()
+                    haveNPC = false
                 end
             end
 
             if haveNPC then
                 local id = mq.TLO.Target.ID()
-                local pullStyle = ctrl.pull_style or 'Melee'
+                local combatStyle = ctrl.combat_style or 'Melee'
                 local reqRange = MELEE_RANGE
-                if pullStyle ~= 'Melee' then
-                    reqRange = ctrl.pull_engage_dist or 100
+                if combatStyle ~= 'Melee' then
+                    reqRange = ctrl.ranged_dist or 40
                 end
 
                 local arrived = moveToward(id, reqRange)
-                if arrived then
+                if arrived or distToId(id) <= (reqRange + 15) or isXTargetId(id) then
                     engage = true
-                    if pullStyle == 'Melee' then
+                    if combatStyle == 'Melee' then
                         if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-                    elseif pullStyle == 'Ranged' then
+                    elseif combatStyle == 'Ranged' then
                         mq.cmd('/face fast')
                         if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-                    elseif pullStyle == 'Pet' then
+                    elseif combatStyle == 'Pet' then
                         mq.cmd('/face fast')
                         petState.petHoldActive = false
                         local petId = mq.TLO.Me.Pet.ID() or 0
                         if petId > 0 then mq.cmd('/pet attack') end
                         mq.cmd('/say #petcmd attack all')
-                    elseif pullStyle == 'Spell' then
+                    elseif combatStyle == 'Spell' then
                         mq.cmd('/face fast')
                         local slotToCast = ctrl.pull_spell_gem or 1
                         local g = loadout.gems and loadout.gems[slotToCast]
@@ -5354,7 +5882,6 @@ local function combatTick()
                 end
             else
                 haveNPC = false
-                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
             end
         else -- 'Chase' or 'Camp'
             local id = maTargetId()
@@ -5368,7 +5895,6 @@ local function combatTick()
                 end
             else
                 haveNPC = false
-                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
             end
             if not closingOnMob then
                 if ctrl.submode == 'Camp' then idleReturn() else chaseMA() end
@@ -5376,10 +5902,10 @@ local function combatTick()
         end
     end
 
-    -- Non-XTarget engagement timeout check:
+    -- Non-XTarget engagement timeout check (only when far away and unable to reach target):
     if haveNPC and (ctrl.mode == 'Manual' or ctrl.mode == 'Puller') then
         local tid = mq.TLO.Target.ID() or 0
-        if tid > 0 and not isXTargetId(tid) then
+        if tid > 0 and not isXTargetId(tid) and distToId(tid) > 30 then
             if pursuit.nonXtarTargetId ~= tid then
                 pursuit.nonXtarTargetId = tid
                 pursuit.nonXtarEngageAt = 0
@@ -5387,14 +5913,12 @@ local function combatTick()
             if engage or mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then
                 if pursuit.nonXtarEngageAt == 0 then
                     pursuit.nonXtarEngageAt = os.clock()
-                elseif (os.clock() - pursuit.nonXtarEngageAt) > 4.0 then
+                elseif (os.clock() - pursuit.nonXtarEngageAt) > 15.0 then
                     print(string.format(
-                        '\ay[Triune]\ax Target #%d (%s) did not enter XTarget after 4s of attack -- marking unreachable & moving to next NPC.',
+                        '\ay[Triune]\ax Target #%d (%s) unreachable after 15s -- marking unreachable & moving to next NPC.',
                         tid, tostring(mq.TLO.Target.CleanName())))
                     markUnreachable(tid)
                     stopMoving()
-                    if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-                    if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
                     mq.cmd('/target clear')
                     haveNPC = false
                     engage = false
@@ -5448,29 +5972,17 @@ local function combatTick()
     end
     if ctrl.combat_style == 'Melee' then
         if not ctrl.pull_stand_back then
-            if autoAttackOk and haveNPC and engage and distToId(mq.TLO.Target.ID()) <= (MELEE_RANGE + 4) then
+            local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
+            if haveNPC and not isDraggingToCamp and autoAttackOk and distToId(mq.TLO.Target.ID() or 0) <= (desiredRange() + 15) then
                 if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-            elseif not haveNPC or not engage then
-                if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
             end
-        else
-            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
         end
     elseif ctrl.combat_style == 'Ranged' then
-        if autoAttackOk and haveNPC and engage and distToId(mq.TLO.Target.ID()) <= ((ctrl.ranged_dist or 40) + 5) then
+        if haveNPC and engage and autoAttackOk then
             if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-        elseif not haveNPC or not engage then
+        else
             if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
         end
-        if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-    else
-        -- Spell style or Pet Tank: turn off auto-attack
-        if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-    end
-    if not haveNPC then
-        if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
     end
 
     -- Pet classes on this server can have multiple simultaneous pets (one per
@@ -5672,6 +6184,10 @@ local function combatTick()
         end
         castTracker.activeSpell = nil
         clearCursor()
+        local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
+        if ctrl and ctrl.combat_style == 'Melee' and not mq.TLO.Me.Combat() and haveNPC and not isDraggingToCamp then
+            mq.cmd('/attack on')
+        end
     end
 
     if not isCasting() and not isMoveActive() then
@@ -5770,7 +6286,7 @@ local function setTriuneMode(arg1, arg2)
     elseif k1 == 'garrison' or k1 == 'tank' then
         newMode = 'Assist'
         newSubmode = 'Camp'
-    elseif k1 == 'backline' then
+    elseif k1 == 'backline' or k1 == 'ranged' then
         newMode = 'Assist'
         newSubmode = 'Backline'
     else
@@ -5841,6 +6357,26 @@ local function triuneCommand(...)
             ctrl.burn = not ctrl.burn
             print(string.format('\ag[Triune]\ax Burn mode %s.', ctrl.burn and 'ENABLED!' or 'DISABLED.'))
         end
+    elseif cmd == 'help' or cmd == 'h' or cmd == '?' then
+        print('\ag[Triune]\ax --- Slash Commands (/ac or /triune) ---')
+        print('  \ag/ac run | start\ax - Start autocombat execution')
+        print('  \ag/ac pause | stop\ax - Pause execution & disengage combat')
+        print('  \ag/ac burn [on|off]\ax - Toggle burn mode')
+        print('  \ag/ac status\ax - Print running state and mode')
+        print('  \ag/ac compact | mini | hud\ax - Toggle compact HUD mode')
+        print('  \ag/ac help | h | ?\ax - Print slash command summary')
+        print('  \ag/ac spellbook | book\ax - Toggle spellbook browser')
+        print('  \ag/ac cursorui | cursormgr\ax - Toggle cursor item manager')
+        print('  \ag/ac clearcursor | autoinv\ax - Clear items from cursor')
+        print('  \ag/ac buffbot | buff\ax - Toggle interactive buffbot window')
+        print('  \ag/ac track | zone\ax - Toggle zone NPC tracker window')
+        print('  \ag/ac update | updater\ax - Toggle release updater window')
+        print('  \ag/ac dps | /dps\ax - Toggle DPS parser window')
+        print('  \ag/ac pullcon [con]\ax - Configure faction consideration filter')
+        print('  \ag/ac wp [add|clear|del|on|off|list]\ax - Configure & toggle Puller Waypoint Patrol')
+        print(
+            '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
+        print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
     elseif cmd == 'spellbook' or cmd == 'book' then
         local s = mq.TLO.Lua.Script('triune_spellbook')
         if s() and s.Status() == 'RUNNING' then
@@ -5858,6 +6394,15 @@ local function triuneCommand(...)
         else
             mq.cmd('/lua run triune_cursor')
             print('\ag[Triune]\ax launching cursor manager...')
+        end
+    elseif cmd == 'buff' or cmd == 'buffbot' or cmd == 'buffui' then
+        local s = mq.TLO.Lua.Script('triune_buffbot')
+        if s() and s.Status() == 'RUNNING' then
+            mq.cmd('/lua stop triune_buffbot')
+            print('\ag[Triune]\ax stopping buffbot engine...')
+        else
+            mq.cmd('/lua run triune_buffbot')
+            print('\ag[Triune]\ax launching buffbot engine...')
         end
     elseif cmd == 'dps' or cmd == 'dpsui' or cmd == 'dpsparser' then
         local s = mq.TLO.Lua.Script('triune_dps')
@@ -5885,11 +6430,113 @@ local function triuneCommand(...)
         ctrl.compact = not ctrl.compact
         saveLoadout(true)
         print(string.format('\ag[Triune]\ax Compact HUD mode %s.', ctrl.compact and 'ENABLED' or 'DISABLED'))
+    elseif cmd == 'pullcon' or cmd == 'con' or cmd == 'confilter' then
+        ctrl.pull_con_filter = ctrl.pull_con_filter or {}
+        local arg2 = args[2] and string.lower(args[2]) or ''
+        local arg3 = args[3] and string.lower(args[3]) or ''
+        if arg2 == 'preset' then
+            if arg3 == 'hostile' then
+                for _, c in ipairs(PULL_CON_LIST) do
+                    ctrl.pull_con_filter[c] = (c == 'Scowling' or c == 'Threateningly' or c == 'Dubious' or c == 'Apprehensive')
+                end
+                print('\ag[Triune]\ax Puller Faction Con filter set to preset: Hostile Only')
+            elseif arg3 == 'indifferent' then
+                for _, c in ipairs(PULL_CON_LIST) do
+                    ctrl.pull_con_filter[c] = (c == 'Scowling' or c == 'Threateningly' or c == 'Dubious' or c == 'Apprehensive' or c == 'Indifferent')
+                end
+                print('\ag[Triune]\ax Puller Faction Con filter set to preset: Hostile + Indifferent')
+            elseif arg3 == 'all' or arg3 == 'selectall' then
+                for _, c in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[c] = true end
+                print('\ag[Triune]\ax Puller Faction Con filter set to preset: Select All')
+            elseif arg3 == 'clear' or arg3 == 'none' then
+                for _, c in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[c] = false end
+                print('\ag[Triune]\ax Puller Faction Con filter set to preset: Clear All')
+            else
+                print('\ay[Triune]\ax usage: /ac pullcon preset [all|hostile|indifferent|none]')
+            end
+            saveLoadout(true)
+        elseif arg2 ~= '' then
+            local targetCon = nil
+            for _, c in ipairs(PULL_CON_LIST) do
+                if string.lower(c) == arg2 then
+                    targetCon = c; break
+                end
+            end
+            if targetCon then
+                local enable = true
+                if arg3 == 'off' or arg3 == '0' or arg3 == 'false' then enable = false end
+                ctrl.pull_con_filter[targetCon] = enable
+                saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Puller Faction Con "%s" set to %s.', targetCon,
+                    enable and 'ENABLED' or 'DISABLED'))
+            else
+                print('\ay[Triune]\ax unknown consideration tier: ' .. tostring(args[2]))
+            end
+        else
+            print('\ag[Triune]\ax --- Puller Faction Considerations ---')
+            for _, c in ipairs(PULL_CON_LIST) do
+                print(string.format('  %s: %s', c, ctrl.pull_con_filter[c] and '\agENABLED\ax' or '\arDISABLED\ax'))
+            end
+            print(
+                '\ay[Triune]\ax usage: /ac pullcon [con_name] [on|off] OR /ac pullcon preset [all|hostile|indifferent|none]')
+        end
+    elseif cmd == 'wp' or cmd == 'waypoint' or cmd == 'waypoints' then
+        ctrl.waypoints = ctrl.waypoints or {}
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'add' then
+            local wpName = args[3] or ''
+            for i = 4, #args do wpName = wpName .. ' ' .. args[i] end
+            local wpNum, name, x, y, z = runtime.wpAdd(wpName)
+            if wpNum then
+                print(string.format('\ag[Triune]\ax Added Waypoint #%d "%s" @ loc (Y:%.1f, X:%.1f, Z:%.1f)', wpNum, name,
+                    y, x, z))
+            else
+                print('\ar[Triune]\ax Failed to add waypoint -- location unavailable.')
+            end
+        elseif sub == 'clear' or sub == 'reset' then
+            runtime.wpClear()
+            print('\ag[Triune]\ax Cleared all waypoints.')
+        elseif sub == 'delete' or sub == 'del' or sub == 'remove' then
+            local idx = tonumber(args[3])
+            if idx and runtime.wpDelete(idx) then
+                print(string.format('\ag[Triune]\ax Deleted Waypoint #%d.', idx))
+            else
+                print('\ay[Triune]\ax usage: /ac wp delete [index]')
+            end
+        elseif sub == 'on' or sub == 'enable' or sub == '1' or sub == 'start' then
+            ctrl.use_waypoints = true
+            saveLoadout(true)
+            print('\ag[Triune]\ax Waypoint Patrol ENABLED.')
+        elseif sub == 'off' or sub == 'disable' or sub == '0' or sub == 'stop' then
+            ctrl.use_waypoints = false
+            saveLoadout(true)
+            print('\ag[Triune]\ax Waypoint Patrol DISABLED.')
+        elseif sub == 'toggle' then
+            ctrl.use_waypoints = not ctrl.use_waypoints
+            saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Waypoint Patrol %s.', ctrl.use_waypoints and 'ENABLED' or 'DISABLED'))
+        elseif sub == 'list' or sub == 'show' or sub == '' then
+            print('\ag[Triune]\ax --- Puller Waypoint Patrol Route ---')
+            print(string.format('  Patrol Status: %s | Active Target: #%d',
+                ctrl.use_waypoints and '\agENABLED\ax' or '\arDISABLED\ax', ctrl.current_waypoint_idx or 1))
+            if #ctrl.waypoints == 0 then
+                print('  \ayNo waypoints defined. Use /ac wp add [name] to add locations.\ax')
+            else
+                for idx, wp in ipairs(ctrl.waypoints) do
+                    local isCur = ((ctrl.current_waypoint_idx or 1) == idx) and ' \ag[NEXT]\ax' or ''
+                    print(string.format('  #%d: "%s" (Y:%.1f, X:%.1f, Z:%.1f) dist: %.0f%s',
+                        idx, wp.name or ('WP ' .. idx), wp.y or 0, wp.x or 0, wp.z or 0, distToLoc(wp.x, wp.y, wp.z),
+                        isCur))
+                end
+            end
+        else
+            print('\ay[Triune]\ax usage: /ac wp [add [name]|clear|delete [idx]|on|off|toggle|list]')
+        end
     elseif setTriuneMode(args[1], args[2]) then
         -- mode command handled
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|update|clearcursor|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 
@@ -5928,7 +6575,6 @@ print('\ag[Triune]\ax loaded v' ..
 -- ============================================================================
 -- Map Visualization Helper
 -- ============================================================================
-local updateMapRadiusVisuals
 
 local function clearMapRadiusVisuals()
     mq.cmd('/maploc remove')
@@ -6065,6 +6711,19 @@ local function runMainLoop()
                 print('\ar[Triune error]\ax combatTick failed: ' .. tostring(err))
             end
             runtime.lastTick = os.clock()
+        elseif not ctrl.running then
+            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+            if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+            if navLoaded() then
+                local navActive = false
+                pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+                if navActive then mq.cmd('/nav stop') end
+            end
+            if stickLoaded() then
+                local stickActive = false
+                pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+                if stickActive then mq.cmd('/stick off') end
+            end
         end
 
         -- auto-save: persist the loadout ~1.5s after any change (no Save click needed)
