@@ -140,6 +140,7 @@ local isXTargetId            -- forward declaration for lexical scoping in helpe
 local isGroupOrRaidMember    -- forward declaration for lexical scoping in helpers
 local buffActive             -- forward declaration for lexical scoping in helpers
 local updateMapRadiusVisuals -- forward declaration for lexical scoping in UI & helpers
+local clearMapRadiusVisuals  -- forward declaration for lexical scoping in UI & helpers
 
 -- Backward compatibility and mode validation sanitizer
 local function sanitizeModeConfig(c)
@@ -254,6 +255,8 @@ local function defaultCtrl()
         compact              = false,
         use_waypoints        = false,
         waypoint_radius      = 20,
+        waypoint_scan_radius = 100,
+        waypoint_direction   = 1,
         current_waypoint_idx = 1,
         waypoints            = {}
     }
@@ -270,6 +273,7 @@ local runtime = {
     pendingMem = {},
     lastCast = {},
     lastTick = 0,
+    wasRunning = false,
     lastSig = nil,
     autoDirty = false,
     autoDirtyAt = 0,
@@ -956,24 +960,43 @@ local function sungKey(spellName, targetId)
 end
 
 local function navLoaded()
-    local ok, loaded = pcall(function() return mq.TLO.Plugin('mq2nav').IsLoaded() or false end)
-    return ok and loaded
+    local ok, loaded = pcall(function()
+        if mq.TLO.Navigation and (mq.TLO.Navigation() ~= nil or mq.TLO.Navigation.MeshLoaded() ~= nil) then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2nav') or mq.TLO.Plugin('MQ2Nav') or mq.TLO.Plugin('nav')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
 end
 
 local function stickLoaded()
-    local ok, loaded = pcall(function() return mq.TLO.Plugin('mq2moveutils').IsLoaded() or false end)
-    return ok and loaded
+    local ok, loaded = pcall(function()
+        if mq.TLO.Stick and (mq.TLO.Stick() ~= nil or mq.TLO.Stick.Status() ~= nil) then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2moveutils') or mq.TLO.Plugin('MQ2MoveUtils') or mq.TLO.Plugin('moveutils')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
 end
 
 local function isMoveActive()
-    local navActive, moveActive = false, false
+    local navActive, moveActive, moveToActive = false, false, false
     if navLoaded() then
         pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
     end
     if stickLoaded() then
-        pcall(function() moveActive = mq.TLO.Stick.Active() or false end)
+        pcall(function() moveActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
     end
-    return navActive or moveActive
+    pcall(function()
+        if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving then
+            moveToActive = mq.TLO.MoveTo.Moving() or false
+        end
+    end)
+    return navActive or moveActive or moveToActive
 end
 
 local function stopMoving()
@@ -989,7 +1012,14 @@ local function stopMoving()
             pcall(function() mq.cmd('/stick off') end)
         end
     end
-    pcall(function() mq.cmd('/keypress back') end)
+    pcall(function()
+        if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving() then
+            mq.cmd('/moveto off')
+        end
+    end)
+    if pursuit.lastNavLoc and string.find(pursuit.lastNavLoc, '^native_') then
+        pcall(function() mq.cmd('/keypress forward') end)
+    end
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
@@ -1750,6 +1780,132 @@ local function removePull(name)
 end
 
 -- Waypoint Patrol helpers for Puller mode (attached to runtime table to respect 200 local limit)
+function runtime.getMapsDirectory()
+    local candidates = {
+        'maps',
+        '../maps',
+        '../../maps',
+    }
+    if mq.configDir then
+        candidates[#candidates + 1] = mq.configDir .. '/../maps'
+        candidates[#candidates + 1] = mq.configDir .. '/../../maps'
+    end
+    if mq.luaDir then
+        candidates[#candidates + 1] = mq.luaDir .. '/../maps'
+        candidates[#candidates + 1] = mq.luaDir .. '/../../maps'
+    end
+    for _, dir in ipairs(candidates) do
+        local testFile = dir .. '/triune_map_test.tmp'
+        local f = io.open(testFile, 'w')
+        if f then
+            f:close()
+            os.remove(testFile)
+            return dir
+        end
+    end
+    return nil
+end
+
+function runtime.syncWaypointMapLines(zoneShort, forceSync)
+    if not zoneShort or zoneShort == '' then
+        pcall(function() zoneShort = mq.TLO.Zone.ShortName() end)
+    end
+    if not zoneShort or zoneShort == '' then return end
+
+    local wps = (ctrl.use_waypoints and ctrl.waypoints) or {}
+    local wpsCoordParts = {}
+    for idx, wp in ipairs(wps) do
+        wpsCoordParts[#wpsCoordParts + 1] = string.format('%d:%.1f,%.1f,%.1f', idx, wp.x or 0, wp.y or 0, wp.z or 0)
+    end
+    local syncKey = string.format('%s|%s|%s', zoneShort, tostring(ctrl.use_waypoints), table.concat(wpsCoordParts, ';'))
+    if not forceSync and runtime.lastSyncedMapWpsKey == syncKey then
+        return
+    end
+
+    local mapsDir = runtime.getMapsDirectory()
+    if not mapsDir then return end
+
+    local mapFilePath = string.format('%s/%s_3.txt', mapsDir, zoneShort)
+    local existingLines = {}
+    local fRead = io.open(mapFilePath, 'r')
+    if fRead then
+        local inTriuneSection = false
+        for line in fRead:lines() do
+            if string.find(line, '^# TRIUNE_WAYPOINTS_START') then
+                inTriuneSection = true
+            elseif string.find(line, '^# TRIUNE_WAYPOINTS_END') then
+                inTriuneSection = false
+            elseif not inTriuneSection then
+                existingLines[#existingLines + 1] = line
+            end
+        end
+        fRead:close()
+    end
+
+    if #wps > 0 then
+        existingLines[#existingLines + 1] = '# TRIUNE_WAYPOINTS_START'
+        for i = 1, #wps - 1 do
+            local wp1 = wps[i]
+            local wp2 = wps[i + 1]
+            if wp1 and wp2 and wp1.x and wp1.y and wp2.x and wp2.y then
+                -- EQ map line format: L StartX, StartY, StartZ, EndX, EndY, EndZ, R, G, B (-x, -y, z)
+                existingLines[#existingLines + 1] = string.format('L %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, 0, 255, 255',
+                    -(wp1.x or 0), -(wp1.y or 0), wp1.z or 0, -(wp2.x or 0), -(wp2.y or 0), wp2.z or 0)
+            end
+        end
+        for i = 1, #wps do
+            local wp1 = wps[i]
+            if wp1 and wp1.x and wp1.y then
+                existingLines[#existingLines + 1] = string.format('P %.2f, %.2f, %.2f, 255, 215, 0, 1, %s',
+                    -(wp1.x or 0), -(wp1.y or 0), wp1.z or 0, wp1.name or ('WP ' .. i))
+            end
+        end
+        existingLines[#existingLines + 1] = '# TRIUNE_WAYPOINTS_END'
+    end
+
+    local fWrite = io.open(mapFilePath, 'w')
+    if fWrite then
+        for _, line in ipairs(existingLines) do
+            fWrite:write(line .. '\n')
+        end
+        fWrite:close()
+        runtime.lastSyncedMapWpsKey = syncKey
+    end
+end
+
+function runtime.setNearestWaypoint()
+    local wps = ctrl.waypoints
+    if not wps or #wps == 0 then return end
+    local myX, myY, myZ = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
+    if not myX or not myY or not myZ then return end
+
+    local bestDist = 999999
+    local bestIdx = 1
+    for i, wp in ipairs(wps) do
+        if wp and wp.x and wp.y and wp.z then
+            local d = distToLoc(wp.x, wp.y, wp.z)
+            if d < bestDist then
+                bestDist = d
+                bestIdx = i
+            end
+        end
+    end
+
+    ctrl.current_waypoint_idx = bestIdx
+    if bestIdx >= #wps and #wps > 1 then
+        ctrl.waypoint_direction = -1
+    else
+        ctrl.waypoint_direction = 1
+    end
+
+    local targetWp = wps[bestIdx]
+    if targetWp then
+        print(string.format('\ag[Triune]\ax Nearest waypoint acquired: %s (#%d, dist: %.0f) [%s]',
+            targetWp.name or ('WP ' .. bestIdx), bestIdx, bestDist,
+            (ctrl.waypoint_direction or 1) == 1 and 'Forward' or 'Reverse'))
+    end
+end
+
 function runtime.wpAdd(name)
     local y, x, z = mq.TLO.Me.Y(), mq.TLO.Me.X(), mq.TLO.Me.Z()
     if not x or not y or not z then return false end
@@ -1758,14 +1914,18 @@ function runtime.wpAdd(name)
     local wpName = (name and name ~= '') and name or string.format('WP %d', wpNum)
     table.insert(ctrl.waypoints,
         { name = wpName, x = math.floor(x * 10) / 10, y = math.floor(y * 10) / 10, z = math.floor(z * 10) / 10 })
+    ctrl.use_waypoints = true
     saveLoadout(true)
+    runtime.syncWaypointMapLines()
     return wpNum, wpName, x, y, z
 end
 
 function runtime.wpClear()
     ctrl.waypoints = {}
     ctrl.current_waypoint_idx = 1
+    ctrl.waypoint_direction = 1
     saveLoadout(true)
+    runtime.syncWaypointMapLines()
 end
 
 function runtime.wpDelete(idx)
@@ -1773,8 +1933,10 @@ function runtime.wpDelete(idx)
     table.remove(ctrl.waypoints, idx)
     if not ctrl.current_waypoint_idx or ctrl.current_waypoint_idx > #ctrl.waypoints then
         ctrl.current_waypoint_idx = 1
+        ctrl.waypoint_direction = 1
     end
     saveLoadout(true)
+    runtime.syncWaypointMapLines()
     return true
 end
 
@@ -1789,6 +1951,7 @@ function runtime.wpMoveUp(idx)
         ctrl.current_waypoint_idx = idx
     end
     saveLoadout(true)
+    runtime.syncWaypointMapLines()
     return true
 end
 
@@ -1803,6 +1966,7 @@ function runtime.wpMoveDown(idx)
         ctrl.current_waypoint_idx = idx
     end
     saveLoadout(true)
+    runtime.syncWaypointMapLines()
     return true
 end
 
@@ -1969,25 +2133,27 @@ local function loadoutSig()
     table.sort(ckeys)
     local ctrlParts = {}
     for _, k in ipairs(ckeys) do
-        local v = ctrl[k]
-        if type(v) == 'table' then
-            if k == 'camp_loc' or k == 'hunter_combat_loc' then
-                ctrlParts[#ctrlParts + 1] = string.format('%s=%.1f,%.1f,%.1f', k, v.x or 0, v.y or 0, v.z or 0)
-            elseif k == 'pull_con_filter' then
-                local conStr = {}
-                for ck, cv in pairs(v) do conStr[#conStr + 1] = ck .. '=' .. tostring(cv) end
-                table.sort(conStr)
-                ctrlParts[#ctrlParts + 1] = 'pull_con_filter:' .. table.concat(conStr, ',')
-            elseif k == 'waypoints' then
-                local wpStr = {}
-                for idx, wp in ipairs(v) do
-                    wpStr[#wpStr + 1] = string.format('%d:%s=%.1f,%.1f,%.1f', idx, wp.name or ('WP ' .. idx), wp.x or 0,
-                        wp.y or 0, wp.z or 0)
+        if k ~= 'current_waypoint_idx' and k ~= 'waypoint_direction' then
+            local v = ctrl[k]
+            if type(v) == 'table' then
+                if k == 'camp_loc' or k == 'hunter_combat_loc' then
+                    ctrlParts[#ctrlParts + 1] = string.format('%s=%.1f,%.1f,%.1f', k, v.x or 0, v.y or 0, v.z or 0)
+                elseif k == 'pull_con_filter' then
+                    local conStr = {}
+                    for ck, cv in pairs(v) do conStr[#conStr + 1] = ck .. '=' .. tostring(cv) end
+                    table.sort(conStr)
+                    ctrlParts[#ctrlParts + 1] = 'pull_con_filter:' .. table.concat(conStr, ',')
+                elseif k == 'waypoints' then
+                    local wpStr = {}
+                    for idx, wp in ipairs(v) do
+                        wpStr[#wpStr + 1] = string.format('%d:%s=%.1f,%.1f,%.1f', idx, wp.name or ('WP ' .. idx), wp.x or 0,
+                            wp.y or 0, wp.z or 0)
+                    end
+                    ctrlParts[#ctrlParts + 1] = 'waypoints:' .. table.concat(wpStr, ';')
                 end
-                ctrlParts[#ctrlParts + 1] = 'waypoints:' .. table.concat(wpStr, ';')
+            else
+                ctrlParts[#ctrlParts + 1] = string.format('%s=%s', k, tostring(v))
             end
-        else
-            ctrlParts[#ctrlParts + 1] = string.format('%s=%s', k, tostring(v))
         end
     end
     p[#p + 1] = table.concat(ctrlParts, '~')
@@ -2835,9 +3001,13 @@ function UI.drawControlTab()
         if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Button), 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
         if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonHovered), 0.80, 0.22, 0.22, 1.0) then pCount = pCount + 1 end
         if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonActive), 0.50, 0.10, 0.10, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Text), 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
-
-        if ImGui.Button('START', 150, 30) then ctrl.running = true end
+        if ImGui.Button('START', 150, 30) then
+            if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                runtime.setNearestWaypoint()
+            end
+            ctrl.running = true
+            runtime.wasRunning = true
+        end
 
         if pCount > 0 then
             pcall(ImGui.PopStyleColor, pCount)
@@ -2902,6 +3072,7 @@ function UI.drawControlTab()
         else
             ctrl.submode = 'Hunt'
         end
+        clearMapRadiusVisuals()
     end
 
     if SUBMODES[ctrl.mode] then
@@ -2910,7 +3081,10 @@ function UI.drawControlTab()
         local subList = SUBMODES[ctrl.mode]
         local curSubIdx = idxOf(subList, ctrl.submode)
         local newSubIdx = ImGui.Combo('##submode', curSubIdx, subList)
-        ctrl.submode = subList[newSubIdx]
+        if newSubIdx ~= curSubIdx then
+            ctrl.submode = subList[newSubIdx]
+            clearMapRadiusVisuals()
+        end
     end
 
     local descKey = ctrl.mode
@@ -3171,6 +3345,10 @@ function UI.drawControlTab()
         local useWp = ImGui.Checkbox('Enable Waypoint Patrol##useWaypoints', ctrl.use_waypoints == true)
         if useWp ~= ctrl.use_waypoints then
             ctrl.use_waypoints = useWp
+            if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                runtime.setNearestWaypoint()
+            end
+            clearMapRadiusVisuals()
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
@@ -3180,7 +3358,7 @@ function UI.drawControlTab()
 
         if ctrl.use_waypoints then
             ImGui.SameLine()
-            ImGui.SetNextItemWidth(160)
+            ImGui.SetNextItemWidth(120)
             local newRad, changedRad = ImGui.SliderInt('Arrival Radius##wpRadius', ctrl.waypoint_radius or 20, 5, 100)
             if changedRad then
                 ctrl.waypoint_radius = newRad
@@ -3188,6 +3366,17 @@ function UI.drawControlTab()
             end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Distance in units to reach a waypoint before advancing to the next one in the loop.')
+            end
+
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(130)
+            local newScan, changedScan = ImGui.SliderInt('Scan Radius##wpScanRadius', ctrl.waypoint_scan_radius or 100, 20, 500)
+            if changedScan then
+                ctrl.waypoint_scan_radius = newScan
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('NPC search radius in units around your character to look for mobs while patrolling waypoints.')
             end
 
             if ImGui.Button('Add Current Location##addWpLoc') then
@@ -3235,7 +3424,8 @@ function UI.drawControlTab()
 
                         ImGui.TableNextColumn()
                         if (ctrl.current_waypoint_idx or 1) == idx then
-                            accent(GOOD, '>> NEXT')
+                            local dirStr = ((ctrl.waypoint_direction or 1) == -1) and '<<' or '>>'
+                            accent(GOOD, dirStr .. ' NEXT')
                         else
                             ImGui.Text('')
                         end
@@ -3243,6 +3433,11 @@ function UI.drawControlTab()
                         ImGui.TableNextColumn()
                         if ImGui.Button(string.format('Set##wpSet_%d', idx)) then
                             ctrl.current_waypoint_idx = idx
+                            if idx == #wps and #wps > 1 then
+                                ctrl.waypoint_direction = -1
+                            elseif idx == 1 then
+                                ctrl.waypoint_direction = 1
+                            end
                             saveLoadout(true)
                         end
                         if ImGui.IsItemHovered() then ImGui.SetTooltip('Set this as the next target waypoint') end
@@ -3636,6 +3831,7 @@ local function drawMiniGui()
             else
                 ctrl.submode = 'Hunt'
             end
+            clearMapRadiusVisuals()
             saveLoadout(true)
         end
 
@@ -3647,6 +3843,7 @@ local function drawMiniGui()
             local newSubIdx = ImGui.Combo('##miniSubCombo', curSubIdx, subList)
             if newSubIdx ~= curSubIdx then
                 ctrl.submode = subList[newSubIdx]
+                clearMapRadiusVisuals()
                 saveLoadout(true)
             end
         end
@@ -3674,7 +3871,11 @@ local function drawMiniGui()
             end
         else
             if ImGui.Button('Run##miniRunBtn', 65, 22) then
+                if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                    runtime.setNearestWaypoint()
+                end
                 ctrl.running = true
+                runtime.wasRunning = true
             end
         end
         ImGui.SameLine()
@@ -3953,10 +4154,12 @@ buffActive = function(id, name)
         if tloTrue(function() return mq.TLO.Me.Song(name)() end) then return true end
         return false
     end
-    local total = mq.TLO.Group.Members() or 0
+    local total = 0
+    pcall(function() total = mq.TLO.Group.Members() or 0 end)
     for i = 0, total do
-        local m = mq.TLO.Group.Member(i)
-        if m and m() and m.ID() == id then
+        local m = nil
+        pcall(function() m = mq.TLO.Group.Member(i) end)
+        if m and m() and (m.ID() or 0) == id then
             if hasNamedBuff(m, name) then return true end
             if tloTrue(function() return m.Song(name)() end) then return true end ---@diagnostic disable-line: undefined-field
             return false
@@ -3986,9 +4189,11 @@ end
 
 local function lowestHpAlly()
     local bestId, bestHp = mq.TLO.Me.ID(), (mq.TLO.Me.PctHPs() or 100)
-    local total = mq.TLO.Group.Members() or 0
+    local total = 0
+    pcall(function() total = mq.TLO.Group.Members() or 0 end)
     for i = 0, total do
-        local m = mq.TLO.Group.Member(i)
+        local m = nil
+        pcall(function() m = mq.TLO.Group.Member(i) end)
         if m and m() and not m.Dead() then
             local hp = m.PctHPs() or 100
             if hp < bestHp then
@@ -4078,13 +4283,18 @@ isGroupOrRaidMember = function(id)
     for _, petId in pairs(petState.myPets) do
         if petId == id then return true end
     end
-    local grpCount = mq.TLO.Group.Members() or 0
-    for i = 1, grpCount do
-        local m = mq.TLO.Group.Member(i)
-        if m and m() then
-            if m.ID() == id then return true end
-            local mPet = m.Pet
-            if mPet and mPet() and mPet.ID() == id then return true end
+    local grpCount = 0
+    pcall(function() grpCount = mq.TLO.Group.Members() or 0 end)
+    if grpCount > 0 then
+        for i = 1, grpCount do
+            local m = nil
+            pcall(function() m = mq.TLO.Group.Member(i) end)
+            if m and m() then
+                if (m.ID() or 0) == id then return true end
+                local mPet = nil
+                pcall(function() mPet = m.Pet end)
+                if mPet and mPet() and (mPet.ID() or 0) == id then return true end
+            end
         end
     end
     local raidCount = 0
@@ -4464,7 +4674,8 @@ local function conditionMet(when, pct, spellName, targetId, cls)
 end
 
 local function isCasting()
-    local cid = mq.TLO.Me.Casting.ID()
+    local cid = nil
+    pcall(function() cid = mq.TLO.Me.Casting.ID() end)
     return cid ~= nil and cid > 0
 end
 
@@ -4531,7 +4742,7 @@ local function castGem(i, g, id)
             while waited < 4000 do
                 mq.delay(200); waited = waited + 200
                 if buffActive(id, g.spell) then break end
-                if not mq.TLO.Me.Casting.ID() then break end
+                if not isCasting() then break end
             end
             mq.cmd('/stopsong')
             runtime.sungBuffs[sungKey(g.spell, id)] = true
@@ -4552,6 +4763,9 @@ local function castGem(i, g, id)
     if not selfCast and orig ~= id then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+    end
+    if wasAttacking and not mq.TLO.Me.Combat() and ctrl and ctrl.combat_style == 'Melee' and not isCasting() then
+        mq.cmd('/attack on')
     end
     return true
 end
@@ -4863,46 +5077,106 @@ mq.event('TriuneTooFar3', '#*#cannot reach#*#', function() repositionCloser() en
 
 -- Same idea for a fixed camp location (used returning from a pull).
 local function moveTowardLoc(x, y, z, dist)
+    dist = dist or 15
     if distToLoc(x, y, z) <= dist then
-        stopMoving(); pursuit.lastNavLoc = nil; return true
+        stopMoving()
+        pursuit.lastNavLoc = nil
+        return true
     end
+
+    local locStr = string.format('loc %.2f %.2f %.2f', y, x, z) -- Y X Z, matches EQ standard
+    local locKey = string.format('%.1f_%.1f_%.1f', y, x, z)
+
     if navLoaded() then
-        local locStr = string.format('loc %.2f %.2f %.2f', y, x, z) -- Y X Z, matches autocombat.lua
-        local ok = false
-        pcall(function() ok = mq.TLO.Navigation.PathExists(locStr)() end)
-        if ok then
-            if pursuit.lastNavLoc ~= locStr or not mq.TLO.Navigation.Active() then
-                mq.cmdf('/nav %s', locStr); pursuit.lastNavLoc = locStr
+        local navActive = false
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+        if pursuit.lastNavLoc ~= locKey or not navActive then
+            local ok = false
+            pcall(function() ok = mq.TLO.Navigation.PathExists(locStr)() end)
+            if ok then
+                mq.cmdf('/nav %s', locStr)
+                pursuit.lastNavLoc = locKey
+                return false
             end
+            local locyxStr = string.format('locyx %.2f %.2f', y, x)
+            local ok2 = false
+            pcall(function() ok2 = mq.TLO.Navigation.PathExists(locyxStr)() end)
+            if ok2 then
+                mq.cmdf('/nav %s', locyxStr)
+                pursuit.lastNavLoc = locKey
+                return false
+            end
+        else
             return false
         end
     end
-    return false -- /stick has no raw-location form; camp return needs MQ2Nav
+
+    if stickLoaded() then
+        local movetoKey = 'moveto_' .. locKey
+        local moveToActive = false
+        pcall(function() moveToActive = (mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving()) or false end)
+        if pursuit.lastNavLoc ~= movetoKey or not moveToActive then
+            mq.cmdf('/moveto loc %.2f %.2f %.2f mdist %d', y, x, z, math.max(5, math.floor(dist)))
+            pursuit.lastNavLoc = movetoKey
+        end
+        return false
+    end
+
+    local nativeKey = 'native_' .. locKey
+    mq.cmdf('/face fast loc %.2f,%.2f', y, x)
+    local isMoving = false
+    pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+    if not isMoving then
+        mq.cmd('/keypress forward hold')
+    end
+    pursuit.lastNavLoc = nativeKey
+    return false
 end
 
 function runtime.wpTick()
-    if not ctrl.use_waypoints or not ctrl.waypoints or #ctrl.waypoints == 0 then return end
-    if not ctrl.current_waypoint_idx or ctrl.current_waypoint_idx < 1 or ctrl.current_waypoint_idx > #ctrl.waypoints then
+    local wps = ctrl.waypoints
+    if not wps or #wps == 0 then return false end
+    if not ctrl.current_waypoint_idx or ctrl.current_waypoint_idx < 1 or ctrl.current_waypoint_idx > #wps then
         ctrl.current_waypoint_idx = 1
     end
-    local wp = ctrl.waypoints[ctrl.current_waypoint_idx]
-    if not wp or not wp.x or not wp.y or not wp.z then return end
+    local wp = wps[ctrl.current_waypoint_idx]
+    if not wp or not wp.x or not wp.y or not wp.z then return false end
 
     local radius = ctrl.waypoint_radius or 20
     local dist = distToLoc(wp.x, wp.y, wp.z)
 
     if dist <= radius then
-        -- Advance to next waypoint in loop
-        ctrl.current_waypoint_idx = (ctrl.current_waypoint_idx % #ctrl.waypoints) + 1
-        local nextWp = ctrl.waypoints[ctrl.current_waypoint_idx]
+        local prevIdx = ctrl.current_waypoint_idx
+        if #wps <= 1 then
+            ctrl.current_waypoint_idx = 1
+            ctrl.waypoint_direction = 1
+        else
+            local dir = ctrl.waypoint_direction or 1
+            if dir ~= 1 and dir ~= -1 then dir = 1 end
+
+            local nextIdx = prevIdx + dir
+            if nextIdx > #wps then
+                dir = -1
+                nextIdx = math.max(1, #wps - 1)
+            elseif nextIdx < 1 then
+                dir = 1
+                nextIdx = math.min(#wps, 2)
+            end
+            ctrl.waypoint_direction = dir
+            ctrl.current_waypoint_idx = nextIdx
+        end
+
+        local nextWp = wps[ctrl.current_waypoint_idx]
         if nextWp then
-            print(string.format('\ay[Triune]\ax Reached %s -- patrolling to %s (#%d)',
-                wp.name or 'waypoint', nextWp.name or 'waypoint', ctrl.current_waypoint_idx))
+            print(string.format('\ay[Triune]\ax Reached %s (#%d) -- patrolling to %s (#%d) [%s]',
+                wp.name or ('WP ' .. prevIdx), prevIdx, nextWp.name or ('WP ' .. ctrl.current_waypoint_idx),
+                ctrl.current_waypoint_idx, (ctrl.waypoint_direction or 1) == 1 and 'Forward' or 'Reverse'))
             moveTowardLoc(nextWp.x, nextWp.y, nextWp.z, radius)
         end
     else
         moveTowardLoc(wp.x, wp.y, wp.z, radius)
     end
+    return true
 end
 
 -- Stuck detection/recovery, ported from autocombat.lua's proven perform_unstuck_maneuver.
@@ -5063,7 +5337,7 @@ local function checkStuck()
     -- If casting, sitting, medding, or immobilized (stunned/rooted), do not count as stuck
     local me = mq.TLO.Me
     if me() then
-        if me.Casting.ID() or me.Sitting() or me.Stunned() or me.Rooted() or runtime.medBreakActive then
+        if isCasting() or me.Sitting() or me.Stunned() or me.Rooted() or runtime.medBreakActive then
             stuckState.counter = 0
             stuckState.lastX, stuckState.lastY = me.X() or 0, me.Y() or 0
             return
@@ -5176,6 +5450,10 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     -- Fixed: Explicit Y/X handling to account for EQ's (Y, X) standard
     local function outsideAnchor(sy, sx)
         if anchorRadius <= 0 or not anchorLoc then return false end
+        -- When Waypoint Patrol is active, pulling/hunting scans dynamically around the character's patrol location
+        if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+            return false
+        end
         local ay = anchorLoc.y or anchorLoc[1] or 0
         local ax = anchorLoc.x or anchorLoc[2] or 0
         local dy = sy - ay
@@ -5183,7 +5461,15 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
     end
 
-    local radius = searchRadius or (isCampMode and (ctrl.camp_radius or 100) or (ctrl.hunter_radius or 200))
+    local defaultRadius = 100
+    if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+        defaultRadius = ctrl.waypoint_scan_radius or 100
+    elseif isCampMode then
+        defaultRadius = ctrl.camp_radius or 100
+    else
+        defaultRadius = ctrl.hunter_radius or 200
+    end
+    local radius = searchRadius or defaultRadius
     local maxZ   = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
     local myZ    = mq.TLO.Me.Z() or 0
 
@@ -5257,19 +5543,44 @@ end
 -- Puller: IDLE (find a mob) -> TO_MOB (close in, tag it) -> TO_CAMP (drag it home)
 -- -> FIGHTING (normal combat loop takes over via the target already being set).
 local function pullerTick()
-    if not ctrl.camp_loc then return end
+    local hasWps = (ctrl.waypoints and #ctrl.waypoints > 0)
+
+    if not ctrl.camp_loc then
+        -- Auto-initialize camp location if not yet set so puller has a return anchor
+        local myX, myY, myZ = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
+        if hasWps then
+            local wp1 = ctrl.waypoints[1]
+            ctrl.camp_loc = { x = wp1.x or myX or 0, y = wp1.y or myY or 0, z = wp1.z or myZ or 0 }
+            print(string.format('\ag[Triune]\ax Puller (Camp): Initialized camp location to Waypoint 1 (Y:%.1f, X:%.1f, Z:%.1f)',
+                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z))
+        elseif myX and myY and myZ then
+            ctrl.camp_loc = { x = myX, y = myY, z = myZ }
+            print(string.format('\ag[Triune]\ax Puller (Camp): Initialized camp location to current position (Y:%.1f, X:%.1f, Z:%.1f)',
+                myY, myX, myZ))
+        else
+            return
+        end
+    end
 
     if runtime.pullState == 'IDLE' then
-        local pt = mq.TLO.Target
-        local hasTarget = pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0 and not pt.Dead()
         local addId = firstNPCXtarget(false)
-        if (addId and setTarget(addId)) or hasTarget then
-            runtime.pullTargetId = addId or pt.ID()
+        if addId and setTarget(addId) then
+            runtime.pullTargetId = addId
             runtime.pullState = 'FIGHTING'
             return
         end
         if mq.TLO.Me.Combat() then return end -- already fighting something; don't pull yet
-        local id = findRoamTarget(ctrl.camp_radius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
+
+        -- If current target is right next to camp (within 25 units), fight it directly
+        local pt = mq.TLO.Target
+        if pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0 and not pt.Dead() and distToId(pt.ID()) <= 25 then
+            runtime.pullTargetId = pt.ID()
+            runtime.pullState = 'FIGHTING'
+            return
+        end
+
+        local scanRadius = hasWps and (ctrl.use_waypoints ~= false) and (ctrl.waypoint_scan_radius or 100) or (ctrl.camp_radius or 100)
+        local id = findRoamTarget(scanRadius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
         if id and setTarget(id) then
             if not runtime.verifyTargetCon(id, true) then
                 print(string.format(
@@ -5279,9 +5590,10 @@ local function pullerTick()
                 runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
                 return
             end
+            stopMoving()
             runtime.pullTargetId = id; runtime.pullState = 'TO_MOB'
             pursuit.hasRetargeted = false
-        elseif ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+        elseif hasWps and (ctrl.use_waypoints ~= false) then
             runtime.wpTick()
         end
         return
@@ -5526,19 +5838,10 @@ local function checkAggroSwitch()
 end
 
 fullStop = function()
-    if navLoaded() then
-        local navActive = false
-        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
-        if navActive then mq.cmd('/nav stop') end
-    end
-    if stickLoaded() then
-        local stickActive = false
-        pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
-        if stickActive then mq.cmd('/stick off') end
-    end
+    stopMoving()
     if not ctrl.running and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if not ctrl.running and mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-    if mq.TLO.Me.Casting.ID() then
+    if isCasting() then
         mq.cmd('/stopsong')
         mq.cmd('/stopcast')
     end
@@ -5717,10 +6020,16 @@ local function combatTick()
                 engage = (runtime.pullState == 'FIGHTING')
             end
         else -- Submode 'Hunt'
+            local hasWps = (ctrl.waypoints and #ctrl.waypoints > 0 and ctrl.use_waypoints ~= false)
             if haveNPC then
                 local tid = mq.TLO.Target.ID() or 0
                 local tspawn = mq.TLO.Spawn(tid)
+                local maxDist = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 200)
                 if not tspawn() or tspawn.Dead() or (tspawn.PctHPs() or 0) <= 0 or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
+                    haveNPC = false
+                    mq.cmd('/target clear')
+                elseif not isXTargetId(tid) and not mq.TLO.Me.Combat() and distToId(tid) > maxDist then
+                    -- If target is not on XTarget and far away outside local scan range, clear so we continue waypoint patrol
                     haveNPC = false
                     mq.cmd('/target clear')
                 end
@@ -5757,7 +6066,8 @@ local function combatTick()
                     end
                 end
             else
-                local id = findRoamTarget(nil, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 200)
+                local id = findRoamTarget(scanRadius, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
                 if id and setTarget(id) then
                     if not runtime.verifyTargetCon(id, true) then
                         print(string.format(
@@ -5768,6 +6078,7 @@ local function combatTick()
                         pursuit.id = 0
                         return
                     end
+                    stopMoving()
                     haveNPC = true
                     pursuit.wanderLoc = nil
                     pursuit.hasRetargeted = false
@@ -5775,7 +6086,7 @@ local function combatTick()
                     print(string.format('\ay[Triune]\ax Puller (Hunt) target acquired: #%d (%s) dist %.1f',
                         id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
                 elseif not anyXtarAlive() then
-                    if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                    if hasWps then
                         runtime.wpTick()
                     else
                         if pursuit.wanderLoc then
@@ -6057,7 +6368,7 @@ local function combatTick()
         end
         local tid = mq.TLO.Target.ID() or 0
         local dueForRetry = (os.clock() - (petState.lastCmdAt or 0)) > 5.0
-        if (tid ~= petState.lastCmdTargetId or dueForRetry) and not mq.TLO.Me.Casting.ID() then
+        if (tid ~= petState.lastCmdTargetId or dueForRetry) and not isCasting() then
             local tgtHp = pctHP(tid) or 100
             -- Self-directed modes: character is leading combat directly, skip external MA aggro gate.
             -- Assist modes: require player/tank has started hitting AND HP threshold met.
@@ -6236,7 +6547,7 @@ local function combatTick()
         local stickOn = false
         pcall(function() stickOn = stickLoaded() and mq.TLO.Stick.Status() == 'ON' end)
         print(string.format('\ao[Triune debug]\ax all gems blocked -- casting=%s navActive=%s stickOn=%s',
-            tostring(mq.TLO.Me.Casting.ID()), tostring(navLoaded() and mq.TLO.Navigation.Active()), tostring(stickOn)))
+            tostring(isCasting()), tostring(navLoaded() and mq.TLO.Navigation.Active()), tostring(stickOn)))
     end
 end
 
@@ -6299,6 +6610,7 @@ local function setTriuneMode(arg1, arg2)
 
     ctrl.mode = newMode
     ctrl.submode = newSubmode
+    clearMapRadiusVisuals()
 
     if SUBMODES[ctrl.mode] then
         print(string.format('\ag[Triune]\ax mode set to %s (%s).', ctrl.mode, ctrl.submode))
@@ -6324,7 +6636,11 @@ local function triuneCommand(...)
         if ctrl.running then
             print('\ay[Triune]\ax already running.')
         else
+            if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                runtime.setNearestWaypoint()
+            end
             ctrl.running = true
+            runtime.wasRunning = true
             print('\ag[Triune]\ax running.')
         end
     elseif cmd == 'pause' or cmd == 'stop' then
@@ -6503,22 +6819,44 @@ local function triuneCommand(...)
             else
                 print('\ay[Triune]\ax usage: /ac wp delete [index]')
             end
-        elseif sub == 'on' or sub == 'enable' or sub == '1' or sub == 'start' then
+        elseif sub == 'on' or sub == '1' or sub == 'enable' then
             ctrl.use_waypoints = true
+            clearMapRadiusVisuals()
             saveLoadout(true)
             print('\ag[Triune]\ax Waypoint Patrol ENABLED.')
-        elseif sub == 'off' or sub == 'disable' or sub == '0' or sub == 'stop' then
+        elseif sub == 'off' or sub == '0' or sub == 'disable' then
             ctrl.use_waypoints = false
+            clearMapRadiusVisuals()
             saveLoadout(true)
             print('\ag[Triune]\ax Waypoint Patrol DISABLED.')
         elseif sub == 'toggle' then
             ctrl.use_waypoints = not ctrl.use_waypoints
+            clearMapRadiusVisuals()
             saveLoadout(true)
             print(string.format('\ag[Triune]\ax Waypoint Patrol %s.', ctrl.use_waypoints and 'ENABLED' or 'DISABLED'))
+        elseif sub == 'radius' or sub == 'arrival' then
+            local r = tonumber(args[3])
+            if r and r >= 5 and r <= 100 then
+                ctrl.waypoint_radius = r
+                saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Waypoint Arrival Radius set to %d.', r))
+            else
+                print('\ay[Triune]\ax usage: /ac wp radius [5-100]')
+            end
+        elseif sub == 'scan' or sub == 'scanradius' then
+            local r = tonumber(args[3])
+            if r and r >= 20 and r <= 500 then
+                ctrl.waypoint_scan_radius = r
+                saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Waypoint NPC Scan Radius set to %d.', r))
+            else
+                print('\ay[Triune]\ax usage: /ac wp scan [20-500]')
+            end
         elseif sub == 'list' or sub == 'show' or sub == '' then
             print('\ag[Triune]\ax --- Puller Waypoint Patrol Route ---')
-            print(string.format('  Patrol Status: %s | Active Target: #%d',
-                ctrl.use_waypoints and '\agENABLED\ax' or '\arDISABLED\ax', ctrl.current_waypoint_idx or 1))
+            print(string.format('  Patrol Status: %s | Active Target: #%d | Arrival Radius: %d | Scan Radius: %d',
+                ctrl.use_waypoints and '\agENABLED\ax' or '\arDISABLED\ax', ctrl.current_waypoint_idx or 1,
+                ctrl.waypoint_radius or 20, ctrl.waypoint_scan_radius or 100))
             if #ctrl.waypoints == 0 then
                 print('  \ayNo waypoints defined. Use /ac wp add [name] to add locations.\ax')
             else
@@ -6530,7 +6868,7 @@ local function triuneCommand(...)
                 end
             end
         else
-            print('\ay[Triune]\ax usage: /ac wp [add [name]|clear|delete [idx]|on|off|toggle|list]')
+            print('\ay[Triune]\ax usage: /ac wp [add [name]|clear|delete [idx]|on|off|toggle|radius [5-100]|scan [20-500]|list]')
         end
     elseif setTriuneMode(args[1], args[2]) then
         -- mode command handled
@@ -6551,7 +6889,11 @@ triuneToggle = function()
         fullStop()
         print('\ag[Triune]\ax paused.')
     else
+        if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+            runtime.setNearestWaypoint()
+        end
         ctrl.running = true
+        runtime.wasRunning = true
         print('\ag[Triune]\ax running.')
     end
 end
@@ -6576,7 +6918,7 @@ print('\ag[Triune]\ax loaded v' ..
 -- Map Visualization Helper
 -- ============================================================================
 
-local function clearMapRadiusVisuals()
+clearMapRadiusVisuals = function()
     mq.cmd('/maploc remove')
     mq.cmd('/mapfilter pullradius 0')
     mq.cmd('/mapfilter castradius 0')
@@ -6592,58 +6934,33 @@ updateMapRadiusVisuals = function()
     end
 
     local mode = ctrl.mode
-    local submode = ctrl.submode
-    local drawType = nil
-    local radius = 0
-    local loc = nil
-    local label = ''
+    local submode = ctrl.submode or ''
+    local hasWps = ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0
+    local zoneShort = ''
+    pcall(function() zoneShort = mq.TLO.Zone.ShortName() or '' end)
 
-    if mode == 'Manual' then
-        if ctrl.camp_loc then
-            drawType = 'maploc'
-            radius = ctrl.camp_radius or 100
-            loc = ctrl.camp_loc
-            label = 'Camp'
-        end
-    elseif mode == 'Puller' then
-        if submode == 'Camp' then
-            radius = ctrl.camp_radius or 100
-            if ctrl.camp_loc then
-                drawType = 'maploc'
-                loc = ctrl.camp_loc
-                label = 'Camp'
-            else
-                drawType = 'pullradius'
-            end
-        else -- Submode 'Hunt'
-            if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
-                drawType = 'maploc'
-                radius = ctrl.hunter_combat_radius
-                loc = ctrl.hunter_combat_loc
-                label = 'Anchor'
-            else
-                drawType = 'castradius'
-                radius = ctrl.hunter_radius or 1500
-            end
-        end
-    elseif mode == 'Assist' then
-        if submode == 'Camp' and ctrl.camp_loc then
-            drawType = 'maploc'
-            radius = 30
-            loc = ctrl.camp_loc
-            label = 'Camp'
+    local wpsCoordParts = {}
+    if hasWps then
+        for idx, wp in ipairs(ctrl.waypoints) do
+            wpsCoordParts[#wpsCoordParts + 1] = string.format('%d:%.1f,%.1f,%.1f', idx, wp.x or 0, wp.y or 0, wp.z or 0)
         end
     end
+    local wpsKey = table.concat(wpsCoordParts, ';')
 
-    if not drawType or radius <= 0 then
-        if runtime.lastMapDraw and runtime.lastMapDraw.active then
-            clearMapRadiusVisuals()
-        end
-        return
-    end
-
-    local key = string.format('%s|%d|%s|%s', drawType, radius, label,
-        loc and string.format('%.1f,%.1f,%.1f', loc.x or 0, loc.y or 0, loc.z or 0) or 'noloc')
+    local key = string.format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
+        tostring(mode),
+        tostring(submode),
+        tostring(ctrl.use_waypoints),
+        tostring(ctrl.waypoint_scan_radius or 100),
+        tostring(ctrl.waypoint_radius or 20),
+        tostring(ctrl.camp_radius or 100),
+        tostring(ctrl.hunter_radius or 1500),
+        tostring(ctrl.hunter_combat_radius or 0),
+        tostring(ctrl.current_waypoint_idx or 1),
+        ctrl.camp_loc and string.format('%.1f,%.1f,%.1f', ctrl.camp_loc.x or 0, ctrl.camp_loc.y or 0, ctrl.camp_loc.z or 0) or 'nocamp',
+        ctrl.hunter_combat_loc and string.format('%.1f,%.1f,%.1f', ctrl.hunter_combat_loc.x or 0, ctrl.hunter_combat_loc.y or 0, ctrl.hunter_combat_loc.z or 0) or 'noanchor',
+        zoneShort,
+        wpsKey)
 
     if runtime.lastMapDraw and runtime.lastMapDraw.active and runtime.lastMapDraw.key == key then
         return -- State unchanged; do nothing
@@ -6652,22 +6969,84 @@ updateMapRadiusVisuals = function()
     -- Clear all previous map overlays before applying new one
     clearMapRadiusVisuals()
 
-    if drawType == 'maploc' and loc then
-        mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label %s',
-            loc.y, loc.x, loc.z, radius, label)
-    elseif drawType == 'pullradius' then
-        mq.cmd('/mapfilter pullradius color 0 255 0')
-        mq.cmd('/mapfilter pullradius show')
-        mq.cmdf('/mapfilter pullradius %d', radius)
-    elseif drawType == 'castradius' then
-        mq.cmd('/mapfilter castradius color 255 0 0')
-        mq.cmd('/mapfilter castradius show')
-        mq.cmdf('/mapfilter castradius %d', radius)
+    if mode == 'Puller' and hasWps then
+        runtime.syncWaypointMapLines(zoneShort)
+
+        -- 1. Dynamic Scan Radius circle following the player
+        local scanRad = ctrl.waypoint_scan_radius or 100
+        if scanRad > 0 then
+            mq.cmd('/mapfilter castradius color 0 255 0')
+            mq.cmd('/mapfilter castradius show')
+            mq.cmdf('/mapfilter castradius %d', scanRad)
+        end
+
+        -- 2. Draw arrival radius markers for all waypoints in the patrol route
+        for idx, wp in ipairs(ctrl.waypoints) do
+            if wp and wp.x and wp.y and wp.z then
+                local isNext = ((ctrl.current_waypoint_idx or 1) == idx)
+                local rCol = isNext and '255 215 0' or '0 200 255'
+                local label = isNext and ('>> ' .. (wp.name or ('WP ' .. idx))) or (wp.name or ('WP ' .. idx))
+                mq.cmdf('/maploc %f %f %f radius %d rcolor %s color %s label %s',
+                    wp.y, wp.x, wp.z, ctrl.waypoint_radius or 20, rCol, rCol, label)
+            end
+        end
+
+        -- 3. If in Camp submode and camp location exists, draw Camp anchor
+        if submode == 'Camp' and ctrl.camp_loc then
+            mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
+                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.camp_radius or 100)
+        end
+
+        runtime.lastMapDraw = {
+            active = true,
+            type = 'waypoints',
+            key = key
+        }
+        return
+    end
+
+    -- Non-waypoint modes: Clean up any leftover waypoint lines on map file
+    runtime.syncWaypointMapLines(zoneShort)
+
+    if mode == 'Manual' then
+        if ctrl.camp_loc then
+            mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
+                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.camp_radius or 100)
+        else
+            mq.cmd('/mapfilter pullradius color 0 255 0')
+            mq.cmd('/mapfilter pullradius show')
+            mq.cmdf('/mapfilter pullradius %d', ctrl.camp_radius or 100)
+        end
+    elseif mode == 'Puller' then
+        if submode == 'Camp' then
+            if ctrl.camp_loc then
+                mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
+                    ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.camp_radius or 100)
+            else
+                mq.cmd('/mapfilter pullradius color 0 255 0')
+                mq.cmd('/mapfilter pullradius show')
+                mq.cmdf('/mapfilter pullradius %d', ctrl.camp_radius or 100)
+            end
+        else -- Submode 'Hunt'
+            if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
+                mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Anchor',
+                    ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.z, ctrl.hunter_combat_radius)
+            else
+                mq.cmd('/mapfilter castradius color 255 0 0')
+                mq.cmd('/mapfilter castradius show')
+                mq.cmdf('/mapfilter castradius %d', ctrl.hunter_radius or 1500)
+            end
+        end
+    elseif mode == 'Assist' then
+        if submode == 'Camp' and ctrl.camp_loc then
+            mq.cmdf('/maploc %f %f %f radius 30 rcolor 0 255 0 color 0 255 0 label Camp',
+                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z)
+        end
     end
 
     runtime.lastMapDraw = {
         active = true,
-        type = drawType,
+        type = mode,
         key = key
     }
 end
@@ -6688,6 +7067,13 @@ local function runMainLoop()
             reconcilePets()                                           -- don't re-summon pets that are already out
             runtime.lastSig = loadoutSig(); runtime.autoDirty = false -- baseline; don't save what we just loaded
         end
+        local curZone = mq.TLO.Zone.ShortName()
+        if curZone and curZone ~= '' and curZone ~= runtime.lastZoneShort then
+            runtime.lastZoneShort = curZone
+            if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                runtime.setNearestWaypoint()
+            end
+        end
         if reDetectRequested then
             reDetectRequested = false
             local detected = detectClasses(true) -- safe here -- main loop coroutine can yield/delay
@@ -6697,7 +7083,7 @@ local function runMainLoop()
         updateMapRadiusVisuals()
         -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting
         local memmed = false
-        if not mq.TLO.Me.Casting.ID() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
+        if not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
             for slot, name in pairs(runtime.pendingMem) do
                 runtime.pendingMem[slot] = nil
                 tryMem(slot, name) -- verifies + reports; blocks briefly while it lands
@@ -6711,18 +7097,11 @@ local function runMainLoop()
                 print('\ar[Triune error]\ax combatTick failed: ' .. tostring(err))
             end
             runtime.lastTick = os.clock()
+            runtime.wasRunning = true
         elseif not ctrl.running then
-            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-            if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-            if navLoaded() then
-                local navActive = false
-                pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
-                if navActive then mq.cmd('/nav stop') end
-            end
-            if stickLoaded() then
-                local stickActive = false
-                pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
-                if stickActive then mq.cmd('/stick off') end
+            if runtime.wasRunning then
+                runtime.wasRunning = false
+                fullStop()
             end
         end
 

@@ -4,11 +4,11 @@ on:
   push:
     tags:
       - 'v*'
-      - 'V*' # Added uppercase V just in case!
+      - 'V*'
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name to release (e.g., v1.1)'
+        description: 'Tag name to release (e.g., v1.6)'
         required: false
         type: string
 
@@ -22,9 +22,62 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Generate Release Notes & Instructions
+        run: |
+          python3 - << 'EOF'
+          with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          # Extract latest release entry from top up to first '---' section separator
+          sections = content.split('\n---\n')
+          latest_entry = sections[0].strip()
+
+          # Strip '# Triune AutoCombat Change Log' title line if present
+          lines = latest_entry.split('\n')
+          if lines and lines[0].startswith('# '):
+              lines = lines[1:]
+          latest_notes = '\n'.join(lines).strip()
+
+          instructions = '''---
+
+          ## 📦 Installation & Updating Instructions
+
+          ### 🆕 New Installation
+          1. Under **Assets** below, download **`Source code (zip)`**.
+          2. Extract the downloaded archive to a folder under your user directory (for example, `C:\\Users\\<YourUsername>\\Documents\\MacroQuest` or `~/Documents/MacroQuest`).
+          3. Start **`MacroQuest.exe`** before launching EverQuest.
+          4. Log into [Project Triune](https://nms.bestemu.com/) — Triune loads automatically on login (or type `/lua run triune` / `/ac` in chat).
+
+          ### 🔄 Updating an Existing Install
+          - **Option 1 (Recommended — Easiest)**: **In-Game Updater**
+            - Click the **[Updater]** button on the top window header or type `/ac update` in chat.
+            - Click **Check for Updates**, then **Update Now** to update and reload all scripts automatically without leaving the game.
+            - Alternatively, run **`update.bat`** (Windows) or **`update.sh`** (Linux) from your `mq2triune/` folder.
+          - **Option 2 (Manual Update)**:
+            - Download **`TriuneAutocombat-Update.zip`** from the Assets below.
+            - Extract and overwrite the files into your existing Triune / MacroQuest directory.
+            - *Note: Your personal settings and saved loadouts in `triune_loadout.lua` are preserved and will never be overwritten.*
+          '''
+
+          # Strip leading indentation from instructions block
+          cleaned_lines = []
+          for line in instructions.split('\n'):
+              if line.startswith('          '):
+                  cleaned_lines.append(line[10:])
+              else:
+                  cleaned_lines.append(line)
+          instructions_clean = '\n'.join(cleaned_lines)
+
+          full_body = latest_notes + '\n\n' + instructions_clean.strip() + '\n'
+
+          with open('RELEASE_NOTES.md', 'w', encoding='utf-8') as out:
+              out.write(full_body)
+
+          print("Generated RELEASE_NOTES.md successfully")
+          EOF
+
       - name: Package Release Archives
         run: |
-
           git archive --format=zip -o TriuneAutocombat-Update.zip HEAD mq2triune/lua mq2triune/config mq2triune/macros mq2triune/triune_updater.py mq2triune/update.bat mq2triune/update.sh README.md CHANGELOG.md
 
       - name: Create or Update Release
@@ -32,10 +85,7 @@ jobs:
         with:
           files: |
             TriuneAutocombat-Update.zip
-          tag_name: ${{ inputs.tag_name || github.ref_name }} # Uses manual input if provided, otherwise defaults to pushed tag
-          generate_release_notes: true
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          body_path: RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-
-
