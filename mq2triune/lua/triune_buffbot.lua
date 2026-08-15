@@ -483,6 +483,12 @@ local function processBuffQueue()
                 if not ready then
                     mq.delay(3000, function() return mq.TLO.Me.SpellReady(gemNum)() end)
                 end
+                local isSitOrDuck = false
+                pcall(function() isSitOrDuck = mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() end)
+                if isSitOrDuck then
+                    mq.cmd('/stand')
+                    mq.delay(200)
+                end
 
                 -- Re-target if target dropped
                 pcall(function()

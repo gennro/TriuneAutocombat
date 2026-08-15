@@ -296,7 +296,9 @@ local function tryMem(slot, spellName, bypassCheck)
     end
     bookSlot = bookSlot or 1
 
-    if mq.TLO.Me.Sitting() then
+    local isDucked = false
+    pcall(function() isDucked = mq.TLO.Me.Ducking() end)
+    if mq.TLO.Me.Sitting() or isDucked then
         mq.cmd('/stand')
         mq.delay(400)
     end

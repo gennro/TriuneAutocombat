@@ -142,6 +142,26 @@ local buffActive             -- forward declaration for lexical scoping in helpe
 local updateMapRadiusVisuals -- forward declaration for lexical scoping in UI & helpers
 local clearMapRadiusVisuals  -- forward declaration for lexical scoping in UI & helpers
 
+local function isDucking()
+    local d = false
+    pcall(function() d = mq.TLO.Me.Ducking() end)
+    return not not d
+end
+
+local function isSitting()
+    local s = false
+    pcall(function() s = mq.TLO.Me.Sitting() end)
+    return not not s
+end
+
+local function standIfSittingOrDucked()
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+        return true
+    end
+    return false
+end
+
 -- Backward compatibility and mode validation sanitizer
 local function sanitizeModeConfig(c)
     c = c or ctrl
@@ -330,6 +350,8 @@ local pursuit = {
     wanderSince = 0,
     unreachableIds = {},
     lastTooFarRepositionAt = 0,
+    lastCantHitAt = 0,
+    cantHitCount = 0,
     hasRetargeted = false,
     nonXtarTargetId = 0,
     nonXtarEngageAt = 0,
@@ -984,7 +1006,7 @@ local function stickLoaded()
 end
 
 local function isMoveActive()
-    local navActive, moveActive, moveToActive = false, false, false
+    local navActive, moveActive, moveToActive, nativeActive = false, false, false, false
     if navLoaded() then
         pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
     end
@@ -996,7 +1018,11 @@ local function isMoveActive()
             moveToActive = mq.TLO.MoveTo.Moving() or false
         end
     end)
-    return navActive or moveActive or moveToActive
+    if (pursuit.lastNavLoc and string.find(tostring(pursuit.lastNavLoc), '^native_')) or
+       (pursuit.lastNavTargetId and string.find(tostring(pursuit.lastNavTargetId), '^native_')) then
+        nativeActive = true
+    end
+    return navActive or moveActive or moveToActive or nativeActive
 end
 
 local function stopMoving()
@@ -1017,7 +1043,8 @@ local function stopMoving()
             mq.cmd('/moveto off')
         end
     end)
-    if pursuit.lastNavLoc and string.find(pursuit.lastNavLoc, '^native_') then
+    if (pursuit.lastNavLoc and string.find(tostring(pursuit.lastNavLoc), '^native_')) or
+       (pursuit.lastNavTargetId and string.find(tostring(pursuit.lastNavTargetId), '^native_')) then
         pcall(function() mq.cmd('/keypress forward') end)
     end
     pursuit.id = 0
@@ -1190,8 +1217,8 @@ local function tryMem(slot, name)
         end)
     end
 
-    -- 7. Stand up if sitting
-    if mq.TLO.Me.Sitting() then
+    -- 7. Stand up if sitting or ducking
+    if isSitting() or isDucking() then
         mq.cmd('/stand')
         mq.delay(200)
     end
@@ -3814,7 +3841,11 @@ local function drawMiniGui()
     if show then
         -- Row 1: Header / Status & Mode Selector
         if ctrl.running then
-            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'RUNNING')
+            if runtime.medBreakActive then
+                ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'MED BREAK')
+            else
+                ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'RUNNING')
+            end
         else
             ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'PAUSED')
         end
@@ -4216,8 +4247,8 @@ local function firstNPCXtarget(unmezzedOnly)
     return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable)
 end
 
--- Returns count of live (PctHPs > 0), non-ignored, reachable NPCs occupying XTarget slots.
-local function countNPCXtarget()
+-- Returns count of live (PctHPs > 0), non-ignored NPCs occupying XTarget slots.
+local function countNPCXtarget(includeUnreachable)
     local cnt = 0
     pcall(function()
         local slots = 13
@@ -4226,13 +4257,13 @@ local function countNPCXtarget()
             local xt = mq.TLO.Me.XTarget(i)
             if xt() then
                 local id = xt.ID() or 0
-                if id > 0 and isSpawnAlive(id) then
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) then
                     local s = mq.TLO.Spawn(id)
                     local stype = (s() and s.Type()) or ''
                     if (stype == 'NPC' or stype == 'Pet')
                         and (s.PctHPs() or 0) > 0 and not s.Dead()
                         and not isIgnored(s.CleanName())
-                        and not isUnreachable(id) then
+                        and (includeUnreachable or not isUnreachable(id)) then
                         cnt = cnt + 1
                     end
                 end
@@ -4240,10 +4271,10 @@ local function countNPCXtarget()
         end
     end)
     -- Fallback: if XTarget list is unpopulated or empty, but we have a valid live NPC target, count as at least 1
-    if cnt == 0 then
+    if cnt == 0 and not includeUnreachable then
         pcall(function()
             local t = mq.TLO.Target
-            if t() and (t.ID() or 0) > 0 then
+            if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) then
                 local stype = t.Type() or ''
                 if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
                     and not isIgnored(t.CleanName()) and not isUnreachable(t.ID()) then
@@ -4255,12 +4286,10 @@ local function countNPCXtarget()
     return cnt
 end
 
--- Returns true if any live (PctHPs > 0), non-ignored, reachable NPC occupies
--- an XTarget slot. Used by Hunter mode to decide whether it is safe to roam
--- for a fresh mob: if the XTarget list still has live hostiles from the
--- current or recent fight, Hunter must finish those before wandering away.
-local function anyXtarAlive()
-    return countNPCXtarget() > 0
+-- Returns true if any live (PctHPs > 0), non-ignored NPC occupies an XTarget slot.
+-- When includeUnreachable is true, includes unreachable NPCs (used for combat / med break safety checks).
+local function anyXtarAlive(includeUnreachable)
+    return countNPCXtarget(includeUnreachable) > 0
 end
 
 isXTargetId = function(id)
@@ -4480,17 +4509,40 @@ local function targetIsEngaged(id)
 end
 
 isCombat = function()
-    if mq.TLO.Me.Combat() then return true end
-    if mq.TLO.Me.CombatState() == 'COMBAT' then return true end
-    local t = mq.TLO.Target
-    if t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead() and isHostileTarget(t.ID()) and targetIsEngaged(t.ID()) then
-        return true
-    end
-    for i = 1, 13 do
-        local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then return true end
-    end
-    return false
+    local ok, res = pcall(function()
+        if mq.TLO.Me.Combat() then return true end
+        if mq.TLO.Me.AutoFire() then return true end
+        if mq.TLO.Me.CombatState() == 'COMBAT' then return true end
+        local hCount = mq.TLO.Me.XTHaterCount() or 0
+        if hCount > 0 then return true end
+        local aCount = mq.TLO.Me.XTAggroCount() or 0
+        if aCount > 0 then return true end
+        local t = mq.TLO.Target
+        if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) then
+            local stype = t.Type() or ''
+            if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead() and not isIgnored(t.CleanName()) then
+                if targetIsEngaged(t.ID()) or isHostileTarget(t.ID()) then return true end
+            end
+        end
+        local slots = mq.TLO.Me.XTargetSlots() or 13
+        for i = 1, slots do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt() then
+                local id = xt.ID() or 0
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) then
+                    local s = mq.TLO.Spawn(id)
+                    if s() then
+                        local stype = s.Type() or ''
+                        if (stype == 'NPC' or stype == 'Pet') and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName()) then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end)
+    return ok and res or false
 end
 
 local function anyNearbyEngagedNpc(radius)
@@ -4843,6 +4895,10 @@ mq.event('TriuneNotReady', '#*#not ready#*#', function() onFailureEvent('not rea
 mq.event('TriuneNoMana', '#*#enough mana#*#', function() onFailureEvent('insufficient mana') end)
 
 local function castGem(i, g, id)
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+        mq.delay(50)
+    end
     if castTracker.isLockedOut(g.spell) then return false end
     local key = 'g' .. i
     if (os.clock() - (runtime.lastCast[key] or 0)) < 1.2 then return false end
@@ -4916,6 +4972,9 @@ local function castGem(i, g, id)
 end
 
 local function fireAA(name, a, id)
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+    end
     local key = 'a' .. name
     if (os.clock() - (runtime.lastCast[key] or 0)) < 1.5 then return false end
     local aa = mq.TLO.Me.AltAbility(name)
@@ -4949,6 +5008,9 @@ local function fireAA(name, a, id)
 end
 
 local function fireDisc(name, a, id)
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+    end
     local key = 'd' .. name
     if (os.clock() - (runtime.lastCast[key] or 0)) < 1.5 then return false end
     if not mq.TLO.Me.CombatAbility(name)() then return false end
@@ -4973,6 +5035,9 @@ local function fireDisc(name, a, id)
 end
 
 local function fireSkill(name, a, id)
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+    end
     local key = 's' .. name
     if (os.clock() - (runtime.lastCast[key] or 0)) < 1.5 then return false end
     if not mq.TLO.Me.AbilityReady(name)() then return false end
@@ -5179,36 +5244,47 @@ local function moveToward(id, dist, followOnly)
         return false
     end
 
-    -- Movement Stage 3: MoveUtils /moveto loc
-    local sp = mq.TLO.Spawn(id)
-    if sp and sp() then
-        local sx, sy, sz = sp.X(), sp.Y(), sp.Z()
-        if sx and sy and sz then
-            local moveToActive = false
-            pcall(function() moveToActive = (mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving()) or false end)
-            if moveToActive then return false end
-            local movetoKey = string.format('movetospawn_%d', id)
-            if pursuit.lastNavTargetId ~= movetoKey then
-                mq.cmdf('/moveto loc %.2f %.2f %.2f mdist %d', sy, sx, sz, math.max(6, math.floor(effectiveArrivalDist)))
-                pursuit.lastNavTargetId = movetoKey
-                return false
-            end
-        end
-    end
-
-    -- Movement Stage 4: Native EQ movement keys & /face
+    -- Movement Stage 3: Native EQ movement keys & /face
+    local nativeKey = string.format('native_spawn_%d', id)
     mq.cmd('/face fast')
     local isMoving = false
     pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
     if not isMoving then
         mq.cmd('/keypress forward hold')
     end
+    pursuit.lastNavTargetId = nativeKey
     return false
 end
 
 -- ============================================================================
--- Reposition / Close-in Handler for "Too far away" combat events
+-- Door / Switch & Reposition / Close-in Handlers
 -- ============================================================================
+
+-- Try to open the nearest door/switch. MQ2Nav's own OpenDoors setting only opens
+-- doors the navmesh recognizes as door links; on this server that's evidently not
+-- catching every door (that's exactly what "gets stuck" at a door looks like). This
+-- is a direct fallback: door-target whatever Switch is nearest and click it.
+-- Harmless when nothing is close by, and throttled so it doesn't spam-click one
+-- while just walking past it.
+local function tryOpenNearbyDoor(force)
+    local now = os.clock()
+    if not force and (now - stuckState.lastDoorClickAt) < 2.0 then return false end
+    local ok, dist = pcall(function() return mq.TLO.Switch.Distance3D() end)
+    if not ok or not dist or dist > 25 then return false end
+    local isOpen = false
+    pcall(function() isOpen = mq.TLO.Switch.Open() or false end)
+    if isOpen and not force then return false end
+    mq.cmd('/doortarget')
+    mq.delay(50)
+    mq.cmd('/click left door')
+    mq.cmd('/click left target')
+    pcall(function()
+        if mq.TLO.Switch.Toggle then mq.TLO.Switch.Toggle() end
+    end)
+    stuckState.lastDoorClickAt = now
+    return true
+end
+
 local function repositionCloser()
     if not isCombat() then return end
     local tgt = mq.TLO.Target
@@ -5255,9 +5331,82 @@ local function repositionCloser()
     end
 end
 
+local function handleCantHitFromHere()
+    if not isCombat() then return end
+    local tgt = mq.TLO.Target
+    if not (tgt() and (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and (tgt.PctHPs() or 0) > 0) then return end
+    local tid = tgt.ID()
+    if not ctrl.running then return end
+    local now = os.clock()
+    if (now - (pursuit.lastCantHitAt or 0)) < 1.0 then return end
+
+    if (now - (pursuit.lastCantHitAt or 0)) > 6.0 then
+        pursuit.cantHitCount = 1
+    else
+        pursuit.cantHitCount = (pursuit.cantHitCount or 0) + 1
+    end
+    pursuit.lastCantHitAt = now
+
+    local curDist = distToId(tid)
+    print(string.format(
+        '\ay[Triune]\ax "Cannot hit from here" (dist %.1f) on #%d (%s) -- opening doors and repositioning.',
+        curDist, tid, tostring(tgt.CleanName())))
+
+    -- Try opening any nearby door or switch first
+    if tryOpenNearbyDoor(true) then
+        print('\ay[Triune]\ax Clicked nearby door/switch to clear line of sight.')
+    end
+
+    -- Reset pursuit tracking so moveToward doesn't short-circuit on stale arrival flags
+    pursuit.id = 0
+    pursuit.lastNavTargetId = 0
+    pursuit.lastNavLoc = nil
+
+    mq.cmd('/face fast')
+
+    -- If we have repeated failures in quick succession (e.g. wedged on doorway frame or wall corner),
+    -- execute a brief backup + strafe jump to break geometric collision snags.
+    if pursuit.cantHitCount >= 3 then
+        pursuit.cantHitCount = 0
+        mq.cmd('/keypress back hold')
+        mq.delay(250)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress strafe_left hold')
+        mq.delay(200)
+        mq.cmd('/keypress strafe_left')
+        mq.cmd('/keypress jump')
+        mq.cmd('/face fast')
+    end
+
+    local targetDist = 6
+    if (ctrl and ctrl.combat_style) ~= 'Melee' then
+        targetDist = math.max(12, math.floor(curDist - 10))
+    end
+
+    if navLoaded() then
+        local hasPath = false
+        pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. tid)() end)
+        if hasPath then
+            mq.cmdf('/nav id %d distance=%d', tid, targetDist)
+            return
+        end
+    end
+
+    if stickLoaded() then
+        mq.cmdf('/stick %d id %d', targetDist, tid)
+    else
+        mq.cmd('/keypress forward hold')
+        mq.delay(250)
+        mq.cmd('/keypress forward')
+    end
+end
+
 mq.event('TriuneTooFar1', '#*#too far away#*#', function() repositionCloser() end)
 mq.event('TriuneTooFar2', '#*#get closer#*#', function() repositionCloser() end)
 mq.event('TriuneTooFar3', '#*#cannot reach#*#', function() repositionCloser() end)
+mq.event('TriuneCantHit1', '#*#cannot hit#*#from here#*#', function() handleCantHitFromHere() end)
+mq.event('TriuneCantHit2', '#*#can\'t hit#*#from here#*#', function() handleCantHitFromHere() end)
+mq.event('TriuneCantHit3', '#*#not in line of sight#*#', function() handleCantHitFromHere() end)
 
 -- Same idea for a fixed camp location (used returning from a pull).
 local function moveTowardLoc(x, y, z, dist)
@@ -5372,36 +5521,17 @@ end
 
 -- Movement: stuck/recovery helpers
 
-
--- Try to open the nearest door/switch. MQ2Nav's own OpenDoors setting only opens
--- doors the navmesh recognizes as door links; on this server that's evidently not
--- catching every door (that's exactly what "gets stuck" at a door looks like). This
--- is a direct fallback: door-target whatever Switch is nearest and click it.
--- Harmless when nothing is close by, and throttled so it doesn't spam-click one
--- while just walking past it.
-local function tryOpenNearbyDoor(force)
-    local now = os.clock()
-    if not force and (now - stuckState.lastDoorClickAt) < 2.0 then return false end
-    local ok, dist = pcall(function() return mq.TLO.Switch.Distance3D() end)
-    if not ok or not dist or dist > 20 then return false end
-    mq.cmd('/doortarget')
-    mq.delay(50)
-    mq.cmd('/click left target')
-    stuckState.lastDoorClickAt = now
-    return true
-end
-
 local function performUnstuck()
-    local now = os.clock()
     if tryOpenNearbyDoor(true) then
         print('\ay[Triune]\ax stuck -- tried opening a nearby door.')
         mq.delay(600)
         stuckState.counter = 0
-        stuckState.lastStuckRecoveryAt = now
+        stuckState.lastStuckRecoveryAt = os.clock()
         pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil
         return
     end
 
+    local now = os.clock()
     -- Increment attempt sequence for recurring stuck events near the same obstacle.
     -- If previous recovery was > 20s ago, reset attempts counter to 1.
     if not stuckState.lastStuckRecoveryAt or (now - stuckState.lastStuckRecoveryAt) > 20 then
@@ -5431,6 +5561,12 @@ local function performUnstuck()
         pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
         if stickActive then mq.cmd('/stick off') end
     end
+    pcall(function()
+        if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving() then
+            mq.cmd('/moveto off')
+        end
+    end)
+    pcall(function() mq.cmd('/keypress forward') end)
 
     if stuckState.attempts == 1 then
         -- Step 1: back up and jump
@@ -5518,10 +5654,10 @@ local function checkStuck()
         return
     end
 
-    -- If casting, sitting, medding, or immobilized (stunned/rooted), do not count as stuck
+    -- If casting, sitting, ducking, medding, or immobilized (stunned/rooted), do not count as stuck
     local me = mq.TLO.Me
     if me() then
-        if isCasting() or me.Sitting() or me.Stunned() or me.Rooted() or runtime.medBreakActive then
+        if isCasting() or me.Sitting() or me.Ducking() or me.Stunned() or me.Rooted() or runtime.medBreakActive then
             stuckState.counter = 0
             stuckState.lastX, stuckState.lastY = me.X() or 0, me.Y() or 0
             return
@@ -5533,9 +5669,13 @@ local function checkStuck()
     if nt() and (nt.PctHPs() or 0) > 0 and not nt.Dead() then
         local reqDist = (nt.Type() == 'PC' and (ctrl.chase_dist or 15) or desiredRange()) + 12
         if distToId(nt.ID()) <= reqDist then
-            stuckState.counter = 0
-            stuckState.lastX, stuckState.lastY = me.X() or 0, me.Y() or 0
-            return
+            if nt.Type() == 'NPC' and not hasLoS(nt.ID()) then
+                tryOpenNearbyDoor() -- close to target but blocked by door/wall; try opening doors
+            else
+                stuckState.counter = 0
+                stuckState.lastX, stuckState.lastY = me.X() or 0, me.Y() or 0
+                return
+            end
         end
     end
 
@@ -5630,7 +5770,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local anchorRadius = isCampMode and (searchRadius or ctrl.camp_radius or 100) or
         (anchorLoc and (ctrl.hunter_combat_radius or 0) or 0)
 
-    -- Fixed: Explicit Y/X handling to account for EQ's (Y, X) standard
+    -- Explicit Y/X handling to account for EQ's (Y, X) standard
     local function outsideAnchor(sy, sx)
         if anchorRadius <= 0 or not anchorLoc then return false end
         -- When Waypoint Patrol is active, pulling/hunting scans dynamically around the character's patrol location
@@ -5657,13 +5797,14 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local myZ    = mq.TLO.Me.Z() or 0
 
     -- 1. Check XTarget first (with distance/level validations applied)
+    local maxXtarDist = math.max(radius, (ctrl and ctrl.xtar_nav_dist) or 150)
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
             local id = xt.ID()
             local dist = xt.Distance3D() or 999
             local lvl = xt.Level() or 0
-            if dist <= radius and lvl >= minLv and lvl <= maxLv then
+            if dist <= maxXtarDist and lvl >= minLv and lvl <= maxLv then
                 if isPullAllowed(xt.CleanName()) and not isUnreachable(id) then
                     if not outsideAnchor(xt.Y() or 0, xt.X() or 0) then
                         return id
@@ -5673,23 +5814,47 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         end
     end
 
-    -- 2. Scan Zone Spawns (Fixed: 'continue' instead of 'break' on missing index)
-    local search     = string.format('npc targetable radius %d', radius)
-    local spawnCount = mq.TLO.SpawnCount(search)() or 0
-    local maxSearch  = math.min(spawnCount, 50) -- Scan up to 50 valid matches
-
-    for i = 1, maxSearch do
+    -- 2. Scan Zone Spawns sequentially by proximity (up to 50 matches)
+    local search = string.format('npc targetable radius %d', radius)
+    for i = 1, 50 do
         local s = mq.TLO.NearestSpawn(i, search)
-        if s() and s.ID() > 0 then
-            if s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
-                local lvl = s.Level() or 0
-                if lvl >= minLv and lvl <= maxLv then
-                    local sz = s.Z() or myZ
-                    if math.abs(sz - myZ) <= maxZ then
-                        local sy, sx = s.Y() or 0, s.X() or 0
-                        if not outsideAnchor(sy, sx) then
-                            if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(s.ID()) then
-                                return s.ID()
+        if not (s and s()) then break end
+        local sid = s.ID() or 0
+        if sid > 0 then
+            local stype = s.Type() or ''
+            if stype == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
+                local isPlayerOwned = false
+                pcall(function()
+                    if s.Trader and s.Trader() then isPlayerOwned = true return end
+                    local master = s.Master
+                    if master and master() then
+                        local mtype = master.Type() or ''
+                        if mtype == 'PC' or mtype == 'Mercenary' then isPlayerOwned = true return end
+                    end
+                end)
+                if not isPlayerOwned then
+                    local lvl = s.Level() or 0
+                    if lvl >= minLv and lvl <= maxLv then
+                        local sz = s.Z() or myZ
+                        if math.abs(sz - myZ) <= maxZ then
+                            local sy, sx = s.Y() or 0, s.X() or 0
+                            if not outsideAnchor(sy, sx) then
+                                if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(sid) then
+                                    local pathOk = true
+                                    if navLoaded() then
+                                        local dist = s.Distance3D() or 999
+                                        if dist > 25 then
+                                            local hasPath = false
+                                            local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
+                                            if ok and not hasPath then
+                                                pathOk = false
+                                            end
+                                        end
+                                    end
+                                    if pathOk then
+                                        return sid
+                                    end
+                                end
                             end
                         end
                     end
@@ -6043,7 +6208,7 @@ fullStop = function()
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
     if runtime.medBreakActive then
-        runtime.medBreakActive = false; if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+        runtime.medBreakActive = false; if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
     end
     stuckState.counter = 0
     stuckState.attempts = 0
@@ -6091,43 +6256,65 @@ local function combatTick()
     if not ctrl.medbreak_enabled then
         if runtime.medBreakActive then
             runtime.medBreakActive = false
-            if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+            if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
         end
     else
         local myHp = pctHP(mq.TLO.Me.ID())
         local myMana = mq.TLO.Me.PctMana() or 100
+        local maxMana = mq.TLO.Me.MaxMana() or 0
         local myEnd = mq.TLO.Me.PctEndurance() or 100
-        local xtarPresent = anyXtarAlive() or mq.TLO.Me.Combat() or
-        ((mq.TLO.Target() and mq.TLO.Target.Type() == 'NPC') and distToId(mq.TLO.Target.ID() or 0) <= 60)
+        local maxEnd = mq.TLO.Me.MaxEndurance() or 0
+
+        -- Strictly verify we are not in combat and have NO hostile NPCs on XTarget
+        local inCombatOrXtar = isCombat() or anyXtarAlive(true)
+        if not inCombatOrXtar then
+            pcall(function()
+                if mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then inCombatOrXtar = true end
+                if mq.TLO.Me.CombatState() == 'COMBAT' then inCombatOrXtar = true end
+                local hCount = mq.TLO.Me.XTHaterCount() or 0
+                if hCount > 0 then inCombatOrXtar = true end
+                local aCount = mq.TLO.Me.XTAggroCount() or 0
+                if aCount > 0 then inCombatOrXtar = true end
+            end)
+        end
+
         if not runtime.medBreakActive then
-            if not xtarPresent then
-                if (ctrl.medbreak_hp_on and myHp <= ctrl.medbreak_hp_start)
-                    or (ctrl.medbreak_mana_on and myMana <= ctrl.medbreak_mana_start)
-                    or (ctrl.medbreak_end_on and myEnd <= ctrl.medbreak_end_start) then
+            if not inCombatOrXtar then
+                local needHp   = ctrl.medbreak_hp_on and myHp <= (ctrl.medbreak_hp_start or 20)
+                local needMana = ctrl.medbreak_mana_on and maxMana > 0 and myMana <= (ctrl.medbreak_mana_start or 20)
+                local needEnd  = ctrl.medbreak_end_on and maxEnd > 0 and myEnd <= (ctrl.medbreak_end_start or 20)
+
+                if needHp or needMana or needEnd then
                     fullStop()
                     runtime.medBreakActive = true
                     print('\ay[Triune]\ax Med Break -- resting to recover.')
+                    if not mq.TLO.Me.Sitting() and not mq.TLO.Me.Ducking() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
+                        mq.cmd('/sit')
+                    end
                 end
             end
         else
-            if xtarPresent then
+            if inCombatOrXtar then
                 runtime.medBreakActive = false
-                if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
-                print('\ay[Triune]\ax Med Break cancelled -- combat / hostile nearby!')
+                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+                print('\ay[Triune]\ax Med Break cancelled -- combat / hostile on XTarget!')
             else
-                local hpOk = not ctrl.medbreak_hp_on or myHp >= ctrl.medbreak_hp_stop
-                local manaOk = not ctrl.medbreak_mana_on or myMana >= ctrl.medbreak_mana_stop
-                local endOk = not ctrl.medbreak_end_on or myEnd >= ctrl.medbreak_end_stop
+                local hpOk   = not ctrl.medbreak_hp_on or myHp >= (ctrl.medbreak_hp_stop or 90)
+                local manaOk = not ctrl.medbreak_mana_on or maxMana == 0 or myMana >= (ctrl.medbreak_mana_stop or 90)
+                local endOk  = not ctrl.medbreak_end_on or maxEnd == 0 or myEnd >= (ctrl.medbreak_end_stop or 90)
+
                 if hpOk and manaOk and endOk then
                     runtime.medBreakActive = false
-                    if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+                    if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
                     print('\ag[Triune]\ax Med Break over -- resuming.')
                 end
             end
         end
     end
     if runtime.medBreakActive then
-        if not mq.TLO.Me.Sitting() and not mq.TLO.Me.Combat() then mq.cmd('/sit') end
+        if not mq.TLO.Me.Sitting() and not mq.TLO.Me.Ducking() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
+            mq.cmd('/sit')
+        end
         return
     end
 
@@ -6220,6 +6407,14 @@ local function combatTick()
                 if not tspawn() or tspawn.Dead() or (tspawn.PctHPs() or 0) <= 0 or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
                     haveNPC = false
                     mq.cmd('/target clear')
+                elseif isXTargetId(tid) then
+                    local maxXtarDist = (ctrl.xtar_nav_dist or 150)
+                    if distToId(tid) > maxXtarDist and not mq.TLO.Me.Combat() then
+                        -- XTarget is beyond max chase range and not actively engaged in melee
+                        haveNPC = false
+                        mq.cmd('/target clear')
+                        stopMoving()
+                    end
                 elseif not isXTargetId(tid) and not mq.TLO.Me.Combat() and distToId(tid) > maxDist then
                     -- If target is not on XTarget and far away outside local scan range, clear so we continue waypoint patrol
                     haveNPC = false
@@ -6230,13 +6425,13 @@ local function combatTick()
             local xtarId = firstNPCXtarget(false)
             if xtarId then
                 local curId = haveNPC and mq.TLO.Target.ID() or 0
-                if curId == 0 or (not isXTargetId(curId) and distToId(curId) > 35 and not mq.TLO.Me.Combat()) then
+                if curId ~= xtarId and (curId == 0 or not isXTargetId(curId)) then
                     stopMoving()
                     pursuit.id = 0
                     pursuit.lastNavTargetId = 0
                     if setTarget(xtarId) then
-                        print(string.format('\ay[Triune]\ax Puller (Hunt) aggro -- switching to XTarget #%d (%s)',
-                            xtarId, tostring(mq.TLO.Target.CleanName())))
+                        print(string.format('\ay[Triune]\ax Puller (Hunt) XTarget detected -- engaging #%d (%s) [dist %.1f, max chase %d]',
+                            xtarId, tostring(mq.TLO.Target.CleanName()), distToId(xtarId), ctrl.xtar_nav_dist or 150))
                     end
                     haveNPC = true
                 end
@@ -6333,10 +6528,11 @@ local function combatTick()
                     local style = ctrl and ctrl.combat_style or 'Melee'
                     if style == 'Melee' then
                         mq.cmd('/face fast')
-                        if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+                        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
                         if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
                     elseif style == 'Ranged' then
                         mq.cmd('/face fast')
+                        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
                         if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
                     elseif style == 'Pet' then
                         mq.cmd('/face fast')
@@ -6344,7 +6540,7 @@ local function combatTick()
                         local petId = mq.TLO.Me.Pet.ID() or 0
                         if petId > 0 then mq.cmd('/pet attack') end
                         mq.cmd('/say #petcmd attack all')
-                    elseif combatStyle == 'Spell' then
+                    elseif style == 'Spell' then
                         mq.cmd('/face fast')
                         local slotToCast = ctrl.pull_spell_gem or 1
                         local g = loadout.gems and loadout.gems[slotToCast]
@@ -6482,7 +6678,7 @@ local function combatTick()
         if not isPullStandBack then
             local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
             if haveNPC and not isDraggingToCamp and autoAttackOk and (engage or (tid > 0 and distToId(tid) <= desiredRange(tid))) then
-                if mq.TLO.Me.Sitting() then
+                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
                     print('\ag[Triune]\ax Standing up to attack.')
                     mq.cmd('/stand')
                 end
@@ -6495,7 +6691,7 @@ local function combatTick()
         end
     elseif style == 'Ranged' then
         if haveNPC and engage and autoAttackOk then
-            if mq.TLO.Me.Sitting() then mq.cmd('/stand') end
+            if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
             if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
         else
             if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
@@ -6704,6 +6900,7 @@ local function combatTick()
         local tid = mq.TLO.Target.ID() or 0
         local d = (tid > 0) and distToId(tid) or 999
         if ctrl and ctrl.combat_style == 'Melee' and not mq.TLO.Me.Combat() and haveNPC and not isDraggingToCamp and d <= desiredRange(tid) then
+            if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
             mq.cmd('/attack on')
         end
     end

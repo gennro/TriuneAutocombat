@@ -2,6 +2,39 @@
 
 ## 2026-08-14
 
+- **Ducking State Detection & Un-Duck / Stand Guards across Combat & Casting.**
+  - **Comprehensive Ducking Checks**: Added `isDucking()` (`mq.TLO.Me.Ducking()`) and `isSitting()` helpers with `pcall` guards to detect when the player is crouched/ducked.
+  - **Combat & Spell Casting Unlock**: Added automatic `/stand` commands before casting spells (`castGem`), firing activated Alternate Advancement abilities (`fireAA`), initiating disciplines (`fireDisc`), triggering combat skills (`fireSkill`), engaging melee auto-attack, engaging ranged auto-fire, and memorizing spells (`memorizeSpell` & `triune_spellbook.lua`). This prevents characters from getting stuck unable to fight or cast if ducked.
+  - **Anti-Stuck & Med Break Integration**: Included `Me.Ducking()` in `checkStuck()` and resting state checks so ducked characters are properly handled and restored to standing when combat or movement resumes.
+
+- **Med Break Logic Refinement & Combat / XTarget Safety Guards.**
+  - **Comprehensive In-Combat & XTarget Verification**: Gated entering and maintaining a Med Break behind exhaustive combat checks (`isCombat()`, `Me.Combat()`, `Me.AutoFire()`, `Me.CombatState() == 'COMBAT'`, `Me.XTHaterCount()`, `Me.XTAggroCount()`, and scanning all XTarget slots for any live hostile NPCs/Pets).
+  - **Non-Hostile / Unreachable Filter Separation**: Ensured friendly players, group/raid members, and player/mercenary pets on XTarget slots are never mistaken for hostile enemies. Added `includeUnreachable` safety flag to `countNPCXtarget()` / `anyXtarAlive()` so unreachable aggro mobs prevent sitting.
+  - **Non-Mana Class Support**: Added `MaxMana() > 0` and `MaxEndurance() > 0` validation to prevent pure melee or non-endurance classes from becoming locked in recovery states if thresholds are active.
+  - **Smooth Sit Execution & UI Status**: Cleanly executes `/sit` when stationary out of combat and displays `MED BREAK` in Arcane blue on the Mini GUI while resting.
+
+- **"Cannot Hit From Here" Door-Opening Recovery & Close-in Repositioning.**
+  - **Chat Event Listeners**: Registered event handlers for `#*#cannot hit#*#from here#*#`, `#*#can't hit#*#from here#*#`, and `#*#not in line of sight#*#`.
+  - **Automated Door & Switch Interaction**: When combat reports being unable to strike the target, the engine immediately attempts to click/toggle the nearest door or switch within 25 units (`/doortarget`, `/click left door`, `/click left target`, `Switch.Toggle()`).
+  - **Dynamic Unwedge & Repositioning**: Resets pursuit arrival caches, faces the target, executes a backup/strafe/jump maneuver if repeated geometry snags occur in quick succession, and re-engages close-in navigation (distance 6) to re-establish line of sight.
+  - **LoS Check in `checkStuck()`**: `checkStuck()` now verifies Line of Sight (`hasLoS`) before assuming arrival near an NPC, allowing door opening and unstuck maneuvers to trigger when separated by a closed door or corner.
+
+- **Refined Nearest NPC Target Acquisition (`findRoamTarget`).**
+  - **Direct Sequential Proximity Iteration**: Removed the `SpawnCount` loop limiter in `findRoamTarget()`, which could return 0 on some MQ builds and cause target selection to silently stall. The engine now directly evaluates candidate spawns up to 50 matches and terminates cleanly on falsy returns.
+  - **Player & Mercenary Pet Filtering**: Added ownership checks to ensure player-owned and mercenary-owned pets or bazaar traders are never selected as roam/pull targets.
+  - **Navigation Path Pre-Validation**: When MQ2Nav is active, distant spawns (> 25 units) are verified for a valid navigation path (`PathExists`) prior to selection, automatically skipping mobs stuck inside unreachable walls or ceiling geometry in favor of reachable NPCs.
+  - **Chase-Range XTarget Ingestion**: Synchronized `findRoamTarget()` XTarget evaluation with `ctrl.xtar_nav_dist` so active aggro within chase range is consistently prioritized over distant roam targets.
+
+- **Puller Hunt Mode XTarget Prioritization & Chase Range Enforcement.**
+  - **Immediate XTarget Acquisition**: In `Puller (Hunt)` mode, if an alive NPC appears on XTarget within `Max XTarget Chase Range` (`ctrl.xtar_nav_dist`), the bot immediately switches target to the XTarget add rather than continuing to pursue an un-aggroed roam mob.
+  - **Chase Range Boundaries**: Enforced `ctrl.xtar_nav_dist` so XTargets beyond the configured chase range are cleared (returning the bot to patrol/hunting) while in-range XTargets are pursued and destroyed.
+  - **Fixed Combat Style Spell Check**: Corrected variable check in Puller Hunt attack routine to ensure `Spell` combat style casts detrimental gems appropriately.
+
+- **Fixed `DoCommand - Couldn't parse '/moveto ...'` Error When Pursuing Off-Mesh Spawns.**
+  - **Clean Native Fallback in `moveToward`**: Removed an unguarded `/moveto loc` call in `moveToward()` that fired when MQ2Nav had no path (e.g., flying/elevated mobs like sky drakes) and MQ2MoveUtils was not loaded. When MoveUtils is not installed, movement now falls through directly to native EQ keyboard movement (`/face fast` + `/keypress forward hold`) without erroring or stalling.
+  - **Native Keypress Release**: Updated `stopMoving()` to release `/keypress forward` when native movement was active for spawn pursuit.
+  - **Unified Stuck Detection across Movement Types**: Added native keyboard pursuit state to `isMoveActive()`, ensuring `checkStuck()` actively monitors displacement and triggers `performUnstuck()` maneuvers even when falling back to native movement. Ensured `performUnstuck()` releases all movement types before performing directional unstuck maneuvers.
+
 - **Fixed Manual mode not auto-attacking or closing to melee range.**
   - **Dynamic Spawn Melee Reach (`desiredRange`)**: Replaced the static hardcoded distance check with dynamic spawn reach (`s.MaxRangeTo()`, default 18 units) so character movement does not stall or freeze just outside melee range on larger models or uneven terrain.
   - **Sequential Melee Engagement**: Character navigates directly to melee range first with all abilities/spells suppressed (`engage = false`).
