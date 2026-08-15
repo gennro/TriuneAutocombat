@@ -118,6 +118,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac run` | `/ac start` | Start autocombat |
 | `/ac pause` | `/ac stop` | Pause autocombat and stop moving |
 | `/ac burn [on\|off]` | `/ac burnon`, `/ac burnoff` | Toggle Burn mode on/off |
+| `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |
 | `/ac compact` | `/ac mini`, `/ac hud` | Toggle the compact Mini HUD |
 | `/ac status` | | Print current status and mode to chat |
 | `/ac help` | `/ac ?` | Show command help in chat |
