@@ -13,8 +13,8 @@
   - Fixed crash: `isHostileTarget` was called in `setTarget` (line 4070) but defined as a `local function` 300 lines later — added forward declaration.
 
 
-- **Project Version & Documentation Overhaul.**
-  - Set project version to **1.6** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+- **Project Version & Documentation Overhaul (v1.6.1).**
+  - Set project version to **1.6.1** across `triune.lua`, `triune_updater.lua`, and `README.md`.
   - Rewrote and simplified `README.md` into a friendly, player-focused guide with a 2-minute quick start guide, clean combat mode breakdown, and full command reference.
   - Added dedicated server context and links for **[Project Triune](https://nms.bestemu.com/)**, highlighting support for 3-class multiclass / gestalt builds.
 
