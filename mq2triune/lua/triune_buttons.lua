@@ -892,7 +892,8 @@ local function drawEditWindow()
         ImGui.Dummy(0, 4)
         local ctrlS = false
         if ImGuiMod and ImGuiKey then
-            ctrlS = pcall(ImGui.IsKeyChordPressed, bit.bor(ImGuiMod.Ctrl, ImGuiKey.S))
+            local ok, pressed = pcall(ImGui.IsKeyChordPressed, bit.bor(ImGuiMod.Ctrl, ImGuiKey.S))
+            ctrlS = ok and pressed or false
         end
         if ImGui.Button('Save', 90, 26) or ctrlS then
             saveEdit()
