@@ -1,40 +1,42 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- Triune Buffbot v1.0 (Standalone MacroQuest ImGui Script)
+-- Triune Buffbot v1.1 (Standalone MacroQuest ImGui Script)
 -- ----------------------------------------------------------------------------
 -- Compatible with MQ LuaJIT (Lua 5.1 syntax safe)
 -- Run with:  /lua run triune_buffbot
 --
 -- Features:
--- - Saves current spell gems on startup / start, memorizes selected buff list.
--- - Restores original spell gems on stop / script exit via mq.atexit().
--- - Monitors incoming /tell messages, verifies distance to requester.
--- - Interactive two-stage tell confirmation ("Would you like buffs? Reply 'yes'").
--- - Casts selected buff spells and sends a completion /tell when finished.
--- - Dropdown combo boxes for selecting buff spells per slot from scribed spellbook.
--- - Automatic configuration persistence per character (triune_buffbot_config.lua).
+-- - Interactive Tell Menu: Responds to incoming /tells with a numbered list of
+--   currently memorized spell gems and an [all] option.
+-- - Flexible Requester Selection: Requesters can reply with 'all' or specific
+--   spell numbers (e.g. '1 3' or '1, 2') to receive only their desired buffs.
+-- - Direct Memorized Spell Gem Casting: Casts selected buffs directly from the
+--   active spell bar without gem-swapping or book scanning overhead.
+-- - Range, Cooldown & Low-Mana Protections.
+-- - Self-test compatible: Allows testing from the local character.
+-- - Configuration persistence per character (triune_buffbot_config.lua).
 -- - Theme styling adhering to Triune dark design system.
 -- ============================================================================
 
-local mq = require('mq')
-local ImGui = require('ImGui')
-local bit = require('bit') -- LuaJIT bitwise library
+local mq           = require('mq')
+local ImGui        = require('ImGui')
+local bit          = require('bit') -- LuaJIT bitwise library
 
-local scriptDir = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
-package.path = scriptDir .. "?.lua;" .. package.path
+local scriptDir    = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
+package.path       = scriptDir .. "?.lua;" .. package.path
 
-local VERSION = '1.0'
-local cfg = mq.configDir
+local VERSION      = '1.1'
+local cfg          = mq.configDir
 
 -- ============================================================================
 -- Theme & Styling Setup
 -- ============================================================================
-local GOLD  = { 1.00, 0.70, 0.54, 1 }
-local ARC   = { 0.30, 0.70, 1.00, 1 }
-local MUTED = { 0.49, 0.56, 0.65, 1 }
-local GOOD  = { 0.37, 0.88, 0.64, 1 }
-local WARN  = { 1.00, 0.72, 0.30, 1 }
-local ERR   = { 0.95, 0.35, 0.35, 1 }
+local GOLD         = { 1.00, 0.70, 0.54, 1 }
+local ARC          = { 0.30, 0.70, 1.00, 1 }
+local MUTED        = { 0.49, 0.56, 0.65, 1 }
+local GOOD         = { 0.37, 0.88, 0.64, 1 }
+local WARN         = { 1.00, 0.72, 0.30, 1 }
+local ERR          = { 0.95, 0.35, 0.35, 1 }
 
 local _colN, _varN = 0, 0
 
@@ -112,45 +114,74 @@ local function pushTheme()
 end
 
 local function popTheme()
-    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 end ---@diagnostic disable-line: undefined-field
-    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 end ---@diagnostic disable-line: undefined-field
+    if _varN > 0 then
+        pcall(mq.imgui.PopStyleVar, _varN); _varN = 0
+    end ---@diagnostic disable-line: undefined-field
+    if _colN > 0 then
+        pcall(mq.imgui.PopStyleColor, _colN); _colN = 0
+    end ---@diagnostic disable-line: undefined-field
 end
 
 -- ============================================================================
 -- Structured State Tables
 -- ============================================================================
-local NUM_GEMS = 12
-
 local ctrl = {
-    enabled       = false,
+    enabled       = true,
+    autoMed       = true,
     maxRange      = 100,
     timeoutSec    = 30,
     cooldownSec   = 60,
     minManaPct    = 15,
-    promptMsg     = "Would you like buffs? Reply 'yes' within 30 seconds.",
-    completionMsg = "All buffs cast! Enjoy!",
-    buffSlots     = {} -- buffSlots[slot] = spellName
+    completionMsg = "All buffs cast! Enjoy!"
 }
 
 local runtime = {
-    openGUI             = true,
-    state               = 'STOPPED', -- STOPPED, IDLE, MEMMING, CASTING, RESTORING
-    savedGems           = {},        -- savedGems[slot] = originalSpellName or nil
-    pendingOffers       = {},        -- sender -> { timestamp = os.time(), spawnID = id }
-    cooldowns           = {},        -- sender -> timestamp
-    activeQueue         = {},        -- array of { sender = name, spawnID = id }
-    currentRequester    = nil,
-    currentSpellIndex   = 0,
-    log                 = {},
-    scribedSpells       = {},        -- list of scribed spell names for dropdown
-    scribedSpellsLoaded = false,
-    pendingAction       = nil        -- queued thread-safe UI actions
+    openGUI           = true,
+    state             = 'IDLE', -- STOPPED, IDLE, CASTING, MEDDING
+    pendingOffers     = {},     -- sender -> { timestamp = os.time(), spawnID = id, gems = list }
+    cooldowns         = {},     -- sender -> timestamp
+    activeQueue       = {},     -- array of { sender = name, spawnID = id, gems = list }
+    currentRequester  = nil,
+    currentSpellsText = "",
+    log               = {},
+    pendingAction     = nil -- queued thread-safe UI actions
 }
 
 local function logMsg(msg, isWarn, isErr)
     local prefix = os.date("[%H:%M:%S] ")
     table.insert(runtime.log, 1, { time = prefix, msg = msg, isWarn = isWarn, isErr = isErr })
     if #runtime.log > 100 then table.remove(runtime.log) end
+end
+
+local function getMyPctMana()
+    local maxMana = 0
+    local pctMana = 100
+    pcall(function()
+        maxMana = mq.TLO.Me.MaxMana() or 0
+        pctMana = mq.TLO.Me.PctMana() or 100
+    end)
+    if maxMana == 0 then return 100 end
+    return pctMana
+end
+
+-- ============================================================================
+-- Gem Discovery Helper
+-- ============================================================================
+local function getAvailableGems()
+    local list = {}
+    local numGems = 8
+    pcall(function() numGems = mq.TLO.Me.NumGems() or 8 end)
+    for gemNum = 1, numGems do
+        local name = nil
+        pcall(function()
+            local gem = mq.TLO.Me.Gem(gemNum)
+            if gem() then name = gem.Name() end
+        end)
+        if name and name ~= '' then
+            table.insert(list, { gem = gemNum, name = name })
+        end
+    end
+    return list
 end
 
 -- ============================================================================
@@ -191,13 +222,13 @@ local function saveConfig(silent)
     end
 
     allData[charKey] = {
+        enabled       = ctrl.enabled,
+        autoMed       = ctrl.autoMed,
         maxRange      = ctrl.maxRange,
         timeoutSec    = ctrl.timeoutSec,
         cooldownSec   = ctrl.cooldownSec,
         minManaPct    = ctrl.minManaPct,
-        promptMsg     = ctrl.promptMsg,
-        completionMsg = ctrl.completionMsg,
-        buffSlots     = ctrl.buffSlots
+        completionMsg = ctrl.completionMsg
     }
 
     local f = io.open(cfg .. '/triune_buffbot_config.lua', 'w')
@@ -223,167 +254,147 @@ local function loadConfig()
 
     local charData = allData[charKey] or allData['default']
     if charData and type(charData) == 'table' then
+        if charData.enabled ~= nil then ctrl.enabled = charData.enabled end
+        if charData.autoMed ~= nil then ctrl.autoMed = charData.autoMed end
         if charData.maxRange then ctrl.maxRange = charData.maxRange end
         if charData.timeoutSec then ctrl.timeoutSec = charData.timeoutSec end
         if charData.cooldownSec then ctrl.cooldownSec = charData.cooldownSec end
         if charData.minManaPct then ctrl.minManaPct = charData.minManaPct end
-        if charData.promptMsg then ctrl.promptMsg = charData.promptMsg end
         if charData.completionMsg then ctrl.completionMsg = charData.completionMsg end
-        if type(charData.buffSlots) == 'table' then ctrl.buffSlots = charData.buffSlots end
         logMsg("Loaded saved buffbot configuration for " .. charKey .. ".")
     end
 end
 
 -- ============================================================================
--- Scribed Spellbook Inspection
+-- Tell Menu & Choice Parsing
 -- ============================================================================
-local function refreshScribedSpells()
-    local spells = {}
-    pcall(function()
-        for i = 1, 720 do
-            local spell = mq.TLO.Me.Book(i)
-            if spell() then
-                local name = spell.Name()
-                if name and name ~= '' then
-                    table.insert(spells, name)
-                end
-            end
-        end
-    end)
-    table.sort(spells)
-    runtime.scribedSpells = spells
-    runtime.scribedSpellsLoaded = true
-    logMsg(string.format("Loaded %d scribed spells from spellbook.", #spells))
-end
-
--- ============================================================================
--- Gem Save / Restore / Memorize Logic
--- ============================================================================
-local function clearCursor()
-    pcall(function()
-        local count = 0
-        while (mq.TLO.Cursor.ID() or 0) > 0 and count < 255 do
-            mq.cmd('/autoinventory')
-            mq.delay(50)
-            count = count + 1
-        end
-    end)
-end
-
-local function saveCurrentGems()
-    runtime.savedGems = {}
-    local numGems = 8
-    pcall(function() numGems = mq.TLO.Me.NumGems() or 8 end)
-    for slot = 1, numGems do
-        local spellName = nil
-        pcall(function()
-            local gem = mq.TLO.Me.Gem(slot)
-            if gem() then spellName = gem.Name() end
-        end)
-        runtime.savedGems[slot] = spellName
+local function sendMenuTells(target, gemList)
+    if #gemList == 0 then
+        pcall(function() mq.cmdf('/tell %s I currently have no buff spells memorized.', target) end)
+        return
     end
-    logMsg(string.format("Saved snapshot of %d spell gems.", numGems))
-end
 
-local function restoreSavedGems()
-    if not runtime.savedGems or next(runtime.savedGems) == nil then return end
-    runtime.state = 'RESTORING'
-    logMsg("Restoring original spell gems...")
-    local numGems = 8
-    pcall(function() numGems = mq.TLO.Me.NumGems() or 8 end)
-
-    clearCursor()
-    for slot = 1, numGems do
-        local orig = runtime.savedGems[slot]
-        local current = nil
-        pcall(function() current = mq.TLO.Me.Gem(slot).Name() end)
-
-        if orig and orig ~= '' then
-            if current ~= orig then
-                pcall(function()
-                    mq.cmdf('/memspell %d "%s"', slot, orig)
-                    mq.delay(3000, function() return (mq.TLO.Me.Gem(slot).Name() or '') == orig end)
-                end)
-            end
-        else
-            if current then
-                pcall(function()
-                    mq.cmdf('/unmemspell %d', slot)
-                    mq.delay(1000, function() return mq.TLO.Me.Gem(slot).Name() == nil end)
-                end)
-            end
-        end
+    local items = {}
+    for idx, item in ipairs(gemList) do
+        table.insert(items, string.format("[%d] %s", idx, item.name))
     end
-    runtime.state = 'STOPPED'
-    logMsg("Original spell gems successfully restored.")
+    table.insert(items, "[all] All")
+
+    local fullStr = "Buffs: " .. table.concat(items, ", ") .. " | Reply with # (e.g. 1 3) or 'all'."
+    if #fullStr <= 300 then
+        pcall(function() mq.cmdf('/tell %s %s', target, fullStr) end)
+    else
+        local mid = math.ceil(#items / 2)
+        local p1, p2 = {}, {}
+        for i = 1, mid do table.insert(p1, items[i]) end
+        for i = mid + 1, #items do table.insert(p2, items[i]) end
+        pcall(function() mq.cmdf('/tell %s Buffs (1/2): %s', target, table.concat(p1, ", ")) end)
+        pcall(function() mq.cmdf('/tell %s Buffs (2/2): %s (Reply with # or \'all\')', target, table.concat(p2, ", ")) end)
+    end
 end
 
-local function memorizeBuffSlots()
-    runtime.state = 'MEMMING'
-    logMsg("Memorizing configured buff spell slots...")
-    clearCursor()
+local function parseRequestedGems(msg, gemList)
+    if not gemList or #gemList == 0 then return nil end
 
-    for slot = 1, NUM_GEMS do
-        local targetSpell = ctrl.buffSlots[slot]
-        if targetSpell and targetSpell ~= '' then
-            local current = nil
-            pcall(function() current = mq.TLO.Me.Gem(slot).Name() end)
-            if current ~= targetSpell then
-                pcall(function()
-                    mq.cmdf('/memspell %d "%s"', slot, targetSpell)
-                    mq.delay(4000, function() return (mq.TLO.Me.Gem(slot).Name() or '') == targetSpell end)
-                end)
-            end
+    local trimmed = tostring(msg):lower():gsub("^%s*(.-)%s*$", "%1")
+
+    -- 1. Check for explicit 'all' keyword
+    if trimmed == 'all' or trimmed == 'all buffs' or trimmed == 'buff all' then
+        local allGems = {}
+        for _, item in ipairs(gemList) do
+            table.insert(allGems, item)
+        end
+        return allGems
+    end
+
+    -- 2. Check for specific numbers (e.g. '1', '2', '1 3', '1, 2', '1 2 3')
+    local selected = {}
+    local seen = {}
+    for numStr in trimmed:gmatch("%d+") do
+        local idx = tonumber(numStr)
+        if idx and gemList[idx] and not seen[idx] then
+            seen[idx] = true
+            table.insert(selected, gemList[idx])
         end
     end
 
-    -- Wait briefly for spell gems to finish memorizing/charging
-    mq.delay(2000)
-    runtime.state = 'IDLE'
-    logMsg("Buff spell memorization complete. Listening for tells.")
-end
+    if #selected > 0 then
+        return selected
+    end
 
--- Ensure gems are restored if script terminates via /lua stop
-if type(mq.atexit) == 'function' then
-    mq.atexit(function()
-        if runtime.savedGems and next(runtime.savedGems) ~= nil then
-            restoreSavedGems()
-        end
-    end)
+    return nil
 end
 
 -- ============================================================================
 -- Interactive Tell Event Handler
 -- ============================================================================
+local lastTellLine = ""
+local lastTellTime = 0
+
 local function onTellReceived(line, sender, msg)
     if not ctrl.enabled then return end
     if not sender or sender == '' or not msg then return end
 
-    -- Check if sender is current character
+    local now = os.time()
+    if line == lastTellLine and (now - lastTellTime) < 1 then
+        return -- Deduplicate multiple event pattern triggers on same line
+    end
+    lastTellLine = line
+    lastTellTime = now
+
+    -- Strip timestamps, channel prefixes, or server names from sender
+    local cleanSender = tostring(sender):gsub("%b[]", ""):gsub("%b()", ""):match("([%a%d]+)")
+    if not cleanSender or cleanSender == '' then
+        cleanSender = tostring(sender):match("([%a%d]+)")
+    end
+    if not cleanSender or cleanSender == '' then return end
+
+    -- Ignore outbound / echo tells and ignore tells from self
+    if cleanSender:lower() == 'you' then return end
     local myName = nil
     pcall(function() myName = mq.TLO.Me.CleanName() end)
-    if myName and sender:lower() == myName:lower() then return end
+    if myName and cleanSender:lower() == myName:lower() then return end
 
-    local trimmedMsg = msg:gsub("^%s*(.-)%s*$", "%1"):lower()
-    local now = os.time()
+    -- Clean quotes/whitespace from message
+    local cleanMsg = tostring(msg):gsub("^['\"%s]+", ""):gsub("['\"%s]+$", "")
+
+    -- Log detection to UI and MQ console
+    logMsg(string.format("Incoming tell from %s: '%s'", cleanSender, cleanMsg))
+    print(string.format('\ay[Triune Buffbot]\ax Incoming tell from \aw%s\ax: \ag"%s"\ax', cleanSender, cleanMsg))
 
     -- Check Cooldown
-    local cd = runtime.cooldowns[sender]
+    local cd = runtime.cooldowns[cleanSender]
     if cd and (now - cd) < ctrl.cooldownSec then
         local rem = ctrl.cooldownSec - (now - cd)
         pcall(function()
-            mq.cmdf('/tell %s You were recently buffed! Please wait %d seconds.', sender, rem)
+            mq.cmdf('/tell %s You were recently buffed! Please wait %d seconds.', cleanSender, rem)
         end)
+        logMsg(string.format("Rejected request from '%s' (Cooldown: %ds remaining)", cleanSender, rem), true, false)
         return
     end
 
     -- Query requester spawn
     local spawn = nil
-    pcall(function() spawn = mq.TLO.Spawn(string.format('pc =%s', sender)) end)
+    pcall(function() spawn = mq.TLO.Spawn(string.format('pc =%s', cleanSender)) end)
+    if not spawn or not spawn() or (spawn.ID() or 0) <= 0 then
+        pcall(function() spawn = mq.TLO.Spawn(string.format('pc %s', cleanSender)) end)
+    end
+
+    local myLocStr = "0, 0, 0"
+    pcall(function()
+        local y = mq.TLO.Me.Y() or 0
+        local x = mq.TLO.Me.X() or 0
+        local z = mq.TLO.Me.Z() or 0
+        myLocStr = string.format("%.0f, %.0f, %.0f", y, x, z)
+    end)
+
     if not spawn or not spawn() or (spawn.ID() or 0) <= 0 then
         pcall(function()
-            mq.cmdf('/tell %s Unable to locate you in this zone for buffing.', sender)
+            mq.cmdf(
+                '/tell %s Unable to locate you in this zone for buffing. My location is /loc %s. Please come closer!',
+                cleanSender, myLocStr)
         end)
+        logMsg(string.format("Unable to locate spawn for '%s' in zone (My Loc: %s).", cleanSender, myLocStr), true, false)
         return
     end
 
@@ -391,44 +402,205 @@ local function onTellReceived(line, sender, msg)
     pcall(function() dist = spawn.Distance() or 9999 end)
     if dist > ctrl.maxRange then
         pcall(function()
-            mq.cmdf('/tell %s You are out of range for buffing (%.0f > %d). Please move closer.', sender, dist, ctrl.maxRange)
+            mq.cmdf(
+                '/tell %s You are out of range for buffing (%.0f > %d). My location is /loc %s. Please come closer!',
+                cleanSender, dist, ctrl.maxRange, myLocStr)
         end)
+        logMsg(
+            string.format("Requester '%s' out of range (%.0f > %d). Sent /loc %s.", cleanSender, dist, ctrl.maxRange,
+                myLocStr), true, false)
         return
     end
 
-    -- Check existing pending offer for sender
-    local pending = runtime.pendingOffers[sender]
-
-    if pending and (now - pending.timestamp) <= ctrl.timeoutSec then
-        -- Sender is replying to our offer prompt
-        if trimmedMsg == 'yes' or trimmedMsg == 'y' or trimmedMsg:find('yes') then
-            logMsg(string.format("Requester '%s' accepted buff offer. Queuing request.", sender))
-            runtime.pendingOffers[sender] = nil
-            table.insert(runtime.activeQueue, { sender = sender, spawnID = spawn.ID() })
-            pcall(function()
-                mq.cmdf('/tell %s Stand by, preparing to cast your buffs!', sender)
-            end)
-        else
-            logMsg(string.format("Requester '%s' sent follow-up tell: '%s'", sender, msg))
-        end
-    else
-        -- Initial tell or expired offer: send prompt tell asking if they want buffs
-        runtime.pendingOffers[sender] = { timestamp = now, spawnID = spawn.ID() }
-        logMsg(string.format("Received tell from '%s'. Prompting for buff confirmation.", sender))
+    local currentGems = getAvailableGems()
+    if #currentGems == 0 then
         pcall(function()
-            mq.cmdf('/tell %s %s', sender, ctrl.promptMsg)
+            mq.cmdf('/tell %s I currently have no buff spells memorized.', cleanSender)
         end)
+        logMsg("No spells memorized on gem bar to offer.", true, false)
+        return
+    end
+
+    -- Check if requester already has an active menu offer
+    local pending = runtime.pendingOffers[cleanSender]
+    local gemListForReply = (pending and pending.gems and #pending.gems > 0) and pending.gems or currentGems
+
+    local requestedGems = parseRequestedGems(cleanMsg, gemListForReply)
+
+    if requestedGems and #requestedGems > 0 then
+        -- Requester made a valid spell selection (or replied 'all')
+        runtime.pendingOffers[cleanSender] = nil
+
+        -- Remove any stale prior entries for this sender in queue
+        for i = #runtime.activeQueue, 1, -1 do
+            if runtime.activeQueue[i].sender:lower() == cleanSender:lower() then
+                table.remove(runtime.activeQueue, i)
+            end
+        end
+
+        local currentTargetID = 0
+        pcall(function() currentTargetID = spawn.ID() or 0 end)
+
+        table.insert(runtime.activeQueue, {
+            sender  = cleanSender,
+            spawnID = currentTargetID,
+            gems    = requestedGems
+        })
+        local queuePos = #runtime.activeQueue
+        local totalAhead = queuePos - 1
+        if runtime.currentRequester and runtime.currentRequester ~= '' then
+            totalAhead = totalAhead + 1
+        end
+        local lineNum = totalAhead + 1
+
+        local namesList = {}
+        for _, sp in ipairs(requestedGems) do table.insert(namesList, string.format("[%d] %s", sp.gem, sp.name)) end
+        logMsg(string.format("Requester '%s' selected %d buff(s) (Line #%d): %s", cleanSender, #requestedGems, lineNum,
+            table.concat(namesList, ", ")))
+        print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (Line #%d): %s', #requestedGems, cleanSender, lineNum,
+            table.concat(namesList, ", ")))
+        local pctMana = getMyPctMana()
+        pcall(function()
+            if totalAhead > 0 then
+                if pctMana < ctrl.minManaPct then
+                    mq.cmdf('/tell %s Queued %d buff(s)! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', cleanSender, #requestedGems, lineNum, totalAhead, pctMana, ctrl.minManaPct)
+                else
+                    mq.cmdf('/tell %s Queued %d buff(s)! You are #%d in line (%d ahead). Please stand by!', cleanSender, #requestedGems, lineNum, totalAhead)
+                end
+            else
+                if pctMana < ctrl.minManaPct then
+                    mq.cmdf('/tell %s Queued %d buff(s)! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', cleanSender, #requestedGems, pctMana, ctrl.minManaPct)
+                elseif #requestedGems == 1 then
+                    mq.cmdf('/tell %s Stand by, casting %s! (You are #1 in line)', cleanSender, requestedGems[1].name)
+                else
+                    mq.cmdf('/tell %s Stand by, preparing to cast %d selected buffs! (You are #1 in line)', cleanSender, #requestedGems)
+                end
+            end
+        end)
+    else
+        -- If requester sent a tell that wasn't a choice, send the numbered menu
+        runtime.pendingOffers[cleanSender] = { timestamp = now, spawnID = spawn.ID(), gems = currentGems }
+        logMsg(string.format("Sent numbered buff menu to '%s'.", cleanSender))
+        sendMenuTells(cleanSender, currentGems)
     end
 end
 
-mq.event('BuffbotTell', '#1# tells you, \'#2#\'', onTellReceived)
+-- ============================================================================
+-- Interactive Hail Event Handler
+-- ============================================================================
+local lastHailTimes = {}
+local lastGlobalHailTime = 0
+
+local function onHailReceived(line, sender, targetName)
+    if not ctrl.enabled then return end
+    if not sender or sender == '' then return end
+
+    local cleanSender = tostring(sender):gsub("%b[]", ""):gsub("%b()", ""):match("([%a%d]+)")
+    if not cleanSender or cleanSender == '' then
+        cleanSender = tostring(sender):match("([%a%d]+)")
+    end
+    if not cleanSender or cleanSender == '' then return end
+    if cleanSender:lower() == 'you' then return end
+
+    local myName = nil
+    pcall(function() myName = mq.TLO.Me.CleanName() end)
+    if not myName or myName == '' then return end
+    if cleanSender:lower() == myName:lower() then return end
+
+    -- If target was specified, verify it was directed at this buffbot
+    if targetName and targetName ~= '' then
+        local cleanTarget = tostring(targetName):gsub("%b[]", ""):gsub("%b()", ""):match("([%a%d]+)")
+        if cleanTarget and cleanTarget:lower() ~= myName:lower() then
+            return
+        end
+    else
+        -- Untargeted hail: only reply if requester is nearby
+        local dist = 9999
+        pcall(function()
+            local sp = mq.TLO.Spawn(string.format('pc =%s', cleanSender))
+            if sp() then dist = sp.Distance() or 9999 end
+        end)
+        if dist > 35 then return end
+    end
+
+    local now = os.time()
+    local lastHail = lastHailTimes[cleanSender:lower()] or 0
+    if (now - lastHail) < 3 or (now - lastGlobalHailTime) < 2 then
+        return -- Rate limit 3 seconds per player, 2 seconds globally to avoid spam
+    end
+    lastHailTimes[cleanSender:lower()] = now
+    lastGlobalHailTime = now
+
+    logMsg(string.format("Hail from '%s' received. Replying in /say.", cleanSender))
+    pcall(function()
+        mq.cmdf('/say %s, send tell to me to receive buffs!', cleanSender)
+    end)
+end
+
+-- Register tell and hail events
+mq.event('BuffbotTell1', '#*##1# tells you, \'#2#\'', onTellReceived)
+mq.event('BuffbotTell2', '#*##1# tells you, "#2#"', onTellReceived)
+mq.event('BuffbotTell3', '#*##1# tells you, #2#', onTellReceived)
+mq.event('BuffbotHail1', '#*##1# says, \'Hail, #2#\'', onHailReceived)
+mq.event('BuffbotHail2', '#*##1# says, "#2#"', onHailReceived)
+mq.event('BuffbotHail3', '#*##1# says, \'Hail, #2#!\'', onHailReceived)
+mq.event('BuffbotHail4', '#*##1# says, "#2#!"', onHailReceived)
+mq.event('BuffbotHail5', '#*##1# says, \'Hail, #2#.\'', onHailReceived)
+mq.event('BuffbotHail6', '#*##1# says, "#2#."', onHailReceived)
+mq.event('BuffbotHailPlain1', '#*##1# says, \'Hail\'', function(line, sender) onHailReceived(line, sender, nil) end)
+mq.event('BuffbotHailPlain2', '#*##1# says, \'Hail!\'', function(line, sender) onHailReceived(line, sender, nil) end)
+mq.event('BuffbotHailPlain3', '#*##1# says, "Hail"', function(line, sender) onHailReceived(line, sender, nil) end)
+mq.event('BuffbotHailPlain4', '#*##1# says, "Hail!"', function(line, sender) onHailReceived(line, sender, nil) end)
+
+-- ============================================================================
+-- Target Acquisition & Verification Helper
+-- ============================================================================
+local function acquireTarget(targetID, targetName)
+    local myName = nil
+    pcall(function() myName = mq.TLO.Me.CleanName() end)
+    local isSelf = myName and (targetName:lower() == myName:lower())
+
+    if isSelf then
+        pcall(function() mq.cmdf('/target id %d', mq.TLO.Me.ID() or 0) end)
+        mq.delay(200, function() return (mq.TLO.Target.ID() or 0) == (mq.TLO.Me.ID() or 0) end)
+        return true
+    end
+
+    -- Try targeting by spawn ID first
+    if targetID and targetID > 0 then
+        pcall(function() mq.cmdf('/target id %d', targetID) end)
+        mq.delay(250, function() return (mq.TLO.Target.ID() or 0) == targetID end)
+    end
+
+    -- Fallback: Target by PC name if ID targeting failed or was lost
+    local currentId = 0
+    pcall(function() currentId = mq.TLO.Target.ID() or 0 end)
+    if currentId ~= targetID and targetName and targetName ~= '' then
+        pcall(function() mq.cmdf('/target pc =%s', targetName) end)
+        mq.delay(250, function() return (mq.TLO.Target.CleanName() or ''):lower() == targetName:lower() end)
+        if (mq.TLO.Target.CleanName() or ''):lower() ~= targetName:lower() then
+            pcall(function() mq.cmdf('/target "%s"', targetName) end)
+            mq.delay(250, function() return (mq.TLO.Target.CleanName() or ''):lower() == targetName:lower() end)
+        end
+    end
+
+    -- Verify target is valid, alive, and matches requester
+    local valid = false
+    pcall(function()
+        local tid = mq.TLO.Target.ID() or 0
+        local tName = mq.TLO.Target.CleanName() or ''
+        valid = tid > 0 and (tName:lower() == targetName:lower() or (targetID > 0 and tid == targetID)) and
+            not mq.TLO.Target.Dead()
+    end)
+    return valid
+end
 
 -- ============================================================================
 -- Buff Casting Loop
 -- ============================================================================
 local function processBuffQueue()
     if #runtime.activeQueue == 0 then
-        if runtime.state ~= 'MEMMING' and runtime.state ~= 'RESTORING' and runtime.state ~= 'STOPPED' then
+        if runtime.state ~= 'STOPPED' and runtime.state ~= 'MEDDING' then
             runtime.state = 'IDLE'
         end
         return
@@ -437,87 +609,133 @@ local function processBuffQueue()
     local request = table.remove(runtime.activeQueue, 1)
     local targetName = request.sender
     local targetID = request.spawnID
+    local gemsToCast = request.gems or {}
 
-    runtime.state = 'CASTING'
-    runtime.currentRequester = targetName
-    logMsg(string.format("Starting buff sequence for '%s'...", targetName))
-
-    -- Target the requester
-    pcall(function() mq.cmdf('/target id %d', targetID) end)
-    mq.delay(500, function() return (mq.TLO.Target.ID() or 0) == targetID end)
-
-    local targetValid = false
-    pcall(function() targetValid = (mq.TLO.Target.ID() or 0) == targetID and not mq.TLO.Target.Dead() end)
-    if not targetValid then
-        logMsg(string.format("Target '%s' lost or out of range. Aborting buff sequence.", targetName), true, false)
-        runtime.currentRequester = nil
+    if #gemsToCast == 0 then
+        runtime.state = 'IDLE'
         return
     end
 
-    -- Sequence through configured buff slots
-    for slot = 1, NUM_GEMS do
-        if not ctrl.enabled then break end
+    runtime.state = 'CASTING'
+    runtime.currentRequester = targetName
 
-        local spellName = ctrl.buffSlots[slot]
-        if spellName and spellName ~= '' then
-            -- Verify spell is memorized in a gem slot
-            local gemNum = nil
-            pcall(function() gemNum = mq.TLO.Me.Gem(spellName)() end)
-            if not gemNum then
-                pcall(function() gemNum = mq.TLO.Me.Gem(slot).Name() == spellName and slot or nil end)
+    local spellSummaryList = {}
+    for _, sp in ipairs(gemsToCast) do table.insert(spellSummaryList, string.format("[%d] %s", sp.gem, sp.name)) end
+    logMsg(string.format("Buffing '%s' with %d spell(s): %s", targetName, #gemsToCast,
+        table.concat(spellSummaryList, ", ")))
+    print(string.format('\ag[Triune Buffbot]\ax Casting %d buff(s) on \aw%s\ax: %s', #gemsToCast, targetName,
+        table.concat(spellSummaryList, ", ")))
+
+    -- Check Mana % before starting sequence
+    local pctMana = getMyPctMana()
+    if pctMana < ctrl.minManaPct then
+        logMsg(string.format("Mana low (%d%% < %d%%). Meditating before buffing '%s'...", pctMana, ctrl.minManaPct, targetName), true, false)
+        pcall(function()
+            mq.cmdf('/tell %s Mana is low (%d%%). Meditating until %d%% before buffing you, please stand by!', targetName, pctMana, ctrl.minManaPct)
+        end)
+        local isSit = false
+        pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
+        if not isSit then
+            pcall(function() mq.cmd('/sit') end)
+        end
+        while pctMana < ctrl.minManaPct and ctrl.enabled do
+            mq.doevents()
+            mq.delay(500)
+            pctMana = getMyPctMana()
+        end
+    end
+
+    -- Initial target lock
+    local targetValid = acquireTarget(targetID, targetName)
+    if not targetValid then
+        logMsg(string.format("Target '%s' lost or unavailable in zone. Aborting buff sequence.", targetName), true, false)
+        runtime.currentRequester = nil
+        runtime.state = 'IDLE'
+        return
+    end
+
+    for _, spellInfo in ipairs(gemsToCast) do
+        if not ctrl.enabled then break end
+        mq.doevents()
+
+        local gemNum = spellInfo.gem
+        local expectedName = spellInfo.name
+
+        -- Re-verify gem slot index by spell name in case spell bar changed
+        local currentGemSpell = nil
+        pcall(function() currentGemSpell = mq.TLO.Me.Gem(gemNum).Name() end)
+        if currentGemSpell ~= expectedName then
+            pcall(function() gemNum = mq.TLO.Me.Gem(expectedName)() end)
+        end
+
+        if gemNum and gemNum > 0 then
+            -- Re-verify and enforce target lock on the requester before each cast
+            if not acquireTarget(targetID, targetName) then
+                logMsg(string.format("Target '%s' lost during casting. Aborting remaining buffs.", targetName), true,
+                    false)
+                break
             end
 
-            if gemNum then
-                -- Check Mana %
-                local pctMana = 100
-                pcall(function() pctMana = mq.TLO.Me.PctMana() or 100 end)
-                if pctMana < ctrl.minManaPct then
-                    logMsg(string.format("Mana low (%d%% < %d%%). Medding brief moment...", pctMana, ctrl.minManaPct), true, false)
-                    mq.delay(3000)
-                end
+            -- Face the requester
+            pcall(function() mq.cmd('/face fast') end)
+            mq.delay(100)
+            mq.doevents()
 
-                -- Wait for gem readiness
-                logMsg(string.format("Casting slot %d: '%s' on %s", slot, spellName, targetName))
-                local ready = false
-                pcall(function() ready = mq.TLO.Me.SpellReady(gemNum)() end)
-                if not ready then
-                    mq.delay(3000, function() return mq.TLO.Me.SpellReady(gemNum)() end)
-                end
-                local isSitOrDuck = false
-                pcall(function() isSitOrDuck = mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() end)
-                if isSitOrDuck then
-                    mq.cmd('/stand')
-                    mq.delay(200)
-                end
+            -- Ensure standing before cast
+            local isSitOrDuck = false
+            pcall(function() isSitOrDuck = mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() end)
+            if isSitOrDuck then
+                mq.cmd('/stand')
+                mq.delay(200)
+            end
 
-                -- Re-target if target dropped
-                pcall(function()
-                    if (mq.TLO.Target.ID() or 0) ~= targetID then
-                        mq.cmdf('/target id %d', targetID)
-                    end
-                end)
-
-                -- Cast the spell
-                pcall(function() mq.cmdf('/cast %d', gemNum) end)
-                mq.delay(500)
-
-                -- Wait for casting to complete
-                local isCasting = true
-                local attempts = 0
-                while isCasting and attempts < 100 do
-                    pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
-                    if isCasting then
-                        mq.delay(200)
-                        attempts = attempts + 1
-                    end
+            -- Wait for gem readiness while servicing events
+            logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetName, gemNum))
+            local ready = false
+            pcall(function() ready = mq.TLO.Me.SpellReady(gemNum)() end)
+            if not ready then
+                local waitAttempts = 0
+                while not ready and waitAttempts < 30 and ctrl.enabled do
+                    mq.doevents()
+                    mq.delay(100)
+                    waitAttempts = waitAttempts + 1
+                    pcall(function() ready = mq.TLO.Me.SpellReady(gemNum)() end)
                 end
-                mq.delay(800) -- recovery delay between casts
+            end
+
+            -- Final pre-cast target lock & LoS facing
+            acquireTarget(targetID, targetName)
+            pcall(function() mq.cmd('/face fast') end)
+            mq.delay(100)
+            mq.doevents()
+
+            -- Cast the spell on the requester
+            pcall(function() mq.cmdf('/cast %d', gemNum) end)
+            mq.delay(300)
+            mq.doevents()
+
+            -- Wait for casting to complete while processing incoming tells
+            local isCasting = true
+            local attempts = 0
+            while isCasting and attempts < 150 do
+                mq.doevents()
+                pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
+                if isCasting then
+                    mq.delay(100)
+                    attempts = attempts + 1
+                end
+            end
+
+            -- Recovery delay between casts while servicing events
+            for _ = 1, 6 do
+                mq.doevents()
+                mq.delay(100)
             end
         end
     end
 
     -- Send Completion Tell to Requester
-    logMsg(string.format("Completed buff sequence for '%s'. Sending completion tell.", targetName))
+    logMsg(string.format("Completed buffs for '%s'. Sending completion tell.", targetName))
     pcall(function()
         mq.cmdf('/tell %s %s', targetName, ctrl.completionMsg)
     end)
@@ -525,6 +743,21 @@ local function processBuffQueue()
     -- Set Cooldown
     runtime.cooldowns[targetName] = os.time()
     runtime.currentRequester = nil
+
+    -- Auto-meditate if mana is not at 100%
+    local endMana = getMyPctMana()
+    if ctrl.autoMed and endMana < 100 then
+        local isSit = false
+        pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
+        if not isSit then
+            pcall(function() mq.cmd('/sit') end)
+            mq.delay(200)
+        end
+        runtime.state = 'MEDDING'
+        logMsg(string.format("Buffs completed. Auto-meditating (%d%% / 100%%)...", endMana))
+    else
+        runtime.state = 'IDLE'
+    end
 end
 
 -- ============================================================================
@@ -532,102 +765,83 @@ end
 -- ============================================================================
 local function drawControlTab()
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Buffbot Control Surface")
+    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+        "Listens for /tells, replies with numbered spell options, and casts choices.")
     ImGui.Separator()
 
-    -- Start / Stop Toggle Button
-    if not ctrl.enabled then
-        if ImGui.Button("  START BUFFBOT  ", 180, 32) then
-            runtime.pendingAction = 'START'
-        end
-        ImGui.SameLine()
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "Status: STOPPED")
+    -- Status Indicator and Save Settings Button
+    if runtime.state == 'IDLE' then
+        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "Status: LISTENING FOR TELLS")
+    elseif runtime.state == 'CASTING' then
+        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4],
+            string.format("Status: BUFFING %s...", runtime.currentRequester or ''))
+    elseif runtime.state == 'MEDDING' then
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4],
+            string.format("Status: MEDITATING (%d%% / 100%%)", getMyPctMana()))
     else
-        if ImGui.Button("  STOP BUFFBOT  ", 180, 32) then
-            runtime.pendingAction = 'STOP'
-        end
-        ImGui.SameLine()
-        if runtime.state == 'IDLE' then
-            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "Status: LISTENING FOR TELLS")
-        elseif runtime.state == 'MEMMING' then
-            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "Status: MEMORIZING BUFFS...")
-        elseif runtime.state == 'CASTING' then
-            ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format("Status: BUFFING %s...", runtime.currentRequester or ''))
-        elseif runtime.state == 'RESTORING' then
-            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "Status: RESTORING ORIGINAL GEMS...")
-        end
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format("Status: %s", runtime.state))
     end
 
     ImGui.SameLine()
-    if ImGui.Button(" Save Settings ", 120, 32) then
+    ImGui.Spacing()
+    ImGui.SameLine()
+    if ImGui.Button(" Save Settings ", 120, 26) then
         saveConfig(false)
+    end
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Active Memorized Buff Spells (Tell Menu)")
+
+    local gems = getAvailableGems()
+    if #gems == 0 then
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "No spells currently memorized on your spell bar!")
+    else
+        for idx, g in ipairs(gems) do
+            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("  [%d]", idx))
+            ImGui.SameLine()
+            ImGui.Text(string.format("%s (Gem %d)", g.name, g.gem))
+        end
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "  [all]")
+        ImGui.SameLine()
+        ImGui.Text("Cast All Memorized Buffs")
     end
 
     ImGui.Spacing()
     ImGui.Separator()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Configuration Options")
 
-    local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", ctrl.maxRange, 20, 300)
-    if rangeChanged then ctrl.maxRange = rangeVal; saveConfig(true) end
-
-    local timeoutVal, timeoutChanged = ImGui.SliderInt("Offer Expiration (sec)", ctrl.timeoutSec, 10, 120)
-    if timeoutChanged then ctrl.timeoutSec = timeoutVal; saveConfig(true) end
-
-    local cdVal, cdChanged = ImGui.SliderInt("Player Cooldown (sec)", ctrl.cooldownSec, 10, 300)
-    if cdChanged then ctrl.cooldownSec = cdVal; saveConfig(true) end
-
-    local manaVal, manaChanged = ImGui.SliderInt("Min Mana % Threshold", ctrl.minManaPct, 5, 50)
-    if manaChanged then ctrl.minManaPct = manaVal; saveConfig(true) end
-
-    ImGui.Spacing()
-    ImGui.Text("Prompt Tell (Sent on initial tell):")
-    local newPrompt, promptChanged = ImGui.InputText("##promptMsg", ctrl.promptMsg, 256)
-    if promptChanged then ctrl.promptMsg = newPrompt; saveConfig(true) end
-
-    ImGui.Text("Completion Tell (Sent after all buffs cast):")
-    local newComp, compChanged = ImGui.InputText("##completionMsg", ctrl.completionMsg, 256)
-    if compChanged then ctrl.completionMsg = newComp; saveConfig(true) end
-end
-
-local function drawBuffSlotsTab()
-    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Buff Spell Selection")
-    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "Select which scribed spells to memorize and cast on requesters.")
-    ImGui.Separator()
-
-    if not runtime.scribedSpellsLoaded then
-        if ImGui.Button("Load Scribed Spells from Spellbook") then
-            refreshScribedSpells()
-        end
-        ImGui.Spacing()
+    local autoMedVal, autoMedChanged = ImGui.Checkbox("Auto Meditate to 100% Mana", ctrl.autoMed)
+    if autoMedChanged then
+        ctrl.autoMed = autoMedVal
+        saveConfig(true)
     end
 
-    for slot = 1, NUM_GEMS do
-        ImGui.PushID(slot)
-        ImGui.Text(string.format("Buff Slot %2d:", slot))
-        ImGui.SameLine()
+    local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", ctrl.maxRange, 20, 300)
+    if rangeChanged then
+        ctrl.maxRange = rangeVal; saveConfig(true)
+    end
 
-        local currentSpell = ctrl.buffSlots[slot] or ""
-        local preview = (currentSpell ~= "") and currentSpell or "-- (None) --"
+    local timeoutVal, timeoutChanged = ImGui.SliderInt("Offer Expiration (sec)", ctrl.timeoutSec, 10, 120)
+    if timeoutChanged then
+        ctrl.timeoutSec = timeoutVal; saveConfig(true)
+    end
 
-        if ImGui.BeginCombo("##buffCombo", preview) then
-            if ImGui.Selectable("-- (None) --", currentSpell == "") then
-                ctrl.buffSlots[slot] = nil
-                saveConfig(true)
-            end
+    local cdVal, cdChanged = ImGui.SliderInt("Player Cooldown (sec)", ctrl.cooldownSec, 10, 300)
+    if cdChanged then
+        ctrl.cooldownSec = cdVal; saveConfig(true)
+    end
 
-            for _, spellName in ipairs(runtime.scribedSpells) do
-                local isSelected = (currentSpell == spellName)
-                if ImGui.Selectable(spellName, isSelected) then
-                    ctrl.buffSlots[slot] = spellName
-                    saveConfig(true)
-                end
-                if isSelected then
-                    ImGui.SetItemDefaultFocus()
-                end
-            end
-            ImGui.EndCombo()
-        end
+    local manaVal, manaChanged = ImGui.SliderInt("Min Mana % Threshold", ctrl.minManaPct, 5, 50)
+    if manaChanged then
+        ctrl.minManaPct = manaVal; saveConfig(true)
+    end
 
-        ImGui.PopID()
+    ImGui.Spacing()
+    ImGui.Text("Completion Tell (Sent after all selected buffs cast):")
+    local newComp, compChanged = ImGui.InputText("##completionMsg", ctrl.completionMsg, 256)
+    if compChanged then
+        ctrl.completionMsg = newComp; saveConfig(true)
     end
 end
 
@@ -637,9 +851,10 @@ local function drawActivityTab()
 
     ImGui.Text(string.format("Active Request Queue: %d pending", #runtime.activeQueue))
     if #runtime.activeQueue > 0 then
-        if ImGui.BeginTable("##queueTable", 2, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
-            ImGui.TableSetupColumn("Requester", ImGuiTableColumnFlags.WidthFixed, 150)
-            ImGui.TableSetupColumn("Spawn ID", ImGuiTableColumnFlags.WidthFixed, 100)
+        if ImGui.BeginTable("##queueTable", 3, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
+            ImGui.TableSetupColumn("Requester", ImGuiTableColumnFlags.WidthFixed, 130)
+            ImGui.TableSetupColumn("Spawn ID", ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn("Spells", ImGuiTableColumnFlags.WidthStretch, 200)
             ImGui.TableHeadersRow()
 
             for _, req in ipairs(runtime.activeQueue) do
@@ -648,6 +863,10 @@ local function drawActivityTab()
                 ImGui.Text(req.sender)
                 ImGui.TableSetColumnIndex(1)
                 ImGui.Text(tostring(req.spawnID))
+                ImGui.TableSetColumnIndex(2)
+                local names = {}
+                for _, sp in ipairs(req.gems or {}) do table.insert(names, sp.name) end
+                ImGui.Text(#names > 0 and table.concat(names, ", ") or "(None)")
             end
             ImGui.EndTable()
         end
@@ -682,10 +901,6 @@ local function renderGUI()
                 drawControlTab()
                 ImGui.EndTabItem()
             end
-            if ImGui.BeginTabItem("Buff Spells") then
-                drawBuffSlotsTab()
-                ImGui.EndTabItem()
-            end
             if ImGui.BeginTabItem("Activity Log") then
                 drawActivityTab()
                 ImGui.EndTabItem()
@@ -703,29 +918,17 @@ end
 -- ============================================================================
 local function init()
     mq.imgui.init('TriuneBuffbotWin', renderGUI)
-    refreshScribedSpells()
+    ctrl.enabled = true
+    runtime.state = 'IDLE'
     loadConfig()
-    logMsg("Triune Buffbot script initialized.")
+    logMsg("Triune Buffbot script initialized and active.")
+    print('\ag[Triune Buffbot]\ax v' .. VERSION .. ' initialized and \agACTIVE\ax. Listening for tells...')
 end
 
 init()
 
 while runtime.openGUI do
     mq.doevents()
-
-    -- Process pending UI actions queued from ImGui thread
-    if runtime.pendingAction == 'START' then
-        runtime.pendingAction = nil
-        ctrl.enabled = true
-        saveConfig(true)
-        saveCurrentGems()
-        memorizeBuffSlots()
-    elseif runtime.pendingAction == 'STOP' then
-        runtime.pendingAction = nil
-        ctrl.enabled = false
-        saveConfig(true)
-        restoreSavedGems()
-    end
 
     -- Clean up expired pending offers
     local now = os.time()
@@ -736,15 +939,27 @@ while runtime.openGUI do
         end
     end
 
+    -- Auto-meditate idle upkeep
+    if ctrl.enabled and ctrl.autoMed and #runtime.activeQueue == 0 and runtime.state ~= 'CASTING' and runtime.state ~= 'STOPPED' then
+        local pctMana = getMyPctMana()
+        if pctMana < 100 then
+            local isSitting = false
+            pcall(function() isSitting = mq.TLO.Me.Sitting() or false end)
+            local isMoving = false
+            pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+            if not isSitting and not isMoving then
+                pcall(function() mq.cmd('/sit') end)
+            end
+            runtime.state = 'MEDDING'
+        elseif pctMana >= 100 and runtime.state == 'MEDDING' then
+            runtime.state = 'IDLE'
+        end
+    end
+
     -- Process queue if buffbot enabled
-    if ctrl.enabled and (runtime.state == 'IDLE' or runtime.state == 'CASTING') then
+    if ctrl.enabled and #runtime.activeQueue > 0 and runtime.state ~= 'STOPPED' then
         processBuffQueue()
     end
 
     mq.delay(100)
-end
-
--- Cleanup on UI close
-if ctrl.enabled or (runtime.savedGems and next(runtime.savedGems) ~= nil) then
-    restoreSavedGems()
 end

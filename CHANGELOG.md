@@ -1,5 +1,62 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-16
+
+- **Interactive Tell Menu & Numbered Spell Selection for Buffbot (`triune_buffbot.lua`).**
+  - **Dynamic Numbered Tell Menu**: When a player sends a `/tell` to the buffbot, it automatically responds with a numbered menu of all currently memorized spell gems on the bar along with an `[all]` option.
+  - **Multi-Spell & All Selection**: Requesters can reply with `'all'` or specific spell numbers (e.g. `'1'`, `'1 3'`, `'1, 2, 4'`), and the buffbot queues and casts only their requested spells. Numbered choices are strictly parsed against the active gem bar, while non-choice tells send the numbered menu.
+  - **Direct Spell Gem Casting**: Casts requested spells directly from the character's active spell gems (`Me.Gem(1..NumGems)`) without book scanning, gem swapping, or restoration delays.
+  - **Robust Tell Event Detection & Self-Tell Guard**: Added wildcard-tolerant event patterns matching single quotes, double quotes, unquoted messages, and chat lines with client/MQ timestamps. Added sender name sanitization and an explicit self-tell guard preventing the buffbot's own outgoing menu tells (`[all] All`) from triggering self-buffing loops.
+  - **Out-of-Range Location Feedback (`/loc`)**: When an out-of-range or distant requester sends a `/tell`, the buffbot replies with its exact `/loc Y, X, Z` coordinates so the player knows where to run to receive buffs.
+  - **Active Requester Target & Facing Enforcement**: Added dedicated `acquireTarget()` helper ensuring the buffbot targets the requester by ID or PC name, stands, and faces them (`/face fast`) before casting each requested buff.
+  - **Auto Meditate Engine (`ctrl.autoMed`)**: Added intelligent meditation management that automatically sits (`/sit`) to med to 100% mana immediately after buffing completes or when idle. When an incoming buff request arrives while below `minManaPct`, the bot automatically tells the requester that mana is low and meditates until reaching the threshold before buffing them. Configurable via UI checkbox with character persistence.
+  - **Continuous Tell Checking & Queue Line Numbers**: Added continuous `mq.doevents()` polling across all casting, gem readiness, and meditation delay loops so incoming tells are received and processed in real-time even while actively casting on someone else. Requesters are given their dynamic queue position / line number (e.g. `You are #2 in line (1 ahead)`) upon choosing buffs.
+  - **Interactive Hail Response in /say**: Added automated hail detection (`'Hail, <BotName>'` and nearby `'Hail'`). When hailed, the bot responds in `/say` instructing the player to send a `/tell` to receive buffs (`<Player>, send tell to me to receive buffs!`), with a 3-second anti-spam rate limiter.
+  - **Streamlined Control Header & Auto-Active**: Initialized `ctrl.enabled = true` by default and removed redundant Start/Stop toggle buttons, presenting a clean live status bar and "Save Settings" button.
+
+- **Discipline Duration & Reuse Cooldown Timer Engine (v1.6.5).**
+  - **Discipline Readiness Verification (`isDiscReady`)**: Added dedicated `runtime.isDiscReady(name)` helper with multi-tier validation preventing disciplines from re-firing while active or on cooldown.
+  - **Active Discipline Stance Tracking (`Me.ActiveDisc`)**: Checks `mq.TLO.Me.ActiveDisc` before attempting discipline activation. Prevents re-firing the currently active discipline or trying to start duration/stance disciplines while another discipline is active.
+  - **Discipline Reuse Cooldown Tracking (`Me.CombatAbilityTimer`)**: Queries `mq.TLO.Me.CombatAbilityTimer(name)` for active reuse cooldown ticks and seconds, eliminating false positives from `Me.CombatAbilityReady` on emulators and non-hotbar abilities.
+  - **Buff & Song Window Duration Checks**: Checks `mq.TLO.Me.Buff(name)` and `mq.TLO.Me.Song(name)` to ensure disciplines with persistent buff durations (such as Auras or defensive buffs) do not fire while already active on the character.
+  - **Endurance Requirement Validation**: Checks `Spell(name).EnduranceCost()` against `Me.CurrentEndurance()` to prevent repetitive failed activation attempts when endurance is depleted.
+  - **Software Timer & Duration Fallback (`runtime.discExpires` & `runtime.discCooldown`)**: Records spell duration (`Duration * 6` seconds) and recast time upon firing, locking out the ability until both the active duration and cooldown period run out.
+  - **Candidate Selection Filtering (`combatTick`)**: Gated discipline priority queue evaluation behind `isDiscReady(name)` and `isSkillReady(name)` so unready or active abilities are skipped cleanly and lower-priority ready abilities can fire.
+  - **Clean State Lifecycle**: Resets discipline software timers on zone changes (`onZoned`) and character death (`deathGuardFired`).
+  - **Project Version Bump**: Bumped version to **1.6.5** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+---
+
+- **Comprehensive Pet Filtering & Ignore Logic for NPC Target Acquisition (v1.6.4).**
+  - **Universal Pet Detector (`isAnyPet`)**: Added `isAnyPet(s)` helper that thoroughly checks `s.Type() == 'Pet'`, `s.Master` existence (ID > 0), `s.Owner` existence (ID > 0), and standard pet clean name naming patterns (`'s pet`, `'s warder`, `'s Familiar`).
+  - **Robust Player/Friendly Pet Identifier (`isSpawnPetOrPlayer`)**: Enhanced `isSpawnPetOrPlayer(id)` to accurately detect local player pets, multi-trio pets, group/raid member pets, mercenary pets, and any player-owned pets regardless of whether MacroQuest reports their spawn type as `'Pet'` or `'NPC'`.
+  - **Hunter & Puller Roam Target Pet Exclusion (`findRoamTarget`)**: Updated `findRoamTarget` to filter out all pets (`isAnyPet`, `isSpawnPetOrPlayer`, and `isHostileTarget`) when scanning zone spawns for new NPCs to pull or hunt. This guarantees pullers/hunters never initiate combat on player pets, group pets, or summoned NPC minion pets (e.g. necromancer skeletons or magician elementals), ensuring they target and pull the actual master mob instead.
+  - **Combat Loop & Auto-Target Protection (`combatTick` & `pullerTick`)**: Added `not isSpawnPetOrPlayer` and `isHostileTarget` guards to `haveNPC` evaluation, camp pull checks, aggro switching (`checkAggroSwitch`), and XTarget list processing (`findFirstNPCXtarget`, `countNPCXtarget`, `isXTargetId`).
+  - **Detrimental Targeting Fallback Filtering (`resolveTargetId`)**: Updated `'Nearest Add'` and `'All Enemies'` fallback queries to skip all pets and non-hostiles when resolving auto-cast targets.
+  - **Lua 5.1 / LuaJIT 60-Upvalue Limit Architecture**: Bound engine helpers to the structured `runtime` state table before `combatTick()` execution, reducing the closure's outer upvalue footprint down to under 10 and permanently preventing "function has more than 60 upvalues" compiler errors.
+  - **Project Version Bump**: Bumped version to **1.6.4** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+---
+
+- **Maximum Melee Distance Positioning & Combat Round Range Engine (v1.6.3).**
+  - **Dynamic Maximum Melee Reach Calculation (`maxMeleeDistance`)**: Added dedicated `maxMeleeDistance(id)` helper querying `Spawn(id).MaxRangeTo()` and `Target.MaxRangeTo()` with fallbacks, accurately determining the maximum strike range for both small humanoid NPCs and giant/dragon hitboxes.
+  - **Precision Max Melee Standing Range (`desiredRange`)**: Refactored `desiredRange(id)` for the `Melee` combat style to position characters comfortably inside maximum strike reach (`math.max(5, math.floor(maxReach - 2))`). This prevents characters from running into the center/hitbox of the mob while keeping all melee attacks connecting reliably.
+  - **Continuous Combat Round Range Maintenance**: Every tick of the combat engine actively evaluates `dist <= maxMeleeDistance(id)`. If an NPC moves, paths away, or gets pushed during combat, `combatTick` and post-cast handlers immediately re-initiate movement to restore proper melee distance.
+  - **Active Combat Facing & Re-Engagement**: Enhanced combat facing to update every 0.4s during active combat and ensured auto-attack and melee skills stay engaged seamlessly.
+  - **Melee Ability & Skill Range Verification**: Updated `isTargetInRange` to verify distance against `maxMeleeDistance` for instant melee disciplines and combat skills (Kick, Bash, Backstab, Flying Kick).
+  - **Dynamic Repositioning Handlers**: Updated `repositionCloser()` and `handleCantHitFromHere()` to calculate target distances dynamically based on `maxMeleeDistance() - 2` instead of fixed offsets, preventing characters from unnecessarily rushing into the center of large/dragon hitboxes.
+  - **Project Version Bump**: Bumped version to **1.6.3** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+- **Unified Live Pet Detection & `#petcmd attack all` / Hold Dispatch Gating (v1.6.2).**
+  - **Live Pet Detection Helper (`hasActivePet`)**: Added `hasActivePet()` to safely query `mq.TLO.Me.Pet.ID()` and multi-pet table (`petState.myPets`) using `isSpawnAlive()`, ensuring pet commands are only evaluated and issued when the character actually has a living pet active in the world.
+  - **Expanded `PET_CLASSES`**: Added all EverQuest pet-summoning classes (`Nec`, `Mag`, `Bst`, `Enc`, `Shm`, `SK`, `Dru`) to `PET_CLASSES` so Enchanter animations, Shaman spirit wolves, Shadowknight skeleton minions, and Druid pets are recognized alongside Mag/Nec/Bst for automated pet commands and startup reconciliation.
+  - **Cross-Mode `#petcmd attack all` Gating**: Updated the universal combat pet handler (`combatTick`) and mode-specific pet triggers (`Puller Hunt`, `Puller Camp`, `Manual`, and `Assist`) to gate on `canCommandPets` (`hasActivePet() or trioHasPetClass()`). This guarantees `#petcmd attack all` fires whenever engaging an NPC in range with an active pet while completely eliminating spam of `/say #petcmd` commands for trios without pets.
+  - **Clean Pet Hold Management in Manual Mode**: Gated `setManualHunterPetHold()` behind pet presence checks to prevent unneeded `/say #petcmd hold all` / `/say #petcmd ghold` chat spam when playing non-pet trios.
+  - **UI Pet Controls Visibility**: Updated the Control tab to display Pet Settings whenever the trio has a pet class or currently has an active pet summoned.
+  - **Project Version Bump**: Bumped version to **1.6.2** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+---
+
 ## 2026-08-14
 
 - **Ducking State Detection & Un-Duck / Stand Guards across Combat & Casting.**

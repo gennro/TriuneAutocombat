@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.6.1'
+local VERSION           = '1.6.5'
 local open              = true
 local cfg               = mq.configDir
 
@@ -138,6 +138,10 @@ local SUBMODE_DESC   = {
 local ctrl                   -- forward declaration for lexical scoping in helpers
 local isXTargetId            -- forward declaration for lexical scoping in helpers
 local isGroupOrRaidMember    -- forward declaration for lexical scoping in helpers
+local isSpawnPetOrPlayer     -- forward declaration for lexical scoping in helpers
+local isAnyPet               -- forward declaration for lexical scoping in helpers
+local isHostileTarget        -- forward declaration for lexical scoping in helpers
+local isCombat               -- forward declaration for lexical scoping in helpers
 local buffActive             -- forward declaration for lexical scoping in helpers
 local updateMapRadiusVisuals -- forward declaration for lexical scoping in UI & helpers
 local clearMapRadiusVisuals  -- forward declaration for lexical scoping in UI & helpers
@@ -319,6 +323,8 @@ local runtime = {
     lastSpellbookCacheTime = 0,
     hasAACache = {},
     knownDiscSet = nil,
+    discExpires = {},
+    discCooldown = {},
     filteredSpellsCache = {},
     gemSyncWarned = {},
     lastGemSyncCheckAt = 0,
@@ -355,7 +361,8 @@ local pursuit = {
     hasRetargeted = false,
     nonXtarTargetId = 0,
     nonXtarEngageAt = 0,
-    lastCombatFaceAt = 0
+    lastCombatFaceAt = 0,
+    lastStickDist = 0
 }
 
 local stuckState = {
@@ -372,8 +379,8 @@ local stuckState = {
 
 -- Full-stop and onZoned: reset every movement/combat command and stale state.
 -- Used by STOP, a mode switch, and the death guard.
-local fullStop, onZoned
-local PET_CLASSES = { Nec = true, Mag = true, Bst = true }
+local fullStop, onZoned, hasActivePet
+local PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true }
 local function trioHasPetClass()
     for _, c in ipairs(myClasses) do if PET_CLASSES[c] then return true end end
     return false
@@ -943,6 +950,23 @@ local function isSpawnAlive(id)
     return (not dead) and (tp ~= 'Corpse') and ((hp or 0) > 0)
 end
 
+-- Returns true if the player currently has an active living pet (or any live trio pet in petState.myPets)
+hasActivePet = function()
+    local myPetId = 0
+    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+    if myPetId > 0 and isSpawnAlive(myPetId) then
+        return true
+    end
+    if petState and type(petState.myPets) == 'table' then
+        for _, petId in pairs(petState.myPets) do
+            if petId and petId > 0 and isSpawnAlive(petId) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function distToId(id)
     if not id or id <= 0 then return 9999 end
     local d = 9999
@@ -1011,7 +1035,11 @@ local function isMoveActive()
         pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
     end
     if stickLoaded() then
-        pcall(function() moveActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+        pcall(function()
+            if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                moveActive = mq.TLO.Me.Moving() or false
+            end
+        end)
     end
     pcall(function()
         if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving then
@@ -1020,7 +1048,9 @@ local function isMoveActive()
     end)
     if (pursuit.lastNavLoc and string.find(tostring(pursuit.lastNavLoc), '^native_')) or
        (pursuit.lastNavTargetId and string.find(tostring(pursuit.lastNavTargetId), '^native_')) then
-        nativeActive = true
+        if mq.TLO.Me.Moving() then
+            nativeActive = true
+        end
     end
     return navActive or moveActive or moveToActive or nativeActive
 end
@@ -1046,10 +1076,171 @@ local function stopMoving()
     if (pursuit.lastNavLoc and string.find(tostring(pursuit.lastNavLoc), '^native_')) or
        (pursuit.lastNavTargetId and string.find(tostring(pursuit.lastNavTargetId), '^native_')) then
         pcall(function() mq.cmd('/keypress forward') end)
+        pcall(function() mq.cmd('/keypress back') end)
     end
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
+    pursuit.lastStickDist = 0
+end
+
+-- Returns true if the spawn ID belongs to the player, their pet, any group member,
+-- any group member pet, or any raid member.
+isGroupOrRaidMember = function(id)
+    if not id or id <= 0 then return false end
+    if id == mq.TLO.Me.ID() then return true end
+    local myPetId = 0
+    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+    if myPetId > 0 and id == myPetId then return true end
+    if petState and type(petState.myPets) == 'table' then
+        for _, petId in pairs(petState.myPets) do
+            if petId == id then return true end
+        end
+    end
+    local grpCount = 0
+    pcall(function() grpCount = mq.TLO.Group.Members() or 0 end)
+    if grpCount > 0 then
+        for i = 1, grpCount do
+            local m = nil
+            pcall(function() m = mq.TLO.Group.Member(i) end)
+            if m and m() then
+                if (m.ID() or 0) == id then return true end
+                local mPet = nil
+                pcall(function() mPet = m.Pet end)
+                if mPet and mPet() and (mPet.ID() or 0) == id then return true end
+            end
+        end
+    end
+    local raidCount = 0
+    pcall(function() raidCount = mq.TLO.Raid.Members() or 0 end)
+    if raidCount > 0 then
+        for i = 1, raidCount do
+            local rm = nil
+            pcall(function() rm = mq.TLO.Raid.Member(i) end)
+            if rm and rm() and (rm.ID() or 0) == id then return true end
+        end
+    end
+    return false
+end
+
+-- Returns true if a spawn (or spawn ID) is ANY pet (player pet, group pet, mercenary,
+-- charmed minion, familiar, warder, or NPC pet). Used when finding new roam/pull/hunt targets
+-- so the bot never initiates combat on pets.
+isAnyPet = function(s_or_id)
+    if not s_or_id then return false end
+    local s = (type(s_or_id) == 'number') and mq.TLO.Spawn(s_or_id) or s_or_id
+    if not s or not s() then return false end
+
+    local isPetSpawn = false
+    pcall(function()
+        local stype = s.Type() or ''
+        if stype == 'Pet' then isPetSpawn = true return end
+
+        local m = s.Master
+        if m and m() and (m.ID() or 0) > 0 then
+            isPetSpawn = true
+            return
+        end
+
+        local o = s.Owner
+        if o and o() and (o.ID() or 0) > 0 then
+            isPetSpawn = true
+            return
+        end
+
+        local cname = s.CleanName() or ''
+        if cname ~= '' then
+            if cname:find("`s pet", 1, true) or cname:find("'s pet", 1, true) or
+               cname:find("`s warder", 1, true) or cname:find("'s warder", 1, true) or
+               cname:find("`s Familiar", 1, true) or cname:find("'s Familiar", 1, true) or
+               cname:find("`s familiar", 1, true) or cname:find("'s familiar", 1, true) then
+                isPetSpawn = true
+                return
+            end
+        end
+    end)
+    return isPetSpawn
+end
+
+-- Returns true if spawn ID is self, player pet, group member pet, player character, or pet of a player/mercenary
+isSpawnPetOrPlayer = function(id)
+    if not id or id <= 0 then return false end
+    if id == mq.TLO.Me.ID() then return true end
+    local myPetId = 0
+    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+    if myPetId > 0 and id == myPetId then return true end
+    if petState and type(petState.myPets) == 'table' then
+        for _, petId in pairs(petState.myPets) do
+            if petId == id then return true end
+        end
+    end
+    if isGroupOrRaidMember(id) then return true end
+
+    local s = mq.TLO.Spawn(id)
+    if not s or not s() then return false end
+
+    local isPlayerOrFriendly = false
+    pcall(function()
+        if s.Trader and s.Trader() then isPlayerOrFriendly = true return end
+        local stype = s.Type() or ''
+        if stype == 'PC' or stype == 'Mercenary' then isPlayerOrFriendly = true return end
+
+        local m = s.Master
+        if m and m() then
+            local mid = m.ID() or 0
+            if mid > 0 then
+                local mt = m.Type() or ''
+                if mt == 'PC' or mt == 'Mercenary' or mid == mq.TLO.Me.ID() or isGroupOrRaidMember(mid) then
+                    isPlayerOrFriendly = true
+                    return
+                end
+            end
+        end
+
+        local o = s.Owner
+        if o and o() then
+            local oid = o.ID() or 0
+            if oid > 0 then
+                local ot = o.Type() or ''
+                if ot == 'PC' or ot == 'Mercenary' or oid == mq.TLO.Me.ID() or isGroupOrRaidMember(oid) then
+                    isPlayerOrFriendly = true
+                    return
+                end
+            end
+        end
+
+        if stype == 'Pet' then
+            local cname = s.CleanName() or ''
+            if cname:find("`s pet", 1, true) or cname:find("'s pet", 1, true) or
+               cname:find("`s warder", 1, true) or cname:find("'s warder", 1, true) or
+               cname:find("`s Familiar", 1, true) or cname:find("'s Familiar", 1, true) or
+               cname:find("`s familiar", 1, true) or cname:find("'s familiar", 1, true) then
+                isPlayerOrFriendly = true
+                return
+            end
+        end
+    end)
+
+    return isPlayerOrFriendly
+end
+
+-- Returns true when the given spawn ID is a confirmed hostile target that
+-- should receive offensive actions (spells, AAs, discs, auto-attack).
+-- Prevents the engine from accidentally casting on friendly NPCs (merchants,
+-- quest givers, guards, bankers) or pets that happen to be targeted.
+isHostileTarget = function(id)
+    if not id or id <= 0 then return false end
+    if isSpawnPetOrPlayer(id) then return false end
+
+    local s = mq.TLO.Spawn(id)
+    if not s or not s() then return false end
+    if s.Dead and s.Dead() then return false end
+
+    local stype = ''
+    pcall(function() stype = s.Type() or '' end)
+    if stype ~= 'NPC' and stype ~= 'Pet' then return false end
+
+    return true
 end
 
 local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist)
@@ -1062,7 +1253,7 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
             local xt = mq.TLO.Me.XTarget(i)
             if xt() then
                 local id = xt.ID() or 0
-                if id > 0 and isSpawnAlive(id) then
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
                     local s = mq.TLO.Spawn(id)
                     if s() then
                         local stype = s.Type() or ''
@@ -1070,6 +1261,7 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
                         local dist = s.Distance3D() or 999
                         if (stype == 'NPC' or stype == 'Pet')
                             and (s.PctHPs() or 0) > 0 and not s.Dead()
+                            and isHostileTarget(id)
                             and dist <= maxDist
                             and (not isIgnoredFn or not isIgnoredFn(cname))
                             and (not isUnreachableFn or not isUnreachableFn(id)) then
@@ -2979,6 +3171,7 @@ function UI.drawDiscTab()
 end
 
 local function setManualHunterPetHold(on, force)
+    if not hasActivePet() and not trioHasPetClass() then return end
     if on then
         if force or petState.manualHunterHold ~= true then
             mq.cmd('/say #petcmd hold all')
@@ -2996,9 +3189,8 @@ local function setManualHunterPetHold(on, force)
     end
 end
 
-local isCombat        -- forward declaration; defined in the engine section below
-local isHostileTarget -- forward declaration; defined in the engine section below
 local desiredRange    -- forward declaration; defined in the engine section below
+local maxMeleeDistance -- forward declaration; defined in the engine section below
 
 -- UI: control/settings tab
 function UI.drawControlTab()
@@ -3766,8 +3958,8 @@ function UI.drawSettingsTab()
     end
 
     ImGui.Dummy(0, 4)
-    -- Pet Settings: shown only when the trio has a pet class
-    if trioHasPetClass() then
+    -- Pet Settings: shown when the trio has a pet class or active pet
+    if trioHasPetClass() or hasActivePet() then
         accent(ARC, 'Pet Settings')
         ImGui.SetNextItemWidth(180)
         local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
@@ -4257,11 +4449,12 @@ local function countNPCXtarget(includeUnreachable)
             local xt = mq.TLO.Me.XTarget(i)
             if xt() then
                 local id = xt.ID() or 0
-                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) then
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
                     local s = mq.TLO.Spawn(id)
                     local stype = (s() and s.Type()) or ''
                     if (stype == 'NPC' or stype == 'Pet')
                         and (s.PctHPs() or 0) > 0 and not s.Dead()
+                        and isHostileTarget(id)
                         and not isIgnored(s.CleanName())
                         and (includeUnreachable or not isUnreachable(id)) then
                         cnt = cnt + 1
@@ -4274,7 +4467,7 @@ local function countNPCXtarget(includeUnreachable)
     if cnt == 0 and not includeUnreachable then
         pcall(function()
             local t = mq.TLO.Target
-            if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) then
+            if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID()) then
                 local stype = t.Type() or ''
                 if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
                     and not isIgnored(t.CleanName()) and not isUnreachable(t.ID()) then
@@ -4294,6 +4487,7 @@ end
 
 isXTargetId = function(id)
     if not id or id <= 0 then return false end
+    if isGroupOrRaidMember(id) or isSpawnPetOrPlayer(id) then return false end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) == id
@@ -4301,104 +4495,12 @@ isXTargetId = function(id)
             and not isIgnored(xt.CleanName())
             and not isUnreachable(id) then
             local stype = xt.Type() or ''
-            if stype == 'NPC' or stype == 'Pet' then
+            if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
                 return true
             end
         end
     end
     return false
-end
-
--- Returns true if the spawn ID belongs to the player, their pet, any group member,
--- any group member pet, or any raid member.
-isGroupOrRaidMember = function(id)
-    if not id or id <= 0 then return false end
-    if id == mq.TLO.Me.ID() then return true end
-    local myPetId = mq.TLO.Me.Pet.ID() or 0
-    if myPetId > 0 and id == myPetId then return true end
-    for _, petId in pairs(petState.myPets) do
-        if petId == id then return true end
-    end
-    local grpCount = 0
-    pcall(function() grpCount = mq.TLO.Group.Members() or 0 end)
-    if grpCount > 0 then
-        for i = 1, grpCount do
-            local m = nil
-            pcall(function() m = mq.TLO.Group.Member(i) end)
-            if m and m() then
-                if (m.ID() or 0) == id then return true end
-                local mPet = nil
-                pcall(function() mPet = m.Pet end)
-                if mPet and mPet() and (mPet.ID() or 0) == id then return true end
-            end
-        end
-    end
-    local raidCount = 0
-    pcall(function() raidCount = mq.TLO.Raid.Members() or 0 end)
-    if raidCount > 0 then
-        for i = 1, raidCount do
-            local rm = mq.TLO.Raid.Member(i)
-            if rm and rm() and rm.ID() == id then return true end
-        end
-    end
-    return false
-end
-
--- Returns true if spawn ID is self, player pet, group member pet, player character, or pet of a player
-local function isSpawnPetOrPlayer(id)
-    if not id or id <= 0 then return false end
-    if id == mq.TLO.Me.ID() then return true end
-    local myPetId = mq.TLO.Me.Pet.ID() or 0
-    if myPetId > 0 and id == myPetId then return true end
-    for _, petId in pairs(petState.myPets) do
-        if petId == id then return true end
-    end
-    if isGroupOrRaidMember(id) then return true end
-
-    local s = mq.TLO.Spawn(id)
-    if not s or not s() then return false end
-
-    local stype = ''
-    pcall(function() stype = s.Type() or '' end)
-    if stype == 'PC' or stype == 'Mercenary' then return true end
-
-    if stype == 'Pet' then
-        local masterIsFriendly = false
-        pcall(function()
-            local m = s.Master
-            if m and m() then
-                local mid = m.ID() or 0
-                if mid > 0 then
-                    local mt = m.Type() or ''
-                    if mt == 'PC' or mt == 'Mercenary' or mid == mq.TLO.Me.ID() or isGroupOrRaidMember(mid) then
-                        masterIsFriendly = true
-                    end
-                end
-            end
-        end)
-        if masterIsFriendly then return true end
-    end
-
-    return false
-end
-
--- Returns true when the given spawn ID is a confirmed hostile target that
--- should receive offensive actions (spells, AAs, discs, auto-attack).
--- Prevents the engine from accidentally casting on friendly NPCs (merchants,
--- quest givers, guards, bankers) or pets that happen to be targeted.
-isHostileTarget = function(id)
-    if not id or id <= 0 then return false end
-    if isSpawnPetOrPlayer(id) then return false end
-
-    local s = mq.TLO.Spawn(id)
-    if not s or not s() then return false end
-    if s.Dead and s.Dead() then return false end
-
-    local stype = ''
-    pcall(function() stype = s.Type() or '' end)
-    if stype ~= 'NPC' and stype ~= 'Pet' then return false end
-
-    return true
 end
 
 -- Returns true if an action (spell, AA, disc, skill) is detrimental (offensive).
@@ -4474,10 +4576,10 @@ local function isTargetInRange(name, targetId)
         end)
     end
     if maxRange == 0 then
-        maxRange = desiredRange(targetId)
+        maxRange = maxMeleeDistance(targetId)
     end
 
-    return dist <= (maxRange + 4)
+    return dist <= (maxRange + 2)
 end
 
 local function maPcId()
@@ -4486,6 +4588,7 @@ end
 
 local function targetIsEngaged(id)
     if not id or id <= 0 then return false end
+    if isSpawnPetOrPlayer(id) or not isHostileTarget(id) then return false end
     if isXTargetId(id) then return true end
     local s = mq.TLO.Spawn(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
@@ -4518,7 +4621,7 @@ isCombat = function()
         local aCount = mq.TLO.Me.XTAggroCount() or 0
         if aCount > 0 then return true end
         local t = mq.TLO.Target
-        if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) then
+        if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID()) then
             local stype = t.Type() or ''
             if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead() and not isIgnored(t.CleanName()) then
                 if targetIsEngaged(t.ID()) or isHostileTarget(t.ID()) then return true end
@@ -4529,11 +4632,11 @@ isCombat = function()
             local xt = mq.TLO.Me.XTarget(i)
             if xt() then
                 local id = xt.ID() or 0
-                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) then
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
                     local s = mq.TLO.Spawn(id)
                     if s() then
                         local stype = s.Type() or ''
-                        if (stype == 'NPC' or stype == 'Pet') and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName()) then
+                        if (stype == 'NPC' or stype == 'Pet') and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName()) and isHostileTarget(id) then
                             return true
                         end
                     end
@@ -4551,7 +4654,7 @@ local function anyNearbyEngagedNpc(radius)
     local n = mq.TLO.SpawnCount(filt)() or 0
     for i = 1, n do
         local s = mq.TLO.NearestSpawn(i, filt)
-        if s() and s.ID() > 0 then
+        if s() and s.ID() > 0 and not isSpawnPetOrPlayer(s.ID()) and isHostileTarget(s.ID()) then
             if targetIsEngaged(s.ID()) then return true end
         end
     end
@@ -4575,7 +4678,7 @@ local function maTargetId()
         end
     end
     local t = mq.TLO.Target
-    if not (t() and t.Type() == 'NPC' and (t.PctHPs() or 0) > 0 and not t.Dead()) then return nil end
+    if not (t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead() and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())) then return nil end
     if gated and not targetIsEngaged(t.ID()) then
         return nil
     end
@@ -4610,10 +4713,13 @@ local function resolveTargetId(token, cls)
             for i = 1, 10 do
                 local s = mq.TLO.NearestSpawn(i, 'npc targetable')
                 if not s() then break end
-                if s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName()) and not isUnreachable(s.ID()) then
+                local sid = s.ID() or 0
+                if sid > 0 and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
+                    and not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid)
+                    and not isIgnored(s.CleanName()) and not isUnreachable(sid) then
                     local lvl = s.Level() or 0
                     if lvl == 0 or (lvl >= minL and lvl <= maxL) then
-                        id = s.ID()
+                        id = sid
                         break
                     end
                 end
@@ -4934,6 +5040,13 @@ local function castGem(i, g, id)
         print(string.format('\ao[DEBUG cast]\ax Gem %d "%s" on target #%d (dist=%.1f, Me.Combat=%s)',
             i, g.spell, id, distToId(id), tostring(mq.TLO.Me.Combat())))
     end
+    if stickLoaded() and g.cls ~= 'Brd' then
+        pcall(function()
+            if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                mq.cmd('/stick pause')
+            end
+        end)
+    end
     mq.cmdf('/cast "%s"', g.spell)
     runtime.lastCast[key] = os.clock()
     petState.lastCastCls = g.cls
@@ -5007,21 +5120,192 @@ local function fireAA(name, a, id)
     return true
 end
 
-local function fireDisc(name, a, id)
+runtime.isDiscReady = function(name)
+    if not name or name == '' then return false end
+
+    -- 1. Software timers: lockouts from previous cast duration / cooldown
+    local now = os.clock()
+    if runtime.discExpires and runtime.discExpires[name] and now < runtime.discExpires[name] then
+        return false
+    end
+    if runtime.discCooldown and runtime.discCooldown[name] and now < runtime.discCooldown[name] then
+        return false
+    end
+    local key = 'd' .. name
+    if runtime.lastCast[key] and now < runtime.lastCast[key] then
+        return false
+    end
+
+    -- 2. Known combat ability check
+    local known = false
+    pcall(function()
+        local ca = mq.TLO.Me.CombatAbility(name)
+        if ca and ca() then known = true end
+    end)
+    if not known then return false end
+
+    -- 3. MQ CombatAbilityReady check
+    local readyOk, isReady = pcall(function() return mq.TLO.Me.CombatAbilityReady(name)() end)
+    if readyOk and isReady == false then return false end
+
+    -- 4. MQ CombatAbilityTimer check
+    local timerOk, timerVal = pcall(function() return mq.TLO.Me.CombatAbilityTimer(name) end)
+    if timerOk and timerVal then
+        local sec = 0
+        pcall(function()
+            if type(timerVal.TotalSeconds) == 'function' then
+                sec = timerVal.TotalSeconds() or 0
+            elseif type(timerVal.TotalSeconds) == 'number' then
+                sec = timerVal.TotalSeconds
+            elseif timerVal() then
+                local v = timerVal()
+                if type(v) == 'number' then sec = v end
+            end
+        end)
+        if sec > 0 then return false end
+    end
+
+    -- 5. Spell info (duration, endurance cost, target type)
+    local spOk, sp = pcall(function() return mq.TLO.Spell(name) end)
+    local hasDuration = false
+    local isSelfTarget = true
+    if spOk and sp and sp() then
+        local endCost = 0
+        local durTicks = 0
+        pcall(function()
+            endCost = sp.EnduranceCost() or 0
+            durTicks = sp.Duration() or sp.MyDuration() or 0
+            local tt = sp.TargetType()
+            if tt and tt:lower() ~= 'self' then isSelfTarget = false end
+        end)
+        if endCost > 0 and (mq.TLO.Me.CurrentEndurance() or 0) < endCost then
+            return false
+        end
+        if durTicks > 0 then
+            hasDuration = true
+        end
+    end
+
+    -- 6. Active Disc state (Me.ActiveDisc)
+    local adOk, ad = pcall(function() return mq.TLO.Me.ActiveDisc end)
+    if adOk and ad and ad() then
+        local adId = 0
+        local adName = nil
+        pcall(function()
+            adId = ad.ID() or 0
+            adName = ad.Name()
+        end)
+        if adId > 0 or (adName and adName ~= '' and adName ~= 'NULL') then
+            -- Exact same discipline is currently running!
+            if adName and (adName:lower() == name:lower() or adName == name) then
+                return false
+            end
+            -- If this discipline is a duration/stance disc, cannot activate while another active disc is running
+            if hasDuration and isSelfTarget then
+                return false
+            end
+        end
+    end
+
+    -- 7. Buff / Song check (for duration discs that land in buff or song window)
+    local buffFound = false
+    pcall(function()
+        local b = mq.TLO.Me.Buff(name)
+        if b and b() and (b.Duration() or 0) > 0 then buffFound = true end
+        if not buffFound then
+            local s = mq.TLO.Me.Song(name)
+            if s and s() and (s.Duration() or 0) > 0 then buffFound = true end
+        end
+    end)
+    if buffFound then return false end
+
+    return true
+end
+
+runtime.isSkillReady = function(name)
+    if not name or name == '' then return false end
+    local now = os.clock()
+    local key = 's' .. name
+    if runtime.lastCast[key] and now < runtime.lastCast[key] then return false end
+    local readyOk, isReady = pcall(function() return mq.TLO.Me.AbilityReady(name)() end)
+    if readyOk and isReady == false then return false end
+    local timerOk, timerVal = pcall(function() return mq.TLO.Me.AbilityTimer(name) end)
+    if timerOk and timerVal then
+        local sec = 0
+        pcall(function()
+            if type(timerVal.TotalSeconds) == 'function' then
+                sec = timerVal.TotalSeconds() or 0
+            elseif type(timerVal.TotalSeconds) == 'number' then
+                sec = timerVal.TotalSeconds
+            elseif timerVal() then
+                local v = timerVal()
+                if type(v) == 'number' then sec = v end
+            end
+        end)
+        if sec > 0 then return false end
+    end
+    return true
+end
+
+runtime.fireDisc = function(name, a, id)
     if isSitting() or isDucking() then
         mq.cmd('/stand')
     end
-    local key = 'd' .. name
-    if (os.clock() - (runtime.lastCast[key] or 0)) < 1.5 then return false end
-    if not mq.TLO.Me.CombatAbility(name)() then return false end
-    if not mq.TLO.Me.CombatAbilityReady(name)() then return false end
+    if not runtime.isDiscReady(name) then return false end
+
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
     clearCursor()
     mq.cmdf('/disc "%s"', name)
-    runtime.lastCast[key] = os.clock()
+
+    -- Calculate duration & cooldown to lock out until the timer runs out
+    local now = os.clock()
+    local key = 'd' .. name
+    local durSec = 0
+    local recastSec = 0
+    pcall(function()
+        local sp = mq.TLO.Spell(name)
+        if sp and sp() then
+            local ticks = sp.Duration() or sp.MyDuration() or 0
+            if ticks > 0 then durSec = ticks * 6 end
+            local rt = sp.RecastTime() or 0
+            if type(rt) == 'number' then
+                if rt > 1800 then recastSec = rt / 1000 else recastSec = rt end
+            end
+            if recastSec == 0 and type(sp.RecastTime) == 'userdata' then
+                local ts = sp.RecastTime.TotalSeconds() or 0
+                if ts > 0 then recastSec = ts end
+            end
+        end
+    end)
+
+    pcall(function()
+        local cat = mq.TLO.Me.CombatAbilityTimer(name)
+        if cat and cat() then
+            local ts = 0
+            if type(cat.TotalSeconds) == 'function' then
+                ts = cat.TotalSeconds() or 0
+            elseif type(cat.TotalSeconds) == 'number' then
+                ts = cat.TotalSeconds
+            elseif type(cat) == 'number' then
+                ts = cat
+            end
+            if ts > recastSec then recastSec = ts end
+        end
+    end)
+
+    local lockSec = math.max(durSec, recastSec)
+    if lockSec <= 0 then lockSec = 5.0 end
+
+    if not runtime.discExpires then runtime.discExpires = {} end
+    if not runtime.discCooldown then runtime.discCooldown = {} end
+
+    if durSec > 0 then runtime.discExpires[name] = now + durSec end
+    if recastSec > 0 then runtime.discCooldown[name] = now + recastSec end
+    runtime.lastCast[key] = now + lockSec
+
     petState.lastCastCls = a.cls
     print('\ag[Triune]\ax discipline fired: ' .. name)
     if not selfCast and orig ~= id then
@@ -5034,20 +5318,31 @@ local function fireDisc(name, a, id)
     return true
 end
 
-local function fireSkill(name, a, id)
+runtime.fireSkill = function(name, a, id)
     if isSitting() or isDucking() then
         mq.cmd('/stand')
     end
-    local key = 's' .. name
-    if (os.clock() - (runtime.lastCast[key] or 0)) < 1.5 then return false end
-    if not mq.TLO.Me.AbilityReady(name)() then return false end
+    if not runtime.isSkillReady(name) then return false end
+
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
     clearCursor()
     mq.cmdf('/doability "%s"', name)
-    runtime.lastCast[key] = os.clock()
+
+    local now = os.clock()
+    local key = 's' .. name
+    local cd = 5.0
+    pcall(function()
+        local t = mq.TLO.Me.AbilityTimer(name)
+        if t and t() then
+            local ts = (type(t.TotalSeconds) == 'function' and t.TotalSeconds()) or (type(t) == 'number' and t) or 0
+            if ts > 0 then cd = ts end
+        end
+    end)
+    runtime.lastCast[key] = now + cd
+
     petState.lastCastCls = a.cls
     print('\ag[Triune]\ax skill fired: ' .. name)
     if not selfCast and orig ~= id then
@@ -5094,6 +5389,31 @@ local MELEE_RANGE = 14
 -- reported live as sitting at a corner saying "you cannot see your target"
 -- with no correction.
 local LOS_TRUST_RANGE = 8
+
+maxMeleeDistance = function(id)
+    local reach = 0
+    if id and id > 0 then
+        pcall(function()
+            local s = mq.TLO.Spawn(id)
+            if s and s() then
+                reach = tonumber(s.MaxRangeTo()) or tonumber(s.MaxMeleeTo()) or 0
+            end
+        end)
+        if reach <= 0 then
+            pcall(function()
+                local t = mq.TLO.Target
+                if t() and t.ID() == id then
+                    reach = tonumber(t.MaxRangeTo()) or tonumber(t.MaxMeleeTo()) or 0
+                end
+            end)
+        end
+    end
+    if reach <= 0 then
+        reach = MELEE_RANGE
+    end
+    return reach
+end
+
 desiredRange = function(id)
     if ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and ctrl.pull_stand_back then
         return ctrl.pull_engage_dist or 100
@@ -5102,16 +5422,9 @@ desiredRange = function(id)
     if style ~= 'Melee' then
         return ctrl.ranged_dist or 40
     end
-    local maxMeleeReach = 0
-    if id and id > 0 then
-        pcall(function()
-            local s = mq.TLO.Spawn(id)
-            if s and s() then
-                maxMeleeReach = s.MaxRangeTo() or s.MaxMeleeTo() or 0
-            end
-        end)
-    end
-    return math.max(18, maxMeleeReach)
+    local maxReach = maxMeleeDistance(id)
+    -- Position at max melee distance (comfortably inside absolute max strike reach)
+    return math.max(6, math.floor(maxReach - 2))
 end
 
 -- Move to within `dist` of a spawn. Returns true once already in range (nothing
@@ -5149,24 +5462,22 @@ local function moveToward(id, dist, followOnly)
         return false
     end
 
-    local maxMeleeReach = 0
-    pcall(function()
-        local s = mq.TLO.Spawn(id)
-        if s and s() then
-            maxMeleeReach = s.MaxRangeTo() or s.MaxMeleeTo() or 0
-        end
-    end)
-    local effectiveArrivalDist = math.max(dist or 18, maxMeleeReach)
+    local isMelee = (not followOnly and (ctrl and ctrl.combat_style or 'Melee') == 'Melee')
+    local maxReach = isMelee and maxMeleeDistance(id) or (dist or 18)
+    local targetDist = dist or (isMelee and desiredRange(id) or 18)
+    local effectiveArrivalDist = isMelee and maxReach or (dist or 18)
 
     if mq.TLO.Target.ID() == id and d <= effectiveArrivalDist then
         stopMoving()
-        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 1.0 then
+        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
             pursuit.lastCombatFaceAt = os.clock()
             mq.cmd('/face fast')
         end
+        pursuit.id = 0
         return true
     end
 
+    -- Update pursuit tracking for stall detection
     if pursuit.id ~= id then
         pursuit.id = id; pursuit.bestDist = d; pursuit.improvedAt = os.clock()
         pursuit.navStalls = 0; pursuit.wasNavActive = false
@@ -5226,7 +5537,7 @@ local function moveToward(id, dist, followOnly)
             end
             pursuit.wasNavActive = navActiveNow
             if pursuit.lastNavTargetId ~= id or not navActiveNow then
-                mq.cmdf('/nav id %d distance=%d', id, math.floor(effectiveArrivalDist))
+                mq.cmdf('/nav id %d distance=%d', id, math.floor(targetDist))
                 pursuit.lastNavTargetId = id
             end
             return false
@@ -5237,8 +5548,11 @@ local function moveToward(id, dist, followOnly)
     if stickLoaded() then
         local stickActive = false
         pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
-        if pursuit.lastNavTargetId ~= id or not stickActive then
-            mq.cmdf('/stick id %d %d', id, math.max(6, math.floor(effectiveArrivalDist)))
+        local stickDist = math.max(5, math.floor(targetDist))
+        local stickTgt = 0
+        pcall(function() stickTgt = mq.TLO.Stick.StickTarget() or 0 end)
+        if pursuit.lastNavTargetId ~= id or not stickActive or stickTgt ~= id then
+            mq.cmdf('/stick id %d %d', id, stickDist)
             pursuit.lastNavTargetId = id
         end
         return false
@@ -5300,7 +5614,8 @@ local function repositionCloser()
     if (ctrl and ctrl.combat_style) ~= 'Melee' then
         targetDist = math.max(15, math.floor(currentDist - 15))
     else
-        targetDist = math.max(6, math.min(14, desiredRange(tid) - 4))
+        local maxReach = maxMeleeDistance(tid)
+        targetDist = math.max(5, math.floor(maxReach - 2))
     end
 
     print(string.format(
@@ -5310,6 +5625,7 @@ local function repositionCloser()
     -- Reset pursuit tracking so moveToward doesn't short-circuit on stale arrival flags
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
+    pursuit.lastStickDist = 0
 
     mq.cmd('/face fast')
 
@@ -5323,7 +5639,7 @@ local function repositionCloser()
     end
 
     if stickLoaded() then
-        mq.cmdf('/stick %d id %d', targetDist, tid)
+        mq.cmdf('/stick id %d %d', tid, targetDist)
     else
         mq.cmd('/keypress forward hold')
         mq.delay(200)
@@ -5361,6 +5677,7 @@ local function handleCantHitFromHere()
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
+    pursuit.lastStickDist = 0
 
     mq.cmd('/face fast')
 
@@ -5378,7 +5695,8 @@ local function handleCantHitFromHere()
         mq.cmd('/face fast')
     end
 
-    local targetDist = 6
+    local maxReach = maxMeleeDistance(tid)
+    local targetDist = math.max(5, math.floor(maxReach - 2))
     if (ctrl and ctrl.combat_style) ~= 'Melee' then
         targetDist = math.max(12, math.floor(curDist - 10))
     end
@@ -5393,7 +5711,7 @@ local function handleCantHitFromHere()
     end
 
     if stickLoaded() then
-        mq.cmdf('/stick %d id %d', targetDist, tid)
+        mq.cmdf('/stick id %d %d', tid, targetDist)
     else
         mq.cmd('/keypress forward hold')
         mq.delay(250)
@@ -5717,7 +6035,7 @@ local function checkCombatStall()
     local d = distToId(t.ID())
     local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and ctrl.pull_stand_back)
     if ctrl.combat_style == 'Melee' and not isPullStandBack then
-        if d <= desiredRange(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+        if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
     elseif ctrl.combat_style == 'Ranged' then
         if d <= (ctrl.ranged_dist or 40) and not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
     end
@@ -5800,14 +6118,16 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local maxXtarDist = math.max(radius, (ctrl and ctrl.xtar_nav_dist) or 150)
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.Type() == 'NPC' and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
+        if xt() and (xt.ID() or 0) > 0 and (xt.Type() == 'NPC' or xt.Type() == 'Pet') and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
             local id = xt.ID()
-            local dist = xt.Distance3D() or 999
-            local lvl = xt.Level() or 0
-            if dist <= maxXtarDist and lvl >= minLv and lvl <= maxLv then
-                if isPullAllowed(xt.CleanName()) and not isUnreachable(id) then
-                    if not outsideAnchor(xt.Y() or 0, xt.X() or 0) then
-                        return id
+            if not isSpawnPetOrPlayer(id) and isHostileTarget(id) then
+                local dist = xt.Distance3D() or 999
+                local lvl = xt.Level() or 0
+                if dist <= maxXtarDist and lvl >= minLv and lvl <= maxLv then
+                    if isPullAllowed(xt.CleanName()) and not isUnreachable(id) then
+                        if not outsideAnchor(xt.Y() or 0, xt.X() or 0) then
+                            return id
+                        end
                     end
                 end
             end
@@ -5823,16 +6143,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         if sid > 0 then
             local stype = s.Type() or ''
             if stype == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
-                local isPlayerOwned = false
-                pcall(function()
-                    if s.Trader and s.Trader() then isPlayerOwned = true return end
-                    local master = s.Master
-                    if master and master() then
-                        local mtype = master.Type() or ''
-                        if mtype == 'PC' or mtype == 'Mercenary' then isPlayerOwned = true return end
-                    end
-                end)
-                if not isPlayerOwned then
+                if not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid) then
                     local lvl = s.Level() or 0
                     if lvl >= minLv and lvl <= maxLv then
                         local sz = s.Z() or myZ
@@ -5923,7 +6234,8 @@ local function pullerTick()
 
         -- If current target is right next to camp (within 25 units), fight it directly
         local pt = mq.TLO.Target
-        if pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0 and not pt.Dead() and distToId(pt.ID()) <= 25 then
+        if pt() and (pt.Type() == 'NPC' or pt.Type() == 'Pet') and (pt.PctHPs() or 0) > 0 and not pt.Dead()
+            and not isSpawnPetOrPlayer(pt.ID()) and isHostileTarget(pt.ID()) and distToId(pt.ID()) <= 25 then
             runtime.pullTargetId = pt.ID()
             runtime.pullState = 'FIGHTING'
             return
@@ -6002,10 +6314,7 @@ local function pullerTick()
             runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
         else
             local pullStyle = ctrl.pull_style or 'Melee'
-            local reqRange = MELEE_RANGE
-            if pullStyle ~= 'Melee' then
-                reqRange = ctrl.pull_engage_dist or 100
-            end
+            local reqRange = (pullStyle == 'Melee') and desiredRange(runtime.pullTargetId) or (ctrl.pull_engage_dist or 100)
 
             if moveToward(runtime.pullTargetId, reqRange) then
                 local tid = runtime.pullTargetId
@@ -6028,7 +6337,9 @@ local function pullerTick()
                     if petId > 0 then
                         mq.cmd('/pet attack')
                     end
-                    mq.cmd('/say #petcmd attack all')
+                    if hasActivePet() or trioHasPetClass() then
+                        mq.cmd('/say #petcmd attack all')
+                    end
                     local petTgtId = 0
                     pcall(function() petTgtId = mq.TLO.Pet.Target.ID() or 0 end)
                     if isXTargetId(tid) or distToId(tid) <= 35 or (petTgtId > 0 and petTgtId == tid) then
@@ -6152,7 +6463,8 @@ local function checkAggroSwitch()
 
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and xt.ID() ~= curId and xt.Type() == 'NPC' and not isUnreachable(xt.ID())
+        if xt() and (xt.ID() or 0) > 0 and xt.ID() ~= curId and (xt.Type() == 'NPC' or xt.Type() == 'Pet') and not isUnreachable(xt.ID())
+            and not isGroupOrRaidMember(xt.ID()) and not isSpawnPetOrPlayer(xt.ID()) and isHostileTarget(xt.ID())
             and not isIgnored(xt.CleanName()) then
             local d = xt.Distance3D() or 999
             local isHittingMe = false
@@ -6225,6 +6537,8 @@ onZoned = function()
     pursuit.wanderLoc = nil
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
+    runtime.discExpires = {}
+    runtime.discCooldown = {}
     if ctrl.camp_loc then
         print('\ay[Triune]\ax zoned -- clearing camp (it was set in the previous zone). Set a new one if needed.')
         ctrl.camp_loc = nil
@@ -6239,13 +6553,127 @@ onZoned = function()
     end
 end
 
+-- Bind engine helpers to runtime table to prevent exceeding Lua 5.1 / LuaJIT 60-upvalue limit
+runtime.fullStop = fullStop
+runtime.pctHP = pctHP
+runtime.isCombat = isCombat
+runtime.anyXtarAlive = anyXtarAlive
+runtime.countNPCXtarget = countNPCXtarget
+runtime.isXTargetId = isXTargetId
+runtime.isGroupOrRaidMember = isGroupOrRaidMember
+runtime.isAnyPet = isAnyPet
+runtime.isSpawnPetOrPlayer = isSpawnPetOrPlayer
+runtime.isHostileTarget = isHostileTarget
+runtime.firstNPCXtarget = firstNPCXtarget
+runtime.findFirstNPCXtarget = findFirstNPCXtarget
+runtime.stopMoving = stopMoving
+runtime.distToId = distToId
+runtime.distToLoc = distToLoc
+runtime.hasLoS = hasLoS
+runtime.isMoveActive = isMoveActive
+runtime.isCasting = isCasting
+runtime.navLoaded = navLoaded
+runtime.stickLoaded = stickLoaded
+runtime.hasActivePet = hasActivePet
+runtime.trioHasPetClass = trioHasPetClass
+runtime.setManualHunterPetHold = setManualHunterPetHold
+runtime.playerHasAggro = playerHasAggro
+runtime.playerIsEngagingTarget = playerIsEngagingTarget
+runtime.checkStuck = checkStuck
+runtime.checkCombatStall = checkCombatStall
+runtime.checkGemMemSync = checkGemMemSync
+runtime.checkAggroSwitch = checkAggroSwitch
+runtime.pullerTick = pullerTick
+runtime.findRoamTarget = findRoamTarget
+runtime.checkCloserTarget = checkCloserTarget
+runtime.chaseMA = chaseMA
+runtime.idleReturn = idleReturn
+runtime.maTargetId = maTargetId
+runtime.resolveTargetId = resolveTargetId
+runtime.castGem = castGem
+runtime.fireAA = fireAA
+runtime.isDetrimentalAction = isDetrimentalAction
+runtime.isTargetInRange = isTargetInRange
+runtime.conditionMet = conditionMet
+runtime.baseTok = baseTok
+runtime.sungKey = sungKey
+runtime.isSpecialSkill = isSpecialSkill
+runtime.clearCursor = clearCursor
+runtime.markUnreachable = markUnreachable
+runtime.moveToward = moveToward
+runtime.moveTowardLoc = moveTowardLoc
+runtime.setTarget = setTarget
+runtime.desiredRange = desiredRange
+runtime.maxMeleeDistance = maxMeleeDistance
+runtime.isIgnored = isIgnored
+runtime.isUnreachable = isUnreachable
+
 local function combatTick()
+    local fullStop = runtime.fullStop
+    local pctHP = runtime.pctHP
+    local isCombat = runtime.isCombat
+    local anyXtarAlive = runtime.anyXtarAlive
+    local countNPCXtarget = runtime.countNPCXtarget
+    local isXTargetId = runtime.isXTargetId
+    local isGroupOrRaidMember = runtime.isGroupOrRaidMember
+    local isAnyPet = runtime.isAnyPet
+    local isSpawnPetOrPlayer = runtime.isSpawnPetOrPlayer
+    local isHostileTarget = runtime.isHostileTarget
+    local firstNPCXtarget = runtime.firstNPCXtarget
+    local stopMoving = runtime.stopMoving
+    local distToId = runtime.distToId
+    local distToLoc = runtime.distToLoc
+    local hasLoS = runtime.hasLoS
+    local isMoveActive = runtime.isMoveActive
+    local isCasting = runtime.isCasting
+    local navLoaded = runtime.navLoaded
+    local stickLoaded = runtime.stickLoaded
+    local hasActivePet = runtime.hasActivePet
+    local trioHasPetClass = runtime.trioHasPetClass
+    local setManualHunterPetHold = runtime.setManualHunterPetHold
+    local playerHasAggro = runtime.playerHasAggro
+    local playerIsEngagingTarget = runtime.playerIsEngagingTarget
+    local checkStuck = runtime.checkStuck
+    local checkCombatStall = runtime.checkCombatStall
+    local checkGemMemSync = runtime.checkGemMemSync
+    local checkAggroSwitch = runtime.checkAggroSwitch
+    local pullerTick = runtime.pullerTick
+    local findRoamTarget = runtime.findRoamTarget
+    local checkCloserTarget = runtime.checkCloserTarget
+    local chaseMA = runtime.chaseMA
+    local idleReturn = runtime.idleReturn
+    local maTargetId = runtime.maTargetId
+    local resolveTargetId = runtime.resolveTargetId
+    local castGem = runtime.castGem
+    local fireAA = runtime.fireAA
+    local fireDisc = runtime.fireDisc
+    local fireSkill = runtime.fireSkill
+    local isDiscReady = runtime.isDiscReady
+    local isSkillReady = runtime.isSkillReady
+    local isDetrimentalAction = runtime.isDetrimentalAction
+    local isTargetInRange = runtime.isTargetInRange
+    local conditionMet = runtime.conditionMet
+    local baseTok = runtime.baseTok
+    local sungKey = runtime.sungKey
+    local isSpecialSkill = runtime.isSpecialSkill
+    local clearCursor = runtime.clearCursor
+    local markUnreachable = runtime.markUnreachable
+    local moveToward = runtime.moveToward
+    local moveTowardLoc = runtime.moveTowardLoc
+    local setTarget = runtime.setTarget
+    local desiredRange = runtime.desiredRange
+    local maxMeleeDistance = runtime.maxMeleeDistance
+    local isIgnored = runtime.isIgnored
+    local isUnreachable = runtime.isUnreachable
+
     if not ctrl.running then return end
     if mq.TLO.Me.Dead() then
         if not runtime.deathGuardFired then
             runtime.deathGuardFired = true
             fullStop()
             runtime.sungBuffs = {}
+            runtime.discExpires = {}
+            runtime.discCooldown = {}
             petState.myPets = {}; petState.lastObservedId = 0; petState.lastCastCls = nil
             print('\ar[Triune]\ax character is dead -- paused. Will resume automatically once alive again.')
         end
@@ -6336,6 +6764,7 @@ local function combatTick()
     local numXtar = countNPCXtarget()
     local t = mq.TLO.Target
     local haveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
+        and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())
     if haveNPC and ctrl.mode == 'Puller' then
         if isIgnored(t.CleanName()) then
             haveNPC = false
@@ -6393,7 +6822,7 @@ local function combatTick()
                 if moveToward(id, desiredRange(id)) then
                     engage = true
                 else
-                    engage = (distToId(id) <= (desiredRange(id) + 4) or isXTargetId(id))
+                    engage = (distToId(id) <= maxMeleeDistance(id) or isXTargetId(id))
                 end
             else
                 engage = (runtime.pullState == 'FIGHTING')
@@ -6523,7 +6952,7 @@ local function combatTick()
                 local id = mq.TLO.Target.ID()
                 local reqRange = desiredRange(id)
                 local arrived = moveToward(id, reqRange)
-                if arrived or distToId(id) <= (reqRange + 4) then
+                if arrived or distToId(id) <= maxMeleeDistance(id) then
                     engage = true
                     local style = ctrl and ctrl.combat_style or 'Melee'
                     if style == 'Melee' then
@@ -6539,7 +6968,9 @@ local function combatTick()
                         petState.petHoldActive = false
                         local petId = mq.TLO.Me.Pet.ID() or 0
                         if petId > 0 then mq.cmd('/pet attack') end
-                        mq.cmd('/say #petcmd attack all')
+                        if hasActivePet() or trioHasPetClass() then
+                            mq.cmd('/say #petcmd attack all')
+                        end
                     elseif style == 'Spell' then
                         mq.cmd('/face fast')
                         local slotToCast = ctrl.pull_spell_gem or 1
@@ -6574,7 +7005,7 @@ local function combatTick()
             if id then
                 if mq.TLO.Target.ID() ~= id then setTarget(id) end
                 haveNPC = true
-                if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) and distToId(id) <= desiredRange(id) and hasLoS(id) then
+                if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) and distToId(id) <= maxMeleeDistance(id) and hasLoS(id) then
                     engage = true
                 end
             else
@@ -6642,7 +7073,7 @@ local function combatTick()
         local tname = (t() and t.CleanName()) or 'none'
         local thp = (t() and t.PctHPs()) or -1
         local dist = (tid > 0) and distToId(tid) or -1
-        local reach = (tid > 0) and desiredRange(tid) or 18
+        local reach = (tid > 0) and maxMeleeDistance(tid) or 18
         local los = (tid > 0) and hasLoS(tid) or false
         local navActive = navLoaded() and mq.TLO.Navigation.Active() or false
         local stickActive = stickLoaded() and (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false
@@ -6651,7 +7082,7 @@ local function combatTick()
         local casting = isCasting()
         local moving = isMoveActive()
         print(string.format(
-            '\ao[DEBUG]\ax Mode:%s Style:%s | Tgt:%s(#%d HP:%d%% Hostile:%s) | Dist:%.1f Reach:%d LoS:%s | Nav:%s Stick:%s Mov:%s | Eng:%s Combat:%s Cast:%s | XTar:%d',
+            '\ao[DEBUG]\ax Mode:%s Style:%s | Tgt:%s(#%d HP:%d%% Hostile:%s) | Dist:%.1f Reach:%.1f LoS:%s | Nav:%s Stick:%s Mov:%s | Eng:%s Combat:%s Cast:%s | XTar:%d',
             tostring(ctrl.mode), tostring(ctrl.combat_style or 'Melee'), tostring(tname), tonumber(tid) or 0, tonumber(thp) or 0, tostring(isHostile), tonumber(dist) or 0, tonumber(reach) or 18, tostring(los),
             tostring(navActive), tostring(stickActive), tostring(moving), tostring(engage), tostring(combat), tostring(casting), tonumber(numXtar) or 0))
     end
@@ -6677,15 +7108,26 @@ local function combatTick()
     if style == 'Melee' then
         if not isPullStandBack then
             local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
-            if haveNPC and not isDraggingToCamp and autoAttackOk and (engage or (tid > 0 and distToId(tid) <= desiredRange(tid))) then
-                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
-                    print('\ag[Triune]\ax Standing up to attack.')
-                    mq.cmd('/stand')
-                end
-                if not mq.TLO.Me.Combat() then
-                    print(string.format('\ag[Triune]\ax Engaging /attack on -> %s (#%d) [dist=%.1f <= reach=%d, engage=%s]',
-                        tostring(mq.TLO.Target.CleanName()), tid, distToId(tid), desiredRange(tid), tostring(engage)))
-                    mq.cmd('/attack on')
+            if haveNPC and not isDraggingToCamp and autoAttackOk then
+                local curDist = (tid > 0) and distToId(tid) or 999
+                local maxReach = (tid > 0) and maxMeleeDistance(tid) or MELEE_RANGE
+                if curDist <= maxReach then
+                    if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
+                        print('\ag[Triune]\ax Standing up to attack.')
+                        mq.cmd('/stand')
+                    end
+                    if not mq.TLO.Me.Combat() then
+                        print(string.format('\ag[Triune]\ax Engaging /attack on -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
+                            tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
+                        mq.cmd('/attack on')
+                    end
+                    if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+                        pursuit.lastCombatFaceAt = os.clock()
+                        mq.cmd('/face fast')
+                    end
+                elseif not isMoveActive() and curDist > maxReach and tid > 0 then
+                    -- Mob moved, was pushed, or is out of striking reach: re-close distance
+                    moveToward(tid, desiredRange(tid))
                 end
             end
         end
@@ -6729,7 +7171,8 @@ local function combatTick()
     --   "#petcmd hold all" while out of combat / waiting for assist threshold to enable hold,
     --   "#petcmd attack all" once in combat and HP threshold is met.
     local assistThreshold = ctrl.pet_assist_at or 100
-    local petHoldEnabled = (ctrl.pet_hold_enabled ~= false) and trioHasPetClass()
+    local canCommandPets = hasActivePet() or trioHasPetClass()
+    local petHoldEnabled = (ctrl.pet_hold_enabled ~= false) and canCommandPets
 
     -- Puller Camp Mode: Keep pets on HOLD while traveling to mob or dragging mob back to camp,
     -- until the mob is brought within camp fight range.
@@ -6764,7 +7207,7 @@ local function combatTick()
         end
     end
 
-    if haveNPC and engage and trioHasPetClass() and not isPullingToCamp then
+    if haveNPC and engage and canCommandPets and not isPullingToCamp then
         if ctrl.mode == 'Manual' then
             setManualHunterPetHold(false)
         end
@@ -6794,7 +7237,7 @@ local function combatTick()
     else
         -- No active NPC target or still pulling back to camp: reset command tracking.
         petState.lastCmdTargetId = 0
-        if ctrl.mode == 'Manual' and not mq.TLO.Me.Combat() then
+        if ctrl.mode == 'Manual' and not mq.TLO.Me.Combat() and canCommandPets then
             setManualHunterPetHold(true)
         end
     end
@@ -6860,7 +7303,10 @@ local function combatTick()
                     if bossOk then
                         local isDet = isDetrimentalAction(name, d.target, d)
                         if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
-                            eligibleDiscs[#eligibleDiscs + 1] = { name = name, entry = d, id = id }
+                            local ready = isSpecialSkill(name) and isSkillReady(name) or isDiscReady(name)
+                            if ready then
+                                eligibleDiscs[#eligibleDiscs + 1] = { name = name, entry = d, id = id }
+                            end
                         end
                     end
                 end
@@ -6891,6 +7337,11 @@ local function combatTick()
         castTracker.wasCasting = true
     elseif castTracker.wasCasting then
         castTracker.wasCasting = false
+        if stickLoaded() then
+            pcall(function()
+                if mq.TLO.Stick.Status() == 'PAUSED' then mq.cmd('/stick unpause') end
+            end)
+        end
         if not castTracker.failed then
             castTracker.recordSuccess(castTracker.activeSpell or castTracker.lastSpell)
         end
@@ -6899,9 +7350,15 @@ local function combatTick()
         local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
         local tid = mq.TLO.Target.ID() or 0
         local d = (tid > 0) and distToId(tid) or 999
-        if ctrl and ctrl.combat_style == 'Melee' and not mq.TLO.Me.Combat() and haveNPC and not isDraggingToCamp and d <= desiredRange(tid) then
-            if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-            mq.cmd('/attack on')
+        local maxReach = (tid > 0) and maxMeleeDistance(tid) or MELEE_RANGE
+        if ctrl and ctrl.combat_style == 'Melee' and haveNPC and not isDraggingToCamp then
+            if d <= maxReach then
+                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+                mq.cmd('/face fast')
+                if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+            elseif not isMoveActive() and tid > 0 then
+                moveToward(tid, desiredRange(tid))
+            end
         end
     end
 
