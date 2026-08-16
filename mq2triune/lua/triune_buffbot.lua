@@ -331,6 +331,26 @@ end
 local lastTellLine = ""
 local lastTellTime = 0
 
+local function isThankYou(msg)
+    if not msg or msg == '' then return false end
+    local text = tostring(msg):lower():gsub("[%p%c]", " "):gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
+    if text == '' then return false end
+
+    if text == 'ty' or text:find('^ty%s') or text == 'tyvm' or text == 'tysm' or text:find('^tyvm%s') or text:find('^tysm%s') then
+        return true
+    end
+    if text == 'thx' or text:find('^thx%s') or text == 'thanks' or text:find('^thanks%s') then
+        return true
+    end
+    if text == 'thank you' or text:find('^thank you%s') or text == 'thank u' or text:find('^thank u%s') or text == 'thankyou' or text:find('^thankyou%s') then
+        return true
+    end
+    if text:find('^much appreciated') or text:find('^appreciate it') or text:find('^appreciate you') then
+        return true
+    end
+    return false
+end
+
 local function onTellReceived(line, sender, msg)
     if not ctrl.enabled then return end
     if not sender or sender == '' or not msg then return end
@@ -361,6 +381,15 @@ local function onTellReceived(line, sender, msg)
     -- Log detection to UI and MQ console
     logMsg(string.format("Incoming tell from %s: '%s'", cleanSender, cleanMsg))
     print(string.format('\ay[Triune Buffbot]\ax Incoming tell from \aw%s\ax: \ag"%s"\ax', cleanSender, cleanMsg))
+
+    -- Check for Thank You / Gratitude
+    if isThankYou(cleanMsg) then
+        logMsg(string.format("Received thank-you tell from '%s'. Replying with 'You're welcome!'.", cleanSender))
+        pcall(function()
+            mq.cmdf("/tell %s You're welcome!", cleanSender)
+        end)
+        return
+    end
 
     -- Check Cooldown
     local cd = runtime.cooldowns[cleanSender]
@@ -769,7 +798,7 @@ local function drawControlTab()
         "Listens for /tells, replies with numbered spell options, and casts choices.")
     ImGui.Separator()
 
-    -- Status Indicator and Save Settings Button
+    -- Status Indicator
     if runtime.state == 'IDLE' then
         ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "Status: LISTENING FOR TELLS")
     elseif runtime.state == 'CASTING' then
@@ -780,13 +809,6 @@ local function drawControlTab()
             string.format("Status: MEDITATING (%d%% / 100%%)", getMyPctMana()))
     else
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format("Status: %s", runtime.state))
-    end
-
-    ImGui.SameLine()
-    ImGui.Spacing()
-    ImGui.SameLine()
-    if ImGui.Button(" Save Settings ", 120, 26) then
-        saveConfig(false)
     end
 
     ImGui.Spacing()
