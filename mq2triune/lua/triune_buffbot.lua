@@ -625,6 +625,35 @@ local function acquireTarget(targetID, targetName)
 end
 
 -- ============================================================================
+-- Spell Cooldown & Recovery Helpers
+-- ============================================================================
+local function isSpellReady(gemNum, spellName)
+    local ready = false
+    pcall(function()
+        if gemNum and gemNum > 0 then
+            ready = mq.TLO.Me.SpellReady(gemNum)() or false
+        end
+        if not ready and spellName and spellName ~= '' then
+            ready = mq.TLO.Me.SpellReady(spellName)() or false
+        end
+    end)
+    return ready
+end
+
+local function waitForSpellReady(gemNum, spellName, maxWaitSec)
+    maxWaitSec = maxWaitSec or 30
+    local start = os.time()
+    while not isSpellReady(gemNum, spellName) and ctrl.enabled do
+        mq.doevents()
+        mq.delay(100)
+        if (os.time() - start) >= maxWaitSec then
+            break
+        end
+    end
+    return isSpellReady(gemNum, spellName)
+end
+
+-- ============================================================================
 -- Buff Casting Loop
 -- ============================================================================
 local function processBuffQueue()
@@ -718,47 +747,44 @@ local function processBuffQueue()
                 mq.delay(200)
             end
 
-            -- Wait for gem readiness while servicing events
-            logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetName, gemNum))
-            local ready = false
-            pcall(function() ready = mq.TLO.Me.SpellReady(gemNum)() end)
-            if not ready then
-                local waitAttempts = 0
-                while not ready and waitAttempts < 30 and ctrl.enabled do
+            -- Verify spell has recovered from cooldown before attempting cast
+            if not isSpellReady(gemNum, expectedName) then
+                logMsg(string.format("Waiting for [%s] (Gem %d) to recover from cooldown...", expectedName, gemNum))
+                waitForSpellReady(gemNum, expectedName, 30)
+            end
+
+            if isSpellReady(gemNum, expectedName) then
+                -- Final pre-cast target lock & LoS facing
+                acquireTarget(targetID, targetName)
+                pcall(function() mq.cmd('/face fast') end)
+                mq.delay(100)
+                mq.doevents()
+
+                -- Cast the spell on the requester
+                logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetName, gemNum))
+                pcall(function() mq.cmdf('/cast %d', gemNum) end)
+                mq.delay(300)
+                mq.doevents()
+
+                -- Wait for casting to complete while processing incoming tells
+                local isCasting = true
+                local attempts = 0
+                while isCasting and attempts < 150 do
+                    mq.doevents()
+                    pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
+                    if isCasting then
+                        mq.delay(100)
+                        attempts = attempts + 1
+                    end
+                end
+
+                -- Recovery delay between casts while servicing events
+                for _ = 1, 8 do
                     mq.doevents()
                     mq.delay(100)
-                    waitAttempts = waitAttempts + 1
-                    pcall(function() ready = mq.TLO.Me.SpellReady(gemNum)() end)
                 end
-            end
-
-            -- Final pre-cast target lock & LoS facing
-            acquireTarget(targetID, targetName)
-            pcall(function() mq.cmd('/face fast') end)
-            mq.delay(100)
-            mq.doevents()
-
-            -- Cast the spell on the requester
-            pcall(function() mq.cmdf('/cast %d', gemNum) end)
-            mq.delay(300)
-            mq.doevents()
-
-            -- Wait for casting to complete while processing incoming tells
-            local isCasting = true
-            local attempts = 0
-            while isCasting and attempts < 150 do
-                mq.doevents()
-                pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
-                if isCasting then
-                    mq.delay(100)
-                    attempts = attempts + 1
-                end
-            end
-
-            -- Recovery delay between casts while servicing events
-            for _ = 1, 6 do
-                mq.doevents()
-                mq.delay(100)
+            else
+                logMsg(string.format("Spell [%s] (Gem %d) timed out waiting for cooldown recovery. Skipping.", expectedName, gemNum), true, false)
             end
         end
     end
