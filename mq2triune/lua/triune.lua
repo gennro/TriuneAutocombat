@@ -950,6 +950,52 @@ local function isSpawnAlive(id)
     return (not dead) and (tp ~= 'Corpse') and ((hp or 0) > 0)
 end
 
+local function isSpawnMyPet(s_or_id)
+    if not s_or_id then return false end
+    local s = (type(s_or_id) == 'number') and mq.TLO.Spawn(s_or_id) or s_or_id
+    if not s or not s() then return false end
+    local myId = 0
+    local myName = ''
+    pcall(function()
+        myId = mq.TLO.Me.ID() or 0
+        myName = mq.TLO.Me.CleanName() or ''
+    end)
+    if myId <= 0 then return false end
+
+    local isMine = false
+    pcall(function()
+        local curPetId = mq.TLO.Me.Pet.ID() or 0
+        local sid = s.ID() or 0
+        if curPetId > 0 and sid == curPetId then
+            isMine = true
+            return
+        end
+
+        local m = s.Master
+        if m and m() and (m.ID() or 0) == myId then
+            isMine = true
+            return
+        end
+
+        local o = s.Owner
+        if o and o() and (o.ID() or 0) == myId then
+            isMine = true
+            return
+        end
+
+        local cname = s.CleanName() or ''
+        if myName ~= '' and cname ~= '' then
+            if cname:find(myName .. "'s ", 1, true) or
+               cname:find(myName .. "`s ", 1, true) or
+               cname:find('(Owner: ' .. myName .. ')', 1, true) then
+                isMine = true
+                return
+            end
+        end
+    end)
+    return isMine
+end
+
 -- Returns true if the player currently has an active living pet (or any live trio pet in petState.myPets)
 hasActivePet = function()
     local myPetId = 0
@@ -958,9 +1004,11 @@ hasActivePet = function()
         return true
     end
     if petState and type(petState.myPets) == 'table' then
-        for _, petId in pairs(petState.myPets) do
-            if petId and petId > 0 and isSpawnAlive(petId) then
+        for k, petId in pairs(petState.myPets) do
+            if petId and petId > 0 and isSpawnAlive(petId) and isSpawnMyPet(petId) then
                 return true
+            elseif petId and petId > 0 and not isSpawnAlive(petId) then
+                petState.myPets[k] = nil
             end
         end
     end
@@ -3171,7 +3219,7 @@ function UI.drawDiscTab()
 end
 
 local function setManualHunterPetHold(on, force)
-    if not hasActivePet() and not trioHasPetClass() then return end
+    if not hasActivePet() then return end
     if on then
         if force or petState.manualHunterHold ~= true then
             mq.cmd('/say #petcmd hold all')
@@ -4781,14 +4829,16 @@ local function reconcilePets()
     local petClassList = {}
     for _, c in ipairs(myClasses) do if PET_CLASSES[c] then petClassList[#petClassList + 1] = c end end
     if #petClassList == 0 then return end
-    local n = mq.TLO.SpawnCount('pet radius 100')() or 0
+    local n = 0
+    pcall(function() n = mq.TLO.SpawnCount('pet radius 100')() or 0 end)
     local assigned = 0
-    for i = 1, math.min(n, #petClassList) do
+    for i = 1, n do
+        if assigned >= #petClassList then break end
         local s = mq.TLO.NearestSpawn(i, 'pet radius 100')
-        if s() and s.ID() then
-            petState.myPets[petClassList[i]] = s.ID()
-            petState.lastObservedId = s.ID()
+        if s and s() and s.ID() and isSpawnMyPet(s) then
             assigned = assigned + 1
+            petState.myPets[petClassList[assigned]] = s.ID()
+            petState.lastObservedId = s.ID()
         end
     end
     if assigned > 0 then
@@ -6334,10 +6384,10 @@ local function pullerTick()
                     mq.cmd('/face fast')
                     local petId = mq.TLO.Me.Pet.ID() or 0
                     petState.petHoldActive = false
-                    if petId > 0 then
+                    if petId > 0 and isSpawnAlive(petId) then
                         mq.cmd('/pet attack')
                     end
-                    if hasActivePet() or trioHasPetClass() then
+                    if hasActivePet() then
                         mq.cmd('/say #petcmd attack all')
                     end
                     local petTgtId = 0
@@ -6539,6 +6589,13 @@ onZoned = function()
     runtime.pullTargetId = 0
     runtime.discExpires = {}
     runtime.discCooldown = {}
+    petState.myPets = {}
+    petState.petHoldActive = false
+    petState.manualHunterHold = nil
+    petState.lastObservedId = 0
+    petState.lastCmdTargetId = 0
+    petState.lastCmdAt = 0
+    petState.holdIssuedForId = 0
     if ctrl.camp_loc then
         print('\ay[Triune]\ax zoned -- clearing camp (it was set in the previous zone). Set a new one if needed.')
         ctrl.camp_loc = nil
@@ -6967,8 +7024,8 @@ local function combatTick()
                         mq.cmd('/face fast')
                         petState.petHoldActive = false
                         local petId = mq.TLO.Me.Pet.ID() or 0
-                        if petId > 0 then mq.cmd('/pet attack') end
-                        if hasActivePet() or trioHasPetClass() then
+                        if petId > 0 and isSpawnAlive(petId) then mq.cmd('/pet attack') end
+                        if hasActivePet() then
                             mq.cmd('/say #petcmd attack all')
                         end
                     elseif style == 'Spell' then
@@ -7171,7 +7228,7 @@ local function combatTick()
     --   "#petcmd hold all" while out of combat / waiting for assist threshold to enable hold,
     --   "#petcmd attack all" once in combat and HP threshold is met.
     local assistThreshold = ctrl.pet_assist_at or 100
-    local canCommandPets = hasActivePet() or trioHasPetClass()
+    local canCommandPets = hasActivePet()
     local petHoldEnabled = (ctrl.pet_hold_enabled ~= false) and canCommandPets
 
     -- Puller Camp Mode: Keep pets on HOLD while traveling to mob or dragging mob back to camp,

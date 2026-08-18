@@ -12,6 +12,12 @@
   - **Removed "All" Buffs Option**: Removed `[all] All` from the tell menu, parsing logic, and UI display. Requesters now select specific buff numbers (e.g. `1 3`, `1 2 4`).
   - **Anti-AFK Keep-Alive Engine (`ctrl.antiAfk`)**: Added an automated anti-AFK system that continuously monitors `Me.AFK()` to clear AFK mode immediately (`/afk off`) and performs a periodic 3-minute keep-alive pulse (stand/sit or duck/stand) while idle or medding. Includes a dedicated UI checkbox with character config persistence.
   - **UI Simplification**: Removed the redundant "Player Cooldown" slider from the Controls tab.
+- **Active Pet Verification & Pet Command Anti-Spam Gate (`triune.lua`).**
+  - **Pet Ownership Verification (`isSpawnMyPet`)**: Added `isSpawnMyPet(s_or_id)` helper verifying that a spawn ID or spawn object explicitly belongs to the player (via `Me.Pet.ID()`, `s.Master.ID()`, `s.Owner.ID()`, or naming conventions like `<Me>'s pet` and `(Owner: <Me>)`).
+  - **Strict Active Pet Gating (`hasActivePet`)**: Strengthened `hasActivePet()` to verify both liveness (`isSpawnAlive`) and ownership (`isSpawnMyPet`) on all tracked pet IDs, pruning dead or unowned pet entries.
+  - **Eliminated Command Spam Without Summoned Pets**: Switched all pet command gates (`setManualHunterPetHold`, Puller Pet style, Pet combat style, and universal combat tick `#petcmd hold/attack all`) from `hasActivePet() or trioHasPetClass()` to strictly check `hasActivePet()`. If a character has a pet class but has not summoned a pet, pet commands are completely suppressed.
+  - **Accurate Startup Pet Reconciliation (`reconcilePets`)**: Updated `reconcilePets()` on script startup to only claim nearby pets within 100 units if `isSpawnMyPet(s)` is true, preventing other players' or NPC pets from falsely registering as the local player's pets.
+  - **Zoning State Reset (`onZoned`)**: Added clean resets of `petState` tracking tables, target IDs, and hold status flags when zoning.
 
 ---
 
