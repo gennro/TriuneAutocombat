@@ -2,9 +2,15 @@
 
 ## 2026-08-17
 
-- **Safe-Length Tell Chunking for Buffbot Menu (`triune_buffbot.lua`).**
-  - **Dynamic Message Packing**: Replaced fixed 300-char string concatenation with a dynamic word-wrap chunker packing spell options into safe lines of $\le 100$ characters (`Buffs (1/3): ...`, `Buffs (2/3): ...`, etc.).
+- **Safe-Length Tell Chunking & Outgoing Tell Queue (`triune_buffbot.lua`).**
+  - **Dynamic Message Packing**: Replaced fixed 300-char string concatenation with a dynamic word-wrap chunker packing spell options into safe lines of $\le 140$ characters (`Buffs (1/2): ...`, `Buffs (2/2): ...`).
+  - **Asynchronous Outgoing Tell Queue & Flood Protection**: Created a dedicated outgoing tell queue (`runtime.outgoingTells` & `queueTell`) drained in the main coroutine loop with a 1100ms wall-clock (`mq.gettime()`) pacing interval. This completely bypasses EQ server-side tell flood filters and eliminates dropped lines.
   - **Chat Buffer Truncation Prevention**: Completely eliminates EverQuest chat buffer truncation when memorizing long spell names or large gem bars, ensuring players receive the complete numbered spell menu.
+  - **1-Second Silent Request Limiter**: Fixed the request delay to 1 second (`ctrl.cooldownSec = 1`) and removed the rejection tell message when players send rapid repeat requests. Repeats under 1 second are now silently ignored without spamming the requester.
+  - **Single Tell Event Listener & Queue Pruning**: Consolidated tell event listeners to a single unified pattern (`#*##1# tells you, #2#`) with millisecond sender deduplication and automatic un-sent queue pruning, eliminating duplicate triggers of lines 1 and 2.
+  - **MacroQuest Pipe Delimiter Fix & Safe Message Length**: Removed the `|` pipe character from the final menu tell string and capped spell chunks to $\le 75$ characters with instructions on a dedicated line so every tell packet remains strictly $\le 95$ characters (well below EverQuest client packet limits).
+  - **Removed "All" Buffs Option**: Removed `[all] All` from the tell menu, parsing logic, and UI display. Requesters now select specific buff numbers (e.g. `1 3`, `1 2 4`).
+  - **UI Simplification**: Removed the redundant "Player Cooldown" slider from the Controls tab.
 
 ---
 
