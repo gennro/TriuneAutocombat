@@ -128,6 +128,7 @@ end
 local ctrl = {
     enabled       = true,
     autoMed       = true,
+    antiAfk       = true,
     maxRange      = 100,
     timeoutSec    = 30,
     cooldownSec   = 1,
@@ -143,6 +144,7 @@ local runtime = {
     activeQueue       = {},     -- array of { sender = name, spawnID = id, gems = list }
     outgoingTells     = {},     -- array of { target = name, msg = text }
     lastTellSendTime  = 0,
+    lastAntiAfkTime   = os.time(),
     currentRequester  = nil,
     currentSpellsText = "",
     log               = {},
@@ -248,6 +250,7 @@ local function saveConfig(silent)
     allData[charKey] = {
         enabled       = ctrl.enabled,
         autoMed       = ctrl.autoMed,
+        antiAfk       = ctrl.antiAfk,
         maxRange      = ctrl.maxRange,
         timeoutSec    = ctrl.timeoutSec,
         cooldownSec   = ctrl.cooldownSec,
@@ -280,6 +283,7 @@ local function loadConfig()
     if charData and type(charData) == 'table' then
         if charData.enabled ~= nil then ctrl.enabled = charData.enabled end
         if charData.autoMed ~= nil then ctrl.autoMed = charData.autoMed end
+        if charData.antiAfk ~= nil then ctrl.antiAfk = charData.antiAfk end
         if charData.maxRange then ctrl.maxRange = charData.maxRange end
         if charData.timeoutSec then ctrl.timeoutSec = charData.timeoutSec end
         ctrl.cooldownSec = 1
@@ -912,6 +916,13 @@ local function drawControlTab()
         saveConfig(true)
     end
 
+    ImGui.SameLine()
+    local antiAfkVal, antiAfkChanged = ImGui.Checkbox("Anti-AFK Keep-Alive", ctrl.antiAfk)
+    if antiAfkChanged then
+        ctrl.antiAfk = antiAfkVal
+        saveConfig(true)
+    end
+
     local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", ctrl.maxRange, 20, 300)
     if rangeChanged then
         ctrl.maxRange = rangeVal; saveConfig(true)
@@ -1044,6 +1055,43 @@ while runtime.openGUI do
             runtime.state = 'MEDDING'
         elseif pctMana >= 100 and runtime.state == 'MEDDING' then
             runtime.state = 'IDLE'
+        end
+    end
+
+    -- Anti-AFK upkeep (clears AFK flag and pulses keep-alive every 3 minutes if idle)
+    if ctrl.enabled and ctrl.antiAfk and #runtime.activeQueue == 0 and runtime.state ~= 'CASTING' and runtime.state ~= 'STOPPED' then
+        local isAfk = false
+        pcall(function() isAfk = mq.TLO.Me.AFK() or false end)
+        if isAfk then
+            pcall(function() mq.cmd('/afk off') end)
+            logMsg("Cleared AFK status.")
+        end
+
+        local curTime = os.time()
+        if (curTime - runtime.lastAntiAfkTime) >= 180 then
+            runtime.lastAntiAfkTime = curTime
+            local isSit = false
+            pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
+            local isCast = false
+            pcall(function() isCast = mq.TLO.Me.Casting() ~= nil end)
+            if not isCast then
+                if isSit then
+                    pcall(function()
+                        mq.cmd('/stand')
+                        mq.delay(250)
+                        mq.cmd('/sit')
+                        if mq.TLO.Me.AFK() then mq.cmd('/afk off') end
+                    end)
+                else
+                    pcall(function()
+                        mq.cmd('/duck')
+                        mq.delay(200)
+                        mq.cmd('/stand')
+                        if mq.TLO.Me.AFK() then mq.cmd('/afk off') end
+                    end)
+                end
+                logMsg("Anti-AFK keep-alive pulse performed.")
+            end
         end
     end
 

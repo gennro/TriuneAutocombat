@@ -10,6 +10,7 @@
   - **Single Tell Event Listener & Queue Pruning**: Consolidated tell event listeners to a single unified pattern (`#*##1# tells you, #2#`) with millisecond sender deduplication and automatic un-sent queue pruning, eliminating duplicate triggers of lines 1 and 2.
   - **MacroQuest Pipe Delimiter Fix & Safe Message Length**: Removed the `|` pipe character from the final menu tell string and capped spell chunks to $\le 75$ characters with instructions on a dedicated line so every tell packet remains strictly $\le 95$ characters (well below EverQuest client packet limits).
   - **Removed "All" Buffs Option**: Removed `[all] All` from the tell menu, parsing logic, and UI display. Requesters now select specific buff numbers (e.g. `1 3`, `1 2 4`).
+  - **Anti-AFK Keep-Alive Engine (`ctrl.antiAfk`)**: Added an automated anti-AFK system that continuously monitors `Me.AFK()` to clear AFK mode immediately (`/afk off`) and performs a periodic 3-minute keep-alive pulse (stand/sit or duck/stand) while idle or medding. Includes a dedicated UI checkbox with character config persistence.
   - **UI Simplification**: Removed the redundant "Player Cooldown" slider from the Controls tab.
 
 ---
