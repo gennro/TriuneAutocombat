@@ -269,7 +269,7 @@ end
 -- Tell Menu & Choice Parsing
 -- ============================================================================
 local function sendMenuTells(target, gemList)
-    if #gemList == 0 then
+    if not gemList or #gemList == 0 then
         pcall(function() mq.cmdf('/tell %s I currently have no buff spells memorized.', target) end)
         return
     end
@@ -280,16 +280,50 @@ local function sendMenuTells(target, gemList)
     end
     table.insert(items, "[all] All")
 
-    local fullStr = "Buffs: " .. table.concat(items, ", ") .. " | Reply with # (e.g. 1 3) or 'all'."
-    if #fullStr <= 300 then
-        pcall(function() mq.cmdf('/tell %s %s', target, fullStr) end)
-    else
-        local mid = math.ceil(#items / 2)
-        local p1, p2 = {}, {}
-        for i = 1, mid do table.insert(p1, items[i]) end
-        for i = mid + 1, #items do table.insert(p2, items[i]) end
-        pcall(function() mq.cmdf('/tell %s Buffs (1/2): %s', target, table.concat(p1, ", ")) end)
-        pcall(function() mq.cmdf('/tell %s Buffs (2/2): %s (Reply with # or \'all\')', target, table.concat(p2, ", ")) end)
+    -- Pack items into clean chunks of <= 100 characters to prevent EQ chat truncation
+    local lines = {}
+    local currentLine = ""
+
+    for _, item in ipairs(items) do
+        if currentLine == "" then
+            currentLine = item
+        else
+            if #(currentLine .. ", " .. item) <= 100 then
+                currentLine = currentLine .. ", " .. item
+            else
+                table.insert(lines, currentLine)
+                currentLine = item
+            end
+        end
+    end
+    if currentLine ~= "" then
+        table.insert(lines, currentLine)
+    end
+
+    -- Send chunked tells with brief delays to preserve chat order
+    for i, line in ipairs(lines) do
+        if #lines == 1 then
+            pcall(function()
+                mq.cmdf('/tell %s Buffs: %s | Reply with # (e.g. 1 3) or \'all\'', target, line)
+            end)
+        else
+            if i == 1 then
+                pcall(function()
+                    mq.cmdf('/tell %s Buffs (%d/%d): %s', target, i, #lines, line)
+                end)
+            elseif i == #lines then
+                pcall(function()
+                    mq.cmdf('/tell %s Buffs (%d/%d): %s | Reply with # or \'all\'', target, i, #lines, line)
+                end)
+            else
+                pcall(function()
+                    mq.cmdf('/tell %s Buffs (%d/%d): %s', target, i, #lines, line)
+                end)
+            end
+        end
+        if i < #lines then
+            mq.delay(200)
+        end
     end
 end
 

@@ -1,5 +1,13 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-17
+
+- **Safe-Length Tell Chunking for Buffbot Menu (`triune_buffbot.lua`).**
+  - **Dynamic Message Packing**: Replaced fixed 300-char string concatenation with a dynamic word-wrap chunker packing spell options into safe lines of $\le 100$ characters (`Buffs (1/3): ...`, `Buffs (2/3): ...`, etc.).
+  - **Chat Buffer Truncation Prevention**: Completely eliminates EverQuest chat buffer truncation when memorizing long spell names or large gem bars, ensuring players receive the complete numbered spell menu.
+
+---
+
 ## 2026-08-16
 
 - **Interactive Tell Menu & Numbered Spell Selection for Buffbot (`triune_buffbot.lua`).**
