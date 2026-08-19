@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.6.5'
+local VERSION           = '1.6.10'
 local open              = true
 local cfg               = mq.configDir
 
@@ -200,6 +200,9 @@ local function sanitizeModeConfig(c)
         c.submode = 'Hunt'
     end
 
+    if c.hunter_z_plane == nil then c.hunter_z_plane = 15 end
+    if c.hunter_z == nil then c.hunter_z = 75 end
+
     if type(c.pull_con_filter) ~= 'table' then
         c.pull_con_filter = {}
     end
@@ -225,6 +228,7 @@ local function defaultCtrl()
         pull_stand_back      = false,
         xtar_nav_dist        = 150,
         combat_style         = 'Melee',
+        melee_dist           = 14,
         ranged_dist          = 40,
         ma_name              = '',
         assist_at            = 98,
@@ -234,7 +238,9 @@ local function defaultCtrl()
         camp_loc             = nil,
         camp_radius          = 100,
         camp_z               = 75,
+        camp_z_plane         = 15,
         hunter_radius        = 1500,
+        hunter_z_plane       = 15,
         hunter_z             = 75,
         hunter_min_level     = 1,
         hunter_max_level     = 100,
@@ -374,12 +380,14 @@ local stuckState = {
     lastDoorClickAt = 0,
     combatStallSince = nil,
     lastStuckRecoveryAt = nil,
-    lastCombatStallRecoveryAt = nil
+    lastCombatStallRecoveryAt = nil,
+    lastCannotSeeAt = 0,
+    cannotSeeAttempts = 0
 }
 
 -- Full-stop and onZoned: reset every movement/combat command and stale state.
 -- Used by STOP, a mode switch, and the death guard.
-local fullStop, onZoned, hasActivePet
+local fullStop, onZoned, hasActivePet, handleCannotSeeTarget
 local PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true }
 local function trioHasPetClass()
     for _, c in ipairs(myClasses) do if PET_CLASSES[c] then return true end end
@@ -421,59 +429,6 @@ local WHENS = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff
 -- ============================================================================
 -- Local Theme & Common Helpers (Self-Contained Module)
 -- ============================================================================
-local MQSHORT = {
-    WARRIOR = 'War',
-    WAR = 'War',
-    WARRIORS = 'War',
-    CLERIC = 'Clr',
-    CLR = 'Clr',
-    CLERICS = 'Clr',
-    PALADIN = 'Pal',
-    PAL = 'Pal',
-    PALADINS = 'Pal',
-    RANGER = 'Rng',
-    RNG = 'Rng',
-    RANGERS = 'Rng',
-    SHADOWKNIGHT = 'SK',
-    SHADOW = 'SK',
-    SHD = 'SK',
-    SK = 'SK',
-    SHADOWKNIGHTS = 'SK',
-    DRUID = 'Dru',
-    DRU = 'Dru',
-    DRUIDS = 'Dru',
-    MONK = 'Mnk',
-    MNK = 'Mnk',
-    MONKS = 'Mnk',
-    BARD = 'Brd',
-    BRD = 'Brd',
-    BARDS = 'Brd',
-    ROGUE = 'Rog',
-    ROG = 'Rog',
-    ROGUES = 'Rog',
-    SHAMAN = 'Shm',
-    SHM = 'Shm',
-    SHAMANS = 'Shm',
-    NECROMANCER = 'Nec',
-    NEC = 'Nec',
-    NECROMANCERS = 'Nec',
-    WIZARD = 'Wiz',
-    WIZ = 'Wiz',
-    WIZARDS = 'Wiz',
-    MAGICIAN = 'Mag',
-    MAG = 'Mag',
-    MAGICIANS = 'Mag',
-    ENCHANTER = 'Enc',
-    ENC = 'Enc',
-    ENCHANTERS = 'Enc',
-    BEASTLORD = 'Bst',
-    BST = 'Bst',
-    BEASTLORDS = 'Bst',
-    BERSERKER = 'Ber',
-    BER = 'Ber',
-    BERSERKERS = 'Ber'
-}
-
 local function idxOf(tbl, val)
     if not tbl then return 1 end
     for i, v in ipairs(tbl) do
@@ -487,16 +442,33 @@ local function toCanonicalClassAbbr(str)
     local s = tostring(str)
     if s == '' or s == 'nil' or s == 'NULL' then return nil end
     local up = s:upper():gsub('%s+', '')
+    local MQSHORT = {
+        WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
+        CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
+        PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
+        RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
+        SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
+        DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
+        MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
+        BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
+        ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
+        SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
+        NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
+        WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
+        MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
+        ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
+        BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
+        BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber'
+    }
     return MQSHORT[up] or (ALL_ABBR and idxOf(ALL_ABBR, s) > 0 and s) or nil
 end
 
-local SLOT_COLORS = {
-    { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
-    { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
-    { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
-}
-
 local function classColor(abbr)
+    local SLOT_COLORS = {
+        { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
+        { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
+        { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
+    }
     for i, c in ipairs(myClasses) do
         if c == abbr then
             local col = SLOT_COLORS[i] or { 0.49, 0.56, 0.65 }
@@ -1291,8 +1263,9 @@ isHostileTarget = function(id)
     return true
 end
 
-local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist)
+local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ)
     maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
+    local myZ = mq.TLO.Me.Z() or 0
     local chosenId, lowestHp = nil, 101
     pcall(function()
         local slots = 13
@@ -1307,10 +1280,13 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
                         local stype = s.Type() or ''
                         local cname = s.CleanName() or ''
                         local dist = s.Distance3D() or 999
+                        local okZ, sz = pcall(function() return s.Z() end)
+                        local zOk = (not maxZ) or (okZ and sz and math.abs(sz - myZ) <= maxZ)
                         if (stype == 'NPC' or stype == 'Pet')
                             and (s.PctHPs() or 0) > 0 and not s.Dead()
                             and isHostileTarget(id)
                             and dist <= maxDist
+                            and zOk
                             and (not isIgnoredFn or not isIgnoredFn(cname))
                             and (not isUnreachableFn or not isUnreachableFn(id)) then
                             if not unmezzedOnly or not buffActive(id, 'Mez') then
@@ -1498,7 +1474,7 @@ local ALIAS_CLASS_MAP = {
     BST = 'Bst',
     Bst = 'Bst',
     SHM = 'Shm',
-    Shm = 'Shm'
+    Shm = 'Shm',
 }
 
 local function lookupSpells(abbr)
@@ -1735,12 +1711,11 @@ local function mapTLOCategoryToKind(sp, name)
     end
 end
 
-local KIND_LABEL = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet = 'Pet', util = 'Util', debuff = 'Debuff' }
-
 local function filteredSpells(abbr)
     if not abbr then
         return {}, {}
     end
+    local KIND_LABEL = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet = 'Pet', util = 'Util', debuff = 'Debuff' }
     local now = os.clock()
     local scribedOnly = ctrl and ctrl.scribed_only or false
 
@@ -1804,10 +1779,10 @@ end
 -- so this stays correctly empty for classes with no notable one. Routine
 -- rotation skills (Kick, Tiger Claw, Flying Kick, etc.) deliberately excluded
 -- -- handled by the user's separate autoskill window.
-local SPECIAL_SKILLS = {
-    Mnk = { 'Mend', 'Feign Death' },
-}
 local function isSpecialSkill(name)
+    local SPECIAL_SKILLS = {
+        Mnk = { 'Mend', 'Feign Death' },
+    }
     for _, list in pairs(SPECIAL_SKILLS) do
         for _, n in ipairs(list) do if n == name then return true end end
     end
@@ -1967,6 +1942,9 @@ local function applyEntry(e)
         if not e.control.combat_style then
             ctrl.combat_style = e.control.use_ranged and 'Ranged' or 'Melee'
         end
+        if ctrl.melee_dist == nil then ctrl.melee_dist = 14 end
+        if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
+        if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -2845,6 +2823,8 @@ function UI.drawHelpTab()
                 { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
                 { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
                 { cmd = '/dps reset',                         desc = 'Reset active combat damage counters' },
+                { cmd = '/ac zplane [5-100]',                 desc = 'Configure Hunter Tier 1 same-floor / Z plane height threshold (default 15)' },
+                { cmd = '/ac huntz [10-300]',                 desc = 'Configure Hunter Tier 2 max vertical height difference (default 75)' },
                 { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
                 { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
                 { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
@@ -3508,7 +3488,17 @@ function UI.drawControlTab()
             ImGui.SetNextItemWidth(180)
             ctrl.hunter_radius = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000)
             ImGui.SetNextItemWidth(180)
+            ctrl.hunter_z_plane = ImGui.SliderInt('Floor Height (Z Plane)', ctrl.hunter_z_plane or 15, 5, 50)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Tier 1 vertical search threshold. Triune prioritizes NPCs on the same floor or Z plane\nwithin this height difference before searching other floors.')
+            end
+            ImGui.SetNextItemWidth(180)
             ctrl.hunter_z = ImGui.SliderInt('Max Height Diff (Z)', ctrl.hunter_z or 75, 10, 300)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Tier 2 vertical search limit. If no valid NPCs are found on your immediate floor,\nTriune expands search up to this maximum height difference across floors and ledges.')
+            end
             ImGui.SetNextItemWidth(180)
             ctrl.hunter_min_level = ImGui.SliderInt('Min NPC Level', ctrl.hunter_min_level or 1, 1, 100)
             ImGui.SameLine()
@@ -3933,20 +3923,51 @@ function UI.drawSettingsTab()
     ImGui.Dummy(0, 4)
 
     accent(GOLD, 'Combat Style')
-    if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then ctrl.combat_style = 'Melee' end
+    if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
+        ctrl.combat_style = 'Melee'
+        saveLoadout(true)
+    end
     ImGui.SameLine()
-    if ImGui.RadioButton('Ranged (bow)', ctrl.combat_style == 'Ranged') then ctrl.combat_style = 'Ranged' end
+    if ImGui.RadioButton('Ranged (bow)', ctrl.combat_style == 'Ranged') then
+        ctrl.combat_style = 'Ranged'
+        saveLoadout(true)
+    end
     ImGui.SameLine()
-    if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then ctrl.combat_style = 'Spell' end
+    if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then
+        ctrl.combat_style = 'Spell'
+        saveLoadout(true)
+    end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
             'Spell: stand off at the range below and never auto-attack (no\n'
             .. '/attack, no /autofire) -- your Spell Gems loadout does all the\n'
             .. 'damage. For pure caster trios that don\'t melee or carry a bow.')
     end
-    if ctrl.combat_style ~= 'Melee' then
-        ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-        ctrl.ranged_dist = ImGui.SliderInt('Range##ranged', ctrl.ranged_dist or 40, 15, 200)
+
+    ImGui.Dummy(0, 2)
+    if ctrl.combat_style == 'Melee' then
+        ImGui.SetNextItemWidth(200)
+        local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
+        if changed or (newDist and newDist ~= ctrl.melee_dist) then
+            ctrl.melee_dist = newDist
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Max melee distance to position at and strike targets (default: 14).\n'
+                .. 'Adjust to stick tighter (e.g. 8-10) or fight from further away (e.g. 15-25).')
+        end
+    else
+        ImGui.SetNextItemWidth(200)
+        local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 15, 200)
+        if changed or (newDist and newDist ~= ctrl.ranged_dist) then
+            ctrl.ranged_dist = newDist
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Distance to position at and engage targets from with ranged/spells (default: 40).')
+        end
     end
 
     ImGui.Dummy(0, 4)
@@ -4483,8 +4504,8 @@ end
 
 local isUnreachable -- forward declaration; defined in the pursuit section below
 
-local function firstNPCXtarget(unmezzedOnly)
-    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable)
+local function firstNPCXtarget(unmezzedOnly, maxZ)
+    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, nil, maxZ)
 end
 
 -- Returns count of live (PctHPs > 0), non-ignored NPCs occupying XTarget slots.
@@ -4753,22 +4774,28 @@ local function resolveTargetId(token, cls)
     elseif b == 'Unmezzed Add' then
         id = firstNPCXtarget(true)
     elseif b == 'Nearest Add' or b == 'All Enemies' then
-        id = firstNPCXtarget(false)
+        local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
+        local maxZ = isPulling and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75)
+        id = firstNPCXtarget(false, maxZ)
         if not id then
-            local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
             local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
             local maxL = isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100)
+            local maxR = isPulling and (ctrl.camp_radius or 100) or (ctrl.hunter_radius or 1500)
+            local myZ = mq.TLO.Me.Z() or 0
             for i = 1, 10 do
-                local s = mq.TLO.NearestSpawn(i, 'npc targetable')
+                local s = mq.TLO.NearestSpawn(i, string.format('npc targetable radius %d', maxR))
                 if not s() then break end
                 local sid = s.ID() or 0
                 if sid > 0 and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
                     and not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid)
                     and not isIgnored(s.CleanName()) and not isUnreachable(sid) then
-                    local lvl = s.Level() or 0
-                    if lvl == 0 or (lvl >= minL and lvl <= maxL) then
-                        id = sid
-                        break
+                    local okZ, sz = pcall(function() return s.Z() end)
+                    if okZ and sz and math.abs(sz - myZ) <= maxZ then
+                        local lvl = s.Level() or 0
+                        if lvl == 0 or (lvl >= minL and lvl <= maxL) then
+                            id = sid
+                            break
+                        end
                     end
                 end
             end
@@ -5037,10 +5064,17 @@ local function onFailureEvent(reason)
     castTracker.onFailureEvent(reason, ctrl and ctrl.cast_max_retries or 2, ctrl and ctrl.cast_lockout_sec or 30)
 end
 
+local function onCannotSeeEvent()
+    onFailureEvent('cannot see target')
+    if handleCannotSeeTarget then
+        handleCannotSeeTarget()
+    end
+end
+
 mq.event('TriuneFizzle', '#*#fizzle#*#', function() onFailureEvent('fizzled') end)
 mq.event('TriuneInterrupt', '#*#interrupted#*#', function() onFailureEvent('interrupted') end)
 mq.event('TriuneOutOfRangeSpell', '#*#out of range#*#', function() onFailureEvent('out of range') end)
-mq.event('TriuneCannotSeeSpell', '#*#see your target#*#', function() onFailureEvent('cannot see target') end)
+mq.event('TriuneCannotSee', '#*#see your target#*#', onCannotSeeEvent)
 mq.event('TriuneNoTakeHold', '#*#take hold#*#', function() onFailureEvent('did not take hold') end)
 mq.event('TriuneImmuneSpell', '#*#immune#*#', function() onFailureEvent('target immune') end)
 mq.event('TriuneDeadTargetSpell', '#*#dead target#*#', function() onFailureEvent('dead target') end)
@@ -5441,40 +5475,62 @@ local MELEE_RANGE = 14
 local LOS_TRUST_RANGE = 8
 
 maxMeleeDistance = function(id)
-    local reach = 0
+    local userDist = (ctrl and ctrl.melee_dist) or MELEE_RANGE
+    local spawnReach = 0
     if id and id > 0 then
         pcall(function()
             local s = mq.TLO.Spawn(id)
             if s and s() then
-                reach = tonumber(s.MaxRangeTo()) or tonumber(s.MaxMeleeTo()) or 0
+                spawnReach = tonumber(s.MaxRangeTo()) or tonumber(s.MaxMeleeTo()) or 0
             end
         end)
-        if reach <= 0 then
+        if spawnReach <= 0 then
             pcall(function()
                 local t = mq.TLO.Target
                 if t() and t.ID() == id then
-                    reach = tonumber(t.MaxRangeTo()) or tonumber(t.MaxMeleeTo()) or 0
+                    spawnReach = tonumber(t.MaxRangeTo()) or tonumber(t.MaxMeleeTo()) or 0
                 end
             end)
         end
     end
-    if reach <= 0 then
-        reach = MELEE_RANGE
+    if spawnReach > 0 then
+        -- Allow reasonable reach bounded by user preference and true hitbox
+        return math.max(userDist, math.min(spawnReach, userDist + 10))
     end
-    return reach
+    return userDist
 end
 
 desiredRange = function(id)
-    if ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and ctrl.pull_stand_back then
+    if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
         return ctrl.pull_engage_dist or 100
     end
     local style = ctrl and ctrl.combat_style or 'Melee'
     if style ~= 'Melee' then
         return ctrl.ranged_dist or 40
     end
-    local maxReach = maxMeleeDistance(id)
-    -- Position at max melee distance (comfortably inside absolute max strike reach)
-    return math.max(6, math.floor(maxReach - 2))
+    local userDist = (ctrl and ctrl.melee_dist) or MELEE_RANGE
+    local spawnReach = 0
+    if id and id > 0 then
+        pcall(function()
+            local s = mq.TLO.Spawn(id)
+            if s and s() then
+                spawnReach = tonumber(s.MaxRangeTo()) or tonumber(s.MaxMeleeTo()) or 0
+            end
+        end)
+        if spawnReach <= 0 then
+            pcall(function()
+                local t = mq.TLO.Target
+                if t() and t.ID() == id then
+                    spawnReach = tonumber(t.MaxRangeTo()) or tonumber(t.MaxMeleeTo()) or 0
+                end
+            end)
+        end
+    end
+    if spawnReach > 0 then
+        local maxSafe = math.max(5, spawnReach - 2)
+        return math.max(5, math.min(userDist, maxSafe))
+    end
+    return math.max(5, math.floor(userDist - 2))
 end
 
 -- Move to within `dist` of a spawn. Returns true once already in range (nothing
@@ -5513,19 +5569,8 @@ local function moveToward(id, dist, followOnly)
     end
 
     local isMelee = (not followOnly and (ctrl and ctrl.combat_style or 'Melee') == 'Melee')
-    local maxReach = isMelee and maxMeleeDistance(id) or (dist or 18)
     local targetDist = dist or (isMelee and desiredRange(id) or 18)
-    local effectiveArrivalDist = isMelee and maxReach or (dist or 18)
-
-    if mq.TLO.Target.ID() == id and d <= effectiveArrivalDist then
-        stopMoving()
-        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
-            pursuit.lastCombatFaceAt = os.clock()
-            mq.cmd('/face fast')
-        end
-        pursuit.id = 0
-        return true
-    end
+    local effectiveArrivalDist = targetDist + (isMelee and 2 or 3)
 
     -- Update pursuit tracking for stall detection
     if pursuit.id ~= id then
@@ -5545,7 +5590,10 @@ local function moveToward(id, dist, followOnly)
         stopMoving()
         if not followOnly then
             if mq.TLO.Target.ID() ~= id then setTarget(id) end
-            mq.cmd('/face fast')
+            if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+                pursuit.lastCombatFaceAt = os.clock()
+                mq.cmd('/face fast')
+            end
         end
         pursuit.lastNavTargetId = 0
         pursuit.id = 0
@@ -5656,16 +5704,16 @@ local function repositionCloser()
     local tid = tgt.ID()
     if not ctrl.running then return end
     if isMoveActive() then return end
-    if (os.clock() - pursuit.lastTooFarRepositionAt) < 1.5 then return end
+    if (os.clock() - pursuit.lastTooFarRepositionAt) < 1.0 then return end
     pursuit.lastTooFarRepositionAt = os.clock()
 
     local currentDist = distToId(tid)
-    local targetDist = 10
+    local targetDist = desiredRange(tid)
     if (ctrl and ctrl.combat_style) ~= 'Melee' then
-        targetDist = math.max(15, math.floor(currentDist - 15))
+        targetDist = math.max(15, math.min(targetDist, math.floor(currentDist - 15)))
     else
-        local maxReach = maxMeleeDistance(tid)
-        targetDist = math.max(5, math.floor(maxReach - 2))
+        -- When EQ reports "too far away", ensure we close in tighter than current distance
+        targetDist = math.max(5, math.min(targetDist, math.floor(currentDist - 8)))
     end
 
     print(string.format(
@@ -5745,10 +5793,11 @@ local function handleCantHitFromHere()
         mq.cmd('/face fast')
     end
 
-    local maxReach = maxMeleeDistance(tid)
-    local targetDist = math.max(5, math.floor(maxReach - 2))
+    local targetDist = desiredRange(tid)
     if (ctrl and ctrl.combat_style) ~= 'Melee' then
-        targetDist = math.max(12, math.floor(curDist - 10))
+        targetDist = math.max(12, math.min(targetDist, math.floor(curDist - 10)))
+    else
+        targetDist = math.max(5, math.min(targetDist, math.floor(curDist - 8)))
     end
 
     if navLoaded() then
@@ -6083,13 +6132,98 @@ local function checkCombatStall()
     end
 
     local d = distToId(t.ID())
-    local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and ctrl.pull_stand_back)
+    local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee')
     if ctrl.combat_style == 'Melee' and not isPullStandBack then
         if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
     elseif ctrl.combat_style == 'Ranged' then
         if d <= (ctrl.ranged_dist or 40) and not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
     end
     stuckState.combatStallSince = nil
+end
+
+-- When EQ chat reports "You cannot see your target." during combat, this active
+-- repositioning maneuver steps back from the target and re-faces it. In EQ, being
+-- inside or right under a mob's bounding box/hitbox causes line-of-sight raycasts
+-- to fail internally. Stepping backward to the perimeter of melee reach restores LoS.
+handleCannotSeeTarget = function()
+    if not ctrl or not ctrl.running then return end
+    local tgt = mq.TLO.Target
+    if not tgt or not tgt() then return end
+
+    local tid = tgt.ID() or 0
+    if tid <= 0 then return end
+
+    local isNpc = (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and (tgt.PctHPs() or 0) > 0 and not tgt.Dead()
+    if not isNpc or not isHostileTarget(tid) then return end
+
+    local d = distToId(tid)
+    local maxReach = maxMeleeDistance(tid)
+    local isMelee = (ctrl and ctrl.combat_style == 'Melee') or mq.TLO.Me.Combat() or (d <= (maxReach + 10))
+
+    if not isMelee then
+        -- In Ranged / caster mode or far away, re-align view vector
+        mq.cmd('/face fast')
+        return
+    end
+
+    local now = os.clock()
+    if not stuckState.lastCannotSeeAt or (now - stuckState.lastCannotSeeAt) > 4.0 then
+        stuckState.cannotSeeAttempts = 1
+    else
+        stuckState.cannotSeeAttempts = (stuckState.cannotSeeAttempts or 0) + 1
+    end
+    stuckState.lastCannotSeeAt = now
+
+    -- Pause stick if active so it doesn't fight our reposition
+    if stickLoaded() then
+        pcall(function()
+            if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                mq.cmd('/stick pause')
+            end
+        end)
+    end
+    pcall(function() mq.cmd('/keypress forward') end)
+
+    if stuckState.cannotSeeAttempts == 1 then
+        print(string.format('\ay[Triune]\ax "Cannot see target" in melee (Attempt 1) -- stepping back (dist=%.1f).', d))
+        mq.cmd('/keypress back hold')
+        mq.delay(250)
+        mq.cmd('/keypress back')
+        mq.cmd('/face fast')
+    elseif stuckState.cannotSeeAttempts == 2 then
+        print(string.format('\ay[Triune]\ax "Cannot see target" in melee (Attempt 2) -- backing up & strafing left (dist=%.1f).', d))
+        mq.cmd('/keypress back hold')
+        mq.delay(250)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress strafe_left hold')
+        mq.delay(200)
+        mq.cmd('/keypress strafe_left')
+        mq.cmd('/face fast')
+    elseif stuckState.cannotSeeAttempts == 3 then
+        print(string.format('\ay[Triune]\ax "Cannot see target" in melee (Attempt 3) -- backing up & strafing right (dist=%.1f).', d))
+        mq.cmd('/keypress back hold')
+        mq.delay(250)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress strafe_right hold')
+        mq.delay(200)
+        mq.cmd('/keypress strafe_right')
+        mq.cmd('/face fast')
+    else
+        -- Attempt 4+: Obstacle or wall blocking sight line
+        if tryOpenNearbyDoor and tryOpenNearbyDoor(true) then
+            print('\ay[Triune]\ax "Cannot see target" -- attempted to open nearby door.')
+            mq.delay(400)
+        elseif ctrl and ctrl.mode == 'Puller' then
+            print(string.format('\ay[Triune]\ax Target #%d obstructed after 4 reposition attempts -- marking unreachable.', tid))
+            markUnreachable(tid)
+            stopMoving()
+            mq.cmd('/target clear')
+        else
+            print(string.format('\ay[Triune]\ax Target #%d still cannot be seen (dist=%.1f) -- performing unstuck recovery.', tid, d))
+            performUnstuck()
+        end
+        stuckState.cannotSeeAttempts = 0
+    end
 end
 
 local function chaseMA()
@@ -6131,8 +6265,8 @@ end
 local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local isPulling    = (ctrl.mode == 'Puller')
     local isCampMode   = isPulling and (ctrl.submode == 'Camp')
-    local minLv        = minLevel or (isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
-    local maxLv        = maxLevel or (isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
+    local minLv        = minLevel or (isCampMode and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
+    local maxLv        = maxLevel or (isCampMode and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
 
     local anchorLoc    = isCampMode and ctrl.camp_loc or ctrl.hunter_combat_loc
     local anchorRadius = isCampMode and (searchRadius or ctrl.camp_radius or 100) or
@@ -6158,14 +6292,17 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     elseif isCampMode then
         defaultRadius = ctrl.camp_radius or 100
     else
-        defaultRadius = ctrl.hunter_radius or 200
+        defaultRadius = ctrl.hunter_radius or 1500
     end
     local radius = searchRadius or defaultRadius
     local maxZ   = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
     local myZ    = mq.TLO.Me.Z() or 0
 
-    -- 1. Check XTarget first (with distance/level validations applied)
-    local maxXtarDist = math.max(radius, (ctrl and ctrl.xtar_nav_dist) or 150)
+    -- 1. Check XTarget first (strictly constrained to max XTarget chase range and maxZ height diff)
+    local maxXtarDist = (ctrl and ctrl.xtar_nav_dist) or 150
+    if isCampMode and radius > 0 then
+        maxXtarDist = math.min(radius, maxXtarDist)
+    end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) > 0 and (xt.Type() == 'NPC' or xt.Type() == 'Pet') and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
@@ -6173,7 +6310,8 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
             if not isSpawnPetOrPlayer(id) and isHostileTarget(id) then
                 local dist = xt.Distance3D() or 999
                 local lvl = xt.Level() or 0
-                if dist <= maxXtarDist and lvl >= minLv and lvl <= maxLv then
+                local okZ, xz = pcall(function() return xt.Z() end)
+                if dist <= maxXtarDist and (okZ and xz and math.abs(xz - myZ) <= maxZ) and lvl >= minLv and lvl <= maxLv then
                     if isPullAllowed(xt.CleanName()) and not isUnreachable(id) then
                         if not outsideAnchor(xt.Y() or 0, xt.X() or 0) then
                             return id
@@ -6184,36 +6322,38 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         end
     end
 
-    -- 2. Scan Zone Spawns sequentially by proximity (up to 50 matches)
-    local search = string.format('npc targetable radius %d', radius)
-    for i = 1, 50 do
-        local s = mq.TLO.NearestSpawn(i, search)
-        if not (s and s()) then break end
-        local sid = s.ID() or 0
-        if sid > 0 then
-            local stype = s.Type() or ''
-            if stype == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
-                if not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid) then
-                    local lvl = s.Level() or 0
-                    if lvl >= minLv and lvl <= maxLv then
-                        local sz = s.Z() or myZ
-                        if math.abs(sz - myZ) <= maxZ then
-                            local sy, sx = s.Y() or 0, s.X() or 0
-                            if not outsideAnchor(sy, sx) then
-                                if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(sid) then
-                                    local pathOk = true
-                                    if navLoaded() then
-                                        local dist = s.Distance3D() or 999
-                                        if dist > 25 then
-                                            local hasPath = false
-                                            local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
-                                            if ok and not hasPath then
-                                                pathOk = false
+    -- 2. Scan Zone Spawns sequentially by proximity with Two-Tier Z filtering
+    local function scanSpawns(zLimit)
+        local search = string.format('npc targetable radius %d', radius)
+        for i = 1, 100 do
+            local s = mq.TLO.NearestSpawn(i, search)
+            if not (s and s()) then break end
+            local sid = s.ID() or 0
+            if sid > 0 then
+                local stype = s.Type() or ''
+                if stype == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
+                    if not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid) then
+                        local lvl = s.Level() or 0
+                        if lvl >= minLv and lvl <= maxLv then
+                            local okZ, sz = pcall(function() return s.Z() end)
+                            if okZ and sz and math.abs(sz - myZ) <= zLimit then
+                                local sy, sx = s.Y() or 0, s.X() or 0
+                                if not outsideAnchor(sy, sx) then
+                                    if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(sid) then
+                                        local pathOk = true
+                                        if navLoaded() then
+                                            local dist = s.Distance3D() or 999
+                                            if dist > 25 then
+                                                local hasPath = false
+                                                local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
+                                                if ok and not hasPath then
+                                                    pathOk = false
+                                                end
                                             end
                                         end
-                                    end
-                                    if pathOk then
-                                        return sid
+                                        if pathOk then
+                                            return sid
+                                        end
                                     end
                                 end
                             end
@@ -6222,6 +6362,20 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                 end
             end
         end
+        return nil
+    end
+
+    -- Two-Tier Z-Plane Target Acquisition:
+    -- Tier 1: Look for NPCs within the player's immediate Z plane (same floor/elevation)
+    local floorZ = isCampMode and (ctrl.camp_z_plane or 15) or (ctrl.hunter_z_plane or 15)
+    local tier1Z = math.min(floorZ, maxZ)
+    local targetId = scanSpawns(tier1Z)
+    if targetId then return targetId end
+
+    -- Tier 2: Expand to full maxZ range if no target on immediate floor
+    if maxZ > tier1Z then
+        targetId = scanSpawns(maxZ)
+        if targetId then return targetId end
     end
 
     return nil
@@ -6232,13 +6386,15 @@ local function checkCloserTarget(curTargetId, searchRadius, searchMaxZ, minLevel
     if pursuit.hasRetargeted then return nil end
 
     local isPulling = (ctrl.mode == 'Puller')
-    local minL = minLevel or (isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
-    local maxL = maxLevel or (isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
+    local isCampMode = isPulling and (ctrl.submode == 'Camp')
+    local minL = minLevel or (isCampMode and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
+    local maxL = maxLevel or (isCampMode and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
+    local maxZ = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
 
     local curDist = distToId(curTargetId)
     if curDist <= 35 or mq.TLO.Me.Combat() then return nil end
 
-    local candId = findRoamTarget(searchRadius, searchMaxZ, minL, maxL)
+    local candId = findRoamTarget(searchRadius, maxZ, minL, maxL)
     if candId and candId ~= curTargetId then
         local candDist = distToId(candId)
         if candDist <= (curDist - 25) and candDist <= (curDist * 0.75) then
@@ -6274,7 +6430,8 @@ local function pullerTick()
     end
 
     if runtime.pullState == 'IDLE' then
-        local addId = firstNPCXtarget(false)
+        local maxCampZ = ctrl.camp_z or 75
+        local addId = firstNPCXtarget(false, maxCampZ)
         if addId and setTarget(addId) then
             runtime.pullTargetId = addId
             runtime.pullState = 'FIGHTING'
@@ -6293,7 +6450,7 @@ local function pullerTick()
 
         local scanRadius = hasWps and (ctrl.use_waypoints ~= false) and (ctrl.waypoint_scan_radius or 100) or
         (ctrl.camp_radius or 100)
-        local id = findRoamTarget(scanRadius, ctrl.camp_z, ctrl.pull_min_level, ctrl.pull_max_level)
+        local id = findRoamTarget(scanRadius, maxCampZ, ctrl.pull_min_level, ctrl.pull_max_level)
         if id and setTarget(id) then
             if not runtime.verifyTargetCon(id, true) then
                 print(string.format(
@@ -6314,7 +6471,8 @@ local function pullerTick()
 
     -- If another mob attacks while heading out to pull (TO_MOB state), switch to incoming aggro immediately and pull back
     if runtime.pullState == 'TO_MOB' then
-        local aggroId = firstNPCXtarget(false)
+        local maxCampZ = ctrl.camp_z or 75
+        local aggroId = firstNPCXtarget(false, maxCampZ)
         if aggroId and aggroId ~= runtime.pullTargetId and (distToId(runtime.pullTargetId) > 35 and not mq.TLO.Me.Combat()) then
             stopMoving()
             if setTarget(aggroId) then
@@ -6325,7 +6483,7 @@ local function pullerTick()
                 runtime.pullState = 'TO_CAMP'
             end
         elseif not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
-            local closerId, candDist, curDist = checkCloserTarget(runtime.pullTargetId, ctrl.camp_radius, ctrl.camp_z,
+            local closerId, candDist, curDist = checkCloserTarget(runtime.pullTargetId, ctrl.camp_radius, maxCampZ,
                 ctrl.pull_min_level, ctrl.pull_max_level)
             if closerId and setTarget(closerId) then
                 stopMoving()
@@ -6343,7 +6501,8 @@ local function pullerTick()
     local s = mq.TLO.Spawn(runtime.pullTargetId)
     local alive = s() and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
     if not alive then
-        local addId = firstNPCXtarget(false)
+        local maxCampZ = ctrl.camp_z or 75
+        local addId = firstNPCXtarget(false, maxCampZ)
         if addId and setTarget(addId) then
             runtime.pullTargetId = addId
             runtime.pullState = 'FIGHTING'
@@ -6574,6 +6733,7 @@ fullStop = function()
     end
     stuckState.counter = 0
     stuckState.attempts = 0
+    stuckState.cannotSeeAttempts = 0
 end
 
 onZoned = function()
@@ -6825,6 +6985,7 @@ local function combatTick()
     if haveNPC and ctrl.mode == 'Puller' then
         if isIgnored(t.CleanName()) then
             haveNPC = false
+            mq.cmd('/target clear')
         elseif not isXTargetId(t.ID()) then
             local isPulling = (ctrl.submode == 'Camp')
             local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
@@ -6832,6 +6993,7 @@ local function combatTick()
             local lvl = t.Level() or 0
             if lvl > 0 and (lvl < minL or lvl > maxL) then
                 haveNPC = false
+                mq.cmd('/target clear')
             end
         end
     elseif haveNPC and ctrl.mode == 'Manual' then
@@ -6886,29 +7048,38 @@ local function combatTick()
             end
         else -- Submode 'Hunt'
             local hasWps = (ctrl.waypoints and #ctrl.waypoints > 0 and ctrl.use_waypoints ~= false)
+            local maxHuntZ = ctrl.hunter_z or 75
+            local myZ = mq.TLO.Me.Z() or 0
             if haveNPC then
                 local tid = mq.TLO.Target.ID() or 0
                 local tspawn = mq.TLO.Spawn(tid)
-                local maxDist = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 200)
+                local maxScan = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
+                -- Add hysteresis buffer (+35 units for waypoint patrol, +30% for free roam) so boundary spawns are not dropped
+                local dropDist = hasWps and (maxScan + 35) or (maxScan * 1.3 + 50)
                 if not tspawn() or tspawn.Dead() or (tspawn.PctHPs() or 0) <= 0 or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
                     haveNPC = false
                     mq.cmd('/target clear')
                 elseif isXTargetId(tid) then
                     local maxXtarDist = (ctrl.xtar_nav_dist or 150)
-                    if distToId(tid) > maxXtarDist and not mq.TLO.Me.Combat() then
-                        -- XTarget is beyond max chase range and not actively engaged in melee
+                    if distToId(tid) > (maxXtarDist + 20) and not mq.TLO.Me.Combat() then
+                        -- XTarget is beyond max chase range + buffer and not actively engaged in melee
                         haveNPC = false
                         mq.cmd('/target clear')
                         stopMoving()
                     end
-                elseif not isXTargetId(tid) and not mq.TLO.Me.Combat() and distToId(tid) > maxDist then
-                    -- If target is not on XTarget and far away outside local scan range, clear so we continue waypoint patrol
-                    haveNPC = false
-                    mq.cmd('/target clear')
+                elseif not isXTargetId(tid) and not mq.TLO.Me.Combat() then
+                    local okZ, sz = pcall(function() return tspawn.Z() end)
+                    local tooFarZ = okZ and sz and math.abs(sz - myZ) > (maxHuntZ + 15)
+                    local tooFarDist = not isMoveActive() and distToId(tid) > dropDist
+                    if tooFarZ or tooFarDist then
+                        -- If target is not on XTarget, not in combat, and exceeds Max Height Diff (+15 hysteresis) or scan distance, clear target
+                        haveNPC = false
+                        mq.cmd('/target clear')
+                    end
                 end
             end
 
-            local xtarId = firstNPCXtarget(false)
+            local xtarId = firstNPCXtarget(false, maxHuntZ)
             if xtarId then
                 local curId = haveNPC and mq.TLO.Target.ID() or 0
                 if curId ~= xtarId and (curId == 0 or not isXTargetId(curId)) then
@@ -6926,7 +7097,7 @@ local function combatTick()
             if haveNPC then
                 if not isXTargetId(mq.TLO.Target.ID()) and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
                     local curId = mq.TLO.Target.ID()
-                    local closerId, candDist, curDist = checkCloserTarget(curId, nil, nil, ctrl.hunter_min_level,
+                    local closerId, candDist, curDist = checkCloserTarget(curId, nil, maxHuntZ, ctrl.hunter_min_level,
                         ctrl.hunter_max_level)
                     if closerId and setTarget(closerId) then
                         stopMoving()
@@ -6939,8 +7110,8 @@ local function combatTick()
                     end
                 end
             else
-                local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 200)
-                local id = findRoamTarget(scanRadius, nil, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
+                local id = findRoamTarget(scanRadius, maxHuntZ, ctrl.hunter_min_level, ctrl.hunter_max_level)
                 if id and setTarget(id) then
                     if not runtime.verifyTargetCon(id, true) then
                         print(string.format(
@@ -6972,19 +7143,20 @@ local function combatTick()
                         local minLv = ctrl.hunter_min_level or 1
                         local maxLv = ctrl.hunter_max_level or 100
                         local zDiff = ctrl.hunter_z or 75
+                        local zPlane = ctrl.hunter_z_plane or 15
                         local anchorKey = ''
                         if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
                             anchorKey = string.format('; anchor R%d @ %.0f,%.0f,%.0f',
                                 ctrl.hunter_combat_radius, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y,
                                 ctrl.hunter_combat_loc.z)
                         end
-                        local currentKey = string.format('%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, anchorKey)
+                        local currentKey = string.format('%d-%d-%d-%d-%d-%s', minLv, maxLv, radius, zDiff, zPlane, anchorKey)
 
                         if runtime.lastHunterMsgKey ~= currentKey then
                             runtime.lastHunterMsgKey = currentKey
                             print(string.format(
-                                '\ay[Triune]\ax Puller (Hunt): No NPCs found (Lvl %d-%d, Radius %d, Z %d%s). Waiting...',
-                                minLv, maxLv, radius, zDiff, anchorKey))
+                                '\ay[Triune]\ax Puller (Hunt): No NPCs found (Lvl %d-%d, Radius %d, Max Z %d, Floor Z %d%s). Waiting...',
+                                minLv, maxLv, radius, zDiff, zPlane, anchorKey))
                         end
                     end
                 end
@@ -7007,46 +7179,108 @@ local function combatTick()
 
             if haveNPC then
                 local id = mq.TLO.Target.ID()
-                local reqRange = desiredRange(id)
+                local pullStyle = ctrl.pull_style or 'Melee'
+
+                -- Pet pull: dispatch pets while navigating (don't wait for arrival)
+                if pullStyle == 'Pet' and (os.clock() - (runtime.lastPetPullAt or 0)) > 3.0 then
+                    runtime.lastPetPullAt = os.clock()
+                    petState.petHoldActive = false
+                    local petId = mq.TLO.Me.Pet.ID() or 0
+                    if petId > 0 and isSpawnAlive(petId) then mq.cmd('/pet attack') end
+                    if hasActivePet() then
+                        mq.cmd('/say #petcmd attack all')
+                    end
+                end
+
+                -- For non-Melee pull styles, approach to engagement distance for the
+                -- initial tag. Once tagged (XTarget) or already in combat, fall back to
+                -- desiredRange() so the post-pull combat_style positioning takes over.
+                local reqRange
+                if pullStyle ~= 'Melee' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
+                    reqRange = ctrl.pull_engage_dist or 100
+                else
+                    reqRange = desiredRange(id)
+                end
+
                 local arrived = moveToward(id, reqRange)
-                if arrived or distToId(id) <= maxMeleeDistance(id) then
-                    engage = true
-                    local style = ctrl and ctrl.combat_style or 'Melee'
-                    if style == 'Melee' then
+                local inRange
+                if pullStyle == 'Melee' then
+                    inRange = arrived or (distToId(id) <= maxMeleeDistance(id) and hasLoS(id))
+                else
+                    inRange = arrived or (distToId(id) <= (ctrl.pull_engage_dist or 100) and hasLoS(id))
+                end
+
+                if inRange then
+                    if pullStyle == 'Melee' then
+                        -- Melee pull: unchanged -- close to melee range and attack
+                        engage = true
                         mq.cmd('/face fast')
                         if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
                         if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-                    elseif style == 'Ranged' then
+                    elseif pullStyle == 'Spell' then
+                        -- Spell pull: cast pull spell from engagement range
                         mq.cmd('/face fast')
-                        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-                    elseif style == 'Pet' then
-                        mq.cmd('/face fast')
-                        petState.petHoldActive = false
-                        local petId = mq.TLO.Me.Pet.ID() or 0
-                        if petId > 0 and isSpawnAlive(petId) then mq.cmd('/pet attack') end
-                        if hasActivePet() then
-                            mq.cmd('/say #petcmd attack all')
-                        end
-                    elseif style == 'Spell' then
-                        mq.cmd('/face fast')
-                        local slotToCast = ctrl.pull_spell_gem or 1
-                        local g = loadout.gems and loadout.gems[slotToCast]
-                        local spellName = ctrl.pull_spell
-                        if not spellName or spellName == '' then
-                            pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
-                        end
-                        if spellName and spellName ~= '' then
-                            local dummyEntry = g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }
-                            castGem(slotToCast, dummyEntry, id)
+                        if isXTargetId(id) or mq.TLO.Me.Combat() then
+                            engage = true
                         else
-                            for i = 1, NUM_GEMS do
-                                local lg = loadout.gems and loadout.gems[i]
-                                if lg and lg.spell and lg.spell ~= '' then
-                                    local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
-                                    if isDet and castGem(i, lg, id) then break end
+                            local slotToCast = ctrl.pull_spell_gem or 1
+                            local g = loadout.gems and loadout.gems[slotToCast]
+                            local spellName = ctrl.pull_spell
+                            if not spellName or spellName == '' then
+                                pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
+                            end
+                            if spellName and spellName ~= '' then
+                                local dummyEntry = g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }
+                                castGem(slotToCast, dummyEntry, id)
+                            else
+                                -- Fallback: try first detrimental spell in loadout
+                                for i = 1, NUM_GEMS do
+                                    local lg = loadout.gems and loadout.gems[i]
+                                    if lg and lg.spell and lg.spell ~= '' then
+                                        local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
+                                        if isDet and castGem(i, lg, id) then break end
+                                    end
                                 end
                             end
+                            -- Check if spell tagged the mob
+                            if isXTargetId(id) then engage = true end
+                        end
+                    elseif pullStyle == 'Pet' then
+                        -- Pet pull: pets already dispatched above during approach
+                        mq.cmd('/face fast')
+                        if isXTargetId(id) or distToId(id) <= 35 then
+                            engage = true
+                        else
+                            local petTgtId = 0
+                            pcall(function() petTgtId = mq.TLO.Pet.Target.ID() or 0 end)
+                            if petTgtId > 0 and petTgtId == id then
+                                engage = true
+                            end
+                        end
+                    elseif pullStyle == 'Ranged' then
+                        -- Ranged pull: try Throw Stone first, then bow/autofire, then melee fallback
+                        mq.cmd('/face fast')
+                        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+                        if isXTargetId(id) or mq.TLO.Me.Combat() then
+                            engage = true
+                        else
+                            local tsReady = false
+                            pcall(function() tsReady = mq.TLO.Me.AbilityReady('Throw Stone')() end)
+                            if tsReady then
+                                mq.cmd('/doability "Throw Stone"')
+                            else
+                                -- Fallback to ranged weapon (bow/autofire)
+                                local hasRanged = false
+                                pcall(function() hasRanged = mq.TLO.Me.Inventory('ranged')() ~= nil end)
+                                if hasRanged then
+                                    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                                else
+                                    -- No ranged option available; fall back to melee
+                                    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+                                end
+                            end
+                            -- Check if target was tagged
+                            if isXTargetId(id) then engage = true end
                         end
                     end
                 elseif isXTargetId(id) then
@@ -7161,13 +7395,13 @@ local function combatTick()
     end
     local style = ctrl and ctrl.combat_style or 'Melee'
     local tid = mq.TLO.Target.ID() or 0
-    local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and ctrl.pull_stand_back)
+    local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee')
     if style == 'Melee' then
         if not isPullStandBack then
             local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
             if haveNPC and not isDraggingToCamp and autoAttackOk then
                 local curDist = (tid > 0) and distToId(tid) or 999
-                local maxReach = (tid > 0) and maxMeleeDistance(tid) or MELEE_RANGE
+                local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or MELEE_RANGE)
                 if curDist <= maxReach then
                     if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
                         print('\ag[Triune]\ax Standing up to attack.')
@@ -7257,7 +7491,11 @@ local function combatTick()
         end)
     end
 
-    if petHoldEnabled and (not (haveNPC and engage) or isPullingToCamp) then
+    -- Puller Hunt Pet Pull: don't re-hold pets while navigating to mob
+    local isHuntPetApproach = (ctrl.mode == 'Puller' and ctrl.submode == 'Hunt'
+        and (ctrl.pull_style or 'Melee') == 'Pet' and haveNPC and not engage)
+
+    if petHoldEnabled and (not (haveNPC and engage) or isPullingToCamp) and not isHuntPetApproach then
         if not petState.petHoldActive then
             mq.cmd('/say #petcmd hold all')
             petState.petHoldActive = true
@@ -7407,7 +7645,7 @@ local function combatTick()
         local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
         local tid = mq.TLO.Target.ID() or 0
         local d = (tid > 0) and distToId(tid) or 999
-        local maxReach = (tid > 0) and maxMeleeDistance(tid) or MELEE_RANGE
+        local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or MELEE_RANGE)
         if ctrl and ctrl.combat_style == 'Melee' and haveNPC and not isDraggingToCamp then
             if d <= maxReach then
                 if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
@@ -7606,10 +7844,14 @@ local function triuneCommand(...)
         print('  \ag/ac spellbook | book\ax - Toggle spellbook browser')
         print('  \ag/ac cursorui | cursormgr\ax - Toggle cursor item manager')
         print('  \ag/ac clearcursor | autoinv\ax - Clear items from cursor')
+        print('  \ag/ac style [melee|ranged|spell]\ax - Configure combat style')
+        print('  \ag/ac range [dist]\ax - Configure melee or ranged distance')
         print('  \ag/ac buffbot | buff\ax - Toggle interactive buffbot window')
         print('  \ag/ac track | zone\ax - Toggle zone NPC tracker window')
         print('  \ag/ac update | updater\ax - Toggle release updater window')
         print('  \ag/ac dps | /dps\ax - Toggle DPS parser window')
+        print('  \ag/ac zplane [5-100]\ax - Configure Hunter Tier 1 same-floor / Z plane height threshold')
+        print('  \ag/ac huntz [10-300]\ax - Configure Hunter Tier 2 max vertical height difference')
         print('  \ag/ac pullcon [con]\ax - Configure faction consideration filter')
         print('  \ag/ac wp [add|clear|del|on|off|list]\ax - Configure & toggle Puller Waypoint Patrol')
         print(
@@ -7793,11 +8035,65 @@ local function triuneCommand(...)
             print(
             '\ay[Triune]\ax usage: /ac wp [add [name]|clear|delete [idx]|on|off|toggle|radius [5-100]|scan [20-500]|list]')
         end
+    elseif cmd == 'style' or cmd == 'combatstyle' then
+        local st = args[2] and string.lower(args[2]) or ''
+        if st == 'melee' then
+            ctrl.combat_style = 'Melee'
+            saveLoadout(true)
+            print('\ag[Triune]\ax Combat style set to: \agMelee\ax (range ' .. tostring(ctrl.melee_dist or 14) .. ')')
+        elseif st == 'ranged' or st == 'bow' then
+            ctrl.combat_style = 'Ranged'
+            saveLoadout(true)
+            print('\ag[Triune]\ax Combat style set to: \agRanged (bow)\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
+        elseif st == 'spell' or st == 'cast' or st == 'caster' then
+            ctrl.combat_style = 'Spell'
+            saveLoadout(true)
+            print('\ag[Triune]\ax Combat style set to: \agSpell\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
+        else
+            print('\ay[Triune]\ax usage: /ac style [melee|ranged|spell]')
+        end
+    elseif cmd == 'range' or cmd == 'meleerange' or cmd == 'dist' then
+        local val = tonumber(args[2])
+        if val then
+            if ctrl.combat_style == 'Melee' or cmd == 'meleerange' then
+                ctrl.melee_dist = math.max(5, math.min(50, math.floor(val)))
+                saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Max Melee Distance set to %d units.', ctrl.melee_dist))
+            else
+                ctrl.ranged_dist = math.max(15, math.min(200, math.floor(val)))
+                saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Ranged Engagement Distance set to %d units.', ctrl.ranged_dist))
+            end
+        else
+            if ctrl.combat_style == 'Melee' then
+                print(string.format('\ag[Triune]\ax Current Max Melee Distance: %d units. (usage: /ac range [5-50])', ctrl.melee_dist or 14))
+            else
+                print(string.format('\ag[Triune]\ax Current Ranged Distance: %d units. (usage: /ac range [15-200])', ctrl.ranged_dist or 40))
+            end
+        end
+    elseif cmd == 'huntz' or cmd == 'z' then
+        local val = tonumber(args[2])
+        if val then
+            ctrl.hunter_z = math.max(10, math.min(300, math.floor(val)))
+            saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Hunter Max Height Diff (Z) set to %d units.', ctrl.hunter_z))
+        else
+            print(string.format('\ag[Triune]\ax Current Hunter Max Height Diff (Z): %d units. (usage: /ac huntz [10-300])', ctrl.hunter_z or 75))
+        end
+    elseif cmd == 'zplane' or cmd == 'huntplane' or cmd == 'floorz' then
+        local val = tonumber(args[2])
+        if val then
+            ctrl.hunter_z_plane = math.max(5, math.min(100, math.floor(val)))
+            saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Hunter Floor Height (Z Plane) set to %d units.', ctrl.hunter_z_plane))
+        else
+            print(string.format('\ag[Triune]\ax Current Hunter Floor Height (Z Plane): %d units. (usage: /ac zplane [5-100])', ctrl.hunter_z_plane or 15))
+        end
     elseif setTriuneMode(args[1], args[2]) then
         -- mode command handled
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 

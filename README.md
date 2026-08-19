@@ -128,6 +128,8 @@ You can control almost everything using simple in-game chat commands:
 | `/ac spellbook` | `/ac book` | Open the Spellbook Browser |
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
+| `/ac style [melee\|ranged\|spell]` | | Set combat style |
+| `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (15-200) distance |
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |
 | `/ac track` | `/ac zone` | Open the Zone NPC Tracker |
 | `/ac update` | `/ac checkupdate` | Check for updates |
@@ -172,6 +174,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.6.5**
+Current version: **1.6.10**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

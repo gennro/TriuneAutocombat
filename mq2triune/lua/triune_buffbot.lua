@@ -1,17 +1,21 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- Triune Buffbot v1.1 (Standalone MacroQuest ImGui Script)
+-- Triune Buffbot v1.2 (Standalone MacroQuest ImGui Script)
 -- ----------------------------------------------------------------------------
 -- Compatible with MQ LuaJIT (Lua 5.1 syntax safe)
 -- Run with:  /lua run triune_buffbot
 --
 -- Features:
 -- - Interactive Tell Menu: Responds to incoming /tells with a numbered list of
---   currently memorized spell gems and an [all] option.
--- - Flexible Requester Selection: Requesters can reply with 'all' or specific
---   spell numbers (e.g. '1 3' or '1, 2') to receive only their desired buffs.
+--   currently memorized spell gems. (No 'all' option: spells have level landing
+--   restrictions on players, but land on pets of any level).
+-- - Flexible Requester Selection: Requesters reply with specific spell numbers
+--   for themselves (e.g. '1 3'), for their pet ('pet 1 3', '1 3 pet', 'p 1 2'),
+--   or both ('both 1 3', '1 3 both', 'b 1 2').
 -- - Direct Memorized Spell Gem Casting: Casts selected buffs directly from the
 --   active spell bar without gem-swapping or book scanning overhead.
+-- - Pet Presence & Range Validation: Checks if summoned pet exists and is alive
+--   and within maxRange before queueing or casting.
 -- - Range, Cooldown & Low-Mana Protections.
 -- - Self-test compatible: Allows testing from the local character.
 -- - Configuration persistence per character (triune_buffbot_config.lua).
@@ -25,7 +29,7 @@ local bit          = require('bit') -- LuaJIT bitwise library
 local scriptDir    = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path       = scriptDir .. "?.lua;" .. package.path
 
-local VERSION      = '1.1'
+local VERSION      = '1.2'
 local cfg          = mq.configDir
 
 -- ============================================================================
@@ -127,6 +131,7 @@ end
 -- ============================================================================
 local ctrl = {
     enabled       = true,
+    allowPets     = true,
     autoMed       = true,
     antiAfk       = true,
     maxRange      = 100,
@@ -141,7 +146,7 @@ local runtime = {
     state             = 'IDLE', -- STOPPED, IDLE, CASTING, MEDDING
     pendingOffers     = {},     -- sender -> { timestamp = os.time(), spawnID = id, gems = list }
     cooldowns         = {},     -- sender -> timestamp
-    activeQueue       = {},     -- array of { sender = name, spawnID = id, gems = list }
+    activeQueue       = {},     -- array of { sender = name, targetName = name, targetID = id, isPet = bool, petName = str, gems = list }
     outgoingTells     = {},     -- array of { target = name, msg = text }
     lastTellSendTime  = 0,
     lastAntiAfkTime   = os.time(),
@@ -249,6 +254,7 @@ local function saveConfig(silent)
 
     allData[charKey] = {
         enabled       = ctrl.enabled,
+        allowPets     = ctrl.allowPets,
         autoMed       = ctrl.autoMed,
         antiAfk       = ctrl.antiAfk,
         maxRange      = ctrl.maxRange,
@@ -282,6 +288,7 @@ local function loadConfig()
     local charData = allData[charKey] or allData['default']
     if charData and type(charData) == 'table' then
         if charData.enabled ~= nil then ctrl.enabled = charData.enabled end
+        if charData.allowPets ~= nil then ctrl.allowPets = charData.allowPets end
         if charData.autoMed ~= nil then ctrl.autoMed = charData.autoMed end
         if charData.antiAfk ~= nil then ctrl.antiAfk = charData.antiAfk end
         if charData.maxRange then ctrl.maxRange = charData.maxRange end
@@ -344,18 +351,26 @@ local function sendMenuTells(target, gemList)
             queueTell(target, string.format("Buffs (%d/%d): %s", i, #lines, line))
         end
     end
-    queueTell(target, "Reply with spell numbers (e.g. 1 3 or 1 2 4)")
+    queueTell(target, "Reply with numbers (e.g. 1 3). Add 'pet' for pet only (pet 1 3) or 'both' for you and your pet (both 1 3)!")
 end
 
-local function parseRequestedGems(msg, gemList)
-    if not gemList or #gemList == 0 then return nil end
+local function parseBuffRequest(msg, gemList)
+    if not gemList or #gemList == 0 then return 'player', nil end
 
-    local trimmed = tostring(msg):lower():gsub("^%s*(.-)%s*$", "%1")
+    local lowerMsg = tostring(msg):lower()
+
+    -- Detect target mode keywords
+    local mode = 'player'
+    if lowerMsg:match("%f[%a]both%f[%A]") or lowerMsg:match("%f[%a]b%f[%A]") then
+        mode = 'both'
+    elseif lowerMsg:match("%f[%a]pet%f[%A]") or lowerMsg:match("%f[%a]p%f[%A]") or lowerMsg:match("%f[%a]pets%f[%A]") then
+        mode = 'pet'
+    end
 
     -- Check for specific numbers (e.g. '1', '2', '1 3', '1, 2', '1 2 3')
     local selected = {}
     local seen = {}
-    for numStr in trimmed:gmatch("%d+") do
+    for numStr in lowerMsg:gmatch("%d+") do
         local idx = tonumber(numStr)
         if idx and gemList[idx] and not seen[idx] then
             seen[idx] = true
@@ -364,10 +379,86 @@ local function parseRequestedGems(msg, gemList)
     end
 
     if #selected > 0 then
-        return selected
+        return mode, selected
     end
 
-    return nil
+    return mode, nil
+end
+
+-- ============================================================================
+-- Pet Discovery Helper (Supports up to 3 pets per character)
+-- ============================================================================
+local function getRequesterPets(requesterSpawn)
+    local pets = {}
+    if not requesterSpawn or not requesterSpawn() then return pets end
+
+    local reqId = 0
+    local reqName = ""
+    pcall(function()
+        reqId = requesterSpawn.ID() or 0
+        reqName = requesterSpawn.CleanName() or ''
+    end)
+    if reqId <= 0 and reqName == '' then return pets end
+
+    local seenPetIDs = {}
+
+    -- 1. Check direct .Pet TLO property
+    pcall(function()
+        local p = requesterSpawn.Pet
+        if p and p() and (p.ID() or 0) > 0 and not p.Dead() then
+            local pid = p.ID()
+            local pname = p.CleanName() or 'Pet'
+            local pdist = p.Distance() or 9999
+            if not seenPetIDs[pid] then
+                seenPetIDs[pid] = true
+                table.insert(pets, { id = pid, name = pname, distance = pdist })
+            end
+        end
+    end)
+
+    -- 2. Scan all pet spawns in zone to discover secondary and tertiary pets
+    local count = 0
+    pcall(function() count = mq.TLO.SpawnCount('pet')() or 0 end)
+    for i = 1, count do
+        local s = nil
+        pcall(function() s = mq.TLO.NearestSpawn(i, 'pet') end)
+        if s and s() and (s.ID() or 0) > 0 and not s.Dead() then
+            local sid = s.ID()
+            if not seenPetIDs[sid] then
+                local isMine = false
+                pcall(function()
+                    local m = s.Master
+                    if m and m() and ((m.ID() or 0) == reqId or (reqName ~= '' and (m.CleanName() or ''):lower() == reqName:lower())) then
+                        isMine = true
+                    end
+                    if not isMine then
+                        local o = s.Owner
+                        if o and o() and ((o.ID() or 0) == reqId or (reqName ~= '' and (o.CleanName() or ''):lower() == reqName:lower())) then
+                            isMine = true
+                        end
+                    end
+                    if not isMine and reqName ~= '' then
+                        local cname = s.CleanName() or ''
+                        if cname:find(reqName .. "'s ", 1, true) or
+                           cname:find(reqName .. "`s ", 1, true) or
+                           cname:find('(Owner: ' .. reqName .. ')', 1, true) or
+                           cname:find(reqName .. "s pet", 1, true) then
+                            isMine = true
+                        end
+                    end
+                end)
+
+                if isMine then
+                    seenPetIDs[sid] = true
+                    local sname = s.CleanName() or 'Pet'
+                    local sdist = s.Distance() or 9999
+                    table.insert(pets, { id = sid, name = sname, distance = sdist })
+                end
+            end
+        end
+    end
+
+    return pets
 end
 
 -- ============================================================================
@@ -493,10 +584,10 @@ local function onTellReceived(line, sender, msg)
     local pending = runtime.pendingOffers[cleanSender]
     local gemListForReply = (pending and pending.gems and #pending.gems > 0) and pending.gems or currentGems
 
-    local requestedGems = parseRequestedGems(cleanMsg, gemListForReply)
+    local mode, requestedGems = parseBuffRequest(cleanMsg, gemListForReply)
 
     if requestedGems and #requestedGems > 0 then
-        -- Requester made a valid spell selection (or replied 'all')
+        -- Requester made a valid spell selection
         runtime.pendingOffers[cleanSender] = nil
 
         -- Remove any stale prior entries for this sender in queue
@@ -509,48 +600,194 @@ local function onTellReceived(line, sender, msg)
         local currentTargetID = 0
         pcall(function() currentTargetID = spawn.ID() or 0 end)
 
-        table.insert(runtime.activeQueue, {
-            sender  = cleanSender,
-            spawnID = currentTargetID,
-            gems    = requestedGems
-        })
-        local queuePos = #runtime.activeQueue
-        local totalAhead = queuePos - 1
-        if runtime.currentRequester and runtime.currentRequester ~= '' then
-            totalAhead = totalAhead + 1
-        end
-        local lineNum = totalAhead + 1
-
+        local pctMana = getMyPctMana()
         local namesList = {}
         for _, sp in ipairs(requestedGems) do table.insert(namesList, string.format("[%d] %s", sp.gem, sp.name)) end
-        logMsg(string.format("Requester '%s' selected %d buff(s) (Line #%d): %s", cleanSender, #requestedGems, lineNum,
-            table.concat(namesList, ", ")))
-        print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (Line #%d): %s', #requestedGems, cleanSender, lineNum,
-            table.concat(namesList, ", ")))
-        local pctMana = getMyPctMana()
-        if totalAhead > 0 then
-            if pctMana < ctrl.minManaPct then
-                queueTell(cleanSender,
-                    string.format(
-                        'Queued %d buff(s)! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.',
-                        #requestedGems, lineNum, totalAhead, pctMana, ctrl.minManaPct))
-            else
-                queueTell(cleanSender,
-                    string.format('Queued %d buff(s)! You are #%d in line (%d ahead). Please stand by!',
-                        #requestedGems, lineNum, totalAhead))
+        local spellsText = table.concat(namesList, ", ")
+
+        if mode == 'pet' then
+            if not ctrl.allowPets then
+                queueTell(cleanSender, 'Pet buffing is currently disabled on this buffbot.')
+                logMsg(string.format("Pet buff request from '%s' rejected (pet buffing disabled).", cleanSender), true, false)
+                return
             end
-        else
-            if pctMana < ctrl.minManaPct then
-                queueTell(cleanSender,
-                    string.format(
-                        'Queued %d buff(s)! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.',
-                        #requestedGems, pctMana, ctrl.minManaPct))
-            elseif #requestedGems == 1 then
-                queueTell(cleanSender,
-                    string.format('Stand by, casting %s! (You are #1 in line)', requestedGems[1].name))
+
+            local allPets = getRequesterPets(spawn)
+            if #allPets == 0 then
+                queueTell(cleanSender, 'You do not currently have any active summoned pets in this zone. Please summon your pet(s) and try again!')
+                logMsg(string.format("Requester '%s' requested pet buffs, but no active pets were found.", cleanSender), true, false)
+                return
+            end
+
+            local inRangePets = {}
+            for _, p in ipairs(allPets) do
+                if p.distance <= ctrl.maxRange then
+                    table.insert(inRangePets, p)
+                end
+            end
+
+            if #inRangePets == 0 then
+                queueTell(cleanSender, string.format('All of your pets (%d) are out of range for buffing (Max: %d). Please bring your pets closer!', #allPets, ctrl.maxRange))
+                logMsg(string.format("All %d pet(s) for '%s' are out of range (> %d).", #allPets, cleanSender, ctrl.maxRange), true, false)
+                return
+            end
+
+            for _, pet in ipairs(inRangePets) do
+                table.insert(runtime.activeQueue, {
+                    sender     = cleanSender,
+                    targetName = pet.name,
+                    targetID   = pet.id,
+                    isPet      = true,
+                    petName    = pet.name,
+                    gems       = requestedGems
+                })
+            end
+
+            local queuePos = #runtime.activeQueue
+            local totalAhead = queuePos - #inRangePets
+            if runtime.currentRequester and runtime.currentRequester ~= '' then
+                totalAhead = totalAhead + 1
+            end
+            local lineNum = totalAhead + 1
+
+            local petNamesList = {}
+            for _, p in ipairs(inRangePets) do table.insert(petNamesList, p.name) end
+            local petNamesStr = table.concat(petNamesList, ", ")
+            local petDesc = (#inRangePets == 1) and string.format("your pet (%s)", petNamesStr) or string.format("your %d pets (%s)", #inRangePets, petNamesStr)
+
+            logMsg(string.format("Requester '%s' queued %d buff(s) for %s (Line #%d): %s", cleanSender, #requestedGems, petDesc, lineNum, spellsText))
+            print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (%s) (Line #%d): %s', #requestedGems, cleanSender, petDesc, lineNum, spellsText))
+
+            if totalAhead > 0 then
+                if pctMana < ctrl.minManaPct then
+                    queueTell(cleanSender, string.format('Queued %d buff(s) for %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', #requestedGems, petDesc, lineNum, totalAhead, pctMana, ctrl.minManaPct))
+                else
+                    queueTell(cleanSender, string.format('Queued %d buff(s) for %s! You are #%d in line (%d ahead). Please stand by!', #requestedGems, petDesc, lineNum, totalAhead))
+                end
             else
-                queueTell(cleanSender,
-                    string.format('Stand by, preparing to cast %d selected buffs! (You are #1 in line)', #requestedGems))
+                if pctMana < ctrl.minManaPct then
+                    queueTell(cleanSender, string.format('Queued %d buff(s) for %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', #requestedGems, petDesc, pctMana, ctrl.minManaPct))
+                else
+                    queueTell(cleanSender, string.format('Stand by, preparing to cast %d buff(s) on %s! (You are #1 in line)', #requestedGems, petDesc))
+                end
+            end
+
+        elseif mode == 'both' then
+            local inRangePets = {}
+            if ctrl.allowPets then
+                local allPets = getRequesterPets(spawn)
+                for _, p in ipairs(allPets) do
+                    if p.distance <= ctrl.maxRange then
+                        table.insert(inRangePets, p)
+                    end
+                end
+            end
+
+            -- Queue player buffs
+            table.insert(runtime.activeQueue, {
+                sender     = cleanSender,
+                targetName = cleanSender,
+                targetID   = currentTargetID,
+                isPet      = false,
+                gems       = requestedGems
+            })
+
+            -- Queue each pet's buffs
+            for _, pet in ipairs(inRangePets) do
+                table.insert(runtime.activeQueue, {
+                    sender     = cleanSender,
+                    targetName = pet.name,
+                    targetID   = pet.id,
+                    isPet      = true,
+                    petName    = pet.name,
+                    gems       = requestedGems
+                })
+            end
+
+            local totalJobs = 1 + #inRangePets
+            local queuePos = #runtime.activeQueue
+            local totalAhead = queuePos - totalJobs
+            if runtime.currentRequester and runtime.currentRequester ~= '' then
+                totalAhead = totalAhead + 1
+            end
+            local lineNum = totalAhead + 1
+
+            if #inRangePets > 0 then
+                local petNamesList = {}
+                for _, p in ipairs(inRangePets) do table.insert(petNamesList, p.name) end
+                local petNamesStr = table.concat(petNamesList, ", ")
+                local petDesc = (#inRangePets == 1) and string.format("pet (%s)", petNamesStr) or string.format("%d pets (%s)", #inRangePets, petNamesStr)
+
+                logMsg(string.format("Requester '%s' queued %d buff(s) for self AND %s (Line #%d): %s", cleanSender, #requestedGems, petDesc, lineNum, spellsText))
+                print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax AND %s (Line #%d): %s', #requestedGems, cleanSender, petDesc, lineNum, spellsText))
+
+                if totalAhead > 0 then
+                    if pctMana < ctrl.minManaPct then
+                        queueTell(cleanSender, string.format('Queued %d buff(s) for you AND your %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', #requestedGems, petDesc, lineNum, totalAhead, pctMana, ctrl.minManaPct))
+                    else
+                        queueTell(cleanSender, string.format('Queued %d buff(s) for you AND your %s! You are #%d in line (%d ahead). Please stand by!', #requestedGems, petDesc, lineNum, totalAhead))
+                    end
+                else
+                    if pctMana < ctrl.minManaPct then
+                        queueTell(cleanSender, string.format('Queued %d buff(s) for you AND your %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', #requestedGems, petDesc, pctMana, ctrl.minManaPct))
+                    else
+                        queueTell(cleanSender, string.format('Stand by, preparing to cast %d buff(s) on you and your %s! (You are #1 in line)', #requestedGems, petDesc))
+                    end
+                end
+            else
+                logMsg(string.format("Requester '%s' requested both, but no pet found in range. Queued player buffs only (Line #%d): %s", cleanSender, lineNum, spellsText), true, false)
+                print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (No pet in range) (Line #%d): %s', #requestedGems, cleanSender, lineNum, spellsText))
+
+                if totalAhead > 0 then
+                    queueTell(cleanSender, string.format('No active pet in range found, but queued %d buff(s) for you! You are #%d in line (%d ahead).', #requestedGems, lineNum, totalAhead))
+                else
+                    queueTell(cleanSender, string.format('No active pet in range found, but queued %d buff(s) for you! Stand by, casting now.', #requestedGems))
+                end
+            end
+
+        else -- mode == 'player'
+            table.insert(runtime.activeQueue, {
+                sender     = cleanSender,
+                targetName = cleanSender,
+                targetID   = currentTargetID,
+                isPet      = false,
+                gems       = requestedGems
+            })
+
+            local queuePos = #runtime.activeQueue
+            local totalAhead = queuePos - 1
+            if runtime.currentRequester and runtime.currentRequester ~= '' then
+                totalAhead = totalAhead + 1
+            end
+            local lineNum = totalAhead + 1
+
+            logMsg(string.format("Requester '%s' selected %d buff(s) (Line #%d): %s", cleanSender, #requestedGems, lineNum, spellsText))
+            print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (Line #%d): %s', #requestedGems, cleanSender, lineNum, spellsText))
+
+            if totalAhead > 0 then
+                if pctMana < ctrl.minManaPct then
+                    queueTell(cleanSender,
+                        string.format(
+                            'Queued %d buff(s)! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.',
+                            #requestedGems, lineNum, totalAhead, pctMana, ctrl.minManaPct))
+                else
+                    queueTell(cleanSender,
+                        string.format('Queued %d buff(s)! You are #%d in line (%d ahead). Please stand by!',
+                            #requestedGems, lineNum, totalAhead))
+                end
+            else
+                if pctMana < ctrl.minManaPct then
+                    queueTell(cleanSender,
+                        string.format(
+                            'Queued %d buff(s)! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.',
+                            #requestedGems, pctMana, ctrl.minManaPct))
+                elseif #requestedGems == 1 then
+                    queueTell(cleanSender,
+                        string.format('Stand by, casting %s! (You are #1 in line)', requestedGems[1].name))
+                else
+                    queueTell(cleanSender,
+                        string.format('Stand by, preparing to cast %d selected buffs! (You are #1 in line)', #requestedGems))
+                end
             end
         end
     else
@@ -629,10 +866,10 @@ mq.event('BuffbotHailPlain4', '#*##1# says, "Hail!"', function(line, sender) onH
 -- ============================================================================
 -- Target Acquisition & Verification Helper
 -- ============================================================================
-local function acquireTarget(targetID, targetName)
+local function acquireTarget(targetID, targetName, isPet, ownerName)
     local myName = nil
     pcall(function() myName = mq.TLO.Me.CleanName() end)
-    local isSelf = myName and (targetName:lower() == myName:lower())
+    local isSelf = myName and not isPet and (targetName:lower() == myName:lower())
 
     if isSelf then
         pcall(function() mq.cmdf('/target id %d', mq.TLO.Me.ID() or 0) end)
@@ -646,25 +883,47 @@ local function acquireTarget(targetID, targetName)
         mq.delay(250, function() return (mq.TLO.Target.ID() or 0) == targetID end)
     end
 
-    -- Fallback: Target by PC name if ID targeting failed or was lost
+    -- Fallback if target ID failed or was lost
     local currentId = 0
     pcall(function() currentId = mq.TLO.Target.ID() or 0 end)
-    if currentId ~= targetID and targetName and targetName ~= '' then
-        pcall(function() mq.cmdf('/target pc =%s', targetName) end)
-        mq.delay(250, function() return (mq.TLO.Target.CleanName() or ''):lower() == targetName:lower() end)
-        if (mq.TLO.Target.CleanName() or ''):lower() ~= targetName:lower() then
-            pcall(function() mq.cmdf('/target "%s"', targetName) end)
+    if currentId ~= targetID then
+        if isPet and ownerName and ownerName ~= '' then
+            pcall(function()
+                local ownerSpawn = mq.TLO.Spawn(string.format('pc =%s', ownerName))
+                if ownerSpawn and ownerSpawn() then
+                    local ownerPets = getRequesterPets(ownerSpawn)
+                    for _, op in ipairs(ownerPets) do
+                        if (targetName and op.name:lower() == targetName:lower()) or targetID == op.id then
+                            targetID = op.id
+                            mq.cmdf('/target id %d', targetID)
+                            break
+                        end
+                    end
+                end
+            end)
+            mq.delay(250, function() return (mq.TLO.Target.ID() or 0) == targetID end)
+        elseif not isPet and targetName and targetName ~= '' then
+            pcall(function() mq.cmdf('/target pc =%s', targetName) end)
             mq.delay(250, function() return (mq.TLO.Target.CleanName() or ''):lower() == targetName:lower() end)
+            if (mq.TLO.Target.CleanName() or ''):lower() ~= targetName:lower() then
+                pcall(function() mq.cmdf('/target "%s"', targetName) end)
+                mq.delay(250, function() return (mq.TLO.Target.CleanName() or ''):lower() == targetName:lower() end)
+            end
         end
     end
 
-    -- Verify target is valid, alive, and matches requester
+    -- Verify target is valid, alive
     local valid = false
     pcall(function()
         local tid = mq.TLO.Target.ID() or 0
         local tName = mq.TLO.Target.CleanName() or ''
-        valid = tid > 0 and (tName:lower() == targetName:lower() or (targetID > 0 and tid == targetID)) and
-            not mq.TLO.Target.Dead()
+        if isPet then
+            valid = tid > 0 and not mq.TLO.Target.Dead() and
+                ((targetID > 0 and tid == targetID) or (targetName and tName:lower() == targetName:lower()))
+        else
+            valid = tid > 0 and not mq.TLO.Target.Dead() and
+                (tName:lower() == targetName:lower() or (targetID > 0 and tid == targetID))
+        end
     end)
     return valid
 end
@@ -710,9 +969,12 @@ local function processBuffQueue()
     end
 
     local request = table.remove(runtime.activeQueue, 1)
-    local targetName = request.sender
-    local targetID = request.spawnID
+    local isPet = request.isPet or false
+    local targetName = request.targetName or request.sender
+    local targetID = request.targetID or request.spawnID
     local gemsToCast = request.gems or {}
+    local ownerName = request.sender
+    local petName = request.petName or targetName
 
     if #gemsToCast == 0 then
         runtime.state = 'IDLE'
@@ -720,20 +982,21 @@ local function processBuffQueue()
     end
 
     runtime.state = 'CASTING'
-    runtime.currentRequester = targetName
+    local targetLabel = isPet and string.format("%s's Pet (%s)", ownerName, petName) or targetName
+    runtime.currentRequester = targetLabel
 
     local spellSummaryList = {}
     for _, sp in ipairs(gemsToCast) do table.insert(spellSummaryList, string.format("[%d] %s", sp.gem, sp.name)) end
-    logMsg(string.format("Buffing '%s' with %d spell(s): %s", targetName, #gemsToCast,
+    logMsg(string.format("Buffing %s with %d spell(s): %s", targetLabel, #gemsToCast,
         table.concat(spellSummaryList, ", ")))
-    print(string.format('\ag[Triune Buffbot]\ax Casting %d buff(s) on \aw%s\ax: %s', #gemsToCast, targetName,
+    print(string.format('\ag[Triune Buffbot]\ax Casting %d buff(s) on \aw%s\ax: %s', #gemsToCast, targetLabel,
         table.concat(spellSummaryList, ", ")))
 
     -- Check Mana % before starting sequence
     local pctMana = getMyPctMana()
     if pctMana < ctrl.minManaPct then
-        logMsg(string.format("Mana low (%d%% < %d%%). Meditating before buffing '%s'...", pctMana, ctrl.minManaPct, targetName), true, false)
-        queueTell(targetName, string.format('Mana is low (%d%%). Meditating until %d%% before buffing you, please stand by!', pctMana, ctrl.minManaPct))
+        logMsg(string.format("Mana low (%d%% < %d%%). Meditating before buffing %s...", pctMana, ctrl.minManaPct, targetLabel), true, false)
+        queueTell(ownerName, string.format('Mana is low (%d%%). Meditating until %d%% before buffing %s, please stand by!', pctMana, ctrl.minManaPct, isPet and ("your pet (" .. petName .. ")") or "you"))
         local isSit = false
         pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
         if not isSit then
@@ -748,9 +1011,14 @@ local function processBuffQueue()
     end
 
     -- Initial target lock
-    local targetValid = acquireTarget(targetID, targetName)
+    local targetValid = acquireTarget(targetID, targetName, isPet, ownerName)
     if not targetValid then
-        logMsg(string.format("Target '%s' lost or unavailable in zone. Aborting buff sequence.", targetName), true, false)
+        if isPet then
+            logMsg(string.format("Pet target '%s' for '%s' lost or unavailable in zone. Skipping.", petName, ownerName), true, false)
+            queueTell(ownerName, string.format("Your pet (%s) was unavailable or lost in zone. Skipping.", petName))
+        else
+            logMsg(string.format("Target '%s' lost or unavailable in zone. Aborting buff sequence.", targetName), true, false)
+        end
         runtime.currentRequester = nil
         runtime.state = 'IDLE'
         return
@@ -773,13 +1041,13 @@ local function processBuffQueue()
 
         if gemNum and gemNum > 0 then
             -- Re-verify and enforce target lock on the requester before each cast
-            if not acquireTarget(targetID, targetName) then
-                logMsg(string.format("Target '%s' lost during casting. Aborting remaining buffs.", targetName), true,
+            if not acquireTarget(targetID, targetName, isPet, ownerName) then
+                logMsg(string.format("Target '%s' lost during casting. Aborting remaining buffs.", targetLabel), true,
                     false)
                 break
             end
 
-            -- Face the requester
+            -- Face the target
             pcall(function() mq.cmd('/face fast') end)
             mq.delay(100)
             mq.doevents()
@@ -807,14 +1075,14 @@ local function processBuffQueue()
 
             if isSpellReady(gemNum, expectedName) then
                 -- Final pre-cast target lock & LoS facing
-                acquireTarget(targetID, targetName)
+                acquireTarget(targetID, targetName, isPet, ownerName)
                 pcall(function() mq.cmd('/face fast') end)
                 mq.delay(100)
                 mq.doevents()
                 processOutgoingTells()
 
-                -- Cast the spell on the requester
-                logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetName, gemNum))
+                -- Cast the spell on the target
+                logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetLabel, gemNum))
                 pcall(function() mq.cmdf('/cast %d', gemNum) end)
                 mq.delay(300)
                 mq.doevents()
@@ -845,12 +1113,32 @@ local function processBuffQueue()
         end
     end
 
-    -- Send Completion Tell to Requester
-    logMsg(string.format("Completed buffs for '%s'. Sending completion tell.", targetName))
-    queueTell(targetName, ctrl.completionMsg)
+    -- Check if there are more pending jobs in queue for this sender (e.g. multi-pet buff sequence)
+    local hasMoreJobsForSender = false
+    for _, qJob in ipairs(runtime.activeQueue) do
+        if qJob.sender:lower() == ownerName:lower() then
+            hasMoreJobsForSender = true
+            break
+        end
+    end
 
-    -- Set Cooldown
-    runtime.cooldowns[targetName] = os.time()
+    if not hasMoreJobsForSender then
+        if isPet then
+            logMsg(string.format("Completed all buffs for '%s' (last pet '%s'). Sending completion tell.", ownerName, petName))
+            queueTell(ownerName, string.format("All buffs cast on your pet (%s)! Enjoy!", petName))
+        else
+            logMsg(string.format("Completed buffs for '%s'. Sending completion tell.", targetName))
+            queueTell(ownerName, ctrl.completionMsg)
+        end
+        runtime.cooldowns[ownerName:lower()] = os.time()
+    else
+        if isPet then
+            logMsg(string.format("Completed buffs on pet '%s' for '%s'. Moving to next queued target...", petName, ownerName))
+        else
+            logMsg(string.format("Completed buffs on '%s'. Moving to next queued target (pet)...", targetName))
+        end
+    end
+
     runtime.currentRequester = nil
 
     -- Auto-meditate if mana is not at 100%
@@ -923,6 +1211,12 @@ local function drawControlTab()
         saveConfig(true)
     end
 
+    local allowPetsVal, allowPetsChanged = ImGui.Checkbox("Allow Pet Buffing", ctrl.allowPets)
+    if allowPetsChanged then
+        ctrl.allowPets = allowPetsVal
+        saveConfig(true)
+    end
+
     local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", ctrl.maxRange, 20, 300)
     if rangeChanged then
         ctrl.maxRange = rangeVal; saveConfig(true)
@@ -944,6 +1238,12 @@ local function drawControlTab()
     if compChanged then
         ctrl.completionMsg = newComp; saveConfig(true)
     end
+
+    ImGui.Spacing()
+    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+        "Tell Commands: Requesters reply with numbers (e.g. '1 3').\n" ..
+        "Add 'pet' (e.g. 'pet 1 3') for pet only, or 'both' (e.g. 'both 1 3') for both.\n" ..
+        "Note: Spells have level restrictions on players, but land on pets of any level.")
 end
 
 local function drawActivityTab()
@@ -952,9 +1252,10 @@ local function drawActivityTab()
 
     ImGui.Text(string.format("Active Request Queue: %d pending", #runtime.activeQueue))
     if #runtime.activeQueue > 0 then
-        if ImGui.BeginTable("##queueTable", 3, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
-            ImGui.TableSetupColumn("Requester", ImGuiTableColumnFlags.WidthFixed, 130)
-            ImGui.TableSetupColumn("Spawn ID", ImGuiTableColumnFlags.WidthFixed, 80)
+        if ImGui.BeginTable("##queueTable", 4, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
+            ImGui.TableSetupColumn("Requester", ImGuiTableColumnFlags.WidthFixed, 110)
+            ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, 130)
+            ImGui.TableSetupColumn("Spawn ID", ImGuiTableColumnFlags.WidthFixed, 70)
             ImGui.TableSetupColumn("Spells", ImGuiTableColumnFlags.WidthStretch, 200)
             ImGui.TableHeadersRow()
 
@@ -963,8 +1264,14 @@ local function drawActivityTab()
                 ImGui.TableSetColumnIndex(0)
                 ImGui.Text(req.sender)
                 ImGui.TableSetColumnIndex(1)
-                ImGui.Text(tostring(req.spawnID))
+                if req.isPet then
+                    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], string.format("Pet (%s)", req.petName or req.targetName or 'Pet'))
+                else
+                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "Self (Player)")
+                end
                 ImGui.TableSetColumnIndex(2)
+                ImGui.Text(tostring(req.targetID or req.spawnID or 0))
+                ImGui.TableSetColumnIndex(3)
                 local names = {}
                 for _, sp in ipairs(req.gems or {}) do table.insert(names, sp.name) end
                 ImGui.Text(#names > 0 and table.concat(names, ", ") or "(None)")
