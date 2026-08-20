@@ -382,7 +382,9 @@ local stuckState = {
     lastStuckRecoveryAt = nil,
     lastCombatStallRecoveryAt = nil,
     lastCannotSeeAt = 0,
-    cannotSeeAttempts = 0
+    cannotSeeAttempts = 0,
+    lastMeshRecoveryAt = nil,
+    meshAttempts = 0
 }
 
 -- Full-stop and onZoned: reset every movement/combat command and stale state.
@@ -6056,6 +6058,49 @@ local function performUnstuck()
     pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil -- force a fresh /nav command next tick
 end
 
+local function performMeshRecovery()
+    local now = os.clock()
+    if (now - (stuckState.lastMeshRecoveryAt or 0)) < 2.5 then return end
+    stuckState.lastMeshRecoveryAt = now
+    stuckState.meshAttempts = (stuckState.meshAttempts or 0) + 1
+
+    print(string.format(
+        '\ay[Triune]\ax NavMesh pathing blocked from current position (attempt %d) -- repositioning to nearest mesh.',
+        stuckState.meshAttempts))
+
+    stopMoving()
+
+    if stuckState.meshAttempts == 1 then
+        -- Step 1: Step forward and jump onto mesh
+        mq.cmd('/keypress forward hold')
+        mq.delay(300)
+        mq.cmd('/keypress forward')
+        mq.cmd('/keypress jump')
+    elseif stuckState.meshAttempts == 2 then
+        -- Step 2: Step backward and jump
+        mq.cmd('/keypress back hold')
+        mq.delay(400)
+        mq.cmd('/keypress back')
+        mq.cmd('/keypress jump')
+    elseif stuckState.meshAttempts == 3 then
+        -- Step 3: Strafe left
+        mq.cmd('/keypress strafe_left hold')
+        mq.delay(400)
+        mq.cmd('/keypress strafe_left')
+        mq.cmd('/keypress jump')
+    elseif stuckState.meshAttempts == 4 then
+        -- Step 4: Strafe right
+        mq.cmd('/keypress strafe_right hold')
+        mq.delay(450)
+        mq.cmd('/keypress strafe_right')
+        mq.cmd('/keypress jump')
+    else
+        -- Step 5: Reload navmesh in case mesh desynced
+        pcall(function() mq.cmd('/nav reload') end)
+        stuckState.meshAttempts = 0
+    end
+end
+
 local function checkStuck()
     local now = os.clock()
     if (now - stuckState.checkAt) < 1.0 then return end
@@ -6298,6 +6343,8 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local maxZ   = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
     local myZ    = mq.TLO.Me.Z() or 0
 
+    runtime.meshPathFails = 0
+
     -- 1. Check XTarget first (strictly constrained to max XTarget chase range and maxZ height diff)
     local maxXtarDist = (ctrl and ctrl.xtar_nav_dist) or 150
     if isCampMode and radius > 0 then
@@ -6325,7 +6372,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     -- 2. Scan Zone Spawns sequentially by proximity with Two-Tier Z filtering
     local function scanSpawns(zLimit)
         local search = string.format('npc targetable radius %d', radius)
-        for i = 1, 100 do
+        for i = 1, 300 do
             local s = mq.TLO.NearestSpawn(i, search)
             if not (s and s()) then break end
             local sid = s.ID() or 0
@@ -6342,12 +6389,16 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                     if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(sid) then
                                         local pathOk = true
                                         if navLoaded() then
-                                            local dist = s.Distance3D() or 999
-                                            if dist > 25 then
-                                                local hasPath = false
-                                                local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
-                                                if ok and not hasPath then
-                                                    pathOk = false
+                                            local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
+                                            if meshOk and meshLoaded then
+                                                local dist = s.Distance3D() or 999
+                                                if dist > 25 then
+                                                    local hasPath = false
+                                                    local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
+                                                    if ok and not hasPath then
+                                                        pathOk = false
+                                                        runtime.meshPathFails = (runtime.meshPathFails or 0) + 1
+                                                    end
                                                 end
                                             end
                                         end
@@ -6452,6 +6503,8 @@ local function pullerTick()
         (ctrl.camp_radius or 100)
         local id = findRoamTarget(scanRadius, maxCampZ, ctrl.pull_min_level, ctrl.pull_max_level)
         if id and setTarget(id) then
+            stuckState.meshAttempts = 0
+            runtime.meshPathFails = 0
             if not runtime.verifyTargetCon(id, true) then
                 print(string.format(
                     '\ay[Triune]\ax Puller: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
@@ -6463,6 +6516,9 @@ local function pullerTick()
             stopMoving()
             runtime.pullTargetId = id; runtime.pullState = 'TO_MOB'
             pursuit.hasRetargeted = false
+        elseif (runtime.meshPathFails or 0) > 0 and not isMoveActive() then
+            performMeshRecovery()
+            runtime.meshPathFails = 0
         elseif hasWps and (ctrl.use_waypoints ~= false) then
             runtime.wpTick()
         end
@@ -7126,11 +7182,16 @@ local function combatTick()
                     haveNPC = true
                     pursuit.wanderLoc = nil
                     pursuit.hasRetargeted = false
+                    stuckState.meshAttempts = 0
+                    runtime.meshPathFails = 0
                     runtime.lastHunterMsgKey = nil
                     print(string.format('\ay[Triune]\ax Puller (Hunt) target acquired: #%d (%s) dist %.1f',
                         id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
                 elseif not anyXtarAlive() then
-                    if hasWps then
+                    if (runtime.meshPathFails or 0) > 0 and not isMoveActive() then
+                        performMeshRecovery()
+                        runtime.meshPathFails = 0
+                    elseif hasWps then
                         runtime.wpTick()
                     else
                         if pursuit.wanderLoc then

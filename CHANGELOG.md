@@ -2,7 +2,10 @@
 
 ## 2026-08-18
 
-- **Max Height Diff (Z) Slider Enforcement & Elevation Bounding Fix (`triune.lua`, v1.6.10).**
+- **NavMesh Pre-Validation & Autonomous Mesh Recovery Engine (`triune.lua`, v1.6.10).**
+  - **Retained `Navigation.PathExists` Target Pre-Validation**: Kept `mq.TLO.Navigation.PathExists` pre-filtering for distant candidate spawns (> 25 units) in `scanSpawns()`, ensuring characters never select or pull NPCs stuck inside walls, ceiling geometry, or impassable rooms.
+  - **Autonomous Off-Mesh Repositioning (`performMeshRecovery`)**: Added an automated mesh recovery system that detects when candidate spawns exist within range and elevation settings but cannot be pathed to because the player is standing on a bad mesh polygon or off-mesh. Performs progressive directional nudges (forward, backward, left, right, jump, and `/nav reload`) to re-seat the character onto a walkable mesh polygon so pathing succeeds.
+  - **Expanded Proximity Scan Depth**: Increased spawn inspection depth in `scanSpawns()` to 300 spawns to ensure all candidate NPCs within search radius are evaluated even in high-density zones.
   - **Fixed `NearestSpawn` Zero Candidate Bug**: Removed `zradius` from MacroQuest `NearestSpawn(i, search)` query string and shifted elevation bounding entirely to Lua via `pcall(function() return s.Z() end)`. In MacroQuest, passing `zradius` without `loc` caused `NearestSpawn` to test against world elevation 0.0, returning 0 candidates and falsely printing "No NPCs found" when mobs were in range.
   - **Strict Multi-Floor Z Bounding**: Fixed an issue where the engine bypassed the `Max Height Diff (Z)` slider (`ctrl.hunter_z` / `ctrl.camp_z`) when no NPC was found on the player's immediate floor (Tier 1). Tier 2 multi-floor expansion now strictly bounds all queries to the configured max height diff.
   - **XTarget Elevation Gating**: Constrained Extended Target discovery in `findRoamTarget()` (Step 1), `pullerTick()`, and `combatTick()` (Hunt mode) to `math.abs(xt.Z() - myZ) <= maxZ`. Previously, distant-floor adds entering XTarget were acquired across massive vertical distances (up to 150 units 3D) without height checking.
