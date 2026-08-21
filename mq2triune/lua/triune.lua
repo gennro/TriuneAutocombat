@@ -5480,7 +5480,7 @@ runtime.fireDisc = function(name, a, id)
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
     clearCursor()
-    mq.cmdf('/disc "%s"', name)
+    mq.cmdf('/disc %s', name)
 
     -- Calculate duration & cooldown to lock out until the timer runs out
     local now = os.clock()

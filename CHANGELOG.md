@@ -1,5 +1,12 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-21
+
+- **Discipline Command Formatting Fix (`triune.lua`, `triune_buttons.lua`).**
+  - Removed surrounding quotation marks when invoking `/disc` commands (`runtime.fireDisc` and button builder). EverQuest's `/disc` parser expects the discipline name as raw arguments (e.g., `/disc Nimble Discipline`), and surrounding quotes could cause the command to fail to execute.
+
+---
+
 ## 2026-08-20
 
 - **Hunt Mode Acquire/Drop Spam Loop Fix (`triune.lua`).**

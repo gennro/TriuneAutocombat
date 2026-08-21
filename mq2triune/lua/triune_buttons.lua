@@ -653,7 +653,7 @@ local function buttonFromCursor()
     elseif t == 'melee_ability' or t == 'combat' or t == 'combat_ability' then
         local bt = tlo(function() return ca.ButtonText() end)
         b.label = (bt and tostring(bt) ~= '') and tostring(bt) or 'Discipline'
-        b.cmd   = string.format('/disc "%s"', b.label)
+        b.cmd   = string.format('/disc %s', b.label)
         local ic = tlo(function() return mq.TLO.Spell(b.label).SpellIcon() end)
         if type(ic) == 'number' and ic > 0 then b.icon = ic end
         b.timerType = 'Disc'
