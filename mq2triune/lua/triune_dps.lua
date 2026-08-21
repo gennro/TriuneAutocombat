@@ -1904,7 +1904,7 @@ local function main()
         -- Check Target state for automatic encounter archiving on target death or combat inactivity
         if runtime.inFight then
             local okId, tId = pcall(function() return mq.TLO.Target.ID() end)
-            local okDead, tDead = pcall(function() return mq.TLO.Target.IsDead() end)
+            local okDead, tDead = pcall(function() return mq.TLO.Target.Dead() or mq.TLO.Target.Type() == 'Corpse' end)
             local targetId = (okId and tId and tId > 0) and tId or 0
             local isDead = (okDead and tDead == true)
             

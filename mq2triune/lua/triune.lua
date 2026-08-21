@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.6.10'
+local VERSION           = '1.6.12'
 local open              = true
 local cfg               = mq.configDir
 
@@ -492,15 +492,15 @@ local function classPlausible(abbr)
 end
 
 local function defaultsForKind(kind, bene)
-    if kind == 'heal' then return 'F: Myself', 'my HP <=' end
-    if kind == 'buff' then return 'F: Myself', 'missing buff' end
-    if kind == 'pet' then return 'F: Myself', 'missing pet' end
-    if kind == 'util' then return 'F: Myself', 'always' end
-    if kind == 'debuff' then return 'E: Current Target', 'target HP <=' end
-    if kind == 'dot' then return 'E: Current Target', 'target HP <=' end
-    if kind == 'dd' then return 'E: Current Target', 'target HP <=' end
-    if bene == true then return 'F: Myself', 'missing buff' end
-    return 'E: Current Target', 'target HP <='
+    if kind == 'heal' then return 'F: Myself', 'my HP <=', 75 end
+    if kind == 'buff' then return 'F: Myself', 'missing buff', 100 end
+    if kind == 'pet' then return 'F: Myself', 'missing pet', 100 end
+    if kind == 'util' then return 'F: Myself', 'always', 100 end
+    if kind == 'debuff' then return 'E: Current Target', 'target HP <=', 98 end
+    if kind == 'dot' then return 'E: Current Target', 'target HP <=', 98 end
+    if kind == 'dd' then return 'E: Current Target', 'target HP <=', 95 end
+    if bene == true then return 'F: Myself', 'missing buff', 100 end
+    return 'E: Current Target', 'target HP <=', 95
 end
 
 local function cleanSpellName(name)
@@ -917,11 +917,11 @@ local function isSpawnAlive(id)
     if not id or id <= 0 then return false end
     local ok, s = pcall(function() return mq.TLO.Spawn(id) end)
     if not ok or not s or not s() then return false end
-    local dead, tp, hp = false, '', 100
+    local dead, tp, state = false, '', ''
     pcall(function() dead = s.Dead() end)
     pcall(function() tp = s.Type() end)
-    pcall(function() hp = s.PctHPs() end)
-    return (not dead) and (tp ~= 'Corpse') and ((hp or 0) > 0)
+    pcall(function() state = s.State() end)
+    return (not dead) and (tp ~= 'Corpse') and (state ~= 'DEAD')
 end
 
 local function isSpawnMyPet(s_or_id)
@@ -1285,7 +1285,7 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
                         local okZ, sz = pcall(function() return s.Z() end)
                         local zOk = (not maxZ) or (okZ and sz and math.abs(sz - myZ) <= maxZ)
                         if (stype == 'NPC' or stype == 'Pet')
-                            and (s.PctHPs() or 0) > 0 and not s.Dead()
+                            and not s.Dead() and stype ~= 'Corpse'
                             and isHostileTarget(id)
                             and dist <= maxDist
                             and zOk
@@ -2456,90 +2456,110 @@ loadAll()
 -- ============================================================================
 -- UI
 -- ============================================================================
-local function accent(c, txt) ImGui.TextColored(c[1], c[2], c[3], c[4], txt) end
+local UI = {}
+
+function UI.accent(c, txt) ImGui.TextColored(c[1], c[2], c[3], c[4], txt) end
+local accent = UI.accent
+function UI.setTooltip(txt)
+    if txt ~= nil then
+        ImGui.SetTooltip('%s', tostring(txt))
+    end
+end
 
 -- UI: theme and style helpers
-local function pushCol(id, r, g, b, a)
+function UI.pushCol(id, r, g, b, a)
     if id == nil then return end
-    local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-    local enumVal = ImGuiColType and ImGuiColType(id) or id
-    if pcall(ImGui.PushStyleColor, enumVal, r, g, b, a) then runtime.colN = (runtime.colN or 0) + 1 end
+    if pcall(ImGui.PushStyleColor, id, r, g, b, a) then runtime.colN = (runtime.colN or 0) + 1 end
 end
-local function pushVar(id, a, b)
+function UI.pushVar(id, a, b)
     if id == nil then return end
     local ok
-    local ImGuiSVType = (mq.imgui and mq.imgui.StyleVar) or _G
-        .ImGuiStyleVar ---@diagnostic disable-line: undefined-field
-    local enumVal = ImGuiSVType and ImGuiSVType(id) or id
     if b ~= nil then
         local ImVec2Type = _G.ImVec2 or ImVec2
         if type(ImVec2Type) == 'function' then
-            ok = pcall(ImGui.PushStyleVar, enumVal, ImVec2Type(a, b))
+            ok = pcall(ImGui.PushStyleVar, id, ImVec2Type(a, b))
         else
-            ok = pcall(ImGui.PushStyleVar, enumVal, a, b)
+            ok = pcall(ImGui.PushStyleVar, id, a, b)
         end
     else
-        ok = pcall(ImGui.PushStyleVar, enumVal, a)
+        ok = pcall(ImGui.PushStyleVar, id, a)
     end
     if ok then runtime.varN = (runtime.varN or 0) + 1 end
 end
 
-local function pushTheme()
+function UI.pushTheme()
     runtime.colN, runtime.varN = 0, 0
-    local ImGuiCol = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol or ImGuiCol ---@diagnostic disable-line: undefined-field
-    local ImGuiStyleVar = (mq.imgui and mq.imgui.StyleVar) or _G.ImGuiStyleVar or
-        ImGuiStyleVar ---@diagnostic disable-line: undefined-field
-    if ImGuiCol then
-        pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
-        pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
-        pushCol(ImGuiCol.PopupBg, 0.047, 0.075, 0.118, 1)
-        pushCol(ImGuiCol.Border, 0.157, 0.251, 0.345, 1)
-        pushCol(ImGuiCol.Text, 0.851, 0.898, 0.953, 1)
-        pushCol(ImGuiCol.TextDisabled, 0.490, 0.561, 0.651, 1)
-        pushCol(ImGuiCol.TitleBg, 0.043, 0.067, 0.106, 1)
-        pushCol(ImGuiCol.TitleBgActive, 0.047, 0.078, 0.125, 1)
-        pushCol(ImGuiCol.FrameBg, 0.047, 0.078, 0.125, 1)
-        pushCol(ImGuiCol.FrameBgHovered, 0.090, 0.150, 0.220, 1)
-        pushCol(ImGuiCol.FrameBgActive, 0.120, 0.190, 0.270, 1)
-        pushCol(ImGuiCol.Button, 0.086, 0.125, 0.196, 1)
-        pushCol(ImGuiCol.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
-        pushCol(ImGuiCol.ButtonActive, 0.300, 0.700, 1.000, 0.60)
-        pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
-        pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
-        pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
-        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
-        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
-        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
-        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
-        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
-        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
-        pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
-        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
-        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
+    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+    local SV = ImGuiStyleVar or _G.ImGuiStyleVar or (mq.imgui and mq.imgui.StyleVar)
+    if Col then
+        UI.pushCol(Col.WindowBg, 0.059, 0.086, 0.133, 1)
+        UI.pushCol(Col.ChildBg, 0.055, 0.082, 0.125, 1)
+        UI.pushCol(Col.PopupBg, 0.047, 0.075, 0.118, 1)
+        UI.pushCol(Col.Border, 0.157, 0.251, 0.345, 1)
+        UI.pushCol(Col.Text, 0.851, 0.898, 0.953, 1)
+        UI.pushCol(Col.TextDisabled, 0.490, 0.561, 0.651, 1)
+        UI.pushCol(Col.TitleBg, 0.043, 0.067, 0.106, 1)
+        UI.pushCol(Col.TitleBgActive, 0.047, 0.078, 0.125, 1)
+        UI.pushCol(Col.FrameBg, 0.047, 0.078, 0.125, 1)
+        UI.pushCol(Col.FrameBgHovered, 0.090, 0.150, 0.220, 1)
+        UI.pushCol(Col.FrameBgActive, 0.120, 0.190, 0.270, 1)
+        UI.pushCol(Col.Button, 0.086, 0.125, 0.196, 1)
+        UI.pushCol(Col.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
+        UI.pushCol(Col.ButtonActive, 0.300, 0.700, 1.000, 0.60)
+        UI.pushCol(Col.Header, 0.078, 0.129, 0.204, 1)
+        UI.pushCol(Col.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
+        UI.pushCol(Col.HeaderActive, 0.160, 0.500, 0.750, 0.70)
+        UI.pushCol(Col.Tab, 0.043, 0.067, 0.098, 1)
+        UI.pushCol(Col.TabHovered, 0.300, 0.700, 1.000, 0.40)
+        UI.pushCol(Col.TabSelected, 0.075, 0.125, 0.200, 1)
+        UI.pushCol(Col.CheckMark, 0.370, 0.880, 0.640, 1)
+        UI.pushCol(Col.SliderGrab, 1.000, 0.700, 0.540, 1)
+        UI.pushCol(Col.SliderGrabActive, 1.000, 0.550, 0.300, 1)
+        UI.pushCol(Col.Separator, 0.157, 0.251, 0.345, 1)
+        UI.pushCol(Col.ScrollbarBg, 0.031, 0.051, 0.078, 1)
+        UI.pushCol(Col.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
     end
-    if ImGuiStyleVar then
-        local ImGuiSV = ImGuiStyleVar
-        pushVar(ImGuiSV.WindowRounding, 6)
-        pushVar(ImGuiSV.ChildRounding, 5)
-        pushVar(ImGuiSV.FrameRounding, 4)
-        pushVar(ImGuiSV.PopupRounding, 4)
-        pushVar(ImGuiSV.TabRounding, 4)
-        pushVar(ImGuiSV.GrabRounding, 3)
-        pushVar(ImGuiSV.ScrollbarRounding, 6)
+    if SV then
+        UI.pushVar(SV.WindowRounding, 6)
+        UI.pushVar(SV.ChildRounding, 5)
+        UI.pushVar(SV.FrameRounding, 4)
+        UI.pushVar(SV.PopupRounding, 4)
+        UI.pushVar(SV.TabRounding, 4)
+        UI.pushVar(SV.GrabRounding, 3)
+        UI.pushVar(SV.ScrollbarRounding, 6)
 
-        pushVar(ImGuiSV.FrameBorderSize, 1)
-        pushVar(ImGuiSV.FramePadding, 7, 4)
-        pushVar(ImGuiSV.ItemSpacing, 8, 6)
-        pushVar(ImGuiSV.WindowPadding, 12, 10)
+        UI.pushVar(SV.FrameBorderSize, 1)
+        UI.pushVar(SV.FramePadding, 7, 4)
+        UI.pushVar(SV.ItemSpacing, 8, 6)
+        UI.pushVar(SV.WindowPadding, 12, 10)
     end
 end
 
-local function popTheme()
+function UI.popTheme()
     if (runtime.varN or 0) > 0 then
         pcall(ImGui.PopStyleVar, runtime.varN); runtime.varN = 0
     end
     if (runtime.colN or 0) > 0 then
         pcall(ImGui.PopStyleColor, runtime.colN); runtime.colN = 0
+    end
+end
+
+function UI.pushDisabledSliderStyle()
+    local pCount = 0
+    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+    if not Col then return 0 end
+    if pcall(ImGui.PushStyleColor, Col.FrameBg, 0.45, 0.08, 0.08, 1.0) then pCount = pCount + 1 end
+    if pcall(ImGui.PushStyleColor, Col.FrameBgHovered, 0.55, 0.12, 0.12, 1.0) then pCount = pCount + 1 end
+    if pcall(ImGui.PushStyleColor, Col.FrameBgActive, 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
+    if pcall(ImGui.PushStyleColor, Col.SliderGrab, 0.75, 0.25, 0.25, 1.0) then pCount = pCount + 1 end
+    if pcall(ImGui.PushStyleColor, Col.SliderGrabActive, 0.85, 0.30, 0.30, 1.0) then pCount = pCount + 1 end
+    if pcall(ImGui.PushStyleColor, Col.Text, 1.0, 0.85, 0.85, 1.0) then pCount = pCount + 1 end
+    return pCount
+end
+
+function UI.popDisabledSliderStyle(pCount)
+    if pCount and pCount > 0 then
+        pcall(ImGui.PopStyleColor, pCount)
     end
 end
 
@@ -2549,7 +2569,7 @@ end
 -- your actual gestalt trio via SLOT_COLORS/classColor. Every draw call is
 -- pcall-guarded so an unsupported binding can't take the header down with it.
 -- UI: header emblem
-local function drawEmblem(size)
+function UI.drawEmblem(size)
     pcall(function()
         local ImVec2Type = _G.ImVec2 or ImVec2 or
             (mq.imgui and mq.imgui.ImVec2) ---@diagnostic disable-line: undefined-field
@@ -2577,7 +2597,7 @@ local function drawEmblem(size)
 end
 
 -- Session Tracker Helpers (AA / Platinum)
-local function getCurrentAA()
+function UI.getCurrentAA()
     local okTotal, total = pcall(function() return mq.TLO.Me.AAPointsTotal() end)
     local okSpent, spent = pcall(function() return mq.TLO.Me.AAPointsSpent() end)
     local okUnspent, unspent = pcall(function() return mq.TLO.Me.AAPoints() end)
@@ -2596,7 +2616,7 @@ local function getCurrentAA()
     return aaCount
 end
 
-local function getCurrentPlat()
+function UI.getCurrentPlat()
     local okCash, cash = pcall(function() return mq.TLO.Me.Cash() end)
     if okCash and type(cash) == 'number' and cash >= 0 then
         return math.floor(cash / 1000)
@@ -2608,42 +2628,40 @@ local function getCurrentPlat()
     return nil
 end
 
-local function resetTracker()
+function UI.resetTracker()
     runtime.trackStartTime = os.time()
-    runtime.startAA = getCurrentAA()
+    runtime.startAA = UI.getCurrentAA()
     runtime.currentAA = runtime.startAA or 0
-    runtime.startPlat = getCurrentPlat()
+    runtime.startPlat = UI.getCurrentPlat()
     runtime.currentPlat = runtime.startPlat or 0
 end
 
-local function updateTracker()
+function UI.updateTracker()
     if not runtime.trackStartTime then
         runtime.trackStartTime = os.time()
     end
-    local aa = getCurrentAA()
+    local aa = UI.getCurrentAA()
     if aa ~= nil then
         if runtime.startAA == nil then runtime.startAA = aa end
         runtime.currentAA = aa
     end
-    local plat = getCurrentPlat()
+    local plat = UI.getCurrentPlat()
     if plat ~= nil then
         if runtime.startPlat == nil then runtime.startPlat = plat end
         runtime.currentPlat = plat
     end
 end
 
-local UI = {}
-
 function UI.drawHeaderBar()
-    drawEmblem(22)
+    UI.drawEmblem(22)
     ImGui.SameLine()
-    accent(ARC, myName or '(no character)')
+    UI.accent(ARC, myName or '(no character)')
     ImGui.SameLine(); ImGui.TextDisabled(string.format('| %s / %s / %s',
         myClasses[1] or '?', myClasses[2] or '?', myClasses[3] or '?'))
     ImGui.SameLine(); ImGui.TextDisabled(string.format('| PoP exp %d | v%s',
         DATA.era_expansion or 5, VERSION))
 
-    updateTracker()
+    UI.updateTracker()
     local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
     local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
     local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or 0
@@ -2659,7 +2677,7 @@ function UI.drawHeaderBar()
         local h = math.floor(m / 60)
         m = m % 60
         local timeStr = h > 0 and string.format('%dh %dm %ds', h, m, s) or string.format('%dm %ds', m, s)
-        ImGui.SetTooltip(string.format(
+        UI.setTooltip(string.format(
             "Session Tracker (%s):\n" ..
             "-------------------------------\n" ..
             "AA/hr Rate:   %.2f / hr\n" ..
@@ -2675,10 +2693,10 @@ function UI.drawHeaderBar()
     end
     ImGui.SameLine()
     if ImGui.Button('Reset##hdrResetTrack') then
-        resetTracker()
+        UI.resetTracker()
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Resets AA and Platinum session tracking values to 0.')
+        UI.setTooltip('Resets AA and Platinum session tracking values to 0.')
     end
 
     -- Toolbar buttons (on line below script info and trackers)
@@ -2890,7 +2908,11 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
             local g = gemsTable[i]
             local cls = g and g.cls or nil
 
-            ImGui.Text(string.format('%2d', i)); ImGui.SameLine()
+            ImGui.Text(string.format('%2d', i))
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(string.format('Gem Slot %d', i))
+            end
+            ImGui.SameLine()
 
             -- class combo (none + trio)
             local classOpts = { '--' }
@@ -2898,10 +2920,13 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
             local curCi = cls and idxOf(classOpts, cls) or 1
             ImGui.SetNextItemWidth(64)
             local ci = ImGui.Combo('##c', curCi, classOpts)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Select the character class that owns this spell slot (or "--" to clear/disable).')
+            end
             local newCls = (ci > 1) and classOpts[ci] or nil
             if newCls ~= cls then
                 if newCls then
-                    gemsTable[i] = { cls = newCls, spell = nil, target = 'F: Myself', when = 'always', pct = 0 }
+                    gemsTable[i] = { cls = newCls, spell = nil, target = 'F: Myself', when = 'always', pct = 100 }
                 else
                     gemsTable[i] = nil
                 end
@@ -2911,6 +2936,9 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
             if cls then
                 if not classHasSpells(cls) then
                     ImGui.SameLine(); accent(MUTED, '  ' .. cls .. ' has no gem spells (melee) -> Abilities tab')
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(cls .. ' is a melee class without castable spell gems. Set up disciplines and abilities on the Abilities & AAs tab.')
+                    end
                 else
                     local names, lookup = filteredSpells(cls)
                     local spOpts = { '-- choose --' }
@@ -2922,6 +2950,9 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     end
                     ImGui.SameLine(); ImGui.SetNextItemWidth(190)
                     local si = ImGui.Combo('##s', curSi, spOpts)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Select the spell to assign to this gem slot.')
+                    end
                     if si > 1 then
                         local lu = lookup[si - 1]
                         if lu and lu.name ~= g.spell then
@@ -2934,17 +2965,37 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     -- target
                     ImGui.SameLine(); ImGui.SetNextItemWidth(150)
                     local ti = ImGui.Combo('##t', idxOf(TARGETS, g.target or 'F: Myself'), TARGETS)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Target condition: who or what to cast this spell on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
+                    end
                     g.target = TARGETS[ti]
 
                     -- when
                     ImGui.SameLine(); ImGui.SetNextItemWidth(140)
                     local wi = ImGui.Combo('##w', idxOf(WHENS, g.when or 'always'), WHENS)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Trigger condition: when this spell should be cast (e.g. HP <=, my Mana <=, missing buff, in combat, always).')
+                    end
                     g.when = WHENS[wi]
 
-                    -- percent: draggable slider that shows the value (only meaningful
-                    -- for %-based triggers; harmless otherwise)
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                    g.pct = ImGui.SliderInt('##p', g.pct or 0, 0, 100, '%d%%')
+                    -- percent: draggable slider that shows the value (0% = Disabled)
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                    local curPct = tonumber(g.pct)
+                    if curPct == nil then curPct = 100 end
+                    local isDis = (curPct == 0)
+                    local pCount = 0
+                    if isDis then pCount = UI.pushDisabledSliderStyle() end
+                    local newPct = ImGui.SliderInt('##p', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                    local isHov = ImGui.IsItemHovered()
+                    if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
+                    g.pct = newPct
+                    if isHov then
+                        if newPct == 0 then
+                            UI.setTooltip('Spell is Disabled (0%). Drag slider above 0% to enable.')
+                        else
+                            UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this spell).', newPct))
+                        end
+                    end
                 end
 
                 if allowBurn then
@@ -2977,18 +3028,34 @@ end
 function UI.drawGemTabHeader(gemsTable)
     ImGui.Dummy(0, 4)
     ImGui.TextDisabled('Level band:')
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Filter available spells by character level range.')
+    end
     ImGui.SameLine(); ImGui.SetNextItemWidth(110)
     local newLvlMin = ImGui.InputInt('##lmin', lvlMin); if newLvlMin < 1 then newLvlMin = 1 end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Minimum character level for spell dropdown list.')
+    end
     if newLvlMin ~= lvlMin then
         lvlMin = newLvlMin; clearFilteredSpellsCache()
     end
-    ImGui.SameLine(); ImGui.Text('to'); ImGui.SameLine(); ImGui.SetNextItemWidth(110)
+    ImGui.SameLine(); ImGui.Text('to')
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Level range separator.')
+    end
+    ImGui.SameLine(); ImGui.SetNextItemWidth(110)
     local newLvlMax = ImGui.InputInt('##lmax', lvlMax); if newLvlMax > 65 then newLvlMax = 65 end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Maximum character level for spell dropdown list.')
+    end
     if newLvlMax ~= lvlMax then
         lvlMax = newLvlMax; clearFilteredSpellsCache()
     end
     if lvlMin > lvlMax then lvlMin = lvlMax end
     ImGui.SameLine(); ImGui.TextDisabled('(spells learned in this band)')
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Only spells learned between Min Level and Max Level appear in the spell dropdowns below.')
+    end
     local newScribed = ImGui.Checkbox('Scribed Only', ctrl.scribed_only)
     if newScribed ~= ctrl.scribed_only then
         ctrl.scribed_only = newScribed
@@ -3031,6 +3098,9 @@ function UI.drawGemTabHeader(gemsTable)
     end
     if pendingCount > 0 then
         ImGui.SameLine(); accent(WARN, string.format('memming... %d queued', pendingCount))
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(string.format('%d spell(s) currently queued to be memorized to your spell bar.', pendingCount))
+        end
     end
     ImGui.Separator()
 end
@@ -3050,6 +3120,9 @@ function UI.drawAATab()
     if not ImGui.BeginTabItem('Abilities & AAs') then return end
     ImGui.Dummy(0, 4)
     ImGui.TextWrapped('Activated AAs (each has its own timer -- all fire when ready). Grouped by cooldown.')
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.')
+    end
     ctrl.aa_purchased_only = ImGui.Checkbox('Purchased Only', ctrl.aa_purchased_only)
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
@@ -3072,18 +3145,51 @@ function UI.drawAATab()
                                 local entry = loadout.aas[nm] or
                                     { cls = cls, target = 'F: Myself', when = 'in combat', enabled = false, pct = 30, burn_only = false }
                                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
+                                if ImGui.IsItemHovered() then
+                                    ImGui.SetTooltip(string.format('Enable or disable %s.', nm))
+                                end
                                 ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
+                                if ImGui.IsItemHovered() then
+                                    ImGui.SetTooltip(string.format('Class: %s', cls))
+                                end
                                 ImGui.SameLine(); ImGui.Text(nm)
+                                if ImGui.IsItemHovered() then
+                                    ImGui.SetTooltip(string.format('AA Ability: %s', nm))
+                                end
                                 ImGui.SameLine(); ImGui.TextDisabled('(' .. fmtSec(secNum) .. ')')
+                                if ImGui.IsItemHovered() then
+                                    ImGui.SetTooltip(string.format('Cooldown: %s (Tier: %s)', fmtSec(secNum), tier))
+                                end
                                 if entry.enabled then
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(150)
                                     local ti = ImGui.Combo('##aat', idxOf(TARGETS, entry.target), TARGETS)
+                                    if ImGui.IsItemHovered() then
+                                        ImGui.SetTooltip('Target condition: who or what to cast this ability on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
+                                    end
                                     entry.target = TARGETS[ti]
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(140)
                                     local wi = ImGui.Combo('##aaw', idxOf(WHENS, entry.when), WHENS)
+                                    if ImGui.IsItemHovered() then
+                                        ImGui.SetTooltip('Trigger condition: when this ability should be cast (e.g. in combat, HP <=, my Mana <=, missing buff, always).')
+                                    end
                                     entry.when = WHENS[wi]
-                                    ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                                    entry.pct = ImGui.SliderInt('##aap', entry.pct or 30, 0, 100, '%d%%')
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                                    local curPct = tonumber(entry.pct)
+                                    if curPct == nil then curPct = 30 end
+                                    local isDis = (curPct == 0)
+                                    local pCount = 0
+                                    if isDis then pCount = UI.pushDisabledSliderStyle() end
+                                    local newPct = ImGui.SliderInt('##aap', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                                    local isHov = ImGui.IsItemHovered()
+                                    if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
+                                    entry.pct = newPct
+                                    if isHov then
+                                        if newPct == 0 then
+                                            UI.setTooltip('Ability is Disabled (0%). Drag slider above 0% to enable.')
+                                        else
+                                            UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this ability).', newPct))
+                                        end
+                                    end
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(45)
                                     local curXt = tonumber(entry.min_xtar) or 1
                                     if curXt < 1 then curXt = 1 end
@@ -3126,6 +3232,9 @@ function UI.drawDiscTab()
         ..
         'a survival disc like Whirlwind can stay on for regular grinding). Priority: when multiple discs are eligible at once, '
         .. 'lower numbers are tried first -- if the top one is still on cooldown, the next one down the list fires instead.')
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Combat disciplines and special skills share timer groups and are evaluated in order of assigned priority.')
+    end
     ctrl.disc_trained_only = ImGui.Checkbox('Trained Only', ctrl.disc_trained_only)
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip(
@@ -3143,19 +3252,51 @@ function UI.drawDiscTab()
                     local entry = loadout.discs[nm] or
                         { cls = cls, target = 'F: Myself', when = 'HP <=', enabled = false, pct = 30, boss_only = false, burn_only = false, priority = 50 }
                     entry.enabled = ImGui.Checkbox('##en', entry.enabled)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(string.format('Enable or disable %s.', nm))
+                    end
                     ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(string.format('Class: %s', cls))
+                    end
                     ImGui.SameLine(); ImGui.Text(nm)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(string.format('Discipline/Skill: %s', nm))
+                    end
                     ImGui.SameLine(); ImGui.TextDisabled('(L' .. lv .. ')')
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(string.format('Required Level: %s', tostring(lv)))
+                    end
                     if entry.enabled then
                         ImGui.SameLine(); ImGui.SetNextItemWidth(150)
                         local ti = ImGui.Combo('##dt', idxOf(TARGETS, entry.target), TARGETS)
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Target condition: who or what to use this discipline on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
+                        end
                         entry.target = TARGETS[ti]
                         ImGui.SameLine(); ImGui.SetNextItemWidth(140)
                         local wi = ImGui.Combo('##dw', idxOf(WHENS, entry.when), WHENS)
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Trigger condition: when this discipline should be used (e.g. HP <=, in combat, my Mana <=, always).')
+                        end
                         entry.when = WHENS[wi]
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                        local dpVal = ImGui.SliderInt('##dp', entry.pct or 30, 0, 100, '%d%%')
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                        local curPct = tonumber(entry.pct)
+                        if curPct == nil then curPct = 30 end
+                        local isDis = (curPct == 0)
+                        local pCount = 0
+                        if isDis then pCount = UI.pushDisabledSliderStyle() end
+                        local dpVal = ImGui.SliderInt('##dp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                        local isHov = ImGui.IsItemHovered()
+                        if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                         entry.pct = dpVal
+                        if isHov then
+                            if dpVal == 0 then
+                                UI.setTooltip('Discipline is Disabled (0%). Drag slider above 0% to enable.')
+                            else
+                                UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this discipline).', dpVal))
+                            end
+                        end
                         ImGui.SameLine(); ImGui.SetNextItemWidth(45)
                         local curXt = tonumber(entry.min_xtar) or 1
                         if curXt < 1 then curXt = 1 end
@@ -3194,7 +3335,12 @@ function UI.drawDiscTab()
                 end
             end
         end
-        if not anyDisc then ImGui.TextDisabled('  (none for your classes)') end
+        if not anyDisc then
+            ImGui.TextDisabled('  (none for your classes)')
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('No combat disciplines found for your current character classes.')
+            end
+        end
     end
     ImGui.EndChild()
     ImGui.EndTabItem()
@@ -3226,13 +3372,12 @@ local maxMeleeDistance -- forward declaration; defined in the engine section bel
 function UI.drawControlTab()
     if not ImGui.BeginTabItem('Control') then return end
     if ctrl.running then
-        local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-        local getCol = function(id) return ImGuiColType and ImGuiColType(id) or id end
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local pCount = 0
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Button), 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonHovered), 0.18, 0.70, 0.28, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonActive), 0.08, 0.40, 0.15, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Text), 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.18, 0.70, 0.28, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.08, 0.40, 0.15, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
         if ImGui.Button('PAUSE', 150, 30) then
             if ctrl.mode == 'Manual' then
@@ -3248,12 +3393,11 @@ function UI.drawControlTab()
             pcall(ImGui.PopStyleColor, pCount)
         end
     else
-        local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-        local getCol = function(id) return ImGuiColType and ImGuiColType(id) or id end
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local pCount = 0
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Button), 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonHovered), 0.80, 0.22, 0.22, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonActive), 0.50, 0.10, 0.10, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.80, 0.22, 0.22, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.50, 0.10, 0.10, 1.0) then pCount = pCount + 1 end
         if ImGui.Button('START', 150, 30) then
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
@@ -3277,13 +3421,12 @@ function UI.drawControlTab()
         local gH = math.min(1.0, g + 0.15)
         local bH = math.min(1.0, b + 0.15)
 
-        local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-        local getCol = function(id) return ImGuiColType and ImGuiColType(id) or id end
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local pCount = 0
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Button), r, g, b, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonHovered), rH, gH, bH, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.ButtonActive), 0.70, 0.00, 0.00, 1.0) then pCount = pCount + 1 end
-        if pcall(ImGui.PushStyleColor, getCol(ImGuiCol.Text), 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, r, g, b, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, rH, gH, bH, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.70, 0.00, 0.00, 1.0) then pCount = pCount + 1 end
+        if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
         if ImGui.Button('BURN (ON)##btnBurn', 150, 30) then
             ctrl.burn = false
@@ -4090,14 +4233,14 @@ end
 
 local function drawMiniGui()
     if not open or not ctrl.compact then return end
-    pushTheme()
+    UI.pushTheme()
     local show
     open, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', open,
         ImGuiWindowFlags.AlwaysAutoResize)
     if not open then
         ctrl.compact = false
         ImGui.End()
-        popTheme()
+        UI.popTheme()
         return
     end
 
@@ -4153,7 +4296,7 @@ local function drawMiniGui()
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Expand back to full tabbed Triune AutoCombat window')
+            UI.setTooltip('Expand back to full tabbed Triune AutoCombat window')
         end
 
         ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
@@ -4170,22 +4313,27 @@ local function drawMiniGui()
                 fullStop()
             end
         else
-            if ImGui.Button('Run##miniRunBtn', 65, 22) then
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            local pCount = 0
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then
+                pCount = pCount + 1
+            end
+            if ImGui.Button('START##miniStartBtn', 80, 22) then
                 if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                     runtime.setNearestWaypoint()
                 end
                 ctrl.running = true
                 runtime.wasRunning = true
             end
+            if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
         end
+
         ImGui.SameLine()
         if ctrl.burn then
-            local ImGuiColType = (mq.imgui and mq.imgui.Col) or _G.ImGuiCol
-            local getCol = function(id) return ImGuiColType and ImGuiColType(id) or id end
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
             local pCount = 0
-            if ImGuiColType and pcall(ImGui.PushStyleColor, getCol(ImGuiColType.Button), 0.8, 0.2, 0.2, 1.0) then
-                pCount =
-                    pCount + 1
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.8, 0.2, 0.2, 1.0) then
+                pCount = pCount + 1
             end
             if ImGui.Button('BURN ON##miniBurnBtn', 75, 22) then
                 ctrl.burn = false
@@ -4197,13 +4345,13 @@ local function drawMiniGui()
             end
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
+            UI.setTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
         end
 
         ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
 
         -- Row 3: Session Tracker Banner
-        updateTracker()
+        UI.updateTracker()
         local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
         local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
         local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or
@@ -4219,7 +4367,7 @@ local function drawMiniGui()
             local h = math.floor(m / 60)
             m = m % 60
             local timeStr = h > 0 and string.format('%dh %dm %ds', h, m, s) or string.format('%dm %ds', m, s)
-            ImGui.SetTooltip(string.format(
+            UI.setTooltip(string.format(
                 "Session Tracker (%s):\n" ..
                 "-------------------------------\n" ..
                 "AA/hr Rate:   %.2f / hr\n" ..
@@ -4235,24 +4383,11 @@ local function drawMiniGui()
         end
         ImGui.SameLine()
         if ImGui.Button('Reset##miniResetTrack', 55, 20) then
-            resetTracker()
+            UI.resetTracker()
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Resets AA and Platinum session tracking values to 0.')
+            UI.setTooltip('Resets AA and Platinum session tracking values to 0.')
         end
-
-        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
-
-        -- Row 4: Sub-module Launcher Buttons Toolbar
-        if ImGui.Button('Spellbook##miniBook', 75, 22) then
-            local s = mq.TLO.Lua.Script('triune_spellbook')
-            if s() and s.Status() == 'RUNNING' then
-                mq.cmd('/lua stop triune_spellbook')
-            else
-                mq.cmd('/lua run triune_spellbook')
-            end
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes standalone Spellbook interface') end
 
         ImGui.SameLine()
         if ImGui.Button('Cursor##miniCursor', 55, 22) then
@@ -4263,7 +4398,7 @@ local function drawMiniGui()
                 mq.cmd('/lua run triune_cursor')
             end
         end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes standalone Cursor Manager') end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes standalone Cursor Manager') end
 
         ImGui.SameLine()
         if ImGui.Button('DPS##miniDPS', 42, 22) then
@@ -4274,7 +4409,7 @@ local function drawMiniGui()
                 mq.cmd('/lua run triune_dps')
             end
         end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or toggles standalone DPS Parser window') end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or toggles standalone DPS Parser window') end
 
         ImGui.SameLine()
         if ImGui.Button('Update##miniUpdate', 58, 22) then
@@ -4285,7 +4420,7 @@ local function drawMiniGui()
                 mq.cmd('/lua run triune_updater')
             end
         end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes Release Updater window') end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Release Updater window') end
 
         ImGui.SameLine()
         if ImGui.Button('Tracker##miniTrack', 60, 22) then
@@ -4296,21 +4431,21 @@ local function drawMiniGui()
                 mq.cmd('/lua run triune_track')
             end
         end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Launches or closes Zone Tracker window') end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Zone Tracker window') end
     end
 
     ImGui.End()
-    popTheme()
+    UI.popTheme()
 end
 
 local function drawFullGui()
     if not open or ctrl.compact then return end
-    pushTheme()
+    UI.pushTheme()
     ImGui.SetNextWindowSize(720, 640, ImGuiCond.FirstUseEver)
     local show
     open, show = ImGui.Begin('Triune AutoCombat##triune', open)
     if not show then
-        ImGui.End(); popTheme(); return
+        ImGui.End(); UI.popTheme(); return
     end
 
     UI.drawHeaderBar()
@@ -4327,7 +4462,7 @@ local function drawFullGui()
     end
 
     ImGui.End()
-    popTheme()
+    UI.popTheme()
 end
 
 local function draw()
@@ -4358,7 +4493,6 @@ local function setTarget(id)
     if not id or id == 0 then return false end
     local s = mq.TLO.Spawn(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
-    if s.Type() == 'NPC' and (s.PctHPs() or 0) <= 0 then return false end
     if mq.TLO.Target.ID() == id then return true end
     local wasCombat = mq.TLO.Me.Combat()
     mq.cmdf('/target id %d', id)
@@ -4510,7 +4644,7 @@ local function firstNPCXtarget(unmezzedOnly, maxZ)
     return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, nil, maxZ)
 end
 
--- Returns count of live (PctHPs > 0), non-ignored NPCs occupying XTarget slots.
+-- Returns count of live, non-ignored NPCs occupying XTarget slots.
 local function countNPCXtarget(includeUnreachable)
     local cnt = 0
     pcall(function()
@@ -4524,7 +4658,7 @@ local function countNPCXtarget(includeUnreachable)
                     local s = mq.TLO.Spawn(id)
                     local stype = (s() and s.Type()) or ''
                     if (stype == 'NPC' or stype == 'Pet')
-                        and (s.PctHPs() or 0) > 0 and not s.Dead()
+                        and not s.Dead() and stype ~= 'Corpse'
                         and isHostileTarget(id)
                         and not isIgnored(s.CleanName())
                         and (includeUnreachable or not isUnreachable(id)) then
@@ -4540,7 +4674,7 @@ local function countNPCXtarget(includeUnreachable)
             local t = mq.TLO.Target
             if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID()) then
                 local stype = t.Type() or ''
-                if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
+                if (stype == 'NPC' or stype == 'Pet') and not t.Dead() and stype ~= 'Corpse'
                     and not isIgnored(t.CleanName()) and not isUnreachable(t.ID()) then
                     cnt = 1
                 end
@@ -4550,7 +4684,7 @@ local function countNPCXtarget(includeUnreachable)
     return cnt
 end
 
--- Returns true if any live (PctHPs > 0), non-ignored NPC occupies an XTarget slot.
+-- Returns true if any live, non-ignored NPC occupies an XTarget slot.
 -- When includeUnreachable is true, includes unreachable NPCs (used for combat / med break safety checks).
 local function anyXtarAlive(includeUnreachable)
     return countNPCXtarget(includeUnreachable) > 0
@@ -4562,7 +4696,7 @@ isXTargetId = function(id)
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) == id
-            and (xt.PctHPs() or 0) > 0 and not xt.Dead()
+            and not xt.Dead() and (xt.Type() or '') ~= 'Corpse'
             and not isIgnored(xt.CleanName())
             and not isUnreachable(id) then
             local stype = xt.Type() or ''
@@ -4694,7 +4828,7 @@ isCombat = function()
         local t = mq.TLO.Target
         if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID()) then
             local stype = t.Type() or ''
-            if (stype == 'NPC' or stype == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead() and not isIgnored(t.CleanName()) then
+            if (stype == 'NPC' or stype == 'Pet') and not t.Dead() and stype ~= 'Corpse' and not isIgnored(t.CleanName()) then
                 if targetIsEngaged(t.ID()) or isHostileTarget(t.ID()) then return true end
             end
         end
@@ -4707,7 +4841,7 @@ isCombat = function()
                     local s = mq.TLO.Spawn(id)
                     if s() then
                         local stype = s.Type() or ''
-                        if (stype == 'NPC' or stype == 'Pet') and (s.PctHPs() or 0) > 0 and not s.Dead() and not isIgnored(s.CleanName()) and isHostileTarget(id) then
+                        if (stype == 'NPC' or stype == 'Pet') and not s.Dead() and stype ~= 'Corpse' and not isIgnored(s.CleanName()) and isHostileTarget(id) then
                             return true
                         end
                     end
@@ -4749,7 +4883,7 @@ local function maTargetId()
         end
     end
     local t = mq.TLO.Target
-    if not (t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead() and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())) then return nil end
+    if not (t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse' and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())) then return nil end
     if gated and not targetIsEngaged(t.ID()) then
         return nil
     end
@@ -4788,7 +4922,7 @@ local function resolveTargetId(token, cls)
                 local s = mq.TLO.NearestSpawn(i, string.format('npc targetable radius %d', maxR))
                 if not s() then break end
                 local sid = s.ID() or 0
-                if sid > 0 and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
+                if sid > 0 and s.Type() == 'NPC' and not s.Dead() and s.Type() ~= 'Corpse'
                     and not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid)
                     and not isIgnored(s.CleanName()) and not isUnreachable(sid) then
                     local okZ, sz = pcall(function() return s.Z() end)
@@ -4812,7 +4946,6 @@ local function resolveTargetId(token, cls)
     pcall(function() hp = s.PctHPs() or 100 end)
     local stype = ''
     pcall(function() stype = s.Type() or '' end)
-    if (stype == 'NPC' or stype == 'Pet') and hp <= 0 then return nil end
     local cname = ''
     pcall(function() cname = s.CleanName() or '' end)
     if cname ~= '' and isIgnored(cname) then return nil end
@@ -4832,7 +4965,9 @@ local function reconcileSungBuffs()
     local function scanGemTable(gemsTable)
         for i = 1, NUM_GEMS do
             local g = gemsTable[i]
-            if g and g.cls == 'Brd' and g.spell and g.spell ~= '' then
+            local gpct = g and tonumber(g.pct)
+            if gpct == nil then gpct = 100 end
+            if g and g.cls == 'Brd' and g.spell and g.spell ~= '' and gpct > 0 then
                 local bene = false
                 pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
                 if bene then
@@ -5015,6 +5150,7 @@ end
 
 local function conditionMet(when, pct, spellName, targetId, cls)
     pct = tonumber(pct) or 0
+    if pct <= 0 then return false end
     if when == 'always' then return true end
     if when == 'in combat' or when == 'twist while fighting' then return isCombat() end
     if when == 'my Mana <=' then return (mq.TLO.Me.PctMana() or 100) <= pct end
@@ -5750,7 +5886,7 @@ end
 local function handleCantHitFromHere()
     if not isCombat() then return end
     local tgt = mq.TLO.Target
-    if not (tgt() and (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and (tgt.PctHPs() or 0) > 0) then return end
+    if not (tgt() and (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and tgt.Type() ~= 'Corpse') then return end
     local tid = tgt.ID()
     if not ctrl.running then return end
     local now = os.clock()
@@ -6128,7 +6264,7 @@ local function checkStuck()
 
     -- If we have a target (NPC or PC player like MA in chase mode) and are within range, we are not stuck
     local nt = mq.TLO.Target
-    if nt() and (nt.PctHPs() or 0) > 0 and not nt.Dead() then
+    if nt() and not nt.Dead() and (nt.Type() or '') ~= 'Corpse' then
         local reqDist = (nt.Type() == 'PC' and (ctrl.chase_dist or 15) or desiredRange()) + 12
         if distToId(nt.ID()) <= reqDist then
             if nt.Type() == 'NPC' and not hasLoS(nt.ID()) then
@@ -6170,7 +6306,7 @@ local function checkCombatStall()
         return
     end
     local t = mq.TLO.Target
-    local haveLiveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
+    local haveLiveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse'
     if not haveLiveNPC or not isHostileTarget(t.ID()) then
         stuckState.combatStallSince = nil
         return
@@ -6198,7 +6334,7 @@ handleCannotSeeTarget = function()
     local tid = tgt.ID() or 0
     if tid <= 0 then return end
 
-    local isNpc = (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and (tgt.PctHPs() or 0) > 0 and not tgt.Dead()
+    local isNpc = (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and tgt.Type() ~= 'Corpse'
     if not isNpc or not isHostileTarget(tid) then return end
 
     local d = distToId(tid)
@@ -6352,7 +6488,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) > 0 and (xt.Type() == 'NPC' or xt.Type() == 'Pet') and (xt.PctHPs() or 0) > 0 and not xt.Dead() then
+        if xt() and (xt.ID() or 0) > 0 and (xt.Type() == 'NPC' or xt.Type() == 'Pet') and not xt.Dead() and xt.Type() ~= 'Corpse' then
             local id = xt.ID()
             if not isSpawnPetOrPlayer(id) and isHostileTarget(id) then
                 local dist = xt.Distance3D() or 999
@@ -6378,7 +6514,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
             local sid = s.ID() or 0
             if sid > 0 then
                 local stype = s.Type() or ''
-                if stype == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead() then
+                if stype == 'NPC' and not s.Dead() and stype ~= 'Corpse' then
                     if not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid) then
                         local lvl = s.Level() or 0
                         if lvl >= minLv and lvl <= maxLv then
@@ -6492,7 +6628,7 @@ local function pullerTick()
 
         -- If current target is right next to camp (within 25 units), fight it directly
         local pt = mq.TLO.Target
-        if pt() and (pt.Type() == 'NPC' or pt.Type() == 'Pet') and (pt.PctHPs() or 0) > 0 and not pt.Dead()
+        if pt() and (pt.Type() == 'NPC' or pt.Type() == 'Pet') and not pt.Dead() and pt.Type() ~= 'Corpse'
             and not isSpawnPetOrPlayer(pt.ID()) and isHostileTarget(pt.ID()) and distToId(pt.ID()) <= 25 then
             runtime.pullTargetId = pt.ID()
             runtime.pullState = 'FIGHTING'
@@ -6555,7 +6691,7 @@ local function pullerTick()
     end
 
     local s = mq.TLO.Spawn(runtime.pullTargetId)
-    local alive = s() and s.Type() == 'NPC' and (s.PctHPs() or 0) > 0 and not s.Dead()
+    local alive = s() and s.Type() == 'NPC' and not s.Dead() and s.Type() ~= 'Corpse'
     if not alive then
         local maxCampZ = ctrl.camp_z or 75
         local addId = firstNPCXtarget(false, maxCampZ)
@@ -6628,7 +6764,9 @@ local function pullerTick()
                         else
                             for i = 1, NUM_GEMS do
                                 local lg = loadout.gems and loadout.gems[i]
-                                if lg and lg.spell and lg.spell ~= '' then
+                                local lpct = lg and tonumber(lg.pct)
+                                if lpct == nil then lpct = 100 end
+                                if lg and lg.spell and lg.spell ~= '' and lpct > 0 then
                                     local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
                                     if isDet and castGem(i, lg, tid) then break end
                                 end
@@ -7036,7 +7174,7 @@ local function combatTick()
 
     local numXtar = countNPCXtarget()
     local t = mq.TLO.Target
-    local haveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and (t.PctHPs() or 0) > 0 and not t.Dead()
+    local haveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse'
         and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())
     if haveNPC and ctrl.mode == 'Puller' then
         if isIgnored(t.CleanName()) then
@@ -7091,7 +7229,7 @@ local function combatTick()
         if ctrl.submode == 'Camp' then
             pullerTick()
             local pt = mq.TLO.Target
-            haveNPC = pt() and pt.Type() == 'NPC' and (pt.PctHPs() or 0) > 0
+            haveNPC = pt() and pt.Type() == 'NPC' and not pt.Dead() and pt.Type() ~= 'Corpse'
             if haveNPC and runtime.pullState == 'FIGHTING' then
                 local id = pt.ID()
                 if moveToward(id, desiredRange(id)) then
@@ -7112,7 +7250,7 @@ local function combatTick()
                 local maxScan = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
                 -- Add hysteresis buffer (+35 units for waypoint patrol, +30% for free roam) so boundary spawns are not dropped
                 local dropDist = hasWps and (maxScan + 35) or (maxScan * 1.3 + 50)
-                if not tspawn() or tspawn.Dead() or (tspawn.PctHPs() or 0) <= 0 or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
+                if not tspawn() or tspawn.Dead() or tspawn.Type() == 'Corpse' or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
                     haveNPC = false
                     mq.cmd('/target clear')
                 elseif isXTargetId(tid) then
@@ -7128,7 +7266,15 @@ local function combatTick()
                     local tooFarZ = okZ and sz and math.abs(sz - myZ) > (maxHuntZ + 15)
                     local tooFarDist = not isMoveActive() and distToId(tid) > dropDist
                     if tooFarZ or tooFarDist then
-                        -- If target is not on XTarget, not in combat, and exceeds Max Height Diff (+15 hysteresis) or scan distance, clear target
+                        -- Mark unreachable so findRoamTarget() won't immediately re-acquire the
+                        -- same spawn on the very next tick, causing the acquire/drop spam loop.
+                        -- The blacklist expires after 60s in case the mob moves closer or a path
+                        -- opens up (same TTL as the navmesh-fail unreachable entries).
+                        local reason = tooFarZ and 'elevation diff' or 'stationary+out-of-range'
+                        print(string.format(
+                            '\\ay[Triune]\\ax Hunt: dropping #%d (%s) -- %s. Blacklisting for 60s.',
+                            tid, tostring(tspawn.CleanName()), reason))
+                        markUnreachable(tid)
                         haveNPC = false
                         mq.cmd('/target clear')
                     end
@@ -7297,7 +7443,9 @@ local function combatTick()
                                 -- Fallback: try first detrimental spell in loadout
                                 for i = 1, NUM_GEMS do
                                     local lg = loadout.gems and loadout.gems[i]
-                                    if lg and lg.spell and lg.spell ~= '' then
+                                    local lpct = lg and tonumber(lg.pct)
+                                    if lpct == nil then lpct = 100 end
+                                    if lg and lg.spell and lg.spell ~= '' and lpct > 0 then
                                         local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
                                         if isDet and castGem(i, lg, id) then break end
                                     end
@@ -7627,9 +7775,11 @@ local function combatTick()
     -- and don't let them block (or be blocked by) the spell cast below
     if combatReady then
         for name, a in pairs(loadout.aas) do
-            if a.enabled and (not a.burn_only or ctrl.burn) and (numXtar >= (tonumber(a.min_xtar) or 1)) then
+            local aPct = tonumber(a.pct)
+            if aPct == nil then aPct = 30 end
+            if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and (numXtar >= (tonumber(a.min_xtar) or 1)) then
                 local id = resolveTargetId(a.target, a.cls)
-                if id and conditionMet(a.when, a.pct, name, id, a.cls) then
+                if id and conditionMet(a.when, aPct, name, id, a.cls) then
                     local isDet = isDetrimentalAction(name, a.target, a)
                     if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
                         fireAA(name, a, id)
@@ -7648,9 +7798,11 @@ local function combatTick()
     if combatReady then
         local eligibleDiscs = {}
         for name, d in pairs(loadout.discs) do
-            if d.enabled and (not d.burn_only or ctrl.burn) and (numXtar >= (tonumber(d.min_xtar) or 1)) then
+            local dPct = tonumber(d.pct)
+            if dPct == nil then dPct = 30 end
+            if d.enabled and (dPct > 0) and (not d.burn_only or ctrl.burn) and (numXtar >= (tonumber(d.min_xtar) or 1)) then
                 local id = resolveTargetId(d.target, d.cls)
-                if id and conditionMet(d.when, d.pct, name, id, d.cls) then
+                if id and conditionMet(d.when, dPct, name, id, d.cls) then
                     local bossOk = true
                     if d.boss_only then
                         local s = mq.TLO.Spawn(id)
@@ -7722,13 +7874,16 @@ local function combatTick()
         for i = 1, NUM_GEMS do
             local g = loadout.gems[i]
             if g and g.spell and g.spell ~= '' then
+                local pctVal = tonumber(g.pct)
+                if pctVal == nil then pctVal = 100 end
+                local isEnabled = (pctVal > 0)
                 local minXt = tonumber(g.min_xtar) or 1
                 local xtOk = (numXtar >= minXt)
                 local burnOk = (not g.burn_only or ctrl.burn)
                 local lockedOut = castTracker.isLockedOut(g.spell)
-                if burnOk and xtOk and not lockedOut then
+                if isEnabled and burnOk and xtOk and not lockedOut then
                     local id = resolveTargetId(g.target, g.cls)
-                    local condOk = id and conditionMet(g.when, g.pct, g.spell, id, g.cls)
+                    local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
                     if condOk then
                         local isDet = isDetrimentalAction(g.spell, g.target, g)
                         local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
@@ -7754,8 +7909,8 @@ local function combatTick()
                 elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
                     runtime.lastGemDiagAt = os.clock()
                     print(string.format(
-                        '\ao[Triune debug]\ax gem %d "%s" gate failed -- xtOk=%s(%d>=%d) burnOk=%s lockedOut=%s',
-                        i, g.spell, tostring(xtOk), numXtar, minXt, tostring(burnOk), tostring(lockedOut)))
+                        '\ao[Triune debug]\ax gem %d "%s" gate failed -- isEnabled=%s(%d%%) xtOk=%s(%d>=%d) burnOk=%s lockedOut=%s',
+                        i, g.spell, tostring(isEnabled), pctVal, tostring(xtOk), numXtar, minXt, tostring(burnOk), tostring(lockedOut)))
                 end
             end
         end
@@ -8345,7 +8500,7 @@ local function runMainLoop()
         if nm and nm ~= '' and nm ~= myName then
             myName = nm
             onCharacterChanged()
-            resetTracker()
+            UI.resetTracker()
             -- camp restored from a save; no map circle is drawn
             reconcileSungBuffs()                                      -- don't re-sing bard buffs that are already up
             reconcilePets()                                           -- don't re-summon pets that are already out

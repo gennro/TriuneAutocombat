@@ -1,5 +1,33 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-20
+
+- **Hunt Mode Acquire/Drop Spam Loop Fix (`triune.lua`).**
+  - When a Hunt-mode target is dropped for failing the Z-elevation (`tooFarZ`) or stationary-distance (`tooFarDist`) validation checks, `markUnreachable(tid)` is now called before clearing the target. This prevents `findRoamTarget()` from immediately re-acquiring the same spawn on the very next tick and producing the endless `Puller (Hunt) target acquired / Target cleared` spam seen when navigation cannot path to a mob that is within scan radius.
+  - The blacklist TTL is 60 seconds (shared with navmesh-fail entries), after which the spawn becomes eligible again in case the mob has moved or a path has opened.
+  - A human-readable reason (`elevation diff` or `stationary+out-of-range`) is printed when the mob is blacklisted so it is obvious in the MQ chat log what triggered the drop.
+
+
+- **Spell Gems, Abilities & Disciplines 0% Disabled Logic & Dark Red Sliders (`triune.lua`, v1.6.12).**
+  - **Universal 0% Disabled Semantics Across All 3 Tabs**: Setting the percentage threshold slider to `0%` now marks the entry as disabled across **Spell Gems**, **Abilities & AAs**, and **Disciplines**.
+  - **Dark Red Slider Styling on Disabled (0%)**: Implemented `pushDisabledSliderStyle` / `popDisabledSliderStyle` to dynamically color the slider box and grab elements dark red (`#731414`) whenever any percentage slider on the Spell Gems, Abilities & AAs, or Disciplines tabs is set to 0%. The slider displays `Disabled` with tooltip guidance to drag above 0% to re-enable.
+  - **Engine Gating in `combatTick` & `conditionMet`**: Updated `conditionMet` to immediately return `false` if `pct <= 0`. Added explicit `(pct > 0)` gates to AA execution loops, discipline priority dispatcher, and spell casting loops in `combatTick`.
+  - **Default Percentage Values for Spell Types**: Updated `defaultsForKind` to assign appropriate non-zero percentages (e.g. 75% for heals, 95% for direct damage, 98% for DoTs/debuffs, 100% for buffs/pets/utility) upon spell selection and class slot initialization so newly configured entries start enabled.
+  - **Comprehensive Tooltips Across Tabs**: Added descriptive tooltips to every control and label across the Spell Gems, Abilities & AAs, and Disciplines tabs, including slot numbers, class owner dropdowns, ability toggles, target conditions, trigger conditions, percentage threshold sliders, min XTarget counts, burn toggles, level band controls, and memorization queue counters.
+  - **Safe ImGui Tooltip String Formatting**: Fixed a Dear ImGui format string bug where tooltips containing percentage signs (`%`) or dynamic format strings caused Dear ImGui's C++ binding (`ImGui::SetTooltip`) to interpret `%` as unhandled `printf` format specifiers and render debug error garbage. Added `UI.setTooltip('%s', tostring(txt))` to safely escape all tooltip text.
+  - **Main Chunk Local Variable Limit Optimization**: Refactored UI helpers, style applicators, and tracker utilities onto the structured `UI` table, preventing Lua 5.1 / LuaJIT's 200 main-chunk local variable limit from being exceeded.
+  - **ImGui Style Color Table Fix**: Fixed an issue where `ImGuiCol` table references were invoked as function calls rather than accessing table enum constants directly, preventing `attempt to call upvalue 'ImGuiColType'` errors during UI rendering.
+- **0% HP Mob Target Retention & Death Detection Engine (`triune.lua`, v1.6.11).**
+  - **Fixed Premature Target Abandonment at 0% HP**: Resolved an issue where living NPCs with very low hit points (truncating to 0% in EverQuest / MacroQuest) were falsely presumed dead by the combat engine, causing characters to clear target and roam to a new mob while the current enemy was still alive and hitting the party.
+  - **Overhauled `isSpawnAlive` Liveness Check**: Removed `((hp or 0) > 0)` requirement from `isSpawnAlive()`. Liveness is now determined strictly by `not s.Dead()`, `s.Type() ~= 'Corpse'`, and `s.State() ~= 'DEAD'`, ensuring living spawns at 0% HP remain recognized as active entities.
+  - **Unblocked 0% HP Target Selection & Maintenance (`setTarget`)**: Removed `s.PctHPs() <= 0` restriction in `setTarget()`, allowing characters to acquire and maintain target lock on low-health mobs to deliver the finishing blow.
+  - **Corrected Combat Tick Target Drop Guard**: Updated the target validity check in `combatTick()` (Hunt mode) to verify `tspawn.Type() == 'Corpse'` instead of `tspawn.PctHPs() <= 0`, preventing `/target clear` from dropping living targets at 0% HP.
+  - **Preserved XTarget Tracking & Combat Status**: Removed `PctHPs > 0` filters from `countNPCXtarget()`, `anyXtarAlive()`, `isXTargetId()`, and `isCombat()`. Ensures the engine maintains combat status and avoids starting med break or disabling burn mode while fighting 0% HP enemies.
+  - **Main Assist & Ability Target Resolution Fix**: Removed `hp <= 0` filtering from `resolveTargetId()` and `maTargetId()`, enabling spells, AAs, disciplines, and assist followers to continue attacking and casting on 0% HP mobs until they transition to a corpse.
+  - **Roam & Puller Loop Continuity**: Removed `PctHPs > 0` gates from `findRoamTarget()` and `pullerTick()`, preventing the puller from resetting to `IDLE` or switching to distant targets before the active encounter is completed.
+
+---
+
 ## 2026-08-18
 
 - **NavMesh Pre-Validation & Autonomous Mesh Recovery Engine (`triune.lua`, v1.6.10).**
