@@ -18,6 +18,11 @@ globals = {
     "ImGuiTableColumnFlags",
     "ImGuiSelectableFlags",
     "ImGuiWindowFlags",
+    "ImGuiTreeNodeFlags",
+    "ImGuiTabBarFlags",
+    "ImGuiTabItemFlags",
+    "ImGuiMod",
+    "ImGuiKey",
     "ImVec2",
     "ImVec4",
     "IM_COL32",
@@ -47,11 +52,35 @@ files["mq2triune/config/triune_data.lua"] = {
 
 files["mq2triune/lua/kissedit/*"] = {
     -- Legacy code with different conventions
-    ignore = { "211", "212", "213" },  -- unused variable/value/loop-variable
+    ignore = { "" },
+}
+files["mq2triune/lua/kissedit/**/*"] = {
+    ignore = { "" },
 }
 
--- Common suppressions for the MQ pcall-guard pattern and ImGui usage
+files["mq2triune/lua/triune.lua"] = {
+    -- classPlausible is tested by test_pure_logic.lua test suite
+    ignore = { "211/classPlausible" },
+}
+
+files["mq2triune/lua/triune_buttons.lua"] = {
+    -- Standalone duplicated color palette constants
+    ignore = { "211/GOOD", "211/WARN", "211/ERR", "211/MUTED" },
+}
+
+files["mq2triune/lua/triune_buffbot.lua"] = {
+    -- Standalone duplicated ImGui theme popCol helper
+    ignore = { "211/popCol" },
+}
+
+-- Common suppressions for the MQ pcall-guard pattern, ImGui callbacks, and formatting
 ignore = {
+    "611",           -- line contains only whitespace
+    "612",           -- line contains trailing whitespace
+    "613",           -- trailing whitespace inside string
+    "621",           -- inconsistent indentation
+    "212",           -- unused argument (event handlers, ImGui callbacks)
     "212/_%w*",      -- unused loop variable starting with _
     "431",           -- shadowing upvalue (very common with pcall patterns)
+    "432",           -- shadowing upvalue argument
 }

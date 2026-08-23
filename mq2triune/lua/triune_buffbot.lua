@@ -1097,19 +1097,6 @@ local function isSpellReady(gemNum, spellName)
     return ready
 end
 
-local function waitForSpellReady(gemNum, spellName, maxWaitSec)
-    maxWaitSec = maxWaitSec or 30
-    local start = os.time()
-    while not isSpellReady(gemNum, spellName) and ctrl.enabled do
-        mq.doevents()
-        mq.delay(100)
-        if (os.time() - start) >= maxWaitSec then
-            break
-        end
-    end
-    return isSpellReady(gemNum, spellName)
-end
-
 -- ============================================================================
 -- Buff Casting Loop
 -- ============================================================================

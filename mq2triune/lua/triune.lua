@@ -182,14 +182,6 @@ local function isSitting()
     return not not s
 end
 
-local function standIfSittingOrDucked()
-    if isSitting() or isDucking() then
-        mq.cmd('/stand')
-        return true
-    end
-    return false
-end
-
 -- Backward compatibility and mode validation sanitizer
 local function sanitizeModeConfig(c)
     c = c or ctrl
@@ -432,22 +424,6 @@ local function trioHasPetClass()
 end
 
 -- Returns true if any character in the trio owns the Advanced Pet Discipline AA
--- (rank >= 1). This AA unlocks the /pet hold command; without it the command is
--- silently ignored by the game, so we gate the hold logic on its presence.
--- NOTE: the entire check is wrapped in a single pcall -- calling aa() on a TLO
--- object for an AA the character doesn't own throws in some MQ builds, and that
--- exception would silently abort combatTick (caught by the outer pcall in the
--- main loop). The single pcall catches any throw and returns false safely.
-local function hasAdvPetDiscipline()
-    local ok, result = pcall(function()
-        local aa = mq.TLO.Me.AltAbility('Advanced Pet Discipline')
-        if not aa or not aa() then return false end
-        local rank = aa.Rank() or 0
-        return rank >= 1
-    end)
-    return ok and result == true
-end
-
 -- Ignore list: names Hunter/Puller must never auto-target (e.g. a friendly NPC
 -- it tried to attack by mistake). Shared across ALL your characters (stored at
 -- ALLDATA.__ignore, not per-character), since a friendly name is friendly no
@@ -482,12 +458,13 @@ local function toCanonicalClassAbbr(str)
     return MQSHORT[up] or (ALL_ABBR and idxOf(ALL_ABBR, s) > 0 and s) or nil
 end
 
+local SLOT_COLORS = {
+    { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
+    { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
+    { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
+}
+
 local function classColor(abbr)
-    local SLOT_COLORS = {
-        { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
-        { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
-        { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
-    }
     for i, c in ipairs(myClasses) do
         if c == abbr then
             local col = SLOT_COLORS[i] or { 0.49, 0.56, 0.65 }
@@ -3434,7 +3411,6 @@ function UI.drawClickieTab()
     ImGui.EndTabItem()
 end
 
-local TIER_LABEL = { short = 'Short  (<= 1 min)', mid = 'Sustained  (1-5 min)', burn = 'Burn  (5 min+)' }
 local TIER_ORDER = { 'short', 'mid', 'burn' }
 
 -- UI: activated AAs tab
@@ -5315,8 +5291,6 @@ local function resolveTargetId(token, cls, when, spellName, pct)
     if not id or id <= 0 then return nil end
     local s = mq.TLO.Spawn(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return nil end
-    local hp = 100
-    pcall(function() hp = s.PctHPs() or 100 end)
     local stype = ''
     pcall(function() stype = s.Type() or '' end)
     local cname = ''
@@ -5383,7 +5357,7 @@ local function reconcilePets()
     end
 end
 
-local function isPoisonedOrDiseased(targetId)
+isPoisonedOrDiseased = function(targetId)
     if not targetId or targetId <= 0 then return false end
 
     -- 1. Check local player (Me)
@@ -5496,28 +5470,6 @@ local function isPoisonedOrDiseased(targetId)
         if td then return true end
     end
 
-    return false
-end
-
-local function isAnyGroupMemberAfflicted()
-    local myId = 0
-    pcall(function() myId = mq.TLO.Me.ID() or 0 end)
-    if myId > 0 and isPoisonedOrDiseased(myId) then return true end
-
-    local grpCount = 0
-    pcall(function() grpCount = mq.TLO.Group.Members() or 0 end)
-    for i = 1, grpCount do
-        local mid = nil
-        pcall(function()
-            local m = mq.TLO.Group.Member(i)
-            if m and m() and not m.Dead() then
-                mid = m.ID() or 0
-            end
-        end)
-        if mid and mid > 0 and isPoisonedOrDiseased(mid) then
-            return true
-        end
-    end
     return false
 end
 
@@ -6960,7 +6912,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
     end
 
-    local defaultRadius = 100
+    local defaultRadius
     if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
         defaultRadius = ctrl.waypoint_scan_radius or 100
     elseif isCampMode then
@@ -7607,21 +7559,17 @@ local function combatTick()
     local anyXtarAlive = runtime.anyXtarAlive
     local countNPCXtarget = runtime.countNPCXtarget
     local isXTargetId = runtime.isXTargetId
-    local isGroupOrRaidMember = runtime.isGroupOrRaidMember
-    local isAnyPet = runtime.isAnyPet
     local isSpawnPetOrPlayer = runtime.isSpawnPetOrPlayer
     local isHostileTarget = runtime.isHostileTarget
     local firstNPCXtarget = runtime.firstNPCXtarget
     local stopMoving = runtime.stopMoving
     local distToId = runtime.distToId
-    local distToLoc = runtime.distToLoc
     local hasLoS = runtime.hasLoS
     local isMoveActive = runtime.isMoveActive
     local isCasting = runtime.isCasting
     local navLoaded = runtime.navLoaded
     local stickLoaded = runtime.stickLoaded
     local hasActivePet = runtime.hasActivePet
-    local trioHasPetClass = runtime.trioHasPetClass
     local setManualHunterPetHold = runtime.setManualHunterPetHold
     local playerHasAggro = runtime.playerHasAggro
     local playerIsEngagingTarget = runtime.playerIsEngagingTarget
@@ -7917,7 +7865,6 @@ local function combatTick()
                             '\ay[Triune]\ax Puller (Hunt): target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
                             id, tostring(mq.TLO.Target.CleanName())))
                         mq.cmd('/target clear')
-                        haveNPC = false
                         pursuit.id = 0
                         return
                     end
@@ -8160,7 +8107,7 @@ local function combatTick()
 
     if ctrl.debug_mode and (os.clock() - (runtime.lastHunterDiagAt or 0)) > 1.5 then
         runtime.lastHunterDiagAt = os.clock()
-        local t = mq.TLO.Target
+        t = mq.TLO.Target
         local tid = (t() and t.ID()) or 0
         local tname = (t() and t.CleanName()) or 'none'
         local thp = (t() and t.PctHPs()) or -1
@@ -8331,7 +8278,7 @@ local function combatTick()
         if ctrl.mode == 'Manual' then
             setManualHunterPetHold(false)
         end
-        local tid = mq.TLO.Target.ID() or 0
+        tid = mq.TLO.Target.ID() or 0
         local dueForRetry = (os.clock() - (petState.lastCmdAt or 0)) > 5.0
         if (tid ~= petState.lastCmdTargetId or dueForRetry) and not isCasting() then
             local tgtHp = pctHP(tid) or 100
@@ -8381,7 +8328,7 @@ local function combatTick()
     }
     local combatReady = (not haveNPC or engage)
     if haveNPC and engage and not ENGINE_TARGETS_MODE[ctrl.mode] then
-        local tid = mq.TLO.Target.ID() or 0
+        tid = mq.TLO.Target.ID() or 0
         if not isHostileTarget(tid) then
             combatReady = false
         end
@@ -8472,7 +8419,7 @@ local function combatTick()
         castTracker.activeSpell = nil
         clearCursor()
         local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
-        local tid = mq.TLO.Target.ID() or 0
+        tid = mq.TLO.Target.ID() or 0
         local d = (tid > 0) and distToId(tid) or 999
         local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or MELEE_RANGE)
         if ctrl and ctrl.combat_style == 'Melee' and haveNPC and not isDraggingToCamp then
@@ -8541,7 +8488,7 @@ local function combatTick()
                         end
                     elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
                         runtime.lastGemDiagAt = os.clock()
-                        local tid = mq.TLO.Target.ID() or 0
+                        tid = mq.TLO.Target.ID() or 0
                         local ts = mq.TLO.Spawn(tid)
                         local ttype = (ts() and ts.Type()) or 'nil'
                         local thp = (ts() and ts.PctHPs()) or -1
@@ -8951,7 +8898,7 @@ local function triuneCommand(...)
             print(string.format('\ag[Triune]\ax Current Min Pull HP threshold: %d%%. (usage: /ac pullhp [0-95])', ctrl.pull_min_hp_pct or 0))
         end
     elseif setTriuneMode(args[1], args[2]) then
-        -- mode command handled
+        return
     else
         print(
             '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|pullhp|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
@@ -9169,11 +9116,11 @@ local function runMainLoop()
         -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting
         local memmed = false
         if not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
-            for slot, name in pairs(runtime.pendingMem) do
+            local slot, name = next(runtime.pendingMem)
+            if slot then
                 runtime.pendingMem[slot] = nil
                 tryMem(slot, name) -- verifies + reports; blocks briefly while it lands
                 memmed = true
-                break
             end
         end
         if ctrl.running and not memmed and (os.clock() - runtime.lastTick) > 0.4 then

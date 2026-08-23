@@ -235,11 +235,6 @@ local function getSpellBookSlot(spellName)
     return nil
 end
 
-local function isScribed(spellName)
-    if not spellName or spellName == '' then return false end
-    return getSpellBookSlot(spellName) ~= nil
-end
-
 -- ============================================================================
 -- Cursor management (needed by tryMem before its definition)
 -- ============================================================================
@@ -1098,7 +1093,7 @@ local function DrawTriuneUI()
     if ImGuiWindowFlags then
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding, ImGuiWindowFlags.MenuBar) ---@diagnostic disable-line: deprecated
     end
-    local open, draw = ImGui.Begin('Triune Spellbook Engine##Main', openGUI, windowFlags)
+    local open = ImGui.Begin('Triune Spellbook Engine##Main', openGUI, windowFlags)
     if not open then
         openGUI = false
         isRunning = false
@@ -1188,8 +1183,8 @@ local function DrawTriuneUI()
                 if #bstSpells == 0 then
                     print("\arNo Beastlord (BST) spells found in DATA.spells to test!\ax")
                 else
-                    for idx, row in ipairs(bstSpells) do
-                        local sName, sLvl, sBene, sKind = row[1], row[2], row[3], row[4]
+                    for _, row in ipairs(bstSpells) do
+                        local sName, sLvl, _, sKind = row[1], row[2], row[3], row[4]
                         local slotFound = getSpellBookSlot(sName)
                         local scribedStatus = slotFound and string.format("\ag[Scribed in Slot %d]\ax", slotFound) or
                             "\ar[Unscribed]\ax"

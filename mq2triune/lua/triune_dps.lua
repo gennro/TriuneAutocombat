@@ -410,7 +410,7 @@ end
 
 local function saveConfig()
     local path = getConfigFilePath()
-    local file, err = io.open(path, "w")
+    local file = io.open(path, "w")
     if not file then return end
     file:write("-- Triune DPS Parser Config\nreturn {\n")
     file:write(string.format("    compact = %s,\n", tostring(ctrl.compact)))
@@ -424,7 +424,7 @@ end
 
 local function loadConfig()
     local path = getConfigFilePath()
-    local chunk, err = loadfile(path)
+    local chunk = loadfile(path)
     if chunk then
         local ok, data = pcall(chunk)
         if ok and type(data) == 'table' then
@@ -870,7 +870,6 @@ end
 local function onCriticalBlast(line, actorRaw, dmgStrRaw, spellRaw)
     if ctrl.paused then return end
     local actor = cleanLine(actorRaw)
-    local dmg = parseDamageValue(dmgStrRaw)
     local spell = cleanLine(spellRaw or '')
     spell = spell:match("%((.-)%)") or spell
     
@@ -1147,7 +1146,7 @@ end
 
 local function getCombinedPetAttackMap(petMap)
     local combined = {}
-    for pName, pData in pairs(petMap) do
+    for _, pData in pairs(petMap) do
         for atkName, atkData in pairs(pData.attacks) do
             if not combined[atkName] then
                 combined[atkName] = {
@@ -1692,7 +1691,7 @@ local function drawDpsGui()
                             ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 105)
                             ImGui.TableHeadersRow()
                             
-                            for i, h in ipairs(runtime.history) do
+                            for _, h in ipairs(runtime.history) do
                                 ImGui.TableNextRow()
                                 ImGui.TableNextColumn()
                                 ImGui.Text(h.timestamp)
@@ -1721,8 +1720,8 @@ local function drawDpsGui()
                                 
                                 ImGui.TableNextColumn()
                                 local pPct = h.totalDmg > 0 and math.floor((h.playerDmg / h.totalDmg * 100) + 0.5) or 0
-                                local petPct = h.totalDmg > 0 and math.floor((h.petDmg / h.totalDmg * 100) + 0.5) or 0
-                                ImGui.Text(string.format("%d%% / %d%%", pPct, petPct))
+                                local histPetPct = h.totalDmg > 0 and math.floor((h.petDmg / h.totalDmg * 100) + 0.5) or 0
+                                ImGui.Text(string.format("%d%% / %d%%", pPct, histPetPct))
                                 
                                 -- Action Buttons
                                 ImGui.TableNextColumn()
@@ -1810,7 +1809,7 @@ local function drawDpsGui()
             ImGui.OpenPopup("Encounter Inspector##InspectModalWin")
         end
         
-        local modalOpen, modalDraw = ImGui.BeginPopupModal("Encounter Inspector##InspectModalWin", true, bit.bor(ImGuiWindowFlags.AlwaysAutoResize))
+        local _, modalDraw = ImGui.BeginPopupModal("Encounter Inspector##InspectModalWin", true, bit.bor(ImGuiWindowFlags.AlwaysAutoResize))
         if modalDraw then
             if runtime.inspectedFight then
                 renderHistoricalInspector(runtime.inspectedFight, false)

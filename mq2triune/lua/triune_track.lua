@@ -186,14 +186,14 @@ local function scanZoneSpawns()
             local okDead, isDead = pcall(function() return s.Dead() end)
 
             if okId and sId and sId > 0 and (not okDead or not isDead) then
-                local okClean, cleanName = pcall(function() return s.CleanName() end)
-                local okLvl, level = pcall(function() return s.Level() end)
-                local okCon, conColor = pcall(function() return s.ConColor() end)
-                local okDist, distance = pcall(function() return s.Distance3D() end)
-                local okLos, lineOfSight = pcall(function() return s.LineOfSight() end)
-                local okX, x = pcall(function() return s.X() end)
-                local okY, y = pcall(function() return s.Y() end)
-                local okZ, z = pcall(function() return s.Z() end)
+                local _, cleanName = pcall(function() return s.CleanName() end)
+                local _, level = pcall(function() return s.Level() end)
+                local _, conColor = pcall(function() return s.ConColor() end)
+                local _, distance = pcall(function() return s.Distance3D() end)
+                local _, lineOfSight = pcall(function() return s.LineOfSight() end)
+                local _, x = pcall(function() return s.X() end)
+                local _, y = pcall(function() return s.Y() end)
+                local _, z = pcall(function() return s.Z() end)
 
                 newList[#newList + 1] = {
                     id = sId,
@@ -301,7 +301,7 @@ local function DrawTrackerUI()
     -- Omit NoCollapse flag so WindowRounding token applies rounded corners cleanly
     windowFlags = bit.band(windowFlags, bit.bnot(ImGuiWindowFlags.NoCollapse or 0))
 
-    local open, draw = ImGui.Begin('Triune Zone Tracker v1.0##TrackWindow', state.openGUI)
+    local open, draw = ImGui.Begin('Triune Zone Tracker v1.0##TrackWindow', state.openGUI, windowFlags)
     state.openGUI = open
 
     if not open then
