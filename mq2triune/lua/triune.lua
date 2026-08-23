@@ -326,6 +326,17 @@ local runtime = {
     pullHpRest = false,
     deathGuardFired = false,
     medBreakActive = false,
+    -- This server's custom "#attackmode ranged"/"#attackmode melee" toggle
+    -- controls whether standard auto-attack (/attack on) swings a melee
+    -- weapon or fires a bow -- it's independent of MQ's Me.AutoFire TLO,
+    -- which stays false the whole time under this scheme. We track the
+    -- server's own confirmation ("Attack mode changed to: Ranged"/"Melee",
+    -- captured below by the TriuneAttackModeChanged event) as the functional
+    -- equivalent of Me.AutoFire for combat_style == 'Ranged'. Assumed Melee
+    -- until the server tells us otherwise (a fresh login/zone-in defaults
+    -- to melee attack mode).
+    serverAttackMode = 'Melee',
+    lastAttackModeCmdAt = 0,
     pendingMem = {},
     lastCast = {},
     lastTick = 0,
@@ -413,7 +424,7 @@ local stuckState = {
 
 -- Full-stop and onZoned: reset every movement/combat command and stale state.
 -- Used by STOP, a mode switch, and the death guard.
-local fullStop, onZoned, hasActivePet, handleCannotSeeTarget
+local fullStop, onZoned, hasActivePet, handleCannotSeeTarget, revertAttackModeToMelee
 local PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true }
 local function trioHasPetClass()
     for _, c in ipairs(myClasses) do if PET_CLASSES[c] then return true end end
@@ -4387,6 +4398,7 @@ function UI.drawSettingsTab()
     accent(GOLD, 'Combat Style')
     if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
         ctrl.combat_style = 'Melee'
+        revertAttackModeToMelee()
         saveLoadout(true)
     end
     ImGui.SameLine()
@@ -4397,6 +4409,7 @@ function UI.drawSettingsTab()
     ImGui.SameLine()
     if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then
         ctrl.combat_style = 'Spell'
+        revertAttackModeToMelee()
         saveLoadout(true)
     end
     if ImGui.IsItemHovered() then
@@ -6438,6 +6451,35 @@ mq.event('TriuneCantHit1', '#*#cannot hit#*#from here#*#', function() handleCant
 mq.event('TriuneCantHit2', '#*#can\'t hit#*#from here#*#', function() handleCantHitFromHere() end)
 mq.event('TriuneCantHit3', '#*#not in line of sight#*#', function() handleCantHitFromHere() end)
 
+-- Server-custom attack-mode toggle feedback ("#attackmode ranged"/"melee").
+-- This is the only reliable signal we have for which mode we're actually in
+-- -- Me.AutoFire never flips true under this scheme -- so keep our own
+-- runtime.serverAttackMode in sync with it. #1# captures everything after
+-- the colon; matched with find() rather than exact equality so it's not
+-- thrown off by trailing punctuation/color codes/whitespace that may or may
+-- not be present on the real server line.
+mq.event('TriuneAttackModeChanged', 'Attack mode changed to: #1#', function(_, mode)
+    if not mode then return end
+    if mode:find('Ranged') then
+        runtime.serverAttackMode = 'Ranged'
+    elseif mode:find('Melee') then
+        runtime.serverAttackMode = 'Melee'
+    end
+end)
+
+-- Reverts the server's attack mode back to melee whenever we're leaving
+-- Ranged combat style (switching combat style away from Ranged, or a full
+-- stop) so a later /attack on doesn't keep firing a bow instead of swinging
+-- a melee weapon. No-op if we're not confirmed in server Ranged mode, and
+-- throttled the same as the Ranged-side switch so repeated calls can't spam
+-- the chat line.
+revertAttackModeToMelee = function()
+    if runtime.serverAttackMode ~= 'Ranged' then return end
+    if (os.clock() - (runtime.lastAttackModeCmdAt or 0)) < 1.0 then return end
+    runtime.lastAttackModeCmdAt = os.clock()
+    mq.cmd('/say #attackmode melee')
+end
+
 -- Same idea for a fixed camp location (used returning from a pull).
 local function moveTowardLoc(x, y, z, dist)
     dist = dist or 15
@@ -6749,9 +6791,13 @@ local function checkCombatStall()
     if ctrl.combat_style == 'Melee' and not isPullStandBack then
         if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
     elseif ctrl.combat_style == 'Ranged' then
-        if d <= (ctrl.ranged_dist or 40) and not isCasting() and not mq.TLO.Me.AutoFire() and (os.clock() - (runtime.lastAutoFireCmdAt or 0)) > 1.0 then
-            runtime.lastAutoFireCmdAt = os.clock()
-            mq.cmd('/autofire on')
+        if d <= (ctrl.ranged_dist or 40) and not isCasting() then
+            if runtime.serverAttackMode ~= 'Ranged' and (os.clock() - (runtime.lastAttackModeCmdAt or 0)) > 1.0 then
+                runtime.lastAttackModeCmdAt = os.clock()
+                mq.cmd('/say #attackmode ranged')
+            elseif runtime.serverAttackMode == 'Ranged' and not mq.TLO.Me.Combat() then
+                mq.cmd('/attack on')
+            end
         end
     end
     stuckState.combatStallSince = nil
@@ -6774,7 +6820,14 @@ handleCannotSeeTarget = function()
 
     local d = distToId(tid)
     local maxReach = maxMeleeDistance(tid)
-    local isMelee = (ctrl and ctrl.combat_style == 'Melee') or mq.TLO.Me.Combat() or (d <= (maxReach + 10))
+    -- Me.Combat() is no longer melee-exclusive: under this server's
+    -- attackmode scheme, Ranged style also drives its bow through plain
+    -- /attack on, so Combat() reads true while ranged-attacking too. Only
+    -- let it count toward "melee" when we're not confirmed in server Ranged
+    -- attack mode.
+    local isConfirmedRanged = ctrl and ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged'
+    local isMelee = (ctrl and ctrl.combat_style == 'Melee') or (mq.TLO.Me.Combat() and not isConfirmedRanged) or
+        (d <= (maxReach + 10))
 
     if not isMelee then
         -- In Ranged / caster mode or far away, re-align view vector
@@ -7346,13 +7399,17 @@ end
 
 -- Returns true once the player has demonstrably started attacking this target:
 --   Melee  -> /attack is on (auto-attack swinging)
---   Ranged -> /autofire is on (bow is firing)
+--   Ranged -> /attack is on with server attack mode == Ranged (bow firing
+--             via this server's #attackmode toggle; caught by the first
+--             check below same as melee -- Me.AutoFire never flips true
+--             under this scheme, so it's kept only as a legacy fallback for
+--             any lingering bow-pull-while-melee-style case)
 --   Spell  -> mob HP has dropped below 100% AND player holds aggro
 --             (at least one spell has connected)
 -- Works for all three combat styles; safe to call with no pets present.
 local function playerIsEngagingTarget(tid)
-    if mq.TLO.Me.Combat() then return true end   -- melee /attack on
-    if mq.TLO.Me.AutoFire() then return true end -- ranged autofire on
+    if mq.TLO.Me.Combat() then return true end   -- melee /attack on, or ranged /attack on in server Ranged attack mode
+    if mq.TLO.Me.AutoFire() then return true end -- legacy: autofire on (e.g. bow pull while combat_style == Melee)
     -- Spell style: confirm a hit has landed via HP drop + aggro ownership
     local tpct = pctHP(tid) or 100
     if tpct < 100 and playerHasAggro(tid) then return true end
@@ -7420,6 +7477,7 @@ fullStop = function()
     stopMoving()
     if not ctrl.running and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if not ctrl.running and mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    if not ctrl.running then revertAttackModeToMelee() end
     if isCasting() then
         mq.cmd('/stopsong')
         mq.cmd('/stopcast')
@@ -8111,8 +8169,8 @@ local function combatTick()
         local casting = isCasting()
         local moving = isMoveActive()
         print(string.format(
-            '\ao[DEBUG]\ax Mode:%s Style:%s | Tgt:%s(#%d HP:%d%% Hostile:%s) | Dist:%.1f Reach:%.1f LoS:%s | Nav:%s Stick:%s Mov:%s | Eng:%s Combat:%s Cast:%s | XTar:%d',
-            tostring(ctrl.mode), tostring(ctrl.combat_style or 'Melee'), tostring(tname), tonumber(tid) or 0, tonumber(thp) or 0, tostring(isHostile), tonumber(dist) or 0, tonumber(reach) or 18, tostring(los),
+            '\ao[DEBUG]\ax Mode:%s Style:%s AtkMode:%s | Tgt:%s(#%d HP:%d%% Hostile:%s) | Dist:%.1f Reach:%.1f LoS:%s | Nav:%s Stick:%s Mov:%s | Eng:%s Combat:%s Cast:%s | XTar:%d',
+            tostring(ctrl.mode), tostring(ctrl.combat_style or 'Melee'), tostring(runtime.serverAttackMode or 'Melee'), tostring(tname), tonumber(tid) or 0, tonumber(thp) or 0, tostring(isHostile), tonumber(dist) or 0, tonumber(reach) or 18, tostring(los),
             tostring(navActive), tostring(stickActive), tostring(moving), tostring(engage), tostring(combat), tostring(casting), tonumber(numXtar) or 0))
     end
 
@@ -8170,11 +8228,17 @@ local function combatTick()
                     print('\ag[Triune]\ax Standing up to attack.')
                     mq.cmd('/stand')
                 end
-                if not isCasting() and not mq.TLO.Me.AutoFire() and (os.clock() - (runtime.lastAutoFireCmdAt or 0)) > 1.0 then
-                    runtime.lastAutoFireCmdAt = os.clock()
-                    print(string.format('\ag[Triune]\ax Engaging /autofire on -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
-                        tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
-                    mq.cmd('/autofire on')
+                if not isCasting() then
+                    if runtime.serverAttackMode ~= 'Ranged' and (os.clock() - (runtime.lastAttackModeCmdAt or 0)) > 1.0 then
+                        runtime.lastAttackModeCmdAt = os.clock()
+                        print(string.format('\ag[Triune]\ax Switching server attack mode -> Ranged -> %s (#%d)',
+                            tostring(mq.TLO.Target.CleanName()), tid))
+                        mq.cmd('/say #attackmode ranged')
+                    elseif runtime.serverAttackMode == 'Ranged' and not mq.TLO.Me.Combat() then
+                        print(string.format('\ag[Triune]\ax Engaging /attack on (ranged) -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
+                            tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
+                        mq.cmd('/attack on')
+                    end
                 end
                 if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
                     pursuit.lastCombatFaceAt = os.clock()
@@ -8816,6 +8880,7 @@ local function triuneCommand(...)
         local st = args[2] and string.lower(args[2]) or ''
         if st == 'melee' then
             ctrl.combat_style = 'Melee'
+            revertAttackModeToMelee()
             saveLoadout(true)
             print('\ag[Triune]\ax Combat style set to: \agMelee\ax (range ' .. tostring(ctrl.melee_dist or 14) .. ')')
         elseif st == 'ranged' or st == 'bow' then
@@ -8824,6 +8889,7 @@ local function triuneCommand(...)
             print('\ag[Triune]\ax Combat style set to: \agRanged (bow)\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
         elseif st == 'spell' or st == 'cast' or st == 'caster' then
             ctrl.combat_style = 'Spell'
+            revertAttackModeToMelee()
             saveLoadout(true)
             print('\ag[Triune]\ax Combat style set to: \agSpell\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
         else
