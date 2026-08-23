@@ -280,6 +280,8 @@ local function defaultCtrl()
         medbreak_end_stop    = 90,
         cast_max_retries     = 2,
         cast_lockout_sec     = 30,
+        buff_max_tries       = 3,
+        buff_retry_sec       = 60,
         min_mana_pct         = 0,
         pull_min_hp_pct      = 0,
         pet_assist_at        = 100,
@@ -306,6 +308,7 @@ local runtime = {
     deathGuardFired = false,
     medBreakActive = false,
     pendingMem = {},
+    buffTries = {},
     lastCast = {},
     lastTick = 0,
     wasRunning = false,
@@ -342,6 +345,37 @@ local runtime = {
     colN = 0,
     varN = 0
 }
+
+-- A "missing buff" that still reads missing right after it was cast is nearly
+-- always a detection false negative rather than a buff that failed to land. With
+-- no cap the entry re-fires every tick for as long as the condition holds. After
+-- a few attempts the entry is parked for a while; it is retried later in case
+-- the cast really did fail.
+runtime.buffRetryOk = function(key)
+    local st = runtime.buffTries[key]
+    if not st then return true end
+    if st.blockedUntil and os.clock() < st.blockedUntil then return false end
+    if st.blockedUntil then runtime.buffTries[key] = nil end
+    return true
+end
+
+runtime.buffTryRecorded = function(key, spellName)
+    -- The bar snapshot is cached for a fraction of a second; without dropping it
+    -- here the very next tick would still read the buff we just landed as
+    -- missing and cast it a second time.
+    if runtime.invalidateBarCache then runtime.invalidateBarCache() end
+    local maxTries = tonumber(ctrl and ctrl.buff_max_tries) or 3
+    local backoff = tonumber(ctrl and ctrl.buff_retry_sec) or 60
+    local st = runtime.buffTries[key] or { n = 0 }
+    st.n = (st.n or 0) + 1
+    if st.n >= maxTries then
+        st.n = 0
+        st.blockedUntil = os.clock() + backoff
+        print(string.format('\ay[Triune]\ax "%s" still reads missing after %d casts -- pausing that buff for %ds.',
+            tostring(spellName), maxTries, backoff))
+    end
+    runtime.buffTries[key] = st
+end
 
 local petState = {
     myPets = {},
@@ -4823,6 +4857,229 @@ local function tloTrue(fn)
     return hit
 end
 
+-- Buff-bar detection. The icon on your buff/song bar is the ground truth for
+-- "do I have this", and it is the only thing that reads correctly for the cases
+-- that cause repeat casts: bard persist songs (which sit on the bar with a
+-- null/0 duration once they lock, so any duration-based check calls them
+-- missing) and self buffs that Buff("name") simply fails to see on some builds.
+-- Scraped from the buff windows as well as the TLOs, because index enumeration
+-- can come back empty while the icons are plainly there.
+--
+-- Nested so the locals do not count against the Lua 5.1 200-local main-chunk
+-- limit, which this file is close to.
+(function()
+    local barNameCache, barNameCacheAt = nil, 0
+
+    local function spellNamesEqual(a, b)
+        a, b = tostring(a or ''), tostring(b or '')
+        if a == '' or b == '' then return false end
+        if a == b then return true end
+        if cleanSpellName(a):lower() == cleanSpellName(b):lower() then return true end
+        return normalizeSpellName(a) == normalizeSpellName(b)
+    end
+
+    local function tloEffectPresent(tlo)
+        local present = false
+        pcall(function()
+            if not tlo then return end
+            local n = tlo.Name()
+            if n and n ~= '' and n ~= 'NULL' then
+                present = true
+                return
+            end
+            local id = tonumber(tlo.ID() or 0) or 0
+            if id > 0 then present = true end
+        end)
+        return present
+    end
+
+    local function selfHasWindowEffect(windowName, name)
+        local byName = false
+        pcall(function() byName = tloEffectPresent(mq.TLO.Me[windowName](name)) end)
+        if byName then return true end
+        local wantId = 0
+        pcall(function() wantId = tonumber(mq.TLO.Spell(name).ID() or 0) or 0 end)
+        local maxSlot = (windowName == 'Song') and 30 or 42
+        for i = 1, maxSlot do
+            local slotName, slotId = nil, 0
+            pcall(function()
+                local slot = mq.TLO.Me[windowName](i)
+                slotName = slot.Name()
+                slotId = tonumber(slot.SpellID() or slot.ID() or 0) or 0
+            end)
+            if slotName and spellNamesEqual(slotName, name) then return true end
+            if wantId > 0 and slotId == wantId then return true end
+        end
+        return false
+    end
+
+    local function addBarName(into, n, source)
+        n = tostring(n or '')
+        if n == '' or n == 'NULL' then return end
+        local first = n:match('^[^\r\n]+') or n
+        first = first:gsub('%s+$', '')
+        if first == '' then return end
+        into.raw[#into.raw + 1] = first
+        into.src[first:lower()] = into.src[first:lower()] or source
+        into.set[first] = true
+        into.set[first:lower()] = true
+        into.set[cleanSpellName(first):lower()] = true
+        into.set[normalizeSpellName(first)] = true
+    end
+
+    -- There are two places an effect can live: the buff window (labelled
+    -- "Effects") and the short-duration window (labelled "Songs"). Bard songs
+    -- and several short self buffs only ever appear in the second one, so
+    -- checking the first alone reports them missing. Both are read here, by TLO
+    -- index and by scraping the window icons, because neither route is complete
+    -- on its own -- BuffCount has been seen reporting more slots than it will
+    -- return names for.
+    local function gatherSelfBarEffects(force)
+        local now = os.clock()
+        if not force and barNameCache and (now - barNameCacheAt) < 0.45 then
+            return barNameCache
+        end
+        local into = { raw = {}, set = {}, src = {}, effects = {}, songs = {} }
+        for i = 1, 42 do
+            pcall(function()
+                local n = mq.TLO.Me.Buff(i).Name()
+                if n and n ~= '' and n ~= 'NULL' then
+                    into.effects[#into.effects + 1] = n
+                    addBarName(into, n, 'Effects')
+                end
+            end)
+        end
+        for i = 1, 30 do
+            pcall(function()
+                local n = mq.TLO.Me.Song(i).Name()
+                if n and n ~= '' and n ~= 'NULL' then
+                    into.songs[#into.songs + 1] = n
+                    addBarName(into, n, 'Songs')
+                end
+            end)
+        end
+        local winSpecs = {
+            { 'BuffWindow',              'Effects', { 'Buff%d', 'BW_Buff%d_Button' } },
+            { 'ShortDurationBuffWindow', 'Songs',   { 'Buff%d', 'SDBW_Buff%d_Button', 'SDB_Buff%d' } },
+        }
+        for _, spec in ipairs(winSpecs) do
+            for _, fmt in ipairs(spec[3]) do
+                for i = 0, 41 do
+                    pcall(function()
+                        local c = mq.TLO.Window(spec[1]).Child(string.format(fmt, i))
+                        if c and c() then
+                            addBarName(into, c.Tooltip(), spec[2])
+                            addBarName(into, c.Text(), spec[2])
+                        end
+                    end)
+                end
+            end
+        end
+        barNameCache, barNameCacheAt = into, now
+        return into
+    end
+
+    local function selfBarHasSpell(name)
+        name = tostring(name or '')
+        if name == '' then return false end
+        local bar = gatherSelfBarEffects()
+        if bar.set[name] or bar.set[name:lower()] then return true end
+        if bar.set[cleanSpellName(name):lower()] or bar.set[normalizeSpellName(name)] then return true end
+        local needle = cleanSpellName(name):lower()
+        if needle == '' then return false end
+        for _, raw in ipairs(bar.raw) do
+            if tostring(raw):lower():find(needle, 1, true) then return true end
+        end
+        return false
+    end
+
+    runtime.tloEffectPresent = tloEffectPresent
+    runtime.selfHasWindowEffect = selfHasWindowEffect
+    runtime.selfBarHasSpell = selfBarHasSpell
+    runtime.invalidateBarCache = function() barNameCache = nil end
+
+    -- Prints both windows and the UP/MISSING verdict for every self buff entry
+    -- in the loadout, so a buff that is plainly on screen but keeps getting
+    -- re-cast can be traced to which window it is in and which probe missed it.
+    runtime.dumpSelfBar = function()
+        local bar = gatherSelfBarEffects(true)
+        local nBuff, nSong = -1, -1
+        pcall(function() nBuff = mq.TLO.Me.CountBuffs() or -1 end)
+        pcall(function() nSong = mq.TLO.Me.CountSongs() or -1 end)
+        print(string.format('\ag[Triune bar]\ax Effects (CountBuffs=%d): %s', nBuff,
+            (#bar.effects > 0) and table.concat(bar.effects, ', ') or '(none)'))
+        print(string.format('\ag[Triune bar]\ax Songs (CountSongs=%d): %s', nSong,
+            (#bar.songs > 0) and table.concat(bar.songs, ', ') or '(none)'))
+
+        local myId = mq.TLO.Me.ID() or 0
+        local seen = {}
+        local function report(name)
+            if not name or name == '' or seen[name] then return end
+            seen[name] = true
+            local up = runtime.buffFactuallyUp(myId, name)
+            print(string.format('  %s %s -- %s%s',
+                up and '\ag[UP]\ax' or '\ay[MISSING]\ax', name,
+                up and 'will not recast' or 'will cast',
+                bar.src[name:lower()] and (' (found in ' .. bar.src[name:lower()] .. ')') or ''))
+        end
+        -- Only entries the engine would actually act on. Listing a disabled or
+        -- non-self entry alongside "will cast" reads as a bug report when it is
+        -- simply switched off, and a pet/group buff checked against your own
+        -- bar would give the wrong verdict anyway.
+        local function selfMissingBuff(when, target)
+            if when ~= 'missing buff' then return false end
+            local tok = baseTok(target)
+            return tok == 'Myself' or tok == 'Self'
+        end
+        print('\ag[Triune bar]\ax enabled self buff entries:')
+        for i = 1, NUM_GEMS do
+            local g = loadout.gems[i]
+            if g and selfMissingBuff(g.when, g.target) then
+                local pctVal = tonumber(g.pct)
+                if pctVal == nil then pctVal = 100 end
+                if pctVal > 0 then report(g.spell) end
+            end
+        end
+        for name, a in pairs(loadout.aas) do
+            if a and a.enabled and selfMissingBuff(a.when, a.target) then
+                local aPct = tonumber(a.pct)
+                if aPct == nil then aPct = 30 end
+                if aPct > 0 then report(name) end
+            end
+        end
+    end
+
+    -- Bard persist songs sit on the song/buff bar after a single apply and never
+    -- need re-singing. Buff-window presence means the persist already locked,
+    -- even with Duration 0. Song-window presence while THAT song is the current
+    -- cast is just the cast in flight, not a lock, so it only counts once we are
+    -- no longer singing it.
+    runtime.persistSongOnBar = function(name)
+        name = tostring(name or '')
+        if name == '' then return false end
+        if selfHasWindowEffect('Buff', name) then return true end
+        if not selfHasWindowEffect('Song', name) then return false end
+        local singing = ''
+        pcall(function() singing = mq.TLO.Me.Casting.Name() or '' end)
+        if singing == '' then return true end
+        return not spellNamesEqual(singing, name)
+    end
+
+    -- Authoritative "is this effect up". Use this for every missing-buff
+    -- decision; buffActive alone produces false negatives on self.
+    runtime.buffFactuallyUp = function(id, name)
+        name = tostring(name or '')
+        if not id or id == 0 or name == '' then return false end
+        local myId = 0
+        pcall(function() myId = mq.TLO.Me.ID() or 0 end)
+        if id == myId then
+            if selfBarHasSpell(name) then return true end
+            return selfHasWindowEffect('Buff', name) or selfHasWindowEffect('Song', name)
+        end
+        return buffActive(id, name)
+    end
+end)()
+
 -- Name-based "Buff(name)" lookups have already proven unreliable on this MQ
 -- build twice this session (CombatAbility(name) for discs, Target.Target for
 -- assist) -- the proven, reliable pattern instead is numeric indexing +
@@ -4843,14 +5100,15 @@ local function hasNamedBuff(spawnObj, name, isMe)
 
     local found = false
     pcall(function()
-        local b = spawnObj.Buff(name)()
-        if b then found = true end
+        if runtime.tloEffectPresent(spawnObj.Buff(name)) then found = true end
     end)
     if not found and isMe then
         pcall(function()
-            local s = spawnObj.Song(name)()
-            if s then found = true end
+            if runtime.tloEffectPresent(spawnObj.Song(name)) then found = true end
         end)
+        if not found then
+            found = runtime.selfHasWindowEffect('Buff', name) or runtime.selfHasWindowEffect('Song', name)
+        end
     end
     if found then return true end
 
@@ -4879,11 +5137,24 @@ local function hasNamedBuff(spawnObj, name, isMe)
             local b = spawnObj.Buff(i)
             if b() then activeNames[#activeNames + 1] = b.Name() or '?' end
         end
+        -- The Songs window is the other half of the answer and was missing from
+        -- this line, which made every short self buff look like it was simply
+        -- not up anywhere.
+        local songNames = {}
+        if isMe then
+            for i = 1, 30 do
+                pcall(function()
+                    local n = mq.TLO.Me.Song(i).Name()
+                    if n and n ~= '' and n ~= 'NULL' then songNames[#songNames + 1] = n end
+                end)
+            end
+        end
         print('\ao[Triune debug]\ax looking for buff "' ..
             tostring(name) .. '" -- ' .. (isMe and 'MyBuffCount' or 'BuffCount') .. '=' .. cnt
             ..
-            ' active=[' ..
+            ' Effects=[' ..
             table.concat(activeNames, ', ') ..
+            '] Songs=[' .. table.concat(songNames, ', ') ..
             '] Buff("name")=' .. directName)
     end
     return found
@@ -5309,7 +5580,7 @@ local function resolveTargetId(token, cls, when, spellName, pct)
 end
 
 mq.event('TriuneZone', 'You have entered #*#', function()
-    runtime.sungBuffs = {}; onZoned()
+    runtime.sungBuffs = {}; runtime.buffTries = {}; onZoned()
 end)
 
 local function reconcileSungBuffs()
@@ -5514,8 +5785,12 @@ local function conditionMet(when, pct, spellName, targetId, cls)
     if when == 'my HP <=' then return pctHP(mq.TLO.Me.ID()) <= pct end
     if when == 'HP <=' or when == 'target HP <=' then return pctHP(targetId) <= pct end
     if when == 'missing buff' then
-        if runtime.sungBuffs[sungKey(spellName, targetId)] then return false end -- already sung this life
-        return not buffActive(targetId, spellName)
+        -- The buff bar is the answer. The old "already sung this life"
+        -- sungBuffs latch was a workaround for detection that could not see a
+        -- bard persist song sitting on the bar with a null duration; with the
+        -- bar check in place it only does harm, since it also meant a buff
+        -- could never be put back up after it genuinely faded.
+        return not runtime.buffFactuallyUp(targetId, spellName)
     end
     -- For pet-summon gems (Nec/Mag/Bst warder/pet lines, etc.): this server keeps
     -- a separate simultaneous pet per pet class, so this checks THIS gem's OWN
@@ -5676,20 +5951,25 @@ local function castGem(i, g, id)
     end
     if g.cls == 'Brd' then
         if sp.Beneficial() then
-            local waited = 0
-            while waited < 4000 do
+            -- Wait for the song to reach the bar, and do NOT /stopsong: cutting
+            -- a persist song short is what stops it locking, so it never
+            -- appears and is sung again on the next pass. Only mark it sung
+            -- once it is actually on the bar -- marking it regardless meant a
+            -- song that failed to land was never retried until zone or death.
+            local waited, onBar = 0, false
+            while waited < 5500 do
                 mq.delay(200); waited = waited + 200
-                if buffActive(id, g.spell) then break end
-                if not isCasting() then break end
+                if runtime.persistSongOnBar(g.spell) then onBar = true; break end
+                if runtime.selfHasWindowEffect('Buff', g.spell) then onBar = true; break end
+                if runtime.selfHasWindowEffect('Song', g.spell) and waited >= 3000 then
+                    onBar = true; break
+                end
             end
-            mq.cmd('/stopsong')
-            runtime.sungBuffs[sungKey(g.spell, id)] = true
-            local bb, ss
-            pcall(function() bb = mq.TLO.Me.Buff(g.spell)() end)
-            pcall(function() ss = mq.TLO.Me.Song(g.spell)() end)
-            print(string.format(
-                '\ay[Triune bard]\ax %s  Buff=%s  Song=%s  (marked sung -- wont resing until zone/death)', g.spell,
-                tostring(bb), tostring(ss)))
+            if onBar then
+                runtime.sungBuffs[sungKey(g.spell, id)] = true
+                runtime.invalidateBarCache()
+                print(string.format('\ay[Triune bard]\ax %s is on the bar.', g.spell))
+            end
         else
             local castMs = 0
             pcall(function() castMs = sp.CastTime() or 0 end)
@@ -7439,6 +7719,7 @@ fullStop = function()
     stuckState.counter = 0
     stuckState.attempts = 0
     stuckState.cannotSeeAttempts = 0
+    runtime.buffTries = {}
 end
 
 onZoned = function()
@@ -7595,6 +7876,7 @@ local function combatTick()
             runtime.deathGuardFired = true
             fullStop()
             runtime.sungBuffs = {}
+            runtime.buffTries = {}
             runtime.discExpires = {}
             runtime.discCooldown = {}
             petState.myPets = {}; petState.lastObservedId = 0; petState.lastCastCls = nil
@@ -8302,10 +8584,14 @@ local function combatTick()
             if aPct == nil then aPct = 30 end
             if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and (numXtar >= (tonumber(a.min_xtar) or 1)) then
                 local id = resolveTargetId(a.target, a.cls, a.when, name, aPct)
-                if id and conditionMet(a.when, aPct, name, id, a.cls) then
+                local aKey = (a.when == 'missing buff') and id and sungKey(name, id) or nil
+                local aRetryOk = (not aKey) or runtime.buffRetryOk(aKey)
+                if id and aRetryOk and conditionMet(a.when, aPct, name, id, a.cls) then
                     local isDet = isDetrimentalAction(name, a.target, a)
                     if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
-                        fireAA(name, a, id)
+                        if fireAA(name, a, id) and aKey then
+                            runtime.buffTryRecorded(aKey, name)
+                        end
                     end
                 end
             end
@@ -8405,6 +8691,12 @@ local function combatTick()
                 local effName = (c.spell and c.spell ~= '') and c.spell or c.name
                 local id = resolveTargetId(c.target, 'ALL', c.when, effName, cPct)
                 local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL')
+                -- An item's effect name often differs from what lands on the
+                -- bar, so a buff clickie is a prime candidate to read missing
+                -- forever. Same backoff the gem and AA loops use: after
+                -- buff_max_tries clicks that do not change the bar, park it.
+                local cKey = (c.when == 'missing buff') and id and sungKey(effName, id) or nil
+                if cKey and not runtime.buffRetryOk(cKey) then condOk = false end
                 if condOk then
                     local isDet = isDetrimentalAction(effName, c.target, c)
                     local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(effName, id))
@@ -8414,6 +8706,7 @@ local function combatTick()
                             pcall(function() bene = mq.TLO.Spell(c.spell).Beneficial() end)
                             if bene then runtime.sungBuffs[sungKey(c.spell, id)] = true end
                         end
+                        if cKey then runtime.buffTryRecorded(cKey, effName) end
                         break
                     end
                 end
@@ -8435,14 +8728,17 @@ local function combatTick()
                 if isEnabled and burnOk and xtOk and not lockedOut then
                     local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal)
                     local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
+                    local buffKey = (g.when == 'missing buff') and id and sungKey(g.spell, id) or nil
+                    if buffKey and not runtime.buffRetryOk(buffKey) then condOk = false end
                     if condOk then
                         local isDet = isDetrimentalAction(g.spell, g.target, g)
                         local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
                         if targetValid and castGem(i, g, id) then
-                            if g.when == 'missing buff' then
+                            if buffKey then
                                 local bene = false
                                 pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
-                                if bene then runtime.sungBuffs[sungKey(g.spell, id)] = true end
+                                if bene then runtime.sungBuffs[buffKey] = true end
+                                runtime.buffTryRecorded(buffKey, g.spell)
                             end
                             break
                         end
@@ -8599,12 +8895,15 @@ local function triuneCommand(...)
     elseif cmd == 'debug' or cmd == 'debugmode' or cmd == 'diag' then
         ctrl.debug_mode = not ctrl.debug_mode
         print(string.format('\ag[Triune]\ax Debug Mode: %s', ctrl.debug_mode and '\agENABLED (live combat telemetry)\ax' or '\arDISABLED\ax'))
+    elseif cmd == 'buffs' or cmd == 'buffbar' or cmd == 'buffdump' then
+        runtime.dumpSelfBar()
     elseif cmd == 'help' or cmd == 'h' or cmd == '?' then
         print('\ag[Triune]\ax --- Slash Commands (/ac or /triune) ---')
         print('  \ag/ac run | start\ax - Start autocombat execution')
         print('  \ag/ac pause | stop\ax - Pause execution & disengage combat')
         print('  \ag/ac burn [on|off]\ax - Toggle burn mode')
         print('  \ag/ac debug\ax - Toggle live combat debug telemetry in chat')
+        print('  \ag/ac buffs\ax - Print buff/song bar contents and the up/missing verdict per self buff')
         print('  \ag/ac status\ax - Print running state and mode')
         print('  \ag/ac compact | mini | hud\ax - Toggle compact HUD mode')
         print('  \ag/ac help | h | ?\ax - Print slash command summary')

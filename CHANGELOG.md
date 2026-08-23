@@ -2,6 +2,18 @@
 
 ## 2026-08-23
 
+- **Trust the buff bar before recasting a missing buff (`triune.lua`).**
+  - `missing buff` now resolves against the buff bar itself rather than `buffActive` alone. Both windows are read — the buff window ("Effects") and the short-duration window ("Songs") — by TLO index and by scraping the window icons, because neither route is complete on its own and index enumeration can come back empty while the icons are plainly there.
+  - Fixes the two cases that caused endless recasting: bard persist songs, which sit on the bar with a null/0 duration once they lock so any duration-based check calls them missing, and self buffs that `Buff("name")` simply fails to see on some builds.
+  - Removed the `sungBuffs` "already sung this life" latch from the `missing buff` check. It was a workaround for exactly that detection gap, and it had the side effect that a buff could never be put back up once it genuinely faded. The latch is still used for pet-buff target resolution, which is unchanged.
+  - A beneficial bard song is no longer cut short with `/stopsong`. Cutting a persist song short is what stopped it locking, so it never appeared on the bar and was sung again on the next pass. It is now marked sung only once it is actually on the bar, so a song that failed to land is retried instead of being suppressed until zone or death.
+- **Cap retries on a buff that keeps reading as missing (`triune.lua`).**
+  - A buff that still reads missing right after being cast is nearly always a detection false negative rather than a buff that failed to land, and with no cap the entry re-fires every tick for as long as the condition holds.
+  - After `buff_max_tries` (3) casts the entry is parked for `buff_retry_sec` (60s) and then retried, in case the cast really did fail. The gem, AA, and clickie loops share the counter so one cannot give up while another immediately re-casts. Cleared on zone, on death, and on Stop.
+  - The clickie loop needs this specifically because it previously relied on the `sungBuffs` latch to avoid re-clicking. An item's effect name often differs from what lands on the bar, which makes a buff clickie a prime candidate to read missing forever.
+- **New `/ac buffs` diagnostic (`triune.lua`).**
+  - Prints the contents of both buff windows and the up/missing verdict for every enabled self buff in the loadout, including which window each effect was found in. Makes a buff that is plainly on screen but keeps getting re-cast traceable to the probe that missed it. Aliases: `/ac buffbar`, `/ac buffdump`.
+  - The debug line in `hasNamedBuff` now shows the Songs window alongside Effects; omitting it made every short self buff look like it was simply not up anywhere.
 - **Automated Clickie Item Management Tab (`triune.lua`, v1.7.0).**
   - **Dedicated Clickies Tab (`UI.drawClickieTab`)**: Added a full-featured "Clickies" tab alongside Spell Gems and Abilities & AAs for managing clickable inventory, bag, and worn items.
   - **Dynamic Cursor Item Addition (`addClickieFromCursor`)**: Added `+ Add Item on Cursor` button that inspects the currently held item on the player's cursor, validates its clickable spell effect (`it.Clicky` / `it.Spell`), extracts spell metadata, and assigns smart default triggers (`F: Myself` + `missing buff` for beneficial effects, `E: Current Target` + `in combat` for offensive effects).
