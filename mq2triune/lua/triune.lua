@@ -281,6 +281,7 @@ local function defaultCtrl()
         cast_max_retries     = 2,
         cast_lockout_sec     = 30,
         min_mana_pct         = 0,
+        pull_min_hp_pct      = 0,
         pet_assist_at        = 100,
         pet_hold_enabled     = true,
         show_map_radius      = true,
@@ -301,6 +302,7 @@ sanitizeModeConfig(ctrl)
 local runtime = {
     pullState = 'IDLE',
     pullTargetId = 0,
+    pullHpRest = false,
     deathGuardFired = false,
     medBreakActive = false,
     pendingMem = {},
@@ -1993,6 +1995,7 @@ local function applyEntry(e)
         if ctrl.melee_dist == nil then ctrl.melee_dist = 14 end
         if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
         if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
+        if ctrl.pull_min_hp_pct == nil then ctrl.pull_min_hp_pct = 0 end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -2882,6 +2885,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
                 { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
                 { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
+                { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
                 { cmd = '/triunerun',                         desc = 'Quick keybind command to toggle run / pause' },
             }
 
@@ -3660,6 +3664,17 @@ function UI.drawControlTab()
             end
         end
 
+        ImGui.Dummy(0, 2)
+        ImGui.SetNextItemWidth(180)
+        local pullMinHpVal = ImGui.SliderInt('Min Pull HP %##pullMinHpCtrl', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
+        ctrl.pull_min_hp_pct = pullMinHpVal
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Pauses pulling and sits out of combat to recover if current HP drops below\n'
+                .. 'this threshold. Pulling resumes once HP reaches 100%.\n'
+                .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
+        end
+
         ImGui.Dummy(0, 4)
 
         if ctrl.submode == 'Hunt' then
@@ -4195,7 +4210,7 @@ function UI.drawSettingsTab()
     end
 
     ImGui.Dummy(0, 4)
-    accent(GOLD, 'Mana Management')
+    accent(GOLD, 'Health & Mana Management')
     ImGui.SetNextItemWidth(180)
     local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%')
     ctrl.min_mana_pct = minManaVal
@@ -4203,6 +4218,16 @@ function UI.drawSettingsTab()
         ImGui.SetTooltip(
             'Prevents automatic spell casting if current mana drops below this percentage.\n'
             .. 'Ignored during Burn Mode (0 = disabled / cast at any mana level).')
+    end
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(180)
+    local minPullHpVal = ImGui.SliderInt('Min Pull HP %##minPullHpSettings', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
+    ctrl.pull_min_hp_pct = minPullHpVal
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'Pauses pulling and sits out of combat to recover if current HP drops below\n'
+            .. 'this threshold. Pulling resumes once HP reaches 100%.\n'
+            .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
     end
 
     ImGui.Dummy(0, 4)
@@ -4283,6 +4308,8 @@ local function drawMiniGui()
         if ctrl.running then
             if runtime.medBreakActive then
                 ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'MED BREAK')
+            elseif runtime.pullHpRest then
+                ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'HP RESTING')
             else
                 ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'RUNNING')
             end
@@ -6665,6 +6692,89 @@ local function checkCloserTarget(curTargetId, searchRadius, searchMaxZ, minLevel
     return nil
 end
 
+local function checkPullHpRest()
+    if ctrl.mode ~= 'Puller' then
+        if runtime.pullHpRest then
+            runtime.pullHpRest = false
+            if isSitting() or isDucking() then mq.cmd('/stand') end
+        end
+        return false
+    end
+
+    local minHp = tonumber(ctrl.pull_min_hp_pct) or 0
+    if minHp <= 0 then
+        if runtime.pullHpRest then
+            runtime.pullHpRest = false
+            if isSitting() or isDucking() then mq.cmd('/stand') end
+        end
+        return false
+    end
+
+    local myHp = pctHP(mq.TLO.Me.ID())
+    local inCombatOrXtar = isCombat() or anyXtarAlive(true)
+    if not inCombatOrXtar then
+        pcall(function()
+            if mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then inCombatOrXtar = true end
+            if mq.TLO.Me.CombatState() == 'COMBAT' then inCombatOrXtar = true end
+            local hCount = mq.TLO.Me.XTHaterCount() or 0
+            if hCount > 0 then inCombatOrXtar = true end
+            local aCount = mq.TLO.Me.XTAggroCount() or 0
+            if aCount > 0 then inCombatOrXtar = true end
+        end)
+    end
+
+    if not runtime.pullHpRest then
+        if not inCombatOrXtar and myHp < minHp then
+            runtime.pullHpRest = true
+            stopMoving()
+            if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+            if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
+            pursuit.wanderLoc = nil
+            if runtime.pullState == 'TO_MOB' then
+                runtime.pullState = 'IDLE'
+                runtime.pullTargetId = 0
+            end
+            local t = mq.TLO.Target
+            if t() and not isXTargetId(t.ID()) then
+                mq.cmd('/target clear')
+            end
+            print(string.format('\ay[Triune]\ax Puller: HP below %d%% (%d%%) -- resting out of combat until 100%% HP.', minHp, myHp))
+            if not isSitting() and not isDucking() and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
+                mq.cmd('/sit')
+            end
+            return true
+        end
+    else
+        if inCombatOrXtar then
+            -- Attacked while resting: stand up and let combat loop handle defense
+            if isSitting() or isDucking() then mq.cmd('/stand') end
+            return false
+        else
+            if myHp >= 100 then
+                runtime.pullHpRest = false
+                if isSitting() or isDucking() then mq.cmd('/stand') end
+                print('\ag[Triune]\ax Puller: HP fully recovered (100%) -- resuming pulling.')
+                return false
+            else
+                -- Still resting
+                stopMoving()
+                if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
+                if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
+                pursuit.wanderLoc = nil
+                local t = mq.TLO.Target
+                if t() and not isXTargetId(t.ID()) then
+                    mq.cmd('/target clear')
+                end
+                if not isSitting() and not isDucking() and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
+                    mq.cmd('/sit')
+                end
+                return true
+            end
+        end
+    end
+
+    return false
+end
 
 -- Puller: IDLE (find a mob) -> TO_MOB (close in, tag it) -> TO_CAMP (drag it home)
 -- -> FIGHTING (normal combat loop takes over via the target already being set).
@@ -6708,6 +6818,8 @@ local function pullerTick()
             runtime.pullState = 'FIGHTING'
             return
         end
+
+        if checkPullHpRest() then return end
 
         local scanRadius = hasWps and (ctrl.use_waypoints ~= false) and (ctrl.waypoint_scan_radius or 100) or
         (ctrl.camp_radius or 100)
@@ -6991,6 +7103,10 @@ fullStop = function()
     pursuit.wanderLoc = nil
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
+    if runtime.pullHpRest then
+        runtime.pullHpRest = false
+        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+    end
     if runtime.medBreakActive then
         runtime.medBreakActive = false; if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
     end
@@ -7010,6 +7126,7 @@ onZoned = function()
     pursuit.wanderLoc = nil
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
+    runtime.pullHpRest = false
     runtime.discExpires = {}
     runtime.discCooldown = {}
     petState.myPets = {}
@@ -7376,7 +7493,10 @@ local function combatTick()
             end
 
             if haveNPC then
-                if not isXTargetId(mq.TLO.Target.ID()) and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
+                if runtime.pullHpRest and not isXTargetId(mq.TLO.Target.ID()) then
+                    mq.cmd('/target clear')
+                    haveNPC = false
+                elseif not isXTargetId(mq.TLO.Target.ID()) and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
                     local curId = mq.TLO.Target.ID()
                     local closerId, candDist, curDist = checkCloserTarget(curId, nil, maxHuntZ, ctrl.hunter_min_level,
                         ctrl.hunter_max_level)
@@ -7390,7 +7510,10 @@ local function combatTick()
                             closerId, tostring(mq.TLO.Target.CleanName()), candDist, curDist))
                     end
                 end
-            else
+            end
+
+            if not haveNPC then
+                if checkPullHpRest() then return end
                 local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
                 local id = findRoamTarget(scanRadius, maxHuntZ, ctrl.hunter_min_level, ctrl.hunter_max_level)
                 if id and setTarget(id) then
@@ -8144,6 +8267,7 @@ local function triuneCommand(...)
         print('  \ag/ac huntz [10-300]\ax - Configure Hunter Tier 2 max vertical height difference')
         print('  \ag/ac pullcon [con]\ax - Configure faction consideration filter')
         print('  \ag/ac wp [add|clear|del|on|off|list]\ax - Configure & toggle Puller Waypoint Patrol')
+        print('  \ag/ac pullhp [0-95]\ax - Set minimum HP % threshold before pausing pulling to rest')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
@@ -8364,11 +8488,24 @@ local function triuneCommand(...)
         else
             print(string.format('\ag[Triune]\ax Current Hunter Floor Height (Z Plane): %d units. (usage: /ac zplane [5-100])', ctrl.hunter_z_plane or 15))
         end
+    elseif cmd == 'pullhp' or cmd == 'minhp' then
+        local val = tonumber(args[2])
+        if val then
+            ctrl.pull_min_hp_pct = math.max(0, math.min(95, math.floor(val)))
+            saveLoadout(true)
+            if ctrl.pull_min_hp_pct == 0 then
+                print('\ag[Triune]\ax Min Pull HP % disabled (0% -- pull at any HP).')
+            else
+                print(string.format('\ag[Triune]\ax Min Pull HP threshold set to %d%% (pause pulling to rest until 100%%).', ctrl.pull_min_hp_pct))
+            end
+        else
+            print(string.format('\ag[Triune]\ax Current Min Pull HP threshold: %d%%. (usage: /ac pullhp [0-95])', ctrl.pull_min_hp_pct or 0))
+        end
     elseif setTriuneMode(args[1], args[2]) then
         -- mode command handled
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|pullhp|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 

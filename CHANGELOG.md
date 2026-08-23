@@ -2,6 +2,12 @@
 
 ## 2026-08-23
 
+- **Minimum Pull HP % Threshold & Out-of-Combat Rest System (`triune.lua`).**
+  - **Configurable Min Pull HP % Setting (`ctrl.pull_min_hp_pct`)**: Added a slider (`Min Pull HP %`, 0–95%, default 0 / disabled) in both the Settings tab (under *Health & Mana Management*) and the Control tab (under *Puller Mode Controls*).
+  - **Automated Out-of-Combat Resting (`checkPullHpRest`)**: When Puller mode is active (both *Hunt* and *Camp* submodes) and player HP drops below the threshold, pulling and waypoint navigation pause immediately, non-engaged targets are cleared, and the character sits out of combat until HP recovers to 100%.
+  - **Combat & Aggro Safety Guards**: Integrates thorough checks (`isCombat()`, hostile XTargets, `Me.Combat()`, `CombatState == 'COMBAT'`). If an enemy attacks while resting, the character immediately stands up (`/stand`) and engages/defends without delay.
+  - **Mini HUD Status Indicator**: Added `HP RESTING` badge in the compact Mini HUD when resting for HP.
+  - **Slash Commands**: Added `/ac pullhp [0-95]` (alias `/ac minhp`) to inspect or configure the threshold via chat.
 - **NavMesh Unpathable Mob Loop & Erroneous Repositioning Fix (`triune.lua`).**
   - **Eliminated Erroneous `performMeshRecovery()` Loop**: Removed the flawed `performMeshRecovery()` routine and `runtime.meshPathFails` counter that incorrectly assumed the *player* was standing off the navmesh whenever candidate roaming spawns failed `mq.TLO.Navigation.PathExists()`. This bug caused characters to endlessly jump forward, backward, strafe left/right, and run `/nav reload` whenever unreachable mobs (e.g. on ledges, in locked rooms, or across unmeshed gaps) existed in the zone.
   - **Smart Unreachable Mob Caching (`markUnreachable`)**: In `findRoamTarget()`, when `Navigation.PathExists('id ' .. sid)` returns false for a distant spawn, that specific NPC is now marked unreachable via `markUnreachable(sid)` (60-second TTL). This immediately skips that spawn on subsequent scan passes without lagging the navigation engine.

@@ -123,6 +123,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac status` | | Print current status and mode to chat |
 | `/ac help` | `/ac ?` | Show command help in chat |
 | `/ac <mode> [submode]` | | Switch mode (e.g. `/ac manual`, `/ac puller camp`, `/ac assist chase`, `/ac backline`) |
+| `/ac pullhp [0-95]` | `/ac minhp` | Set minimum HP % threshold before pausing pulling to rest until 100% |
 | `/ac pullcon [preset]` | `/ac con` | Set faction filters (e.g. `/ac pullcon preset hostile`) |
 | `/ac wp [add\|clear\|del\|on\|off\|list]` | `/ac waypoint` | Manage waypoint patrol routes |
 | `/ac spellbook` | `/ac book` | Open the Spellbook Browser |
