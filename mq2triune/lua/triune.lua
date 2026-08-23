@@ -525,6 +525,7 @@ local function normalizeSpellName(name)
     return s
 end
 
+---@return table
 local function getScribedSpellSet()
     local now = os.clock()
     if runtime.spellbookSetCache and (now - (runtime.lastSpellbookCacheTime or 0)) < 3.0 then
@@ -536,8 +537,11 @@ local function getScribedSpellSet()
         local count = 720
         pcall(function()
             local c = mq.TLO.Me.BookCount()
-            if c and tonumber(tostring(c)) and tonumber(tostring(c)) > 0 then
-                count = tonumber(tostring(c))
+            if c then
+                local num = tonumber(tostring(c))
+                if num and num > 0 then
+                    count = math.floor(num)
+                end
             end
         end)
 
@@ -577,6 +581,7 @@ local function isScribed(nm)
 
     -- 1. Check cached spellbook map (fastest & handles unindexed TLO names)
     local sbSet = getScribedSpellSet()
+    if not sbSet then return false end
     if sbSet[strNm] or sbSet[strNm:lower()] then return true end
 
     local cleaned = cleanSpellName(strNm):lower()

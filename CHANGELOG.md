@@ -10,6 +10,10 @@
   - Hoisted `MQSHORT` lookup table from a local inside `toCanonicalClassAbbr` to module scope. `parseClassLine` referenced `MQSHORT` as an upvalue but it was scoped to a different function, causing 3-letter and 2-letter class code lookups to silently error (indexing nil) inside pcall blocks.
 - **Sync `triune_updater.lua` theme to canonical copy.**
   - Added 8 missing color entries (CheckMark, SliderGrab, SliderGrabActive, ScrollbarBg, ScrollbarGrab, Tab, TabHovered, TabSelected) and aligned all StyleVar values (ChildRounding, FrameBorderSize, FramePadding, GrabRounding, ItemSpacing, ScrollbarRounding, TabRounding, WindowPadding) to match the canonical satellite theme.
+- **Linter & Type Diagnostic Fixes across Modules.**
+  - **`triune_updater.lua`**: Added `---@type string|nil` annotation and initialized `pendingAction = 'check'`, eliminating type conversion (`string` to `nil`) and dead-store linter warnings.
+  - **`triune.lua`**: Added `---@return table` to `getScribedSpellSet()`, ensured integer conversion via `math.floor(num)` for `BookCount`, and added explicit `if not sbSet then return false end` guard in `isScribed` to eliminate nil-index warnings.
+  - **`test_pure_logic.lua`**: Added `---@diagnostic disable: deprecated` to silence Lua 5.1 `loadstring`/`setfenv` environment warnings under Lua 5.4 language servers, and asserted `loadfile` result for safe `pcall` typing.
 
 - **Ranged Combat Autofire Parity with Auto-Attack (`triune.lua`).**
   - **Eliminated Rapid Autofire Toggle Overhead**: Removed redundant per-tick `/autofire` commands from individual spell, AA, discipline, ability, and clickie execution routines as well as post-cast checks.

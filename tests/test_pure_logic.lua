@@ -1,4 +1,5 @@
 #!/usr/bin/env luajit
+---@diagnostic disable: deprecated
 -- ==========================================================================
 -- tests/test_pure_logic.lua — Unit tests for pure-logic functions in triune.lua
 --
@@ -1001,7 +1002,7 @@ assert_eq(isThankYou(''), false,             'thx: empty → false')
 -- 28. triune_data.lua — structural validation
 -- ============================================================================
 print('--- triune_data.lua validation ---')
-local dataFile = loadfile('mq2triune/config/triune_data.lua')
+local dataFile = assert(loadfile('mq2triune/config/triune_data.lua'))
 assert_neq(dataFile, nil, 'data: loadfile succeeds')
 
 local dataOk, DATA_LOADED = pcall(dataFile)

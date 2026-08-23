@@ -20,7 +20,8 @@ local installedVersion = VERSION
 local latestVersion = 'Unknown'
 local releaseNotes = ''
 local statusMessage = 'Click "Check for Updates" to connect to GitHub.'
-local pendingAction = nil
+---@type string|nil
+local pendingAction = 'check' -- 'check', 'update', or nil (initial update check queued for main loop)
 
 -- Theme helper
 local _colN, _varN = 0, 0
@@ -824,9 +825,6 @@ end
 
 -- Register ImGui render callback
 mq.imgui.init('TriuneUpdaterWin', drawUpdaterWindow)
-
--- Queue initial update check safely on yieldable coroutine thread
-pendingAction = 'check'
 
 -- Main loop for executing queued pending actions safely outside render callback
 while isRunning and isOpen do
