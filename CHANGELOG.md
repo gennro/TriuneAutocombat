@@ -2,6 +2,10 @@
 
 ## 2026-08-23
 
+- **Beneficial self-casts now actually target you (`triune.lua`).**
+  - `castGem` and `fireAA` skipped targeting entirely when the resolved target was yourself, leaving whatever hostile happened to be selected. EverQuest redirects a beneficial spell to your *target's* target, so a self heal or self buff only landed because the mob was already beating on you.
+  - Out of combat that redirect resolves to nobody and the cast is simply wasted, which is why a self buff put up between pulls can silently fail. In a group it is worse: an emergency self heal goes to whoever the mob is actually on.
+  - Both now target you explicitly for a beneficial self-cast and restore your previous target afterwards, exactly as they already did for a cast on someone else. Detrimental self-targeted actions are untouched.
 - **Automated Clickie Item Management Tab (`triune.lua`, v1.7.0).**
   - **Dedicated Clickies Tab (`UI.drawClickieTab`)**: Added a full-featured "Clickies" tab alongside Spell Gems and Abilities & AAs for managing clickable inventory, bag, and worn items.
   - **Dynamic Cursor Item Addition (`addClickieFromCursor`)**: Added `+ Add Item on Cursor` button that inspects the currently held item on the player's cursor, validates its clickable spell effect (`it.Clicky` / `it.Spell`), extracts spell metadata, and assigns smart default triggers (`F: Myself` + `missing buff` for beneficial effects, `E: Current Target` + `in combat` for offensive effects).

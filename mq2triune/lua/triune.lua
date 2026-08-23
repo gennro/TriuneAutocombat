@@ -5653,6 +5653,22 @@ local function castGem(i, g, id)
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
 
+    -- EQ redirects a beneficial spell to your TARGET'S target. Mid-fight the mob
+    -- is beating on you, so self heals and buffs land on you by accident -- which
+    -- is the only reason they have ever appeared to work. Out of combat that
+    -- redirect resolves to nobody and the cast is wasted, and in a group it hands
+    -- your emergency self heal to whoever the mob happens to be on. Target
+    -- yourself explicitly so a self-cast means self.
+    local selfTargeted = false
+    if selfCast and orig ~= id then
+        local bene = true
+        pcall(function() bene = not not sp.Beneficial() end)
+        if bene then
+            if not setTarget(id) then return false end
+            selfTargeted = true
+        end
+    end
+
     castTracker.lastSpell   = g.spell
     castTracker.lastTime    = os.clock()
     castTracker.failed      = false
@@ -5699,7 +5715,7 @@ local function castGem(i, g, id)
             mq.cmd('/stopsong')
         end
     end
-    if not selfCast and orig ~= id then
+    if (not selfCast or selfTargeted) and orig ~= id then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
@@ -5733,11 +5749,25 @@ local function fireAA(name, a, id)
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not setTarget(id) then return false end
+
+    -- Same redirect castGem has to work around: EQ sends a beneficial effect to
+    -- your TARGET'S target, so a self buff AA fired with a hostile selected can
+    -- resolve to nobody out of combat, or to whoever the mob is on in a group.
+    local selfTargeted = false
+    if selfCast and orig ~= id then
+        local bene = true
+        pcall(function() bene = not not sp.Beneficial() end)
+        if bene then
+            if not setTarget(id) then return false end
+            selfTargeted = true
+        end
+    end
+
     clearCursor()
     mq.cmdf('/alt act %d', aa.ID())
     runtime.lastCast[key] = os.clock()
     print('\ag[Triune]\ax AA fired: ' .. name)
-    if not selfCast and orig ~= id then
+    if (not selfCast or selfTargeted) and orig ~= id then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
