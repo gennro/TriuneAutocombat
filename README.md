@@ -174,6 +174,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.6.12**
+Current version: **1.6.14**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

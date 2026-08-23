@@ -29,7 +29,7 @@ local bit          = require('bit') -- LuaJIT bitwise library
 local scriptDir    = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path       = scriptDir .. "?.lua;" .. package.path
 
-local VERSION      = '1.4'
+local VERSION      = '1.5'
 local cfg          = mq.configDir
 
 -- ============================================================================
@@ -126,9 +126,16 @@ local function popTheme()
     end ---@diagnostic disable-line: undefined-field
 end
 
--- ============================================================================
--- Structured State Tables
--- ============================================================================
+local function popCol(n)
+    n = n or 1
+    for _ = 1, n do
+        if _colN > 0 then
+            pcall(mq.imgui.PopStyleColor, 1)
+            _colN = _colN - 1
+        end
+    end
+end
+
 local ctrl = {
     enabled       = true,
     allowPets     = true,
@@ -139,7 +146,8 @@ local ctrl = {
     cooldownSec   = 3,
     tellDelayMs   = 2500,
     minManaPct    = 15,
-    completionMsg = "All buffs cast! Enjoy!"
+    completionMsg = "All buffs cast! Enjoy!",
+    allowLowLevel = {} -- [spellName] = true/false (true = can cast on level <= 46 players)
 }
 
 local runtime = {
@@ -200,8 +208,50 @@ local function getMyPctMana()
 end
 
 -- ============================================================================
--- Gem Discovery Helper
+-- Spell Cooldown, Target Verification & Gem Discovery Helpers
 -- ============================================================================
+local function getSpellCooldownSec(gemNum, spellName)
+    local sec = 0
+    pcall(function()
+        if gemNum and gemNum > 0 then
+            local gt = mq.TLO.Me.GemTimer(gemNum)
+            if gt and gt() then
+                local ts = gt.TotalSeconds()
+                if ts and ts > 0 then
+                    sec = ts
+                else
+                    local ms = gt() or 0
+                    if ms > 0 then sec = math.ceil(ms / 1000) end
+                end
+            end
+        end
+        if sec == 0 and spellName and spellName ~= '' then
+            local gt = mq.TLO.Me.GemTimer(spellName)
+            if gt and gt() then
+                local ts = gt.TotalSeconds()
+                if ts and ts > 0 then
+                    sec = ts
+                else
+                    local ms = gt() or 0
+                    if ms > 0 then sec = math.ceil(ms / 1000) end
+                end
+            end
+        end
+    end)
+    return sec
+end
+
+local function canCastOnPlayer(spellName, playerLevel)
+    if not playerLevel or playerLevel > 46 then
+        return true
+    end
+    -- Target is level 46 or below: allow if user checked the box for this spell
+    if ctrl.allowLowLevel and ctrl.allowLowLevel[spellName] == true then
+        return true
+    end
+    return false
+end
+
 local function getAvailableGems()
     local list = {}
     local numGems = 8
@@ -213,7 +263,14 @@ local function getAvailableGems()
             if gem() then name = gem.Name() end
         end)
         if name and name ~= '' then
-            table.insert(list, { gem = gemNum, name = name })
+            local allowLow = (ctrl.allowLowLevel and ctrl.allowLowLevel[name] == true)
+            local cdRemaining = getSpellCooldownSec(gemNum, name)
+            table.insert(list, {
+                gem           = gemNum,
+                name          = name,
+                allowLowLevel = allowLow,
+                cooldownSec   = cdRemaining
+            })
         end
     end
     return list
@@ -266,7 +323,8 @@ local function saveConfig(silent)
         cooldownSec   = ctrl.cooldownSec,
         tellDelayMs   = ctrl.tellDelayMs,
         minManaPct    = ctrl.minManaPct,
-        completionMsg = ctrl.completionMsg
+        completionMsg = ctrl.completionMsg,
+        allowLowLevel = ctrl.allowLowLevel or {}
     }
 
     local f = io.open(cfg .. '/triune_buffbot_config.lua', 'w')
@@ -302,6 +360,11 @@ local function loadConfig()
         if charData.tellDelayMs then ctrl.tellDelayMs = charData.tellDelayMs else ctrl.tellDelayMs = 2500 end
         if charData.minManaPct then ctrl.minManaPct = charData.minManaPct end
         if charData.completionMsg then ctrl.completionMsg = charData.completionMsg end
+        if charData.allowLowLevel and type(charData.allowLowLevel) == 'table' then
+            ctrl.allowLowLevel = charData.allowLowLevel
+        else
+            ctrl.allowLowLevel = {}
+        end
         logMsg("Loaded saved buffbot configuration for " .. charKey .. ".")
     end
 end
@@ -309,7 +372,7 @@ end
 -- ============================================================================
 -- Tell Menu & Choice Parsing
 -- ============================================================================
-local function sendMenuTells(target, gemList)
+local function sendMenuTells(target, gemList, requesterLevel)
     if not target or target == '' then return end
 
     -- Prune any pending un-sent tells already queued for this target
@@ -325,8 +388,17 @@ local function sendMenuTells(target, gemList)
     end
 
     local items = {}
+    local isLowLevel = requesterLevel and requesterLevel > 0 and requesterLevel <= 46
     for idx, item in ipairs(gemList) do
-        table.insert(items, string.format("[%d] %s", idx, item.name))
+        local tag = ""
+        if isLowLevel and not item.allowLowLevel then
+            tag = " (47+/Pet)"
+        end
+        if item.cooldownSec and item.cooldownSec > 30 then
+            local cdText = (item.cooldownSec >= 60) and string.format("CD %dm", math.ceil(item.cooldownSec / 60)) or string.format("CD %ds", item.cooldownSec)
+            tag = (tag ~= "") and (tag .. ", " .. cdText) or (" (" .. cdText .. ")")
+        end
+        table.insert(items, string.format("[%d] %s%s", idx, item.name, tag))
     end
 
     -- Pack items into clean chunks of <= 100 characters so tell count is minimized
@@ -605,13 +677,13 @@ local function onTellReceived(line, sender, msg)
             end
         end
 
+        local requesterLevel = 1
+        pcall(function() requesterLevel = spawn.Level() or 1 end)
+
         local currentTargetID = 0
         pcall(function() currentTargetID = spawn.ID() or 0 end)
 
         local pctMana = getMyPctMana()
-        local namesList = {}
-        for _, sp in ipairs(requestedGems) do table.insert(namesList, string.format("[%d] %s", sp.gem, sp.name)) end
-        local spellsText = table.concat(namesList, ", ")
 
         if mode == 'pet' then
             if not ctrl.allowPets then
@@ -639,6 +711,10 @@ local function onTellReceived(line, sender, msg)
                 logMsg(string.format("All %d pet(s) for '%s' are out of range (> %d).", #allPets, cleanSender, ctrl.maxRange), true, false)
                 return
             end
+
+            local namesList = {}
+            for _, sp in ipairs(requestedGems) do table.insert(namesList, string.format("[%d] %s", sp.gem, sp.name)) end
+            local spellsText = table.concat(namesList, ", ")
 
             for _, pet in ipairs(inRangePets) do
                 table.insert(runtime.activeQueue, {
@@ -681,6 +757,23 @@ local function onTellReceived(line, sender, msg)
             end
 
         elseif mode == 'both' then
+            -- Validate level restrictions for player character (<= 46 check), while allowing all requested buffs for pet
+            local playerGems = {}
+            local skippedForPlayer = {}
+            for _, sp in ipairs(requestedGems) do
+                if not canCastOnPlayer(sp.name, requesterLevel) then
+                    table.insert(skippedForPlayer, sp.name)
+                else
+                    table.insert(playerGems, sp)
+                end
+            end
+
+            if #skippedForPlayer > 0 then
+                local skippedListStr = table.concat(skippedForPlayer, ", ")
+                queueTell(cleanSender, string.format("Note: Skipped %s for you (requires level 47+), but casting on your pet!", skippedListStr))
+                logMsg(string.format("Skipped level-restricted buffs for player '%s' in 'both' mode (Lvl %d): %s", cleanSender, requesterLevel, skippedListStr), true, false)
+            end
+
             local inRangePets = {}
             if ctrl.allowPets then
                 local allPets = getRequesterPets(spawn)
@@ -691,16 +784,21 @@ local function onTellReceived(line, sender, msg)
                 end
             end
 
-            -- Queue player buffs
-            table.insert(runtime.activeQueue, {
-                sender     = cleanSender,
-                targetName = cleanSender,
-                targetID   = currentTargetID,
-                isPet      = false,
-                gems       = requestedGems
-            })
+            local totalJobs = 0
 
-            -- Queue each pet's buffs
+            -- Queue player buffs if player has eligible spells
+            if #playerGems > 0 then
+                table.insert(runtime.activeQueue, {
+                    sender     = cleanSender,
+                    targetName = cleanSender,
+                    targetID   = currentTargetID,
+                    isPet      = false,
+                    gems       = playerGems
+                })
+                totalJobs = totalJobs + 1
+            end
+
+            -- Queue each pet's buffs (pets receive all requested spells)
             for _, pet in ipairs(inRangePets) do
                 table.insert(runtime.activeQueue, {
                     sender     = cleanSender,
@@ -710,9 +808,15 @@ local function onTellReceived(line, sender, msg)
                     petName    = pet.name,
                     gems       = requestedGems
                 })
+                totalJobs = totalJobs + 1
             end
 
-            local totalJobs = 1 + #inRangePets
+            if totalJobs == 0 then
+                queueTell(cleanSender, string.format("Cannot cast: requested spells cannot land on you at Level %d and no active pets were found in range.", requesterLevel))
+                logMsg(string.format("Request 'both' from '%s' rejected: no eligible player buffs and no pets in range.", cleanSender), true, false)
+                return
+            end
+
             local queuePos = #runtime.activeQueue
             local totalAhead = queuePos - totalJobs
             if runtime.currentRequester and runtime.currentRequester ~= '' then
@@ -720,40 +824,79 @@ local function onTellReceived(line, sender, msg)
             end
             local lineNum = totalAhead + 1
 
+            local allNamesList = {}
+            for _, sp in ipairs(requestedGems) do table.insert(allNamesList, string.format("[%d] %s", sp.gem, sp.name)) end
+            local spellsText = table.concat(allNamesList, ", ")
+
             if #inRangePets > 0 then
                 local petNamesList = {}
                 for _, p in ipairs(inRangePets) do table.insert(petNamesList, p.name) end
                 local petNamesStr = table.concat(petNamesList, ", ")
                 local petDesc = (#inRangePets == 1) and string.format("pet (%s)", petNamesStr) or string.format("%d pets (%s)", #inRangePets, petNamesStr)
 
-                logMsg(string.format("Requester '%s' queued %d buff(s) for self AND %s (Line #%d): %s", cleanSender, #requestedGems, petDesc, lineNum, spellsText))
-                print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax AND %s (Line #%d): %s', #requestedGems, cleanSender, petDesc, lineNum, spellsText))
+                if #playerGems > 0 then
+                    logMsg(string.format("Requester '%s' queued buffs for self (%d) AND %s (%d) (Line #%d): %s", cleanSender, #playerGems, petDesc, #requestedGems, lineNum, spellsText))
+                    print(string.format('\ag[Triune Buffbot]\ax Queued buffs for \aw%s\ax AND %s (Line #%d): %s', cleanSender, petDesc, lineNum, spellsText))
+                else
+                    logMsg(string.format("Requester '%s' queued %d buff(s) for %s only (player level restricted) (Line #%d): %s", cleanSender, #requestedGems, petDesc, lineNum, spellsText))
+                    print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for %s (%s) (Line #%d): %s', #requestedGems, cleanSender, petDesc, lineNum, spellsText))
+                end
 
                 if totalAhead > 0 then
                     if pctMana < ctrl.minManaPct then
-                        queueTell(cleanSender, string.format('Queued %d buff(s) for you AND your %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', #requestedGems, petDesc, lineNum, totalAhead, pctMana, ctrl.minManaPct))
+                        queueTell(cleanSender, string.format('Queued buffs for you AND your %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', petDesc, lineNum, totalAhead, pctMana, ctrl.minManaPct))
                     else
-                        queueTell(cleanSender, string.format('Queued %d buff(s) for you AND your %s! You are #%d in line (%d ahead). Please stand by!', #requestedGems, petDesc, lineNum, totalAhead))
+                        queueTell(cleanSender, string.format('Queued buffs for you AND your %s! You are #%d in line (%d ahead). Please stand by!', petDesc, lineNum, totalAhead))
                     end
                 else
                     if pctMana < ctrl.minManaPct then
-                        queueTell(cleanSender, string.format('Queued %d buff(s) for you AND your %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', #requestedGems, petDesc, pctMana, ctrl.minManaPct))
+                        queueTell(cleanSender, string.format('Queued buffs for you AND your %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', petDesc, pctMana, ctrl.minManaPct))
                     else
-                        queueTell(cleanSender, string.format('Stand by, preparing to cast %d buff(s) on you and your %s! (You are #1 in line)', #requestedGems, petDesc))
+                        queueTell(cleanSender, string.format('Stand by, preparing to cast buffs on you and your %s! (You are #1 in line)', petDesc))
                     end
                 end
             else
                 logMsg(string.format("Requester '%s' requested both, but no pet found in range. Queued player buffs only (Line #%d): %s", cleanSender, lineNum, spellsText), true, false)
-                print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (No pet in range) (Line #%d): %s', #requestedGems, cleanSender, lineNum, spellsText))
+                print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (No pet in range) (Line #%d): %s', #playerGems, cleanSender, lineNum, spellsText))
 
                 if totalAhead > 0 then
-                    queueTell(cleanSender, string.format('No active pet in range found, but queued %d buff(s) for you! You are #%d in line (%d ahead).', #requestedGems, lineNum, totalAhead))
+                    queueTell(cleanSender, string.format('No active pet in range found, but queued %d buff(s) for you! You are #%d in line (%d ahead).', #playerGems, lineNum, totalAhead))
                 else
-                    queueTell(cleanSender, string.format('No active pet in range found, but queued %d buff(s) for you! Stand by, casting now.', #requestedGems))
+                    queueTell(cleanSender, string.format('No active pet in range found, but queued %d buff(s) for you! Stand by, casting now.', #playerGems))
                 end
             end
 
         else -- mode == 'player'
+            -- Filter requested spells by requester's level (<= 46 check)
+            local validGems = {}
+            local skippedGems = {}
+            for _, sp in ipairs(requestedGems) do
+                if not canCastOnPlayer(sp.name, requesterLevel) then
+                    table.insert(skippedGems, sp.name)
+                else
+                    table.insert(validGems, sp)
+                end
+            end
+
+            if #validGems == 0 then
+                local skippedListStr = table.concat(skippedGems, ", ")
+                queueTell(cleanSender, string.format("Cannot cast: %s cannot land on you at Level %d. (Hint: High-level buffs land on pets with 'pet <num>')", skippedListStr, requesterLevel))
+                logMsg(string.format("All requested buffs for '%s' rejected due to level restriction (Level %d): %s", cleanSender, requesterLevel, skippedListStr), true, false)
+                return
+            end
+
+            if #skippedGems > 0 then
+                local skippedListStr = table.concat(skippedGems, ", ")
+                queueTell(cleanSender, string.format("Note: Skipped %s (requires higher level for players; lands on pets with 'pet <num>').", skippedListStr))
+                logMsg(string.format("Skipped level-restricted buffs for player '%s' (Level %d): %s", cleanSender, requesterLevel, skippedListStr), true, false)
+            end
+
+            requestedGems = validGems
+
+            local namesList = {}
+            for _, sp in ipairs(requestedGems) do table.insert(namesList, string.format("[%d] %s", sp.gem, sp.name)) end
+            local spellsText = table.concat(namesList, ", ")
+
             table.insert(runtime.activeQueue, {
                 sender     = cleanSender,
                 targetName = cleanSender,
@@ -769,8 +912,8 @@ local function onTellReceived(line, sender, msg)
             end
             local lineNum = totalAhead + 1
 
-            logMsg(string.format("Requester '%s' selected %d buff(s) (Line #%d): %s", cleanSender, #requestedGems, lineNum, spellsText))
-            print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (Line #%d): %s', #requestedGems, cleanSender, lineNum, spellsText))
+            logMsg(string.format("Requester '%s' (Lvl %d) selected %d buff(s) (Line #%d): %s", cleanSender, requesterLevel, #requestedGems, lineNum, spellsText))
+            print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (Lvl %d) (Line #%d): %s', #requestedGems, cleanSender, requesterLevel, lineNum, spellsText))
 
             if totalAhead > 0 then
                 if pctMana < ctrl.minManaPct then
@@ -799,10 +942,12 @@ local function onTellReceived(line, sender, msg)
             end
         end
     else
-        -- If requester sent a tell that wasn't a choice, send the numbered menu
-        runtime.pendingOffers[cleanSender] = { timestamp = now, spawnID = spawn.ID(), gems = currentGems }
-        logMsg(string.format("Sent numbered buff menu to '%s'.", cleanSender))
-        sendMenuTells(cleanSender, currentGems)
+        -- If requester sent a tell that wasn't a choice, send the numbered menu with level annotations
+        local requesterLevel = 1
+        pcall(function() requesterLevel = spawn.Level() or 1 end)
+        runtime.pendingOffers[cleanSender] = { timestamp = now, spawnID = spawn.ID(), gems = currentGems, level = requesterLevel }
+        logMsg(string.format("Sent numbered buff menu to '%s' (Lvl %d).", cleanSender, requesterLevel))
+        sendMenuTells(cleanSender, currentGems, requesterLevel)
     end
 end
 
@@ -1036,6 +1181,14 @@ local function processBuffQueue()
         return
     end
 
+    -- Ensure standing before sequence starts
+    local isSitOrDuck = false
+    pcall(function() isSitOrDuck = mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() end)
+    if isSitOrDuck then
+        mq.cmd('/stand')
+        mq.delay(50)
+    end
+
     for _, spellInfo in ipairs(gemsToCast) do
         if not ctrl.enabled then break end
         mq.doevents()
@@ -1052,53 +1205,63 @@ local function processBuffQueue()
         end
 
         if gemNum and gemNum > 0 then
-            -- Re-verify and enforce target lock on the requester before each cast
-            if not acquireTarget(targetID, targetName, isPet, ownerName) then
-                logMsg(string.format("Target '%s' lost during casting. Aborting remaining buffs.", targetLabel), true,
-                    false)
-                break
+            -- Pre-cast landing check for player targets
+            if not isPet then
+                local targetLvl = 1
+                pcall(function()
+                    local sp = mq.TLO.Spawn(string.format('pc =%s', targetName))
+                    if sp and sp() then targetLvl = sp.Level() or 1 end
+                end)
+                if targetLvl > 0 and not canCastOnPlayer(expectedName, targetLvl) then
+                    logMsg(string.format("Skipping [%s] on player '%s' (Target Level %d <= 46 and spell is not allowed for low-level players).", expectedName, targetName, targetLvl), true, false)
+                    queueTell(ownerName, string.format("[%s] skipped: restricted to level 47+ (you are level %d).", expectedName, targetLvl))
+                    gemNum = 0 -- Skip this spell cast
+                end
+            end
+        end
+
+        if gemNum and gemNum > 0 then
+            -- Pre-cast cooldown check: skip immediately if spell is on cooldown > 30s
+            local cdRemaining = getSpellCooldownSec(gemNum, expectedName)
+            if cdRemaining > 30 then
+                logMsg(string.format("Skipping [%s] on %s: on cooldown for %ds (> 30s limit).", expectedName, targetLabel, cdRemaining), true, false)
+                queueTell(ownerName, string.format("[%s] skipped: currently on cooldown (%ds remaining > 30s limit).", expectedName, cdRemaining))
+                gemNum = 0 -- Skip this spell cast
+            end
+        end
+
+        if gemNum and gemNum > 0 then
+            -- Verify target lock on requester; only re-target if lost
+            local curTargetID = 0
+            pcall(function() curTargetID = mq.TLO.Target.ID() or 0 end)
+            if curTargetID ~= targetID then
+                if not acquireTarget(targetID, targetName, isPet, ownerName) then
+                    logMsg(string.format("Target '%s' lost during casting. Aborting remaining buffs.", targetLabel), true, false)
+                    break
+                end
             end
 
-            -- Face the target
-            pcall(function() mq.cmd('/face fast') end)
-            mq.delay(100)
-            mq.doevents()
-            processOutgoingTells()
+            -- Ensure standing and facing target
+            pcall(function()
+                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+                mq.cmd('/face fast')
+            end)
 
-            -- Ensure standing before cast
-            local isSitOrDuck = false
-            pcall(function() isSitOrDuck = mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() end)
-            if isSitOrDuck then
-                mq.cmd('/stand')
-                mq.delay(200)
-            end
-
-            -- Verify spell has recovered from cooldown before attempting cast
+            -- Wait for spell cooldown / global recovery (up to 30 seconds max)
             if not isSpellReady(gemNum, expectedName) then
-                logMsg(string.format("Waiting for [%s] (Gem %d) to recover from cooldown...", expectedName, gemNum))
                 local startWait = os.time()
                 while not isSpellReady(gemNum, expectedName) and ctrl.enabled do
                     mq.doevents()
                     processOutgoingTells()
-                    mq.delay(100)
+                    mq.delay(50)
                     if (os.time() - startWait) >= 30 then break end
                 end
             end
 
             if isSpellReady(gemNum, expectedName) then
-                -- Final pre-cast target lock & LoS facing
-                acquireTarget(targetID, targetName, isPet, ownerName)
-                pcall(function() mq.cmd('/face fast') end)
-                mq.delay(100)
-                mq.doevents()
-                processOutgoingTells()
-
                 -- Cast the spell on the target
                 logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetLabel, gemNum))
                 pcall(function() mq.cmdf('/cast %d', gemNum) end)
-                mq.delay(200)
-                mq.doevents()
-                processOutgoingTells()
 
                 -- Wait for casting to register on client
                 local castStarted = false
@@ -1106,35 +1269,40 @@ local function processBuffQueue()
                 pcall(function() waitStart = mq.gettime() end)
                 if waitStart == 0 then waitStart = os.time() * 1000 end
 
-                while (mq.gettime() - waitStart) < 800 do
+                while (mq.gettime() - waitStart) < 600 do
                     pcall(function() castStarted = mq.TLO.Me.Casting() ~= nil end)
                     if castStarted then break end
-                    mq.delay(50)
+                    mq.delay(25)
                 end
 
-                -- Wait for casting to complete while processing incoming tells
+                -- Wait for casting to complete while servicing incoming tells
                 if castStarted then
                     local attempts = 0
                     local isCasting = true
-                    while isCasting and attempts < 200 do
+                    while isCasting and attempts < 400 do
                         mq.doevents()
                         processOutgoingTells()
                         pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
                         if isCasting then
-                            mq.delay(100)
+                            mq.delay(50)
                             attempts = attempts + 1
                         end
                     end
                 end
 
-                -- Recovery delay between casts while servicing events
-                for _ = 1, 8 do
+                -- Reactive recovery wait for global recovery / spell readiness
+                local gcdWait = 0
+                pcall(function() gcdWait = mq.gettime() end)
+                if gcdWait == 0 then gcdWait = os.time() * 1000 end
+                while (mq.gettime() - gcdWait) < 3000 do
                     mq.doevents()
                     processOutgoingTells()
-                    mq.delay(100)
+                    if isSpellReady(gemNum, expectedName) then break end
+                    mq.delay(50)
                 end
             else
-                logMsg(string.format("Spell [%s] (Gem %d) timed out waiting for cooldown recovery. Skipping.", expectedName, gemNum), true, false)
+                logMsg(string.format("Spell [%s] (Gem %d) timed out waiting for cooldown recovery (> 30s). Skipping.", expectedName, gemNum), true, false)
+                queueTell(ownerName, string.format("[%s] skipped: cooldown exceeded 30s wait limit.", expectedName))
             end
         end
     end
@@ -1214,10 +1382,26 @@ local function drawControlTab()
     if #gems == 0 then
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "No spells currently memorized on your spell bar!")
     else
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "Check the box next to any spell to allow casting on Level <= 46 players (unchecked = 47+ / pets only):")
+        ImGui.Spacing()
         for idx, g in ipairs(gems) do
-            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("  [%d]", idx))
+            local chkVal = (ctrl.allowLowLevel and ctrl.allowLowLevel[g.name] == true)
+            local newChk, chkChanged = ImGui.Checkbox(string.format("##allowLow_%d", idx), chkVal)
+            if chkChanged then
+                if not ctrl.allowLowLevel then ctrl.allowLowLevel = {} end
+                ctrl.allowLowLevel[g.name] = newChk
+                saveConfig(true)
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("[%d]", idx))
             ImGui.SameLine()
             ImGui.Text(string.format("%s (Gem %d)", g.name, g.gem))
+            ImGui.SameLine()
+            if chkVal then
+                ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "[Allowed on Lvl <= 46]")
+            else
+                ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "[Lvl 47+ / Pet Only]")
+            end
         end
     end
 

@@ -2,17 +2,45 @@
 
 ## 2026-08-23
 
+- **NavMesh Unpathable Mob Loop & Erroneous Repositioning Fix (`triune.lua`).**
+  - **Eliminated Erroneous `performMeshRecovery()` Loop**: Removed the flawed `performMeshRecovery()` routine and `runtime.meshPathFails` counter that incorrectly assumed the *player* was standing off the navmesh whenever candidate roaming spawns failed `mq.TLO.Navigation.PathExists()`. This bug caused characters to endlessly jump forward, backward, strafe left/right, and run `/nav reload` whenever unreachable mobs (e.g. on ledges, in locked rooms, or across unmeshed gaps) existed in the zone.
+  - **Smart Unreachable Mob Caching (`markUnreachable`)**: In `findRoamTarget()`, when `Navigation.PathExists('id ' .. sid)` returns false for a distant spawn, that specific NPC is now marked unreachable via `markUnreachable(sid)` (60-second TTL). This immediately skips that spawn on subsequent scan passes without lagging the navigation engine.
+  - **Unblocked Waypoint & Idle Fallthrough**: Cleaned up `pullerTick()` and `combatTick()` (Hunter mode) roam fallthroughs, allowing characters to smoothly advance to waypoint patrols (`runtime.wpTick()`) or wait for spawns rather than getting trapped in repositioning loops.
+- **Pet Summon Recasting & Auto-Association Fix (`triune.lua`, v1.6.14).**
+  - **Self-Healing `conditionMet('missing pet')`**: Overhauled `'missing pet'` trigger condition evaluation. Instead of exclusively checking `petState.myPets[cls]`, `conditionMet` now validates live pets via `mq.TLO.Me.Pet.ID()` and `getAllMyPets()`. If the character already has an active living pet belonging to them and unclaimed by another pet class, it is automatically claimed for that class and returns `false`, eliminating infinite pet summon recasting loops.
+  - **Isolated `petState.lastCastCls` Tracking**: Restricted `petState.lastCastCls` assignment to pet-summoning actions (`when == 'missing pet'` or `kind == 'pet'`) in `castGem`. Removed conflicting `lastCastCls` assignments from `fireAA`, `fireDisc`, and `fireSkill` so non-pet abilities no longer overwrite the class tag during long pet cast times.
+  - **Robust Combat Tick Pet Assignment**: Enhanced `combatTick` pet observation on spawn to clear `lastCastCls` upon assignment and fall back to assigning newly detected pets to the first unassigned pet class in the trio if `lastCastCls` was not explicitly set (e.g. manual summoning).
+  - **Spell Categorization Refinement (`mapTLOCategoryToKind`)**: Beneficial spells with active duration (`dur > 0`) are now correctly categorized as `buff` / `pet_buff` (defaulting to `target = 'F: Pet'`, `when = 'missing buff'`), preventing pet buffs (e.g. `Burnout`, `Pet Haste`, `Companion's Health`) and player buffs (e.g. `Elemental Armor`, `Elemental Shield`) from being misclassified as pet summons (`kind = 'pet'`) with impossible-to-satisfy `'missing pet'` triggers.
+  - **Type-Safe Numeric Comparisons & Lockout Guards**: Added `tonumber()` coercion guards across `isDiscReady`, `isSkillReady`, `fireAA`, `fireDisc`, `castGem`, `createCastTracker`, and the `table.sort` priority comparator for `eligibleDiscs`, resolving the runtime `combatTick failed: attempt to compare number with string` error.
+  - **Project Version Bump (v1.6.14)**: Bumped version to **1.6.14** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+- **Multi-Pet Health Tracking & Smart Heal Targeting (`triune.lua`, v1.6.13).**
+  - **Dynamic Multi-Pet Discovery (`getAllMyPets`)**: Added `getAllMyPets()` to collect all active living pets belonging to the character by combining `mq.TLO.Me.Pet.ID()`, the multi-class `petState.myPets` table, and scanning nearby friendly spawns verified via `isSpawnMyPet()`.
+  - **Smart Pet Target Resolution (`resolvePetTargetId`)**: Overhauled pet target resolution for gems, AAs, and discs configured with target `F: Pet`:
+    - **HP-based Heals (`HP <=`, `target HP <=`)**: Evaluates the health percentages of *all* active player pets and targets the pet with the lowest HP percentage, ensuring heals (Cleric, Druid, Shaman, or Magician/Necromancer pet heals) cast no matter which pet took damage.
+    - **Buffing (`missing buff`)**: Targets any player pet that is currently missing the specified buff.
+    - **Curing (`has Poison/Disease`)**: Targets any player pet currently afflicted with poison or disease debuffs.
+  - **Context-Aware `resolveTargetId` Dispatch**: Updated `resolveTargetId` calls across AA, Disc, and Gem evaluation loops in `combatTick` and `reconcileSungBuffs` to pass condition type (`when`), spell/ability name, and threshold percentage.
+  - **Automatic Zone Pet Reconciliation**: Added `reconcilePets()` triggering upon zone changes in the main loop so pets that survive zoning are immediately indexed without requiring a script reload or re-summoning.
+  - **Project Version Bump (v1.6.13)**: Bumped version to **1.6.13** across `triune.lua`, `triune_updater.lua`, and `README.md`.
 - **Updater Phantom-Update Fix (`triune_updater.lua`).**
   - Synced the updater's embedded `VERSION` constant from 1.6.7 to 1.6.12 to match the suite version. The updater compares its own VERSION against the latest GitHub release tag, so the stale constant made every fresh install report "New version available" on first run.
+- **Chat Color Code Normalization (`triune.lua`).**
+  - Replaced 4 raw ANSI escape sequences (`\127[31m` / `\127[33m`) in class-detection and cast-lockout messages with the MacroQuest-native color codes (`\ar` / `\ay` / `\ax`) used everywhere else in the suite, so messages render correctly instead of printing control characters.
 - **Tool-Launch Deduplication (`triune.lua`).**
   - Consolidated 14 identical copy-pasted "stop-if-running / run-if-stopped" tool-launch blocks (header toolbar, Mini HUD, and slash-command handler) into a single new `toggleTool(scriptName, stopCmd)` helper. All original chat messages and the DPS parser's `/dps toggle` special case are preserved exactly.
 - **CI Pipeline (`.github/workflows/ci.yml`).**
   - Added a LuaJIT bytecode-compile (`luajit -bl`) syntax check across every `.lua` file in `mq2triune/`, catching Lua 5.1/LuaJIT-incompatible syntax before release.
   - Added a version-consistency gate that fails CI if `triune.lua`, `triune_updater.lua`, and `README.md` ever drift apart in version.
-- **Documentation Accuracy (`AGENTS.md`).**
-  - Corrected the file map (all 8 modules + kissedit), replaced the stale `3.25-commonmod` version reference with the real 1.6.12 sync rule, documented the intentional per-file theme duplication policy, and added a "do not migrate binaries to Git LFS" constraint explaining how LFS pointer files would corrupt release zips and updater downloads.
+- **Buffbot User-Controlled Low-Level (<= 46) Buff Checkboxes (`triune_buffbot.lua`, v1.5).**
+  - **Per-Spell Low-Level Checkboxes in Controls Tab**: Added an intuitive checkbox next to every memorized spell gem in the Controls tab. Checking the box designates that the spell can land on players Level 46 and below. Unchecked spells are restricted to players Level 47+ (and cast on pets of any level).
+  - **Character Config Persistence (`ctrl.allowLowLevel`)**: Checkbox states are automatically saved and loaded per character/server in `triune_buffbot_config.lua` across sessions.
+  - **Requester Level Tell Menu Annotations**: Requesters Level <= 46 receive tell menus clearly distinguishing low-level eligible buffs from high-level/pet-only buffs (`[47+/Pet]`).
+  - **Player & Multi-Target Request Validation**: When requesters Level <= 46 request buffs in `player` or `both` modes, unchecked spells are skipped for the player with clear feedback tells, while `both` and `pet` modes continue to cast all requested buffs on their pets without restriction.
+  - **Pre-Cast Execution Safety Guard**: Re-verifies player target level and checkbox state immediately before casting in `processBuffQueue`, preventing wasted mana, fizzles, or spell bouncing.
+  - **Casting Loop Latency & Dead-Time Elimination**: Removed the hardcoded 800ms post-cast sleep, redundant target-acquisition pauses, and duplicate `/face fast` delays in `processBuffQueue`. Replaced them with reactive 50ms spell readiness / global cooldown polling (`mq.TLO.Me.SpellReady()`), casting subsequent buffs instantaneously as soon as the client GCD clears.
+  - **Cooldown Skip Guard (> 30s)**: Added `getSpellCooldownSec` using `mq.TLO.Me.GemTimer()`. If a requested spell has more than 30 seconds of recast cooldown remaining, it is immediately skipped with a notification tell to avoid blocking the queue. Tell menus also display active cooldowns > 30s.
 
-> **TLDR:** Fixed phantom-update reports from a stale updater version, deduplicated 14 tool-launch blocks into one helper, and added CI syntax/version gates.
+> **TLDR:** Added multi-pet health tracking and smart pet heal/buff targeting across all trio pets (v1.6.13), added user-controlled low-level buff checkboxes to Buffbot, eliminated cast dead-time, and added automatic skipping of spells with > 30s recast cooldowns.
 
 ---
 

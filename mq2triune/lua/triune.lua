@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.6.12'
+local VERSION           = '1.6.14'
 local open              = true
 local cfg               = mq.configDir
 
@@ -145,6 +145,9 @@ local isCombat               -- forward declaration for lexical scoping in helpe
 local buffActive             -- forward declaration for lexical scoping in helpers
 local updateMapRadiusVisuals -- forward declaration for lexical scoping in UI & helpers
 local clearMapRadiusVisuals  -- forward declaration for lexical scoping in UI & helpers
+local isPoisonedOrDiseased   -- forward declaration for lexical scoping in helpers
+local getAllMyPets           -- forward declaration for lexical scoping in helpers
+local resolvePetTargetId     -- forward declaration for lexical scoping in helpers
 
 local function isDucking()
     local d = false
@@ -382,9 +385,7 @@ local stuckState = {
     lastStuckRecoveryAt = nil,
     lastCombatStallRecoveryAt = nil,
     lastCannotSeeAt = 0,
-    cannotSeeAttempts = 0,
-    lastMeshRecoveryAt = nil,
-    meshAttempts = 0
+    cannotSeeAttempts = 0
 }
 
 -- Full-stop and onZoned: reset every movement/combat command and stale state.
@@ -494,6 +495,7 @@ end
 local function defaultsForKind(kind, bene)
     if kind == 'heal' then return 'F: Myself', 'my HP <=', 75 end
     if kind == 'buff' then return 'F: Myself', 'missing buff', 100 end
+    if kind == 'pet_buff' then return 'F: Pet', 'missing buff', 100 end
     if kind == 'pet' then return 'F: Myself', 'missing pet', 100 end
     if kind == 'util' then return 'F: Myself', 'always', 100 end
     if kind == 'debuff' then return 'E: Current Target', 'target HP <=', 98 end
@@ -883,14 +885,14 @@ local function classesFromInventoryWindow(loud, force)
 
     if #found > 0 then
         if loud then
-            print(string.format('\127[33m[Triune]\127[r Detected %d class(es) from InventoryWindow: %s', #found,
+            print(string.format('\ay[Triune]\ax Detected %d class(es) from InventoryWindow: %s', #found,
                 table.concat(found, ', ')))
         end
         return found
     end
 
     if loud then
-        print('\127[31m[Triune]\127[r InventoryWindow returned no classes.')
+        print('\ar[Triune]\ax InventoryWindow returned no classes.')
     end
     return nil
 end
@@ -904,7 +906,7 @@ local function detectClasses(loud)
         local norm = toCanonicalClassAbbr(mainClass)
         if norm then
             if loud then
-                print(string.format('\127[33m[Triune]\127[r Single-class character fallback (%s).', norm))
+                print(string.format('\ay[Triune]\ax Single-class character fallback (%s).', norm))
             end
             return { norm }
         end
@@ -970,23 +972,51 @@ local function isSpawnMyPet(s_or_id)
     return isMine
 end
 
--- Returns true if the player currently has an active living pet (or any live trio pet in petState.myPets)
-hasActivePet = function()
+-- Collects and returns all living spawn IDs belonging to the player (multi-pet support for trio classes)
+getAllMyPets = function()
+    local pets = {}
+    local seen = {}
+    local function addPet(id)
+        if id and id > 0 and not seen[id] and isSpawnAlive(id) and isSpawnMyPet(id) then
+            seen[id] = true
+            pets[#pets + 1] = id
+        end
+    end
+
     local myPetId = 0
     pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
-    if myPetId > 0 and isSpawnAlive(myPetId) then
-        return true
-    end
+    if myPetId > 0 then addPet(myPetId) end
+
     if petState and type(petState.myPets) == 'table' then
         for k, petId in pairs(petState.myPets) do
-            if petId and petId > 0 and isSpawnAlive(petId) and isSpawnMyPet(petId) then
-                return true
-            elseif petId and petId > 0 and not isSpawnAlive(petId) then
-                petState.myPets[k] = nil
+            if petId and petId > 0 then
+                if isSpawnAlive(petId) and isSpawnMyPet(petId) then
+                    addPet(petId)
+                else
+                    petState.myPets[k] = nil
+                end
             end
         end
     end
-    return false
+
+    pcall(function()
+        local count = mq.TLO.SpawnCount('pet radius 150')() or 0
+        for i = 1, count do
+            local s = mq.TLO.NearestSpawn(i, 'pet radius 150')
+            if s and s() then
+                local sid = s.ID() or 0
+                if sid > 0 then addPet(sid) end
+            end
+        end
+    end)
+
+    return pets
+end
+
+-- Returns true if the player currently has an active living pet (or any live trio pet in petState.myPets)
+hasActivePet = function()
+    local pets = getAllMyPets()
+    return #pets > 0
 end
 
 local function distToId(id)
@@ -1325,17 +1355,19 @@ local function createCastTracker()
 
     local function recordFailure(spellName, maxRetries, lockoutSec)
         if not spellName then return end
-        failureCount[spellName] = (failureCount[spellName] or 0) + 1
-        if failureCount[spellName] >= (maxRetries or 2) then
-            lockouts[spellName] = os.clock() + (lockoutSec or 30)
+        local mRetries = tonumber(maxRetries) or 2
+        local lSec = tonumber(lockoutSec) or 30
+        failureCount[spellName] = (tonumber(failureCount[spellName]) or 0) + 1
+        if failureCount[spellName] >= mRetries then
+            lockouts[spellName] = os.clock() + lSec
             failureCount[spellName] = 0
-            print(string.format('\127[31m[Triune]\127[r Lockout applied for "%s" (%ds)', spellName, lockoutSec or 30))
+            print(string.format('\ar[Triune]\ax Lockout applied for "%s" (%ds)', spellName, lSec))
         end
     end
 
     local function isLockedOut(spellName)
         if not spellName then return false end
-        local untilTime = lockouts[spellName]
+        local untilTime = tonumber(lockouts[spellName])
         if not untilTime then return false end
         if os.clock() < untilTime then return true end
         lockouts[spellName] = nil
@@ -1622,15 +1654,7 @@ local function mapTLOCategoryToKind(sp, name)
 
     local nmLower = name and name:lower() or ""
 
-    -- Check specific pet subcategories/categories, pet spell names, or pet buff spells (e.g. Burnout, Pet Haste, Pet Power)
-    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility'))
-        or subcatStr:find('burnout') or nmLower:find('burnout')
-        or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant')
-        or subcatStr:find('companion') or catStr:find('companion') or subcatStr:find('minion') or catStr:find('minion') then
-        return 'pet'
-    end
-
-    -- Extract Beneficial status early
+    -- Extract Beneficial status and Duration early
     local bene = true
     pcall(function()
         if tloSpell then
@@ -1642,14 +1666,40 @@ local function mapTLOCategoryToKind(sp, name)
         end
     end)
 
-    -- Check player buffs / damage shields / haste spells (Celerity, Alacrity, Haste, Swift, Shield of Lava, etc.)
-    if bene then
+    local dur = 0
+    pcall(function()
+        if tloSpell and tloSpell.Duration then
+            dur = tonumber(tloSpell.Duration() or 0) or 0
+        elseif sp and sp.Duration then
+            dur = tonumber(sp.Duration() or 0) or 0
+        end
+    end)
+    dur = tonumber(dur) or 0
+
+    -- Timed beneficial buffs on pets (Burnout, Pet Haste, Pet Power, Companion's Aegis, etc.)
+    if bene and dur > 0 then
+        if subcatStr:find('pet') or catStr:find('pet') or subcatStr:find('burnout') or nmLower:find('burnout') then
+            return 'pet_buff'
+        end
         if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield')
             or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield')
             or subcatStr:find('haste') or catStr:find('haste')
-            or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste') or nmLower:find('swift') then
+            or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste')
+            or nmLower:find('swift') or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant') then
             return 'buff'
         end
+    end
+
+    -- True pet summoning spells: check SPA 103 or instant duration pet summon categories/names
+    if checkHasSPA(tloSpell, name, sp, 103) then return 'pet' end
+
+    if dur == 0 and (subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility'))
+        or nmLower:find('summoning') or nmLower:find('animate dead') or nmLower:find('cavorting bones')
+        or nmLower:find('bone walk') or nmLower:find('leering corpse') or nmLower:find('convoke shadow')
+        or nmLower:find('servant of bones') or nmLower:find('minion of') or nmLower:find('companion of spirit')
+        or nmLower:find("nature's companion") or nmLower:find('animation') or nmLower:find('spirit of sharik')
+        or nmLower:find('spirit of khaliz') or nmLower:find('warder')) then
+        return 'pet'
     end
 
     -- Debuff Check for resist debuffs (Mala, Malo, Malosi, Tash, etc.)
@@ -1670,19 +1720,15 @@ local function mapTLOCategoryToKind(sp, name)
     end
 
     -- 2. SPA-based checks (most authoritative for non-beneficial SPA mechanics)
-    if checkHasSPA(tloSpell, name, sp, 103) then return 'pet' end
     if checkHasSPA(tloSpell, name, sp, 32) or checkHasSPA(tloSpell, name, sp, 108) or checkHasSPA(tloSpell, name, sp, 33) then
-        return
-        'util'
+        return 'util'
     end
     if checkHasSPA(tloSpell, name, sp, 83) or checkHasSPA(tloSpell, name, sp, 88) or checkHasSPA(tloSpell, name, sp, 12) or checkHasSPA(tloSpell, name, sp, 41) or checkHasSPA(tloSpell, name, sp, 29) or checkHasSPA(tloSpell, name, sp, 30) then
-        return
-        'util'
+        return 'util'
     end
     if checkHasSPA(tloSpell, name, sp, 81) or checkHasSPA(tloSpell, name, sp, 91) then return 'util' end
     if checkHasSPA(tloSpell, name, sp, 18) or checkHasSPA(tloSpell, name, sp, 22) or checkHasSPA(tloSpell, name, sp, 31) then
-        return
-        'util'
+        return 'util'
     end
     if not bene then
         if checkHasSPA(tloSpell, name, sp, 11) or checkHasSPA(tloSpell, name, sp, 46) or checkHasSPA(tloSpell, name, sp, 23)
@@ -1717,7 +1763,7 @@ local function filteredSpells(abbr)
     if not abbr then
         return {}, {}
     end
-    local KIND_LABEL = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet = 'Pet', util = 'Util', debuff = 'Debuff' }
+    local KIND_LABEL = { dd = 'DD', dot = 'DoT', heal = 'Heal', buff = 'Buff', pet_buff = 'PetBuff', pet = 'Pet', util = 'Util', debuff = 'Debuff' }
     local now = os.clock()
     local scribedOnly = ctrl and ctrl.scribed_only or false
 
@@ -4858,7 +4904,54 @@ local function maTargetId()
     return t.ID()
 end
 
-local function resolveTargetId(token, cls)
+resolvePetTargetId = function(when, spellName, cls, pct)
+    local allPets = getAllMyPets()
+    if #allPets == 0 then return nil end
+    if #allPets == 1 then return allPets[1] end
+
+    -- HP-based condition (healing): find lowest HP% pet among all player pets
+    if when == 'HP <=' or when == 'target HP <=' or when == 'my HP <=' then
+        local lowestPetId = nil
+        local lowestHp = 9999
+        for _, pid in ipairs(allPets) do
+            local hp = pctHP(pid)
+            if hp < lowestHp then
+                lowestHp = hp
+                lowestPetId = pid
+            end
+        end
+        return lowestPetId or allPets[1]
+    end
+
+    -- Buff condition: find pet missing the buff
+    if when == 'missing buff' and spellName and spellName ~= '' then
+        for _, pid in ipairs(allPets) do
+            if not runtime.sungBuffs[sungKey(spellName, pid)] and not buffActive(pid, spellName) then
+                return pid
+            end
+        end
+        return allPets[1]
+    end
+
+    -- Cure condition: find pet with affliction
+    if when == 'has Poison/Disease' and isPoisonedOrDiseased then
+        for _, pid in ipairs(allPets) do
+            if isPoisonedOrDiseased(pid) then
+                return pid
+            end
+        end
+        return allPets[1]
+    end
+
+    -- If class-specific pet is requested and alive, prefer it; otherwise return first pet
+    if cls and petState.myPets[cls] and isSpawnAlive(petState.myPets[cls]) then
+        return petState.myPets[cls]
+    end
+
+    return allPets[1]
+end
+
+local function resolveTargetId(token, cls, when, spellName, pct)
     local b = baseTok(token)
     local id
     if b == 'Myself' or b == 'Whole Group' then
@@ -4868,9 +4961,7 @@ local function resolveTargetId(token, cls)
     elseif b == 'Lowest-HP Ally' then
         id = lowestHpAlly()
     elseif b == 'Pet' then
-        local p = (cls and petState.myPets[cls] and isSpawnAlive(petState.myPets[cls]) and petState.myPets[cls]) or
-            (mq.TLO.Me.Pet.ID() or 0)
-        id = (p and p > 0) and p or nil
+        id = resolvePetTargetId(when, spellName, cls, pct)
     elseif b == 'Current Target' then
         id = mq.TLO.Target.ID()
     elseif b == 'Assist Target' then
@@ -4939,7 +5030,7 @@ local function reconcileSungBuffs()
                 local bene = false
                 pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
                 if bene then
-                    local id = resolveTargetId(g.target, g.cls)
+                    local id = resolveTargetId(g.target, g.cls, g.when, g.spell, gpct)
                     if id and buffActive(id, g.spell) then
                         local key = sungKey(g.spell, id)
                         if not runtime.sungBuffs[key] then
@@ -4962,11 +5053,11 @@ local function reconcilePets()
     for _, c in ipairs(myClasses) do if PET_CLASSES[c] then petClassList[#petClassList + 1] = c end end
     if #petClassList == 0 then return end
     local n = 0
-    pcall(function() n = mq.TLO.SpawnCount('pet radius 100')() or 0 end)
+    pcall(function() n = mq.TLO.SpawnCount('pet radius 150')() or 0 end)
     local assigned = 0
     for i = 1, n do
         if assigned >= #petClassList then break end
-        local s = mq.TLO.NearestSpawn(i, 'pet radius 100')
+        local s = mq.TLO.NearestSpawn(i, 'pet radius 150')
         if s and s() and s.ID() and isSpawnMyPet(s) then
             assigned = assigned + 1
             petState.myPets[petClassList[assigned]] = s.ID()
@@ -4974,7 +5065,7 @@ local function reconcilePets()
         end
     end
     if assigned > 0 then
-        print('\ag[Triune]\ax found ' .. assigned .. ' existing pet(s) on load -- wont re-summon them.')
+        print('\ag[Triune]\ax found ' .. assigned .. ' existing pet(s) -- tracking ' .. assigned .. ' pet(s).')
     end
 end
 
@@ -5139,11 +5230,55 @@ local function conditionMet(when, pct, spellName, targetId, cls)
     -- otherwise summoning class A's pet would make class B's gem think it
     -- already has one too, per class C never gets cast ("cast one, gave up").
     if when == 'missing pet' then
-        if not cls then
-            local petId = mq.TLO.Me.Pet.ID()
-            return not petId or petId == 0
+        -- 1. If we have an alive tracked pet for this specific class, pet is NOT missing
+        if cls and petState.myPets[cls] and isSpawnAlive(petState.myPets[cls]) then
+            return false
         end
-        return not isSpawnAlive(petState.myPets[cls])
+
+        -- 2. If Me.Pet is alive and belongs to us, check if it can satisfy this class
+        local curPetId = 0
+        pcall(function() curPetId = mq.TLO.Me.Pet.ID() or 0 end)
+        if curPetId > 0 and isSpawnAlive(curPetId) and isSpawnMyPet(curPetId) then
+            local petClasses = {}
+            for _, c in ipairs(myClasses) do if PET_CLASSES[c] then petClasses[#petClasses + 1] = c end end
+            if #petClasses <= 1 or not cls then
+                if cls then petState.myPets[cls] = curPetId end
+                return false
+            end
+            local claimedByOther = false
+            for k, pid in pairs(petState.myPets) do
+                if k ~= cls and pid == curPetId and isSpawnAlive(pid) then
+                    claimedByOther = true
+                    break
+                end
+            end
+            if not claimedByOther and cls then
+                petState.myPets[cls] = curPetId
+                return false
+            end
+        end
+
+        -- 3. Check all nearby living pets belonging to us
+        local allPets = getAllMyPets()
+        if cls then
+            for _, pid in ipairs(allPets) do
+                local claimedByOther = false
+                for k, cpid in pairs(petState.myPets) do
+                    if k ~= cls and cpid == pid and isSpawnAlive(cpid) then
+                        claimedByOther = true
+                        break
+                    end
+                end
+                if not claimedByOther then
+                    petState.myPets[cls] = pid
+                    return false
+                end
+            end
+        elseif #allPets > 0 then
+            return false
+        end
+
+        return true
     end
     if when == 'ally is Dead' then
         local s = mq.TLO.Spawn(targetId); return s() and s.Dead()
@@ -5197,7 +5332,7 @@ local function castGem(i, g, id)
     end
     if castTracker.isLockedOut(g.spell) then return false end
     local key = 'g' .. i
-    if (os.clock() - (runtime.lastCast[key] or 0)) < 1.2 then return false end
+    if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.2 then return false end
     local sp = mq.TLO.Spell(g.spell)
     if not sp() then return false end
     local isMemmed = false
@@ -5205,8 +5340,12 @@ local function castGem(i, g, id)
         isMemmed = isGemMatching(i, g.spell) or (mq.TLO.Me.Gem(g.spell)() ~= nil)
     end)
     if not isMemmed then return false end -- not memmed
-    if (mq.TLO.Me.CurrentMana() or 0) < (sp.Mana() or 0) then return false end
-    if not ctrl.burn and (ctrl.min_mana_pct or 0) > 0 and (mq.TLO.Me.PctMana() or 100) < (ctrl.min_mana_pct or 0) then return false end
+    local spMana = tonumber(sp.Mana() or 0) or 0
+    local curMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
+    if curMana < spMana then return false end
+    local minMana = tonumber(ctrl and ctrl.min_mana_pct) or 0
+    local pctMana = tonumber(mq.TLO.Me.PctMana() or 100) or 100
+    if not ctrl.burn and minMana > 0 and pctMana < minMana then return false end
     if not mq.TLO.Me.SpellReady(g.spell)() then return false end
 
     local dur = 0
@@ -5239,7 +5378,9 @@ local function castGem(i, g, id)
     end
     mq.cmdf('/cast "%s"', g.spell)
     runtime.lastCast[key] = os.clock()
-    petState.lastCastCls = g.cls
+    if g.when == 'missing pet' or g.kind == 'pet' then
+        petState.lastCastCls = g.cls
+    end
     if g.cls == 'Brd' then
         if sp.Beneficial() then
             local waited = 0
@@ -5259,6 +5400,7 @@ local function castGem(i, g, id)
         else
             local castMs = 0
             pcall(function() castMs = sp.CastTime() or 0 end)
+            castMs = tonumber(castMs) or 0
             if castMs <= 0 or castMs > 6000 then castMs = 2000 end
             mq.delay(castMs + 300)
             mq.cmd('/stopsong')
@@ -5279,17 +5421,20 @@ local function fireAA(name, a, id)
         mq.cmd('/stand')
     end
     local key = 'a' .. name
-    if (os.clock() - (runtime.lastCast[key] or 0)) < 1.5 then return false end
+    if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.5 then return false end
     local aa = mq.TLO.Me.AltAbility(name)
     if not aa() then return false end
-    if (aa.Rank() or 0) <= 0 then return false end
+    local aaRank = tonumber(aa.Rank() or 0) or 0
+    if aaRank <= 0 then return false end
     if not mq.TLO.Me.AltAbilityReady(name)() then return false end
     local ok, sp = pcall(function() return aa.Spell end)
     if ok and sp and sp() then
-        local endCost = sp.EnduranceCost() or 0
-        local manaCost = sp.Mana() or 0
-        if endCost > 0 and (mq.TLO.Me.CurrentEndurance() or 0) < endCost then return false end
-        if manaCost > 0 and (mq.TLO.Me.CurrentMana() or 0) < manaCost then return false end
+        local endCost = tonumber(sp.EnduranceCost() or 0) or 0
+        local manaCost = tonumber(sp.Mana() or 0) or 0
+        local curEnd = tonumber(mq.TLO.Me.CurrentEndurance() or 0) or 0
+        local curMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
+        if endCost > 0 and curEnd < endCost then return false end
+        if manaCost > 0 and curMana < manaCost then return false end
     end
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
@@ -5298,7 +5443,6 @@ local function fireAA(name, a, id)
     clearCursor()
     mq.cmdf('/alt act %d', aa.ID())
     runtime.lastCast[key] = os.clock()
-    petState.lastCastCls = a.cls
     print('\ag[Triune]\ax AA fired: ' .. name)
     if not selfCast and orig ~= id then
         mq.delay(60)
@@ -5315,14 +5459,14 @@ runtime.isDiscReady = function(name)
 
     -- 1. Software timers: lockouts from previous cast duration / cooldown
     local now = os.clock()
-    if runtime.discExpires and runtime.discExpires[name] and now < runtime.discExpires[name] then
+    if runtime.discExpires and runtime.discExpires[name] and now < (tonumber(runtime.discExpires[name]) or 0) then
         return false
     end
-    if runtime.discCooldown and runtime.discCooldown[name] and now < runtime.discCooldown[name] then
+    if runtime.discCooldown and runtime.discCooldown[name] and now < (tonumber(runtime.discCooldown[name]) or 0) then
         return false
     end
     local key = 'd' .. name
-    if runtime.lastCast[key] and now < runtime.lastCast[key] then
+    if runtime.lastCast[key] and now < (tonumber(runtime.lastCast[key]) or 0) then
         return false
     end
 
@@ -5344,12 +5488,12 @@ runtime.isDiscReady = function(name)
         local sec = 0
         pcall(function()
             if type(timerVal.TotalSeconds) == 'function' then
-                sec = timerVal.TotalSeconds() or 0
+                sec = tonumber(timerVal.TotalSeconds() or 0) or 0
             elseif type(timerVal.TotalSeconds) == 'number' then
-                sec = timerVal.TotalSeconds
+                sec = tonumber(timerVal.TotalSeconds) or 0
             elseif timerVal() then
                 local v = timerVal()
-                if type(v) == 'number' then sec = v end
+                sec = tonumber(v) or 0
             end
         end)
         if sec > 0 then return false end
@@ -5363,12 +5507,13 @@ runtime.isDiscReady = function(name)
         local endCost = 0
         local durTicks = 0
         pcall(function()
-            endCost = sp.EnduranceCost() or 0
-            durTicks = sp.Duration() or sp.MyDuration() or 0
+            endCost = tonumber(sp.EnduranceCost() or 0) or 0
+            durTicks = tonumber(sp.Duration() or sp.MyDuration() or 0) or 0
             local tt = sp.TargetType()
-            if tt and tt:lower() ~= 'self' then isSelfTarget = false end
+            if tt and tostring(tt):lower() ~= 'self' then isSelfTarget = false end
         end)
-        if endCost > 0 and (mq.TLO.Me.CurrentEndurance() or 0) < endCost then
+        local myEnd = tonumber(mq.TLO.Me.CurrentEndurance() or 0) or 0
+        if endCost > 0 and myEnd < endCost then
             return false
         end
         if durTicks > 0 then
@@ -5382,7 +5527,7 @@ runtime.isDiscReady = function(name)
         local adId = 0
         local adName = nil
         pcall(function()
-            adId = ad.ID() or 0
+            adId = tonumber(ad.ID() or 0) or 0
             adName = ad.Name()
         end)
         if adId > 0 or (adName and adName ~= '' and adName ~= 'NULL') then
@@ -5401,10 +5546,10 @@ runtime.isDiscReady = function(name)
     local buffFound = false
     pcall(function()
         local b = mq.TLO.Me.Buff(name)
-        if b and b() and (b.Duration() or 0) > 0 then buffFound = true end
+        if b and b() and (tonumber(b.Duration() or 0) or 0) > 0 then buffFound = true end
         if not buffFound then
             local s = mq.TLO.Me.Song(name)
-            if s and s() and (s.Duration() or 0) > 0 then buffFound = true end
+            if s and s() and (tonumber(s.Duration() or 0) or 0) > 0 then buffFound = true end
         end
     end)
     if buffFound then return false end
@@ -5416,7 +5561,7 @@ runtime.isSkillReady = function(name)
     if not name or name == '' then return false end
     local now = os.clock()
     local key = 's' .. name
-    if runtime.lastCast[key] and now < runtime.lastCast[key] then return false end
+    if runtime.lastCast[key] and now < (tonumber(runtime.lastCast[key]) or 0) then return false end
     local readyOk, isReady = pcall(function() return mq.TLO.Me.AbilityReady(name)() end)
     if readyOk and isReady == false then return false end
     local timerOk, timerVal = pcall(function() return mq.TLO.Me.AbilityTimer(name) end)
@@ -5424,12 +5569,12 @@ runtime.isSkillReady = function(name)
         local sec = 0
         pcall(function()
             if type(timerVal.TotalSeconds) == 'function' then
-                sec = timerVal.TotalSeconds() or 0
+                sec = tonumber(timerVal.TotalSeconds() or 0) or 0
             elseif type(timerVal.TotalSeconds) == 'number' then
-                sec = timerVal.TotalSeconds
+                sec = tonumber(timerVal.TotalSeconds) or 0
             elseif timerVal() then
                 local v = timerVal()
-                if type(v) == 'number' then sec = v end
+                sec = tonumber(v) or 0
             end
         end)
         if sec > 0 then return false end
@@ -5458,14 +5603,15 @@ runtime.fireDisc = function(name, a, id)
     pcall(function()
         local sp = mq.TLO.Spell(name)
         if sp and sp() then
-            local ticks = sp.Duration() or sp.MyDuration() or 0
+            local ticks = tonumber(sp.Duration() or sp.MyDuration() or 0) or 0
             if ticks > 0 then durSec = ticks * 6 end
             local rt = sp.RecastTime() or 0
-            if type(rt) == 'number' then
-                if rt > 1800 then recastSec = rt / 1000 else recastSec = rt end
+            if type(rt) == 'number' or tonumber(rt) then
+                local numRt = tonumber(rt) or 0
+                if numRt > 1800 then recastSec = numRt / 1000 else recastSec = numRt end
             end
             if recastSec == 0 and type(sp.RecastTime) == 'userdata' then
-                local ts = sp.RecastTime.TotalSeconds() or 0
+                local ts = tonumber(sp.RecastTime.TotalSeconds() or 0) or 0
                 if ts > 0 then recastSec = ts end
             end
         end
@@ -5476,11 +5622,11 @@ runtime.fireDisc = function(name, a, id)
         if cat and cat() then
             local ts = 0
             if type(cat.TotalSeconds) == 'function' then
-                ts = cat.TotalSeconds() or 0
+                ts = tonumber(cat.TotalSeconds() or 0) or 0
             elseif type(cat.TotalSeconds) == 'number' then
-                ts = cat.TotalSeconds
-            elseif type(cat) == 'number' then
-                ts = cat
+                ts = tonumber(cat.TotalSeconds) or 0
+            elseif type(cat) == 'number' or tonumber(cat) then
+                ts = tonumber(cat) or 0
             end
             if ts > recastSec then recastSec = ts end
         end
@@ -5496,7 +5642,6 @@ runtime.fireDisc = function(name, a, id)
     if recastSec > 0 then runtime.discCooldown[name] = now + recastSec end
     runtime.lastCast[key] = now + lockSec
 
-    petState.lastCastCls = a.cls
     print('\ag[Triune]\ax discipline fired: ' .. name)
     if not selfCast and orig ~= id then
         mq.delay(60)
@@ -5527,13 +5672,19 @@ runtime.fireSkill = function(name, a, id)
     pcall(function()
         local t = mq.TLO.Me.AbilityTimer(name)
         if t and t() then
-            local ts = (type(t.TotalSeconds) == 'function' and t.TotalSeconds()) or (type(t) == 'number' and t) or 0
+            local ts = 0
+            if type(t.TotalSeconds) == 'function' then
+                ts = tonumber(t.TotalSeconds() or 0) or 0
+            elseif type(t.TotalSeconds) == 'number' then
+                ts = tonumber(t.TotalSeconds) or 0
+            elseif type(t) == 'number' or tonumber(t) then
+                ts = tonumber(t) or 0
+            end
             if ts > 0 then cd = ts end
         end
     end)
     runtime.lastCast[key] = now + cd
 
-    petState.lastCastCls = a.cls
     print('\ag[Triune]\ax skill fired: ' .. name)
     if not selfCast and orig ~= id then
         mq.delay(60)
@@ -6162,49 +6313,6 @@ local function performUnstuck()
     pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil -- force a fresh /nav command next tick
 end
 
-local function performMeshRecovery()
-    local now = os.clock()
-    if (now - (stuckState.lastMeshRecoveryAt or 0)) < 2.5 then return end
-    stuckState.lastMeshRecoveryAt = now
-    stuckState.meshAttempts = (stuckState.meshAttempts or 0) + 1
-
-    print(string.format(
-        '\ay[Triune]\ax NavMesh pathing blocked from current position (attempt %d) -- repositioning to nearest mesh.',
-        stuckState.meshAttempts))
-
-    stopMoving()
-
-    if stuckState.meshAttempts == 1 then
-        -- Step 1: Step forward and jump onto mesh
-        mq.cmd('/keypress forward hold')
-        mq.delay(300)
-        mq.cmd('/keypress forward')
-        mq.cmd('/keypress jump')
-    elseif stuckState.meshAttempts == 2 then
-        -- Step 2: Step backward and jump
-        mq.cmd('/keypress back hold')
-        mq.delay(400)
-        mq.cmd('/keypress back')
-        mq.cmd('/keypress jump')
-    elseif stuckState.meshAttempts == 3 then
-        -- Step 3: Strafe left
-        mq.cmd('/keypress strafe_left hold')
-        mq.delay(400)
-        mq.cmd('/keypress strafe_left')
-        mq.cmd('/keypress jump')
-    elseif stuckState.meshAttempts == 4 then
-        -- Step 4: Strafe right
-        mq.cmd('/keypress strafe_right hold')
-        mq.delay(450)
-        mq.cmd('/keypress strafe_right')
-        mq.cmd('/keypress jump')
-    else
-        -- Step 5: Reload navmesh in case mesh desynced
-        pcall(function() mq.cmd('/nav reload') end)
-        stuckState.meshAttempts = 0
-    end
-end
-
 local function checkStuck()
     local now = os.clock()
     if (now - stuckState.checkAt) < 1.0 then return end
@@ -6447,8 +6555,6 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local maxZ   = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
     local myZ    = mq.TLO.Me.Z() or 0
 
-    runtime.meshPathFails = 0
-
     -- 1. Check XTarget first (strictly constrained to max XTarget chase range and maxZ height diff)
     local maxXtarDist = (ctrl and ctrl.xtar_nav_dist) or 150
     if isCampMode and radius > 0 then
@@ -6501,7 +6607,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                                     local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
                                                     if ok and not hasPath then
                                                         pathOk = false
-                                                        runtime.meshPathFails = (runtime.meshPathFails or 0) + 1
+                                                        markUnreachable(sid)
                                                     end
                                                 end
                                             end
@@ -6607,8 +6713,6 @@ local function pullerTick()
         (ctrl.camp_radius or 100)
         local id = findRoamTarget(scanRadius, maxCampZ, ctrl.pull_min_level, ctrl.pull_max_level)
         if id and setTarget(id) then
-            stuckState.meshAttempts = 0
-            runtime.meshPathFails = 0
             if not runtime.verifyTargetCon(id, true) then
                 print(string.format(
                     '\ay[Triune]\ax Puller: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
@@ -6620,9 +6724,6 @@ local function pullerTick()
             stopMoving()
             runtime.pullTargetId = id; runtime.pullState = 'TO_MOB'
             pursuit.hasRetargeted = false
-        elseif (runtime.meshPathFails or 0) > 0 and not isMoveActive() then
-            performMeshRecovery()
-            runtime.meshPathFails = 0
         elseif hasWps and (ctrl.use_waypoints ~= false) then
             runtime.wpTick()
         end
@@ -7127,7 +7228,17 @@ local function combatTick()
 
     local curPetId = mq.TLO.Me.Pet.ID() or 0
     if curPetId ~= 0 and curPetId ~= petState.lastObservedId then
-        if petState.lastCastCls then petState.myPets[petState.lastCastCls] = curPetId end
+        if petState.lastCastCls then
+            petState.myPets[petState.lastCastCls] = curPetId
+            petState.lastCastCls = nil
+        else
+            for _, c in ipairs(myClasses) do
+                if PET_CLASSES[c] and (not petState.myPets[c] or not isSpawnAlive(petState.myPets[c])) then
+                    petState.myPets[c] = curPetId
+                    break
+                end
+            end
+        end
         petState.lastObservedId = curPetId
     elseif curPetId == 0 then
         petState.lastObservedId = 0
@@ -7296,16 +7407,11 @@ local function combatTick()
                     haveNPC = true
                     pursuit.wanderLoc = nil
                     pursuit.hasRetargeted = false
-                    stuckState.meshAttempts = 0
-                    runtime.meshPathFails = 0
                     runtime.lastHunterMsgKey = nil
                     print(string.format('\ay[Triune]\ax Puller (Hunt) target acquired: #%d (%s) dist %.1f',
                         id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
                 elseif not anyXtarAlive() then
-                    if (runtime.meshPathFails or 0) > 0 and not isMoveActive() then
-                        performMeshRecovery()
-                        runtime.meshPathFails = 0
-                    elseif hasWps then
+                    if hasWps then
                         runtime.wpTick()
                     else
                         if pursuit.wanderLoc then
@@ -7746,7 +7852,7 @@ local function combatTick()
             local aPct = tonumber(a.pct)
             if aPct == nil then aPct = 30 end
             if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and (numXtar >= (tonumber(a.min_xtar) or 1)) then
-                local id = resolveTargetId(a.target, a.cls)
+                local id = resolveTargetId(a.target, a.cls, a.when, name, aPct)
                 if id and conditionMet(a.when, aPct, name, id, a.cls) then
                     local isDet = isDetrimentalAction(name, a.target, a)
                     if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
@@ -7769,7 +7875,7 @@ local function combatTick()
             local dPct = tonumber(d.pct)
             if dPct == nil then dPct = 30 end
             if d.enabled and (dPct > 0) and (not d.burn_only or ctrl.burn) and (numXtar >= (tonumber(d.min_xtar) or 1)) then
-                local id = resolveTargetId(d.target, d.cls)
+                local id = resolveTargetId(d.target, d.cls, d.when, name, dPct)
                 if id and conditionMet(d.when, dPct, name, id, d.cls) then
                     local bossOk = true
                     if d.boss_only then
@@ -7788,7 +7894,7 @@ local function combatTick()
                 end
             end
         end
-        table.sort(eligibleDiscs, function(a, b) return (a.entry.priority or 50) < (b.entry.priority or 50) end)
+        table.sort(eligibleDiscs, function(a, b) return (tonumber(a.entry.priority) or 50) < (tonumber(b.entry.priority) or 50) end)
         for _, e in ipairs(eligibleDiscs) do
             local fired
             if isSpecialSkill(e.name) then
@@ -7850,7 +7956,7 @@ local function combatTick()
                 local burnOk = (not g.burn_only or ctrl.burn)
                 local lockedOut = castTracker.isLockedOut(g.spell)
                 if isEnabled and burnOk and xtOk and not lockedOut then
-                    local id = resolveTargetId(g.target, g.cls)
+                    local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal)
                     local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
                     if condOk then
                         local isDet = isDetrimentalAction(g.spell, g.target, g)
@@ -8462,6 +8568,7 @@ local function runMainLoop()
         local curZone = mq.TLO.Zone.ShortName()
         if curZone and curZone ~= '' and curZone ~= runtime.lastZoneShort then
             runtime.lastZoneShort = curZone
+            reconcilePets()
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
             end
