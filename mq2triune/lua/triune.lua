@@ -5318,9 +5318,9 @@ local function fireAA(name, a, id)
     if not mq.TLO.Me.AltAbilityReady(name)() then return false end
     local ok, sp = pcall(function() return aa.Spell end)
     if ok and sp and sp() then
-        local endCost = sp.EnduranceCost() or 0
-        local manaCost = sp.Mana() or 0
-        if endCost > 0 and (mq.TLO.Me.CurrentEndurance() or 0) < endCost then return false end
+        local endCost = tonumber(sp.EnduranceCost()) or 0
+        local manaCost = tonumber(sp.Mana()) or 0
+        if endCost > 0 and (tonumber(mq.TLO.Me.CurrentEndurance()) or 0) < endCost then return false end
         if manaCost > 0 and (mq.TLO.Me.CurrentMana() or 0) < manaCost then return false end
     end
     local selfCast = (id == mq.TLO.Me.ID())
@@ -5395,12 +5395,12 @@ runtime.isDiscReady = function(name)
         local endCost = 0
         local durTicks = 0
         pcall(function()
-            endCost = sp.EnduranceCost() or 0
-            durTicks = sp.Duration() or sp.MyDuration() or 0
+            endCost = tonumber(sp.EnduranceCost()) or 0
+            durTicks = tonumber(sp.Duration()) or tonumber(sp.MyDuration()) or 0
             local tt = sp.TargetType()
             if tt and tt:lower() ~= 'self' then isSelfTarget = false end
         end)
-        if endCost > 0 and (mq.TLO.Me.CurrentEndurance() or 0) < endCost then
+        if endCost > 0 and (tonumber(mq.TLO.Me.CurrentEndurance()) or 0) < endCost then
             return false
         end
         if durTicks > 0 then
@@ -5433,10 +5433,10 @@ runtime.isDiscReady = function(name)
     local buffFound = false
     pcall(function()
         local b = mq.TLO.Me.Buff(name)
-        if b and b() and (b.Duration() or 0) > 0 then buffFound = true end
+        if b and b() and (tonumber(b.Duration()) or 0) > 0 then buffFound = true end
         if not buffFound then
             local s = mq.TLO.Me.Song(name)
-            if s and s() and (s.Duration() or 0) > 0 then buffFound = true end
+            if s and s() and (tonumber(s.Duration()) or 0) > 0 then buffFound = true end
         end
     end)
     if buffFound then return false end
@@ -5490,7 +5490,7 @@ runtime.fireDisc = function(name, a, id)
     pcall(function()
         local sp = mq.TLO.Spell(name)
         if sp and sp() then
-            local ticks = sp.Duration() or sp.MyDuration() or 0
+            local ticks = tonumber(sp.Duration()) or tonumber(sp.MyDuration()) or 0
             if ticks > 0 then durSec = ticks * 6 end
             local rt = sp.RecastTime() or 0
             if type(rt) == 'number' then
