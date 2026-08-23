@@ -29,7 +29,7 @@ local bit          = require('bit') -- LuaJIT bitwise library
 local scriptDir    = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path       = scriptDir .. "?.lua;" .. package.path
 
-local VERSION      = '1.2'
+local VERSION      = '1.4'
 local cfg          = mq.configDir
 
 -- ============================================================================
@@ -136,24 +136,27 @@ local ctrl = {
     antiAfk       = true,
     maxRange      = 100,
     timeoutSec    = 30,
-    cooldownSec   = 1,
+    cooldownSec   = 3,
+    tellDelayMs   = 2500,
     minManaPct    = 15,
     completionMsg = "All buffs cast! Enjoy!"
 }
 
 local runtime = {
-    openGUI           = true,
-    state             = 'IDLE', -- STOPPED, IDLE, CASTING, MEDDING
-    pendingOffers     = {},     -- sender -> { timestamp = os.time(), spawnID = id, gems = list }
-    cooldowns         = {},     -- sender -> timestamp
-    activeQueue       = {},     -- array of { sender = name, targetName = name, targetID = id, isPet = bool, petName = str, gems = list }
-    outgoingTells     = {},     -- array of { target = name, msg = text }
-    lastTellSendTime  = 0,
-    lastAntiAfkTime   = os.time(),
-    currentRequester  = nil,
-    currentSpellsText = "",
-    log               = {},
-    pendingAction     = nil -- queued thread-safe UI actions
+    openGUI            = true,
+    state              = 'IDLE', -- STOPPED, IDLE, CASTING, MEDDING
+    pendingOffers      = {},     -- sender -> { timestamp = os.time(), spawnID = id, gems = list }
+    cooldowns          = {},     -- sender -> timestamp
+    activeQueue        = {},     -- array of { sender = name, targetName = name, targetID = id, isPet = bool, petName = str, gems = list }
+    outgoingTells      = {},     -- array of { target = name, msg = text }
+    lastTellSendTime   = 0,
+    lastAntiAfkTime    = os.time(),
+    lastSitAttemptTime = 0,
+    lastTablePruneTime = os.time(),
+    currentRequester   = nil,
+    currentSpellsText  = "",
+    log                = {},
+    pendingAction      = nil -- queued thread-safe UI actions
 }
 
 local function logMsg(msg, isWarn, isErr)
@@ -173,7 +176,8 @@ local function processOutgoingTells()
     pcall(function() nowMs = mq.gettime() end)
     if nowMs == 0 then nowMs = os.time() * 1000 end
 
-    if (nowMs - runtime.lastTellSendTime) < 1100 then return end
+    local delayMs = ctrl.tellDelayMs or 2500
+    if (nowMs - runtime.lastTellSendTime) < delayMs then return end
 
     local out = table.remove(runtime.outgoingTells, 1)
     if out and out.target and out.msg then
@@ -260,6 +264,7 @@ local function saveConfig(silent)
         maxRange      = ctrl.maxRange,
         timeoutSec    = ctrl.timeoutSec,
         cooldownSec   = ctrl.cooldownSec,
+        tellDelayMs   = ctrl.tellDelayMs,
         minManaPct    = ctrl.minManaPct,
         completionMsg = ctrl.completionMsg
     }
@@ -293,7 +298,8 @@ local function loadConfig()
         if charData.antiAfk ~= nil then ctrl.antiAfk = charData.antiAfk end
         if charData.maxRange then ctrl.maxRange = charData.maxRange end
         if charData.timeoutSec then ctrl.timeoutSec = charData.timeoutSec end
-        ctrl.cooldownSec = 1
+        if charData.cooldownSec then ctrl.cooldownSec = charData.cooldownSec else ctrl.cooldownSec = 3 end
+        if charData.tellDelayMs then ctrl.tellDelayMs = charData.tellDelayMs else ctrl.tellDelayMs = 2500 end
         if charData.minManaPct then ctrl.minManaPct = charData.minManaPct end
         if charData.completionMsg then ctrl.completionMsg = charData.completionMsg end
         logMsg("Loaded saved buffbot configuration for " .. charKey .. ".")
@@ -323,7 +329,7 @@ local function sendMenuTells(target, gemList)
         table.insert(items, string.format("[%d] %s", idx, item.name))
     end
 
-    -- Pack items into clean chunks of <= 75 characters so total tell length never exceeds 95 chars
+    -- Pack items into clean chunks of <= 100 characters so tell count is minimized
     local lines = {}
     local currentLine = ""
 
@@ -331,7 +337,7 @@ local function sendMenuTells(target, gemList)
         if currentLine == "" then
             currentLine = item
         else
-            if #(currentLine .. ", " .. item) <= 75 then
+            if #(currentLine .. ", " .. item) <= 100 then
                 currentLine = currentLine .. ", " .. item
             else
                 table.insert(lines, currentLine)
@@ -416,12 +422,14 @@ local function getRequesterPets(requesterSpawn)
         end
     end)
 
-    -- 2. Scan all pet spawns in zone to discover secondary and tertiary pets
+    -- 2. Scan pet spawns within range to discover secondary and tertiary pets
     local count = 0
-    pcall(function() count = mq.TLO.SpawnCount('pet')() or 0 end)
+    local searchStr = string.format('pet radius %d', ctrl.maxRange or 100)
+    pcall(function() count = mq.TLO.SpawnCount(searchStr)() or 0 end)
+    count = math.min(count, 15) -- Cap search to 15 nearby pets to prevent O(N^2) frame lag in hub zones
     for i = 1, count do
         local s = nil
-        pcall(function() s = mq.TLO.NearestSpawn(i, 'pet') end)
+        pcall(function() s = mq.TLO.NearestSpawn(i, searchStr) end)
         if s and s() and (s.ID() or 0) > 0 and not s.Dead() then
             local sid = s.ID()
             if not seenPetIDs[sid] then
@@ -838,8 +846,8 @@ local function onHailReceived(line, sender, targetName)
 
     local now = os.time()
     local lastHail = lastHailTimes[cleanSender:lower()] or 0
-    if (now - lastHail) < 3 or (now - lastGlobalHailTime) < 2 then
-        return -- Rate limit 3 seconds per player, 2 seconds globally to avoid spam
+    if (now - lastHail) < 5 or (now - lastGlobalHailTime) < 3 then
+        return -- Rate limit 5 seconds per player, 3 seconds globally to avoid chat packet flood
     end
     lastHailTimes[cleanSender:lower()] = now
     lastGlobalHailTime = now
@@ -999,10 +1007,14 @@ local function processBuffQueue()
         queueTell(ownerName, string.format('Mana is low (%d%%). Meditating until %d%% before buffing %s, please stand by!', pctMana, ctrl.minManaPct, isPet and ("your pet (" .. petName .. ")") or "you"))
         local isSit = false
         pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
-        if not isSit then
+        if not isSit and (os.time() - (runtime.lastSitAttemptTime or 0)) >= 2 then
+            runtime.lastSitAttemptTime = os.time()
             pcall(function() mq.cmd('/sit') end)
         end
         while pctMana < ctrl.minManaPct and ctrl.enabled do
+            local inGame = false
+            pcall(function() inGame = mq.TLO.MacroQuest.GameState() == 'INGAME' end)
+            if not inGame then break end
             mq.doevents()
             processOutgoingTells()
             mq.delay(500)
@@ -1084,20 +1096,34 @@ local function processBuffQueue()
                 -- Cast the spell on the target
                 logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetLabel, gemNum))
                 pcall(function() mq.cmdf('/cast %d', gemNum) end)
-                mq.delay(300)
+                mq.delay(200)
                 mq.doevents()
                 processOutgoingTells()
 
+                -- Wait for casting to register on client
+                local castStarted = false
+                local waitStart = 0
+                pcall(function() waitStart = mq.gettime() end)
+                if waitStart == 0 then waitStart = os.time() * 1000 end
+
+                while (mq.gettime() - waitStart) < 800 do
+                    pcall(function() castStarted = mq.TLO.Me.Casting() ~= nil end)
+                    if castStarted then break end
+                    mq.delay(50)
+                end
+
                 -- Wait for casting to complete while processing incoming tells
-                local isCasting = true
-                local attempts = 0
-                while isCasting and attempts < 150 do
-                    mq.doevents()
-                    processOutgoingTells()
-                    pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
-                    if isCasting then
-                        mq.delay(100)
-                        attempts = attempts + 1
+                if castStarted then
+                    local attempts = 0
+                    local isCasting = true
+                    while isCasting and attempts < 200 do
+                        mq.doevents()
+                        processOutgoingTells()
+                        pcall(function() isCasting = mq.TLO.Me.Casting() ~= nil end)
+                        if isCasting then
+                            mq.delay(100)
+                            attempts = attempts + 1
+                        end
                     end
                 end
 
@@ -1146,7 +1172,8 @@ local function processBuffQueue()
     if ctrl.autoMed and endMana < 100 then
         local isSit = false
         pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
-        if not isSit then
+        if not isSit and (os.time() - (runtime.lastSitAttemptTime or 0)) >= 2 then
+            runtime.lastSitAttemptTime = os.time()
             pcall(function() mq.cmd('/sit') end)
             mq.delay(200)
         end
@@ -1230,6 +1257,11 @@ local function drawControlTab()
     local manaVal, manaChanged = ImGui.SliderInt("Min Mana % Threshold", ctrl.minManaPct, 5, 50)
     if manaChanged then
         ctrl.minManaPct = manaVal; saveConfig(true)
+    end
+
+    local delayVal, delayChanged = ImGui.SliderInt("Tell Dispatch Delay (ms)", ctrl.tellDelayMs or 2500, 1000, 5000)
+    if delayChanged then
+        ctrl.tellDelayMs = delayVal; saveConfig(true)
     end
 
     ImGui.Spacing()
@@ -1336,75 +1368,85 @@ end
 init()
 
 while runtime.openGUI do
-    mq.doevents()
-    processOutgoingTells()
+    local inGame = false
+    pcall(function() inGame = mq.TLO.MacroQuest.GameState() == 'INGAME' end)
+    if not inGame then
+        mq.delay(500)
+    else
+        mq.doevents()
+        processOutgoingTells()
 
-    -- Clean up expired pending offers
-    local now = os.time()
-    for sender, offer in pairs(runtime.pendingOffers) do
-        if (now - offer.timestamp) > ctrl.timeoutSec then
-            runtime.pendingOffers[sender] = nil
-            logMsg(string.format("Offer for '%s' expired.", sender))
-        end
-    end
+        local now = os.time()
 
-    -- Auto-meditate idle upkeep
-    if ctrl.enabled and ctrl.autoMed and #runtime.activeQueue == 0 and runtime.state ~= 'CASTING' and runtime.state ~= 'STOPPED' then
-        local pctMana = getMyPctMana()
-        if pctMana < 100 then
-            local isSitting = false
-            pcall(function() isSitting = mq.TLO.Me.Sitting() or false end)
-            local isMoving = false
-            pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
-            if not isSitting and not isMoving then
-                pcall(function() mq.cmd('/sit') end)
+        -- Clean up expired pending offers
+        for sender, offer in pairs(runtime.pendingOffers) do
+            if (now - offer.timestamp) > ctrl.timeoutSec then
+                runtime.pendingOffers[sender] = nil
+                logMsg(string.format("Offer for '%s' expired.", sender))
             end
-            runtime.state = 'MEDDING'
-        elseif pctMana >= 100 and runtime.state == 'MEDDING' then
-            runtime.state = 'IDLE'
-        end
-    end
-
-    -- Anti-AFK upkeep (clears AFK flag and pulses keep-alive every 3 minutes if idle)
-    if ctrl.enabled and ctrl.antiAfk and #runtime.activeQueue == 0 and runtime.state ~= 'CASTING' and runtime.state ~= 'STOPPED' then
-        local isAfk = false
-        pcall(function() isAfk = mq.TLO.Me.AFK() or false end)
-        if isAfk then
-            pcall(function() mq.cmd('/afk off') end)
-            logMsg("Cleared AFK status.")
         end
 
-        local curTime = os.time()
-        if (curTime - runtime.lastAntiAfkTime) >= 180 then
-            runtime.lastAntiAfkTime = curTime
-            local isSit = false
-            pcall(function() isSit = mq.TLO.Me.Sitting() or false end)
-            local isCast = false
-            pcall(function() isCast = mq.TLO.Me.Casting() ~= nil end)
-            if not isCast then
-                if isSit then
-                    pcall(function()
-                        mq.cmd('/stand')
-                        mq.delay(250)
-                        mq.cmd('/sit')
-                        if mq.TLO.Me.AFK() then mq.cmd('/afk off') end
-                    end)
-                else
-                    pcall(function()
-                        mq.cmd('/duck')
-                        mq.delay(200)
-                        mq.cmd('/stand')
-                        if mq.TLO.Me.AFK() then mq.cmd('/afk off') end
-                    end)
+        -- Periodic memory maintenance for tracking tables (every 10 minutes)
+        if (now - (runtime.lastTablePruneTime or 0)) >= 600 then
+            runtime.lastTablePruneTime = now
+            for sender, timestamp in pairs(runtime.cooldowns) do
+                if (now - timestamp) > 3600 then runtime.cooldowns[sender] = nil end
+            end
+            for sender, entry in pairs(lastTellBySender) do
+                if (now - math.floor(entry.time / 1000)) > 3600 then lastTellBySender[sender] = nil end
+            end
+            for sender, hailTime in pairs(lastHailTimes) do
+                if (now - hailTime) > 3600 then lastHailTimes[sender] = nil end
+            end
+        end
+
+        -- Auto-meditate idle upkeep (throttled to avoid rapid /sit packet spam)
+        if ctrl.enabled and ctrl.autoMed and #runtime.activeQueue == 0 and runtime.state ~= 'CASTING' and runtime.state ~= 'STOPPED' then
+            local pctMana = getMyPctMana()
+            if pctMana < 100 then
+                local isSitting = false
+                pcall(function() isSitting = mq.TLO.Me.Sitting() or false end)
+                local isMoving = false
+                pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+                if not isSitting and not isMoving and (now - (runtime.lastSitAttemptTime or 0)) >= 3 then
+                    runtime.lastSitAttemptTime = now
+                    pcall(function() mq.cmd('/sit') end)
                 end
-                logMsg("Anti-AFK keep-alive pulse performed.")
+                runtime.state = 'MEDDING'
+            elseif pctMana >= 100 and runtime.state == 'MEDDING' then
+                runtime.state = 'IDLE'
             end
         end
-    end
 
-    -- Process queue if buffbot enabled
-    if ctrl.enabled and #runtime.activeQueue > 0 and runtime.state ~= 'STOPPED' then
-        processBuffQueue()
+        -- Anti-AFK upkeep: simulates hardware keypress to reset EQ native idle timer without disturbing sit state
+        if ctrl.enabled and ctrl.antiAfk and #runtime.activeQueue == 0 and runtime.state ~= 'CASTING' and runtime.state ~= 'STOPPED' then
+            local isAfk = false
+            pcall(function() isAfk = mq.TLO.Me.AFK() or false end)
+            if isAfk then
+                pcall(function() mq.cmd('/afk off') end)
+                logMsg("Cleared AFK status.")
+            end
+
+            if (now - runtime.lastAntiAfkTime) >= 120 then
+                runtime.lastAntiAfkTime = now
+                local isCast = false
+                pcall(function() isCast = mq.TLO.Me.Casting() ~= nil end)
+                if not isCast then
+                    pcall(function()
+                        -- /nomodkey /keypress HOME generates a direct Windows/DirectInput key event
+                        -- which resets EverQuest's internal idle timer without breaking sitting or casting
+                        mq.cmd('/nomodkey /keypress HOME')
+                        if mq.TLO.Me.AFK() then mq.cmd('/afk off') end
+                    end)
+                    logMsg("Anti-AFK keep-alive pulse performed (idle timer reset).")
+                end
+            end
+        end
+
+        -- Process queue if buffbot enabled
+        if ctrl.enabled and #runtime.activeQueue > 0 and runtime.state ~= 'STOPPED' then
+            processBuffQueue()
+        end
     end
 
     mq.delay(100)

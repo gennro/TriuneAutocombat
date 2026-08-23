@@ -1,7 +1,40 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-23
+
+- **Updater Phantom-Update Fix (`triune_updater.lua`).**
+  - Synced the updater's embedded `VERSION` constant from 1.6.7 to 1.6.12 to match the suite version. The updater compares its own VERSION against the latest GitHub release tag, so the stale constant made every fresh install report "New version available" on first run.
+- **Tool-Launch Deduplication (`triune.lua`).**
+  - Consolidated 14 identical copy-pasted "stop-if-running / run-if-stopped" tool-launch blocks (header toolbar, Mini HUD, and slash-command handler) into a single new `toggleTool(scriptName, stopCmd)` helper. All original chat messages and the DPS parser's `/dps toggle` special case are preserved exactly.
+- **CI Pipeline (`.github/workflows/ci.yml`).**
+  - Added a LuaJIT bytecode-compile (`luajit -bl`) syntax check across every `.lua` file in `mq2triune/`, catching Lua 5.1/LuaJIT-incompatible syntax before release.
+  - Added a version-consistency gate that fails CI if `triune.lua`, `triune_updater.lua`, and `README.md` ever drift apart in version.
+- **Documentation Accuracy (`AGENTS.md`).**
+  - Corrected the file map (all 8 modules + kissedit), replaced the stale `3.25-commonmod` version reference with the real 1.6.12 sync rule, documented the intentional per-file theme duplication policy, and added a "do not migrate binaries to Git LFS" constraint explaining how LFS pointer files would corrupt release zips and updater downloads.
+
+> **TLDR:** Fixed phantom-update reports from a stale updater version, deduplicated 14 tool-launch blocks into one helper, and added CI syntax/version gates.
+
+---
+
+## 2026-08-22
+
+- **Buffbot Configurable Tell Dispatch Delay & Menu Compaction (`triune_buffbot.lua`, v1.4).**
+  - **Configurable Outgoing Tell Dispatch Delay (`ctrl.tellDelayMs`)**: Increased the default outgoing tell interval from 1100ms to 2500ms (2.5 seconds) and added an interactive UI slider (`Tell Dispatch Delay (ms)`, 1000–5000ms) with character config persistence. Spacing out outgoing `/tell` packets prevents chat rate limiter kicks on servers with strict anti-flood protections.
+  - **Compact Tell Menu Chunking**: Increased line packing threshold in `sendMenuTells` from 75 to 100 characters, condensing memorized buff lists into fewer total messages (reducing overall chat packet volume).
+  - **Requester Repeat Cooldown Increase**: Raised default per-character request repeat cooldown to 3 seconds (`ctrl.cooldownSec`) to prevent rapid-fire requests from queuing duplicate tell bursts.
+
+---
+
 ## 2026-08-21
 
+- **Buffbot Disconnect Prevention & Anti-AFK Engine Overhaul (`triune_buffbot.lua`, v1.3).**
+  - **Simulated DirectInput Hardware Keystroke for Native IdleTimer Reset**: Overhauled the Anti-AFK pulse mechanism to issue `/nomodkey /keypress HOME` every 120 seconds. In EverQuest, slash commands like `/stand`, `/sit`, and `/afk off` do not generate DirectInput hardware events and fail to reset EverQuest's internal `IdleTimer` (`${EverQuest.IdleTime}`), causing the EQ client to auto-camp to Character Select after 15–45 minutes of inactivity. Simulating a harmless keypress directly resets the idle timer without breaking meditation or casting.
+  - **Auto-Med Sitting Command Rate Limiting**: Added `lastSitAttemptTime` and a 2-3 second throttle to `/sit` execution across Auto-Med idle upkeep, pre-cast mana recovery, and post-cast meditation. Prevents the 100ms main loop from spamming rapid-fire `/sit` packets while waiting for server position acknowledgement, eliminating server-side stance flood and anti-warp kicks.
+  - **GameState Validation Guard**: Added an `mq.TLO.MacroQuest.GameState() == 'INGAME'` check to wrap the main loop and mana meditation loops, cleanly yielding when zoning, logging in, or camping rather than executing commands into uninitialized game states.
+  - **Radius-Bounded & Capped Pet Discovery**: Constrained secondary and tertiary pet scanning in `getRequesterPets` to `pet radius <maxRange>` and capped inspection to 15 pets. Eliminates O(N²) full-zone linear scans and frame lag freezes in high-population hub zones (e.g. PoK, Guild Lobby) that caused UDP heartbeat timeout disconnects ("Server not responding").
+  - **Hail `/say` Rate Limiting**: Increased per-player hail cooldown to 5 seconds and global cooldown to 3 seconds to prevent chat packet flooding when multiple players hail simultaneously.
+  - **Cast Bar Registration Verification**: Updated `processBuffQueue` to allow up to 800ms for `mq.TLO.Me.Casting()` to register before waiting for cast completion, preventing network ping from causing premature loop exits or ghost casts.
+  - **Memory Table Pruning**: Added a periodic 10-minute maintenance cycle to prune stale entries from `runtime.cooldowns`, `lastTellBySender`, and `lastHailTimes` to guarantee low memory usage during long-running 24/7 sessions.
 - **Discipline Command Formatting Fix (`triune.lua`, `triune_buttons.lua`).**
   - Removed surrounding quotation marks when invoking `/disc` commands (`runtime.fireDisc` and button builder). EverQuest's `/disc` parser expects the discipline name as raw arguments (e.g., `/disc Nimble Discipline`), and surrounding quotes could cause the command to fail to execute.
 

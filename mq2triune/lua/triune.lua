@@ -2652,6 +2652,19 @@ function UI.updateTracker()
     end
 end
 
+-- Toggle a standalone Triune tool script: stop it if running, otherwise run
+-- it. Returns 'started' or 'stopped'. stopCmd overrides the default
+-- '/lua stop <name>' stop action (the DPS parser uses its own '/dps toggle').
+local function toggleTool(scriptName, stopCmd)
+    local s = mq.TLO.Lua.Script(scriptName)
+    if s() and s.Status() == 'RUNNING' then
+        mq.cmd(stopCmd or ('/lua stop ' .. scriptName))
+        return 'stopped'
+    end
+    mq.cmd('/lua run ' .. scriptName)
+    return 'started'
+end
+
 function UI.drawHeaderBar()
     UI.drawEmblem(22)
     ImGui.SameLine()
@@ -2701,60 +2714,35 @@ function UI.drawHeaderBar()
 
     -- Toolbar buttons (on line below script info and trackers)
     if ImGui.Button('Open Spellbook##hdrBook') then
-        local s = mq.TLO.Lua.Script('triune_spellbook')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_spellbook')
-        else
-            mq.cmd('/lua run triune_spellbook')
-        end
+        toggleTool('triune_spellbook')
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or closes the standalone Triune Spellbook interface.')
     end
     ImGui.SameLine()
     if ImGui.Button('Cursor Manager##hdrCursor') then
-        local s = mq.TLO.Lua.Script('triune_cursor')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_cursor')
-        else
-            mq.cmd('/lua run triune_cursor')
-        end
+        toggleTool('triune_cursor')
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or closes the standalone Triune Cursor Item Manager.')
     end
     ImGui.SameLine()
     if ImGui.Button('DPS Parser##hdrDPS') then
-        local s = mq.TLO.Lua.Script('triune_dps')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/dps toggle')
-        else
-            mq.cmd('/lua run triune_dps')
-        end
+        toggleTool('triune_dps', '/dps toggle')
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or toggles the standalone Triune DPS Parser window.')
     end
     ImGui.SameLine()
     if ImGui.Button('Updater##hdrUpdate') then
-        local s = mq.TLO.Lua.Script('triune_updater')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_updater')
-        else
-            mq.cmd('/lua run triune_updater')
-        end
+        toggleTool('triune_updater')
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
     end
     ImGui.SameLine()
     if ImGui.Button('Zone Tracker##hdrTrack') then
-        local s = mq.TLO.Lua.Script('triune_track')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_track')
-        else
-            mq.cmd('/lua run triune_track')
-        end
+        toggleTool('triune_track')
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or closes the standalone Triune Zone Tracker interface.')
@@ -4391,45 +4379,25 @@ local function drawMiniGui()
 
         ImGui.SameLine()
         if ImGui.Button('Cursor##miniCursor', 55, 22) then
-            local s = mq.TLO.Lua.Script('triune_cursor')
-            if s() and s.Status() == 'RUNNING' then
-                mq.cmd('/lua stop triune_cursor')
-            else
-                mq.cmd('/lua run triune_cursor')
-            end
+            toggleTool('triune_cursor')
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes standalone Cursor Manager') end
 
         ImGui.SameLine()
         if ImGui.Button('DPS##miniDPS', 42, 22) then
-            local s = mq.TLO.Lua.Script('triune_dps')
-            if s() and s.Status() == 'RUNNING' then
-                mq.cmd('/dps toggle')
-            else
-                mq.cmd('/lua run triune_dps')
-            end
+            toggleTool('triune_dps', '/dps toggle')
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or toggles standalone DPS Parser window') end
 
         ImGui.SameLine()
         if ImGui.Button('Update##miniUpdate', 58, 22) then
-            local s = mq.TLO.Lua.Script('triune_updater')
-            if s() and s.Status() == 'RUNNING' then
-                mq.cmd('/lua stop triune_updater')
-            else
-                mq.cmd('/lua run triune_updater')
-            end
+            toggleTool('triune_updater')
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Release Updater window') end
 
         ImGui.SameLine()
         if ImGui.Button('Tracker##miniTrack', 60, 22) then
-            local s = mq.TLO.Lua.Script('triune_track')
-            if s() and s.Status() == 'RUNNING' then
-                mq.cmd('/lua stop triune_track')
-            else
-                mq.cmd('/lua run triune_track')
-            end
+            toggleTool('triune_track')
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Zone Tracker window') end
     end
@@ -8074,53 +8042,38 @@ local function triuneCommand(...)
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
     elseif cmd == 'spellbook' or cmd == 'book' then
-        local s = mq.TLO.Lua.Script('triune_spellbook')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_spellbook')
-            print('\ag[Triune]\ax stopping spellbook engine...')
-        else
-            mq.cmd('/lua run triune_spellbook')
+        if toggleTool('triune_spellbook') == 'started' then
             print('\ag[Triune]\ax launching spellbook engine...')
+        else
+            print('\ag[Triune]\ax stopping spellbook engine...')
         end
     elseif cmd == 'cursorui' or cmd == 'cursorwin' or cmd == 'cursormgr' then
-        local s = mq.TLO.Lua.Script('triune_cursor')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_cursor')
-            print('\ag[Triune]\ax stopping cursor manager...')
-        else
-            mq.cmd('/lua run triune_cursor')
+        if toggleTool('triune_cursor') == 'started' then
             print('\ag[Triune]\ax launching cursor manager...')
+        else
+            print('\ag[Triune]\ax stopping cursor manager...')
         end
     elseif cmd == 'buff' or cmd == 'buffbot' or cmd == 'buffui' then
-        local s = mq.TLO.Lua.Script('triune_buffbot')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_buffbot')
-            print('\ag[Triune]\ax stopping buffbot engine...')
-        else
-            mq.cmd('/lua run triune_buffbot')
+        if toggleTool('triune_buffbot') == 'started' then
             print('\ag[Triune]\ax launching buffbot engine...')
+        else
+            print('\ag[Triune]\ax stopping buffbot engine...')
         end
     elseif cmd == 'dps' or cmd == 'dpsui' or cmd == 'dpsparser' then
-        local s = mq.TLO.Lua.Script('triune_dps')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/dps toggle')
-            print('\ag[Triune]\ax toggling DPS parser window...')
-        else
-            mq.cmd('/lua run triune_dps')
+        if toggleTool('triune_dps', '/dps toggle') == 'started' then
             print('\ag[Triune]\ax launching DPS parser window...')
+        else
+            print('\ag[Triune]\ax toggling DPS parser window...')
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()
     elseif cmd == 'update' or cmd == 'updater' or cmd == 'checkupdate' then
         mq.cmd('/lua run triune_updater')
     elseif cmd == 'track' or cmd == 'tracker' or cmd == 'trackui' or cmd == 'zone' then
-        local s = mq.TLO.Lua.Script('triune_track')
-        if s() and s.Status() == 'RUNNING' then
-            mq.cmd('/lua stop triune_track')
-            print('\ag[Triune]\ax stopping zone tracker window...')
-        else
-            mq.cmd('/lua run triune_track')
+        if toggleTool('triune_track') == 'started' then
             print('\ag[Triune]\ax launching zone tracker window...')
+        else
+            print('\ag[Triune]\ax stopping zone tracker window...')
         end
     elseif cmd == 'compact' or cmd == 'mini' or cmd == 'hud' then
         ctrl.compact = not ctrl.compact

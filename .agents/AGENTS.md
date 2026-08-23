@@ -4,18 +4,34 @@
 
 **TriuneAutocombat** is a MacroQuest ImGui Lua autocombat engine for EverQuest
 progression servers. It automates targeting, spell casting, pet management, and
-navigation for a "trio" of three EverQuest characters played together. It is
+navigation for a "trio" of three EverQuest classes played on one character. It is
 written entirely in Lua 5.1 / LuaJIT and runs inside MacroQuest2 via
-`/lua run triune`. The project has four Lua modules and one large data file.
+`/lua run triune`.
+
+## Standalone File Rule
+
+**Every Lua script in `lua/` MUST remain fully standalone**: no file may
+`require()` another Triune script or depend on any shared module to work.
+Users may copy a single `.lua` file into their setup and it must run. This is
+intentional duplication: the ImGui theme helpers (`pushCol`/`pushVar`/
+`pushTheme`/`popTheme`) and color constants are copied into every module ON
+PURPOSE. When you change the theme, you MUST apply the identical change to
+every module that contains a copy. Do NOT "fix" this duplication by
+extracting a shared module.
 
 ## File Map
 
 | File | Role |
 |---|---|
 | `lua/triune.lua` | Main engine: UI with theme, loadout, combat loop, persistence. Entry point. |
-
-| `lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window with theme. |
+| `lua/triune_buttons.lua` | Standalone quick-action hot-button toolbar window with theme. |
+| `lua/triune_buffbot.lua` | Standalone tell-driven automated buffing station with theme. |
 | `lua/triune_cursor.lua` | Standalone cursor item manager window with theme. |
+| `lua/triune_dps.lua` | Standalone live DPS parser with its own independent version number. |
+| `lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window with theme. |
+| `lua/triune_track.lua` | Standalone zone NPC tracker + navigation window with theme. |
+| `lua/triune_updater.lua` | Standalone in-game release updater (GitHub Releases). |
+| `lua/kissedit/` | Legacy standalone KissAssist INI editor suite (pre-convention code, not part of the main suite). |
 | `config/triune_data.lua` | Era-correct spell/disc/AA database (generated, not hand-edited). |
 | `CHANGELOG.md` | Full history of changes, newest date first. |
 | `README.md` | User-facing documentation including commands, features, file structure. |
@@ -67,17 +83,31 @@ Rules:
 - A new major feature section is added (add a new `###` subsection)
 - The version number changes (update the "Current version:" line at the bottom)
 
-### Version Number Location
+### Version Number Locations
 
 The canonical version is defined in `lua/triune.lua`:
 ```lua
-local VERSION = '3.25-commonmod'
+local VERSION           = '1.6.12'
 ```
 
 The README must always reflect this value:
 ```markdown
-Current version: **3.25-commonmod**
+Current version: **1.6.12**
 ```
+
+`lua/triune_updater.lua` carries the SAME version string (`local VERSION = '1.6.12'`)
+because it compares its own VERSION against the latest GitHub release tag to decide
+whether an update is available — a mismatch makes fresh installs report phantom
+updates. When you bump the version, update BOTH files and the README.
+CI (`.github/workflows/ci.yml`) fails if these three drift apart.
+
+### Binary Files Policy (Do NOT use Git LFS)
+
+The committed binaries (MacroQuest DLLs/EXEs, navmeshes, ItemDB, etc.) must stay
+as regular git objects. Do NOT migrate them to Git LFS: GitHub source archives
+and `git archive` emit LFS *pointer files* instead of real content, which would
+corrupt every distribution path (release zips, repo ZIP downloads, and the
+Python updater's tag-archive download).
 
 ---
 
@@ -152,9 +182,9 @@ When adding new state, always add it to the appropriate table — never add a ba
 ## Code Style
 
 - Section headers use `-- ====` / `-- ----` banner comments as present throughout the files.
-- Functions exported from `triune_common.lua` are always `common.functionName`.
 - Color constants use descriptive names: `GOOD`, `WARN`, `ERR`, `ARC`, `GOLD`, `MUTED`.
-- The unified dark theme must be applied to every ImGui window via `common.pushTheme()` / `common.popTheme()`.
+- The unified dark theme helpers (`pushTheme` / `popTheme`) exist as a duplicated copy
+  inside every module by design (see Standalone File Rule). Keep every copy identical.
 - Class abbreviations always use the mixed-case data-file format: `War`, `Clr`, `Pal`, `Rng`, `SK`, `Dru`, `Mnk`, `Brd`, `Rog`, `Shm`, `Nec`, `Wiz`, `Mag`, `Enc`, `Bst`, `Ber`.
 
 
