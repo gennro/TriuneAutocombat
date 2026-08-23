@@ -2,6 +2,13 @@
 
 ## 2026-08-23
 
+- **Server-Native Ranged Attack Mode Replaces `/autofire` for Ranged Style (`triune.lua`).**
+  - **Attack Mode Tracking (`runtime.serverAttackMode`)**: Added a `TriuneAttackModeChanged` chat event that watches this server's `"Attack mode changed to: Ranged/Melee"` feedback line from the custom `#attackmode` command, since `Me.AutoFire` never reflects it and can no longer be trusted as a ranged-combat signal on this server.
+  - **`#attackmode ranged` + Standard Auto-Attack**: `checkCombatStall()` and `combatTick()`'s Ranged-style engage logic now send `/say #attackmode ranged` (throttled to once/sec) instead of `/autofire on`, then drive the bow through plain `/attack on` once the server confirms the switch -- mirroring how Melee style already worked.
+  - **Automatic Revert to Melee (`revertAttackModeToMelee`)**: Switching combat style away from Ranged (via `/ac style` or the Settings tab radio buttons) or a full stop now sends `/say #attackmode melee` so a later `/attack on` doesn't keep firing a bow.
+  - **`handleCannotSeeTarget()` Fix**: Since Ranged style now also drives combat through `/attack on`, `Me.Combat()` alone no longer implies melee. Updated the melee/ranged branch heuristic to exclude confirmed server-Ranged attack mode, preventing the melee step-back maneuver from firing during ranged combat.
+  - **Scope**: `pull_style == 'Ranged'` (bow-tagging a pull target, independent of combat style) still uses `/autofire` as before and is unaffected.
+
 - **CI Testing Infrastructure (`ci.yml`, `tests/`).**
   - **Luacheck static analysis**: Added `.luacheckrc` config and CI job for Luacheck linting. Catches typos, unused variables, shadowed locals, and undefined global references across all Lua files.
   - **Pure-logic unit tests**: Added `tests/test_pure_logic.lua` with 555 assertions across 28 test suites covering `triune.lua` (`sanitizeModeConfig`, `toCanonicalClassAbbr`, `parseClassLine`, `cleanSpellName`, `normalizeSpellName`, `defaultsForKind`, `defaultCtrl` shape validation, `idxOf`, `isSpecialSkill`, `aaTier`, `fmtSec`, `baseTok`, `normalizeCommandKey`, `sungKey`, `classPlausible`, `serialize`, `extractConName`, and cast tracker lockout/retry logic), `triune_dps.lua` (`cleanLine`, `parseDamageValue`, `isValidMobName`, `getVerbCategory`, `calculateCategoryTotals`, `getFightDPS`), `triune_buffbot.lua` (`parseBuffRequest`, `isThankYou`), and `triune_data.lua` schema/level validation. Tests extract functions directly from source and run under plain LuaJIT with no MQ dependency.
