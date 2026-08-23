@@ -2,6 +2,11 @@
 
 ## 2026-08-23
 
+- **Ranged Combat Autofire Parity with Auto-Attack (`triune.lua`).**
+  - **Eliminated Rapid Autofire Toggle Overhead**: Removed redundant per-tick `/autofire` commands from individual spell, AA, discipline, ability, and clickie execution routines as well as post-cast checks.
+  - **Casting & Command Throttle Protection**: Guarded autofire activation behind `not isCasting()` and added a 1.0-second command debounce (`runtime.lastAutoFireCmdAt`) in `combatTick()` and `checkCombatStall()`, preventing rapid toggle loops caused by calling `/autofire` before `Me.AutoFire` TLO updates.
+  - **Comprehensive Range & Facing Management**: Added periodic `/face fast` re-facing, stand-up checks, and out-of-range navigation (`moveToward` closing to `ctrl.ranged_dist`) matching melee auto-attack handling.
+
 - **Automated Clickie Item Management Tab (`triune.lua`, v1.7.0).**
   - **Dedicated Clickies Tab (`UI.drawClickieTab`)**: Added a full-featured "Clickies" tab alongside Spell Gems and Abilities & AAs for managing clickable inventory, bag, and worn items.
   - **Dynamic Cursor Item Addition (`addClickieFromCursor`)**: Added `+ Add Item on Cursor` button that inspects the currently held item on the player's cursor, validates its clickable spell effect (`it.Clicky` / `it.Spell`), extracts spell metadata, and assigns smart default triggers (`F: Myself` + `missing buff` for beneficial effects, `E: Current Target` + `in combat` for offensive effects).

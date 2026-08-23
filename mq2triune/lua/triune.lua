@@ -6179,7 +6179,7 @@ local function moveToward(id, dist, followOnly)
     end
 
     local isMelee = (not followOnly and (ctrl and ctrl.combat_style or 'Melee') == 'Melee')
-    local targetDist = dist or (isMelee and desiredRange(id) or 18)
+    local targetDist = dist or desiredRange(id)
     local effectiveArrivalDist = targetDist + (isMelee and 2 or 3)
 
     -- Update pursuit tracking for stall detection
@@ -6746,7 +6746,10 @@ local function checkCombatStall()
     if ctrl.combat_style == 'Melee' and not isPullStandBack then
         if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
     elseif ctrl.combat_style == 'Ranged' then
-        if d <= (ctrl.ranged_dist or 40) and not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+        if d <= (ctrl.ranged_dist or 40) and not isCasting() and not mq.TLO.Me.AutoFire() and (os.clock() - (runtime.lastAutoFireCmdAt or 0)) > 1.0 then
+            runtime.lastAutoFireCmdAt = os.clock()
+            mq.cmd('/autofire on')
+        end
     end
     stuckState.combatStallSince = nil
 end
@@ -8155,11 +8158,29 @@ local function combatTick()
             end
         end
     elseif style == 'Ranged' then
-        if haveNPC and engage and autoAttackOk then
-            if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-            if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-        else
-            if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+        local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
+        if haveNPC and not isDraggingToCamp and autoAttackOk then
+            local curDist = (tid > 0) and distToId(tid) or 999
+            local maxReach = (ctrl and ctrl.ranged_dist) or 40
+            if curDist <= maxReach then
+                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
+                    print('\ag[Triune]\ax Standing up to attack.')
+                    mq.cmd('/stand')
+                end
+                if not isCasting() and not mq.TLO.Me.AutoFire() and (os.clock() - (runtime.lastAutoFireCmdAt or 0)) > 1.0 then
+                    runtime.lastAutoFireCmdAt = os.clock()
+                    print(string.format('\ag[Triune]\ax Engaging /autofire on -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
+                        tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
+                    mq.cmd('/autofire on')
+                end
+                if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+                    pursuit.lastCombatFaceAt = os.clock()
+                    mq.cmd('/face fast')
+                end
+            elseif not isMoveActive() and curDist > maxReach and tid > 0 then
+                -- Mob moved, was pushed, or is out of ranged reach: re-close distance
+                moveToward(tid, desiredRange(tid))
+            end
         end
     end
 
