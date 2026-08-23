@@ -42,6 +42,27 @@ local cfg               = mq.configDir
 local ALL_ABBR          = { 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm',
     'Nec', 'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
 
+-- Canonical class-name-to-abbreviation lookup (module-level so parseClassLine
+-- and toCanonicalClassAbbr can both reference it as an upvalue).
+local MQSHORT = {
+    WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
+    CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
+    PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
+    RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
+    SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
+    DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
+    MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
+    BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
+    ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
+    SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
+    NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
+    WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
+    MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
+    ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
+    BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
+    BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber',
+}
+
 -- the character's gestalt trio (editable). Declared here, before classColor,
 -- so slot colors below can be looked up by position in this list.
 local myClasses         = {}
@@ -447,24 +468,6 @@ local function toCanonicalClassAbbr(str)
     local s = tostring(str)
     if s == '' or s == 'nil' or s == 'NULL' then return nil end
     local up = s:upper():gsub('%s+', '')
-    local MQSHORT = {
-        WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
-        CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
-        PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
-        RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
-        SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
-        DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
-        MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
-        BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
-        ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
-        SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
-        NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
-        WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
-        MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
-        ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
-        BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
-        BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber'
-    }
     return MQSHORT[up] or (ALL_ABBR and idxOf(ALL_ABBR, s) > 0 and s) or nil
 end
 

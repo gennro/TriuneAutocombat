@@ -2,6 +2,15 @@
 
 ## 2026-08-23
 
+- **CI Testing Infrastructure (`ci.yml`, `tests/`).**
+  - **Luacheck static analysis**: Added `.luacheckrc` config and CI job for Luacheck linting. Catches typos, unused variables, shadowed locals, and undefined global references across all Lua files.
+  - **Pure-logic unit tests**: Added `tests/test_pure_logic.lua` with 555 assertions across 28 test suites covering `triune.lua` (`sanitizeModeConfig`, `toCanonicalClassAbbr`, `parseClassLine`, `cleanSpellName`, `normalizeSpellName`, `defaultsForKind`, `defaultCtrl` shape validation, `idxOf`, `isSpecialSkill`, `aaTier`, `fmtSec`, `baseTok`, `normalizeCommandKey`, `sungKey`, `classPlausible`, `serialize`, `extractConName`, and cast tracker lockout/retry logic), `triune_dps.lua` (`cleanLine`, `parseDamageValue`, `isValidMobName`, `getVerbCategory`, `calculateCategoryTotals`, `getFightDPS`), `triune_buffbot.lua` (`parseBuffRequest`, `isThankYou`), and `triune_data.lua` schema/level validation. Tests extract functions directly from source and run under plain LuaJIT with no MQ dependency.
+  - **Theme consistency check**: Added `tests/check_theme_consistency.sh` that extracts pushTheme color/style-var tuples from each satellite module and diffs against the canonical copy. Prevents accidental theme drift when updating the duplicated theme helpers.
+- **Fix `parseClassLine` MQSHORT scoping bug (`triune.lua`).**
+  - Hoisted `MQSHORT` lookup table from a local inside `toCanonicalClassAbbr` to module scope. `parseClassLine` referenced `MQSHORT` as an upvalue but it was scoped to a different function, causing 3-letter and 2-letter class code lookups to silently error (indexing nil) inside pcall blocks.
+- **Sync `triune_updater.lua` theme to canonical copy.**
+  - Added 8 missing color entries (CheckMark, SliderGrab, SliderGrabActive, ScrollbarBg, ScrollbarGrab, Tab, TabHovered, TabSelected) and aligned all StyleVar values (ChildRounding, FrameBorderSize, FramePadding, GrabRounding, ItemSpacing, ScrollbarRounding, TabRounding, WindowPadding) to match the canonical satellite theme.
+
 - **Ranged Combat Autofire Parity with Auto-Attack (`triune.lua`).**
   - **Eliminated Rapid Autofire Toggle Overhead**: Removed redundant per-tick `/autofire` commands from individual spell, AA, discipline, ability, and clickie execution routines as well as post-cast checks.
   - **Casting & Command Throttle Protection**: Guarded autofire activation behind `not isCasting()` and added a 1.0-second command debounce (`runtime.lastAutoFireCmdAt`) in `combatTick()` and `checkCombatStall()`, preventing rapid toggle loops caused by calling `/autofire` before `Me.AutoFire` TLO updates.

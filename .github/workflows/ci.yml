@@ -54,3 +54,38 @@ jobs:
             exit 1
           fi
           echo "All versions in sync: ${{ steps.ver.outputs.main }}"
+
+  luacheck:
+    name: Luacheck static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Luacheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y lua5.1 luarocks
+          sudo luarocks install luacheck
+
+      - name: Run Luacheck
+        run: luacheck mq2triune/
+
+  unit-tests:
+    name: Pure-logic unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit
+
+      - name: Run unit tests
+        run: luajit tests/test_pure_logic.lua
+
+  theme-consistency:
+    name: Theme consistency check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check satellite theme drift
+        run: bash tests/check_theme_consistency.sh

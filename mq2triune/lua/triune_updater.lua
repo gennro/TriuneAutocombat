@@ -26,33 +26,32 @@ local pendingAction = nil
 local _colN, _varN = 0, 0
 local function pushCol(id, r, g, b, a)
     if id == nil then return end
-    local ImGuiColType = mq.imgui.Col or _G.ImGuiCol
+    local ImGuiColType = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
     local enumVal = ImGuiColType and ImGuiColType(id) or id
-    if pcall(mq.imgui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end
+    if pcall(mq.imgui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end ---@diagnostic disable-line: undefined-field
 end
-
 local function pushVar(id, a, b)
     if id == nil then return end
     local ok
-    local ImGuiSVType = mq.imgui.StyleVar or _G.ImGuiStyleVar
+    local ImGuiSVType = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
     local enumVal = ImGuiSVType and ImGuiSVType(id) or id
     if b ~= nil then
         local ImVec2Type = _G.ImVec2
         if type(ImVec2Type) == 'function' then
-            ok = pcall(mq.imgui.PushStyleVar, enumVal, ImVec2Type(a, b))
+            ok = pcall(mq.imgui.PushStyleVar, enumVal, ImVec2Type(a, b)) ---@diagnostic disable-line: undefined-field
         else
-            ok = pcall(mq.imgui.PushStyleVar, enumVal, a, b)
+            ok = pcall(mq.imgui.PushStyleVar, enumVal, a, b) ---@diagnostic disable-line: undefined-field
         end
     else
-        ok = pcall(mq.imgui.PushStyleVar, enumVal, a)
+        ok = pcall(mq.imgui.PushStyleVar, enumVal, a) ---@diagnostic disable-line: undefined-field
     end
     if ok then _varN = _varN + 1 end
 end
 
 local function pushTheme()
     _colN, _varN = 0, 0
-    local ImGuiCol = mq.imgui.Col or _G.ImGuiCol
-    local ImGuiStyleVar = mq.imgui.StyleVar or _G.ImGuiStyleVar
+    local ImGuiCol = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
+    local ImGuiStyleVar = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
     if ImGuiCol then
         pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
         pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
@@ -71,23 +70,36 @@ local function pushTheme()
         pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
         pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
         pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
+        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
+        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
+        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
+        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
+        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
+        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
         pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
+        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
     end
     if ImGuiStyleVar then
-        pushVar(ImGuiStyleVar.WindowRounding, 6.0)
-        pushVar(ImGuiStyleVar.FrameRounding, 4.0)
-        pushVar(ImGuiStyleVar.ChildRounding, 4.0)
-        pushVar(ImGuiStyleVar.PopupRounding, 4.0)
-        pushVar(ImGuiStyleVar.WindowPadding, 10.0, 10.0)
-        pushVar(ImGuiStyleVar.FramePadding, 6.0, 3.0)
-        pushVar(ImGuiStyleVar.ItemSpacing, 8.0, 5.0)
+        local ImGuiSV = ImGuiStyleVar
+        pushVar(ImGuiSV.WindowRounding, 6)
+        pushVar(ImGuiSV.ChildRounding, 5)
+        pushVar(ImGuiSV.FrameRounding, 4)
+        pushVar(ImGuiSV.PopupRounding, 4)
+        pushVar(ImGuiSV.TabRounding, 4)
+        pushVar(ImGuiSV.GrabRounding, 3)
+        pushVar(ImGuiSV.ScrollbarRounding, 6)
+
+        pushVar(ImGuiSV.FrameBorderSize, 1)
+        pushVar(ImGuiSV.FramePadding, 7, 4)
+        pushVar(ImGuiSV.ItemSpacing, 8, 6)
+        pushVar(ImGuiSV.WindowPadding, 12, 10)
     end
 end
 
 local function popTheme()
-    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN) end
-    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN) end
-    _colN, _varN = 0, 0
+    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 end ---@diagnostic disable-line: undefined-field
+    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 end ---@diagnostic disable-line: undefined-field
 end
 
 local function cleanTag(tag)
