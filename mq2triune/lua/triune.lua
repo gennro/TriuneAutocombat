@@ -205,6 +205,7 @@ local function sanitizeModeConfig(c)
 
     if c.hunter_z_plane == nil then c.hunter_z_plane = 15 end
     if c.hunter_z == nil then c.hunter_z = 75 end
+    if c.buff_on_start == nil then c.buff_on_start = true end
 
     if type(c.pull_con_filter) ~= 'table' then
         c.pull_con_filter = {}
@@ -280,6 +281,9 @@ local function defaultCtrl()
         medbreak_end_stop    = 90,
         cast_max_retries     = 2,
         cast_lockout_sec     = 30,
+        buff_on_start        = true,
+        buff_in_combat       = false,
+        buff_instant_in_combat = true,
         buff_max_tries       = 3,
         buff_retry_sec       = 60,
         min_mana_pct         = 0,
@@ -308,10 +312,14 @@ local runtime = {
     deathGuardFired = false,
     medBreakActive = false,
     pendingMem = {},
-    buffTries = {},
     lastCast = {},
     lastTick = 0,
     wasRunning = false,
+    startBuffPass = false,
+    startBuffAt = 0,
+    wasUnderAttack = false,
+    buffTries = {},
+    startBuffStalls = {},
     lastSig = nil,
     autoDirty = false,
     autoDirtyAt = 0,
@@ -375,6 +383,22 @@ runtime.buffTryRecorded = function(key, spellName)
             tostring(spellName), maxTries, backoff))
     end
     runtime.buffTries[key] = st
+end
+
+-- Queue a one-shot self-buff pass. Armed on Start and again each time a fight
+-- ends, never while paused or mid-combat. See startBuffTick.
+local function beginStartBuffPass()
+    if ctrl.buff_on_start == false then
+        runtime.startBuffPass = false
+        return
+    end
+    runtime.startBuffPass = true
+    runtime.startBuffAt = os.clock()
+    runtime.startBuffStalls = {}
+    -- Stop swinging before the pass judges whether a fight is on, so leftover
+    -- /attack from the last kill does not read as combat on the first tick.
+    if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+    print('\ag[Triune]\ax checking self buffs.')
 end
 
 local petState = {
@@ -1386,18 +1410,23 @@ end
 local function createCastTracker()
     local failureCount = {}
     local lockouts = {}
+    -- Why each spell last failed ('fizzled', 'did not take hold', ...), so a
+    -- lockout can say what went wrong instead of just that it gave up.
+    local lastReason = {}
 
     local tracker = {}
 
-    local function recordFailure(spellName, maxRetries, lockoutSec)
+    local function recordFailure(spellName, maxRetries, lockoutSec, reason)
         if not spellName then return end
+        if reason then lastReason[spellName] = reason end
         local mRetries = tonumber(maxRetries) or 2
         local lSec = tonumber(lockoutSec) or 30
         failureCount[spellName] = (tonumber(failureCount[spellName]) or 0) + 1
         if failureCount[spellName] >= mRetries then
             lockouts[spellName] = os.clock() + lSec
             failureCount[spellName] = 0
-            print(string.format('\ar[Triune]\ax Lockout applied for "%s" (%ds)', spellName, lSec))
+            print(string.format('\ar[Triune]\ax Lockout applied for "%s" (%ds) -- %s', spellName, lSec,
+                lastReason[spellName] or 'repeated failures'))
         end
     end
 
@@ -1418,7 +1447,7 @@ local function createCastTracker()
         end
         if castingName and castingName ~= '' then
             tracker.failed = true
-            recordFailure(castingName, maxRetries, lockoutSec)
+            recordFailure(castingName, maxRetries, lockoutSec, reason)
         end
     end
 
@@ -1426,14 +1455,21 @@ local function createCastTracker()
         if not spellName then return end
         failureCount[spellName] = 0
         lockouts[spellName] = nil
+        lastReason[spellName] = nil
+    end
+
+    local function failureReason(spellName)
+        if not spellName then return nil end
+        return lastReason[spellName]
     end
 
     tracker.recordFailure = recordFailure
     tracker.recordSuccess = recordSuccess
     tracker.isLockedOut = isLockedOut
     tracker.onFailureEvent = onFailureEvent
+    tracker.failureReason = failureReason
     tracker.clear = function()
-        failureCount = {}; lockouts = {}
+        failureCount = {}; lockouts = {}; lastReason = {}
     end
     tracker.failed = false
     tracker.activeSpell = nil
@@ -2911,6 +2947,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac pause / /ac stop',               desc = 'Pause auto-combat execution, halt movement & disengage pet' },
                 { cmd = '/ac burn [on|off]',                  desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
                 { cmd = '/ac status',                         desc = 'Print current running state and combat mode to chat' },
+                { cmd = '/ac buffs',                          desc = 'Print the Effects & Songs windows and each self buff UP/MISSING verdict' },
                 { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
                 { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
                 { cmd = '/ac spellbook',                      desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
@@ -3741,6 +3778,7 @@ function UI.drawControlTab()
             end
             ctrl.running = true
             runtime.wasRunning = true
+            beginStartBuffPass()
         end
 
         if pCount > 0 then
@@ -4490,6 +4528,31 @@ function UI.drawSettingsTab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Switches the Triune AutoCombat interface into a small, sleek HUD overlay widget.')
     end
+    ctrl.buff_on_start = ImGui.Checkbox('Buff Up Between Fights', ctrl.buff_on_start ~= false)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'Puts self "missing buff" / always spells and AAs up when you hit\n'
+            .. 'Start, and again each time a fight ends, before the next pull.\n'
+            .. 'Never runs while paused or mid-combat. Drops on aggro, and\n'
+            .. 'times out after 25 seconds so a blocked buff cannot stall you.')
+    end
+    ctrl.buff_in_combat = ImGui.Checkbox('Refresh Buffs In Combat', ctrl.buff_in_combat or false)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'Off by default: a self "missing buff" gem is held until the fight\n'
+            .. 'ends, instead of spending cast time re-buffing mid-swing.\n'
+            .. 'Target debuffs and "always" entries always fire normally.')
+    end
+    ctrl.buff_instant_in_combat = ImGui.Checkbox('Allow Instant Buffs In Combat',
+        ctrl.buff_instant_in_combat ~= false)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'On by default: a self buff with no cast time is exempt from the\n'
+            .. 'hold above and fires mid-fight. An instant costs no cast time\n'
+            .. 'and does not interrupt melee, so there is nothing to save by\n'
+            .. 'waiting. Applies to both gems and AAs; AAs whose cast time\n'
+            .. 'cannot be read are treated as instant.')
+    end
 
     ImGui.Dummy(0, 4)
     accent(GOLD, 'Spell Failures & Lockout')
@@ -4684,6 +4747,7 @@ local function drawMiniGui()
                 end
                 ctrl.running = true
                 runtime.wasRunning = true
+                beginStartBuffPass()
             end
             if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
         end
@@ -5013,12 +5077,21 @@ end
 
         local myId = mq.TLO.Me.ID() or 0
         local seen = {}
-        local function report(name)
+        local function report(name, isAA)
             if not name or name == '' or seen[name] then return end
             seen[name] = true
             local up = runtime.buffFactuallyUp(myId, name)
-            print(string.format('  %s %s -- %s%s',
-                up and '\ag[UP]\ax' or '\ay[MISSING]\ax', name,
+            local ms = runtime.castTimeMs(name, isAA)
+            local timing
+            if ms == nil then
+                timing = runtime.isInstantCast(name, isAA) and 'instant?' or 'unknown'
+            elseif ms <= 0 then
+                timing = 'instant'
+            else
+                timing = string.format('%.1fs', ms / 1000)
+            end
+            print(string.format('  %s %s [%s] -- %s%s',
+                up and '\ag[UP]\ax' or '\ay[MISSING]\ax', name, timing,
                 up and 'will not recast' or 'will cast',
                 bar.src[name:lower()] and (' (found in ' .. bar.src[name:lower()] .. ')') or ''))
         end
@@ -5037,14 +5110,14 @@ end
             if g and selfMissingBuff(g.when, g.target) then
                 local pctVal = tonumber(g.pct)
                 if pctVal == nil then pctVal = 100 end
-                if pctVal > 0 then report(g.spell) end
+                if pctVal > 0 then report(g.spell, false) end
             end
         end
         for name, a in pairs(loadout.aas) do
             if a and a.enabled and selfMissingBuff(a.when, a.target) then
                 local aPct = tonumber(a.pct)
                 if aPct == nil then aPct = 30 end
-                if aPct > 0 then report(name) end
+                if aPct > 0 then report(name, true) end
             end
         end
     end
@@ -5067,6 +5140,48 @@ end
 
     -- Authoritative "is this effect up". Use this for every missing-buff
     -- decision; buffActive alone produces false negatives on self.
+    -- Cast time in milliseconds, or nil when the build will not tell us.
+    -- Cached: a spell's cast time never changes, and this is consulted on every
+    -- combat tick for every buff entry.
+    local castTimeCache = {}
+    runtime.castTimeMs = function(name, isAA)
+        name = tostring(name or '')
+        if name == '' then return nil end
+        local cacheKey = (isAA and 'a:' or 's:') .. name
+        local hit = castTimeCache[cacheKey]
+        if hit ~= nil then
+            if hit == false then return nil end
+            return hit
+        end
+        local ms = nil
+        pcall(function()
+            local sp
+            if isAA then
+                local aa = mq.TLO.Me.AltAbility(name)
+                if aa and aa() then sp = aa.Spell end
+            else
+                sp = mq.TLO.Spell(name)
+            end
+            if sp and sp() then
+                local v = tonumber(sp.CastTime())
+                if v then ms = v end
+            end
+        end)
+        castTimeCache[cacheKey] = (ms == nil) and false or ms
+        return ms
+    end
+
+    -- An instant buff costs no cast time and does not interrupt melee, so
+    -- holding it until the fight ends buys nothing. AAs whose cast time cannot
+    -- be read are treated as instant: activated AAs overwhelmingly are, and
+    -- AltAbilityReady already gates them. An unreadable spell is not, since a
+    -- long self buff mid-fight is exactly what the hold exists to prevent.
+    runtime.isInstantCast = function(name, isAA)
+        local ms = runtime.castTimeMs(name, isAA)
+        if ms == nil then return isAA and true or false end
+        return ms <= 0
+    end
+
     runtime.buffFactuallyUp = function(id, name)
         name = tostring(name or '')
         if not id or id == 0 or name == '' then return false end
@@ -5885,6 +6000,11 @@ mq.event('TriuneInterrupt', '#*#interrupted#*#', function() onFailureEvent('inte
 mq.event('TriuneOutOfRangeSpell', '#*#out of range#*#', function() onFailureEvent('out of range') end)
 mq.event('TriuneCannotSee', '#*#see your target#*#', onCannotSeeEvent)
 mq.event('TriuneNoTakeHold', '#*#take hold#*#', function() onFailureEvent('did not take hold') end)
+-- "Your spell would not have taken hold" is the stacking refusal: something
+-- stronger in the same line already occupies the slot. Worth naming separately
+-- from a plain fizzle, since re-casting will never fix it.
+mq.event('TriuneStackBlocked', '#*#taken hold#*#',
+    function() onFailureEvent('blocked -- a stronger buff is already up') end)
 mq.event('TriuneImmuneSpell', '#*#immune#*#', function() onFailureEvent('target immune') end)
 mq.event('TriuneDeadTargetSpell', '#*#dead target#*#', function() onFailureEvent('dead target') end)
 mq.event('TriuneCantCast', '#*#cast spells while#*#', function() onFailureEvent('cannot cast') end)
@@ -5999,7 +6119,11 @@ local function castGem(i, g, id)
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
-    if (wasAttacking or (ctrl and ctrl.combat_style == 'Melee')) and not mq.TLO.Me.Combat() then
+    -- The Start buff pass casts on yourself while a hunt target may already be
+    -- selected far away. Swinging at it here makes EQ answer "too far away",
+    -- which trips the reposition handler and runs off mid-buff.
+    if not runtime.startBuffPass
+        and (wasAttacking or (ctrl and ctrl.combat_style == 'Melee')) and not mq.TLO.Me.Combat() then
         mq.cmd('/attack on')
     end
     return true
@@ -6051,7 +6175,8 @@ local function fireAA(name, a, id)
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
-    if (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
+    if not runtime.startBuffPass
+        and (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
         mq.cmd('/attack on')
     end
     return true
@@ -6618,6 +6743,7 @@ local function tryOpenNearbyDoor(force)
 end
 
 local function repositionCloser()
+    if runtime.startBuffPass then return end
     if not isCombat() then return end
     local tgt = mq.TLO.Target
     if not (tgt() and tgt.Type() == 'NPC' and not tgt.Dead()) then return end
@@ -7329,6 +7455,11 @@ local function checkCloserTarget(curTargetId, searchRadius, searchMaxZ, minLevel
 end
 
 local function checkPullHpRest()
+    -- Buff before sitting. Both this and the between-fights buff pass own the
+    -- idle window, and castGem stands you up to cast, so running them together
+    -- flaps sit/stand. Buffing takes seconds and costs mana; resting to full
+    -- takes far longer, so the useful order is buffs first, then recover.
+    if runtime.startBuffPass then return false end
     if ctrl.mode ~= 'Puller' then
         if runtime.pullHpRest then
             runtime.pullHpRest = false
@@ -7749,6 +7880,7 @@ fullStop = function()
     stuckState.counter = 0
     stuckState.attempts = 0
     stuckState.cannotSeeAttempts = 0
+    runtime.startBuffPass = false
     runtime.buffTries = {}
 end
 
@@ -7841,6 +7973,81 @@ runtime.desiredRange = desiredRange
 runtime.maxMeleeDistance = maxMeleeDistance
 runtime.isIgnored = isIgnored
 runtime.isUnreachable = isUnreachable
+
+-- Self-buff pass: self "missing buff" / always gems and AAs only.
+-- Returns 'cast' if something fired, 'wait' if a buff is still landing, 'done'
+-- when nothing is left. Hunt waits until 'done', real aggro, or the timeout.
+--
+-- Every cast is recorded against buffTries. Once an entry has been cast
+-- buff_max_tries times and still reads missing it is parked for buff_retry_sec,
+-- which is what stops a mis-detected buff being re-cast on every single tick.
+local function startBuffTick()
+    if mq.TLO.Me.Dead() then return 'done' end
+    if isCasting() then return 'wait' end
+    local myId = mq.TLO.Me.ID() or 0
+    if myId <= 0 then return 'wait' end
+
+    local pending = false
+    local blocked = nil
+
+    local function idleSelf(when, target)
+        local tok = baseTok(target)
+        return (when == 'missing buff' or when == 'always') and (tok == 'Myself' or tok == 'Self')
+    end
+
+    -- An entry that is missing but cannot fire right now -- spell not memmed,
+    -- AA on cooldown, not enough mana or endurance -- must not hold the pass
+    -- open, or a single unusable entry stalls every pull for the full timeout.
+    -- It gets four ticks of grace, in case it is simply mid-recast, and is then
+    -- left for the next post-combat pass.
+    local function stalled(key)
+        local n = (runtime.startBuffStalls[key] or 0) + 1
+        runtime.startBuffStalls[key] = n
+        return n < 4
+    end
+
+    for name, a in pairs(loadout.aas) do
+        if a and a.enabled and idleSelf(a.when, a.target) then
+            local aPct = tonumber(a.pct) or 100
+            local key = sungKey(name, myId)
+            if aPct > 0 and not a.burn_only and runtime.buffRetryOk(key)
+                and not runtime.buffFactuallyUp(myId, name) then
+                if fireAA(name, a, myId) then
+                    runtime.buffTryRecorded(key, name)
+                    return 'cast'
+                end
+                if stalled(key) then pending = true end
+            end
+        end
+    end
+
+    for i = 1, NUM_GEMS do
+        local g = loadout.gems[i]
+        if g and g.spell and g.spell ~= '' and idleSelf(g.when, g.target) then
+            local pctVal = tonumber(g.pct)
+            if pctVal == nil then pctVal = 100 end
+            local key = sungKey(g.spell, myId)
+            if pctVal > 0 and not g.burn_only and runtime.buffRetryOk(key)
+                and not runtime.buffFactuallyUp(myId, g.spell) then
+                if castTracker.isLockedOut(g.spell) then
+                    blocked = (blocked and (blocked .. ', ') or '')
+                        .. string.format('%s (%s)', g.spell,
+                            castTracker.failureReason(g.spell) or 'repeated failures')
+                else
+                    if castGem(i, g, myId) then
+                        runtime.buffTryRecorded(key, g.spell)
+                        return 'cast'
+                    end
+                    if stalled(key) then pending = true end
+                end
+            end
+        end
+    end
+    if not pending and blocked then
+        print('\ay[Triune]\ax buff skipped -- ' .. blocked)
+    end
+    return pending and 'wait' or 'done'
+end
 
 local function combatTick()
     local fullStop = runtime.fullStop
@@ -7979,6 +8186,51 @@ local function combatTick()
             mq.cmd('/sit')
         end
         return
+    end
+
+    -- Buff upkeep runs between fights. "Something hostile is on my XTarget" is
+    -- the signal, not isCombat(), which is also true with a hostile merely
+    -- targeted -- the normal state the instant hunting resumes. The hater and
+    -- aggro counts alone were not enough: they read 0 on some builds, which
+    -- left the pass running straight through fights.
+    local inFight = anyXtarAlive(true)
+    if not inFight then
+        pcall(function()
+            if (mq.TLO.Me.XTHaterCount() or 0) > 0 then inFight = true end
+            if (mq.TLO.Me.XTAggroCount() or 0) > 0 then inFight = true end
+            if mq.TLO.Me.CombatState() == 'COMBAT' then inFight = true end
+        end)
+    end
+    if runtime.wasUnderAttack and not inFight then
+        beginStartBuffPass()
+    end
+    runtime.wasUnderAttack = inFight
+
+    if runtime.startBuffPass then
+        local now = os.clock()
+        local timedOut = (now - (runtime.startBuffAt or now)) > 25
+        if inFight or timedOut then
+            runtime.startBuffPass = false
+            if timedOut and not inFight then
+                print('\ay[Triune]\ax buff check timed out -- moving on.')
+            elseif inFight then
+                print('\ay[Triune]\ax buff check dropped -- aggro.')
+            end
+        elseif isCasting() then
+            return
+        else
+            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+            if isMoveActive() or mq.TLO.Me.Moving() then
+                stopMoving()
+                return
+            end
+            local result = startBuffTick()
+            if result == 'cast' or result == 'wait' then
+                return
+            end
+            runtime.startBuffPass = false
+            print('\ag[Triune]\ax buffs up.')
+        end
     end
 
     local curPetId = mq.TLO.Me.Pet.ID() or 0
@@ -8612,7 +8864,16 @@ local function combatTick()
         for name, a in pairs(loadout.aas) do
             local aPct = tonumber(a.pct)
             if aPct == nil then aPct = 30 end
-            if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and (numXtar >= (tonumber(a.min_xtar) or 1)) then
+            -- Same treatment the gem loop gets below: a self buff AA is exempt
+            -- from Min XTarget (empty out of combat, where buffing happens) and
+            -- is held until the fight ends unless it is instant.
+            local aTok = baseTok(a.target)
+            local aSelfBuff = (a.when == 'missing buff') and (aTok == 'Myself' or aTok == 'Self')
+            local aMinXt = aSelfBuff and 0 or (tonumber(a.min_xtar) or 1)
+            local aInstant = (ctrl.buff_instant_in_combat ~= false)
+                and runtime.isInstantCast(name, true)
+            local aHeld = aSelfBuff and not ctrl.buff_in_combat and isCombat() and not aInstant
+            if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and (numXtar >= aMinXt) and not aHeld then
                 local id = resolveTargetId(a.target, a.cls, a.when, name, aPct)
                 local aKey = (a.when == 'missing buff') and id and sungKey(name, id) or nil
                 local aRetryOk = (not aKey) or runtime.buffRetryOk(aKey)
@@ -8751,11 +9012,24 @@ local function combatTick()
                 local pctVal = tonumber(g.pct)
                 if pctVal == nil then pctVal = 100 end
                 local isEnabled = (pctVal > 0)
-                local minXt = tonumber(g.min_xtar) or 1
+                local tok = baseTok(g.target)
+                local selfBuff = (g.when == 'missing buff') and (tok == 'Myself' or tok == 'Self')
+                -- Min XTarget is a "don't waste this on one mob" gate for combat
+                -- spells. A self buff has to be exempt or it could never land
+                -- out of combat, where XTarget is empty by definition.
+                local minXt = selfBuff and 0 or (tonumber(g.min_xtar) or 1)
                 local xtOk = (numXtar >= minXt)
                 local burnOk = (not g.burn_only or ctrl.burn)
                 local lockedOut = castTracker.isLockedOut(g.spell)
-                if isEnabled and burnOk and xtOk and not lockedOut then
+                -- Refreshing a self buff mid-fight costs cast time you owe the
+                -- fight. Held until combat ends unless Refresh Buffs In Combat
+                -- is on -- or the buff is instant, which costs nothing and does
+                -- not interrupt melee, so there is no reason to wait. Target
+                -- debuffs and 'always' entries are untouched.
+                local instantOk = (ctrl.buff_instant_in_combat ~= false)
+                    and runtime.isInstantCast(g.spell, false)
+                local heldBuff = selfBuff and not ctrl.buff_in_combat and isCombat() and not instantOk
+                if isEnabled and burnOk and xtOk and not lockedOut and not heldBuff then
                     local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal)
                     local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
                     local buffKey = (g.when == 'missing buff') and id and sungKey(g.spell, id) or nil
@@ -8890,6 +9164,7 @@ local function triuneCommand(...)
             end
             ctrl.running = true
             runtime.wasRunning = true
+            beginStartBuffPass()
             print('\ag[Triune]\ax running.')
         end
     elseif cmd == 'pause' or cmd == 'stop' then
@@ -8933,8 +9208,8 @@ local function triuneCommand(...)
         print('  \ag/ac pause | stop\ax - Pause execution & disengage combat')
         print('  \ag/ac burn [on|off]\ax - Toggle burn mode')
         print('  \ag/ac debug\ax - Toggle live combat debug telemetry in chat')
-        print('  \ag/ac buffs\ax - Print buff/song bar contents and the up/missing verdict per self buff')
         print('  \ag/ac status\ax - Print running state and mode')
+        print('  \ag/ac buffs\ax - Print buff/song bar contents and the up/missing verdict per self buff')
         print('  \ag/ac compact | mini | hud\ax - Toggle compact HUD mode')
         print('  \ag/ac help | h | ?\ax - Print slash command summary')
         print('  \ag/ac spellbook | book\ax - Toggle spellbook browser')
@@ -9208,6 +9483,7 @@ triuneToggle = function()
         end
         ctrl.running = true
         runtime.wasRunning = true
+        beginStartBuffPass()
         print('\ag[Triune]\ax running.')
     end
 end

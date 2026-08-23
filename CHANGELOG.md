@@ -2,6 +2,20 @@
 
 ## 2026-08-23
 
+- **Buff up between fights (`triune.lua`).**
+  - Self `missing buff` / `always` gems and AAs are put up when you hit Start and again each time a fight ends, before the next pull, so you are not pulling with buffs down. Never runs while paused or mid-combat.
+  - New **Buff Up Between Fights** setting (on by default). The pass drops immediately on aggro and times out after 25 seconds, so a buff that cannot be cast can never stall a pull. An entry that is missing but unable to fire — spell not memmed, AA on cooldown, not enough mana or endurance — gets four ticks of grace and is then left for the next post-combat pass rather than holding the pass open.
+  - "Something hostile is on my XTarget" is the signal for an active fight rather than `isCombat()`, which is also true with a hostile merely targeted — the normal state the instant hunting resumes. Hater and aggro counts alone were not enough: they read 0 on some builds, which left the pass running straight through fights.
+  - While the pass is active, `/attack` is not re-enabled after a cast and repositioning is suppressed. Casting a self buff with a distant hunt target selected otherwise draws a "too far away" response, which trips the reposition handler and runs off mid-buff.
+- **Hold self buffs until the fight ends (`triune.lua`).**
+  - New **Refresh Buffs In Combat** setting (off by default). A self `missing buff` gem or AA is held until combat ends instead of spending cast time re-buffing mid-swing. Target debuffs and `always` entries are unaffected.
+  - New **Allow Instant Buffs In Combat** setting (on by default) exempts buffs with no cast time from that hold — an instant costs nothing and does not interrupt melee, so there is no reason to wait. AAs whose cast time cannot be read are treated as instant, since activated AAs overwhelmingly are and `AltAbilityReady` already gates them.
+  - Self buffs are now exempt from the Min XTarget gate. That gate exists to stop heavy combat spells firing on a single mob, but out of combat XTarget is empty by definition, so it prevented self buffs from ever going up.
+- **Buffs go up before resting (`triune.lua`).**
+  - `checkPullHpRest` and the between-fights pass both own the idle window, and casting stands you up, so with both active you get a sit/stand flap. Resting is skipped while the buff pass is running. Buffing takes seconds and spends mana; resting to full takes far longer, so buffs first and recover afterwards is the useful order.
+- **Say why a cast failed (`triune.lua`).**
+  - The cast tracker records the reason a spell last failed and the lockout message now reports it, so "Lockout applied for X" reads as "Lockout applied for X -- fizzled" instead of leaving you to guess.
+  - Added a distinct event for "your spell would not have taken hold", the stacking refusal, since re-casting will never fix it and it deserves to be named separately from a plain fizzle.
 - **Trust the buff bar before recasting a missing buff (`triune.lua`).**
   - `missing buff` now resolves against the buff bar itself rather than `buffActive` alone. Both windows are read — the buff window ("Effects") and the short-duration window ("Songs") — by TLO index and by scraping the window icons, because neither route is complete on its own and index enumeration can come back empty while the icons are plainly there.
   - Fixes the two cases that caused endless recasting: bard persist songs, which sit on the bar with a null/0 duration once they lock so any duration-based check calls them missing, and self buffs that `Buff("name")` simply fails to see on some builds.

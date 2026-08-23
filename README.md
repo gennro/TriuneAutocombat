@@ -75,6 +75,7 @@ Triune keeps things simple with **3 main combat modes**:
 - **Burn Mode**: Tag big cooldowns and nukes as **Burn Only**, then toggle Burn on when fighting named mobs or big pulls (`/ac burn`).
 - **Min XTarget Gate**: Set heavy spells or area-of-effect nukes to only fire when you have multiple enemies on you (e.g. *Only cast if 3+ mobs on XTarget*).
 - **Auto-Memorize**: Triune remembers your setup in `triune_loadout.lua` and will automatically memorize missing spells when you're out of combat.
+- **Buff Up Between Fights**: Your self buffs go up when you hit Start and again after each fight ends, before the next pull. Mid-fight refreshes are held until combat is over so you're not spending cast time re-buffing mid-swing — instant buffs are exempt, and both behaviours are toggleable in Settings.
 
 ---
 
