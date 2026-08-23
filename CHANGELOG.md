@@ -2,6 +2,13 @@
 
 ## 2026-08-23
 
+- **Automated Clickie Item Management Tab (`triune.lua`, v1.7.0).**
+  - **Dedicated Clickies Tab (`UI.drawClickieTab`)**: Added a full-featured "Clickies" tab alongside Spell Gems and Abilities & AAs for managing clickable inventory, bag, and worn items.
+  - **Dynamic Cursor Item Addition (`addClickieFromCursor`)**: Added `+ Add Item on Cursor` button that inspects the currently held item on the player's cursor, validates its clickable spell effect (`it.Clicky` / `it.Spell`), extracts spell metadata, and assigns smart default triggers (`F: Myself` + `missing buff` for beneficial effects, `E: Current Target` + `in combat` for offensive effects).
+  - **Per-Item Trigger Rules & Controls**: Each clickie row includes enable/disable toggle, target dropdown (`TARGETS`), trigger condition dropdown (`WHENS`), threshold slider (`0–100%`), Min XTarget requirement (`1–10`), Burn Mode checkbox (`burn_only`), and priority reordering buttons (`▲` / `▼`).
+  - **Combat & Out-of-Combat Automation (`runtime.useClickie`)**: Seamlessly integrated clickie execution into `autocombatTick()`. Automates buff maintenance out of combat and emergency heals/offensive clickies in combat with item readiness verification (`Me.ItemReady` / timer check), movement guards, and throttle timers.
+  - **Full Persistence Support**: Updated `collectEntry()`, `applyEntry()`, and `onCharacterChanged()` to save and restore `loadout.clickies` directly in `triune_loadout.lua`.
+  - **Project Version Bump (v1.7.0)**: Bumped version to **1.7.0** across `triune.lua`, `triune_updater.lua`, and `README.md`.
 - **Minimum Pull HP % Threshold & Out-of-Combat Rest System (`triune.lua`).**
   - **Configurable Min Pull HP % Setting (`ctrl.pull_min_hp_pct`)**: Added a slider (`Min Pull HP %`, 0–95%, default 0 / disabled) in both the Settings tab (under *Health & Mana Management*) and the Control tab (under *Puller Mode Controls*).
   - **Automated Out-of-Combat Resting (`checkPullHpRest`)**: When Puller mode is active (both *Hunt* and *Camp* submodes) and player HP drops below the threshold, pulling and waypoint navigation pause immediately, non-engaged targets are cleared, and the character sits out of combat until HP recovers to 100%.

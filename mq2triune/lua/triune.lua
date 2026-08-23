@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.6.14'
+local VERSION           = '1.7.0'
 local open              = true
 local cfg               = mq.configDir
 
@@ -98,7 +98,7 @@ local lvlMin, lvlMax = 1, 65
 -- (discs = disciplines, e.g. Mend/Lay on Hands/Hand of Piety -- fired via
 -- /disc, not /alt act; kept separate from aas since they're a different
 -- activation command and data source, but use the identical entry shape)
-local loadout        = { gems = {}, aas = {}, discs = {} }
+local loadout        = { gems = {}, aas = {}, discs = {}, clickies = {} }
 
 -- combat control state (Control tab). NOTE: this is the control surface; wiring it
 -- into the actual casting/movement engine is phase 2.
@@ -1966,6 +1966,7 @@ local function collectEntry()
         gems = loadout.gems,
         aas = loadout.aas,
         discs = loadout.discs,
+        clickies = loadout.clickies,
         control = ctrl
     }
 end
@@ -1984,6 +1985,14 @@ local function applyEntry(e)
         end
     end
     loadout.discs = e.discs or {}
+    loadout.clickies = {}
+    if type(e.clickies) == 'table' then
+        for _, v in ipairs(e.clickies) do
+            if type(v) == 'table' and v.name then
+                table.insert(loadout.clickies, v)
+            end
+        end
+    end
     if type(e.control) == 'table' then
         for k, v in pairs(e.control) do ctrl[k] = v end
         sanitizeModeConfig()
@@ -2472,7 +2481,7 @@ end
 -- Called when the logged-in character changes: load that toon's saved setup, or
 -- detect classes fresh if it's new.
 local function onCharacterChanged()
-    loadout = { gems = {}, aas = {}, discs = {} }
+    loadout = { gems = {}, aas = {}, discs = {}, clickies = {} }
     ctrl = defaultCtrl()
     runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
     lvlMin, lvlMax = 1, 65
@@ -3150,6 +3159,262 @@ function UI.drawGemTab()
     ImGui.EndTabItem()
 end
 
+local function addClickieFromCursor()
+    local it = mq.TLO.Cursor
+    if not it or not it() or (it.ID() or 0) <= 0 then
+        print('\ar[Triune]\ax Cursor is empty -- pick up a clickable item first.')
+        return false, 'Cursor is empty'
+    end
+
+    local itemName = tostring(it.Name() or '')
+    if itemName == '' then
+        print('\ar[Triune]\ax Unable to read item on cursor.')
+        return false, 'Invalid item'
+    end
+
+    loadout.clickies = loadout.clickies or {}
+    for _, c in ipairs(loadout.clickies) do
+        if c.name == itemName then
+            print('\ay[Triune]\ax Item "' .. itemName .. '" is already in your Clickies list.')
+            return false, 'Already in list'
+        end
+    end
+
+    local spellName = ''
+    local castTime = 0
+    local isBene = true
+
+    pcall(function()
+        if it.Clicky and it.Clicky() then
+            local sp = it.Clicky.Spell
+            if sp and sp() then
+                spellName = tostring(sp.Name() or '')
+                castTime = tonumber(it.Clicky.CastTime() or sp.CastTime() or 0) or 0
+                isBene = not not sp.Beneficial()
+            end
+        end
+    end)
+
+    if spellName == '' then
+        pcall(function()
+            local sp = it.Spell
+            if sp and sp() then
+                spellName = tostring(sp.Name() or '')
+                castTime = tonumber(it.CastTime() or sp.CastTime() or 0) or 0
+                isBene = not not sp.Beneficial()
+            end
+        end)
+    end
+
+    if spellName == '' then
+        print('\ar[Triune]\ax Item [' .. itemName .. '] does not have an activatable click effect/spell.')
+        return false, 'No click effect'
+    end
+
+    local defTarget = isBene and 'F: Myself' or 'E: Current Target'
+    local defWhen = isBene and 'missing buff' or 'in combat'
+    local defPct = 100
+
+    local entry = {
+        name = itemName,
+        spell = spellName,
+        target = defTarget,
+        when = defWhen,
+        pct = defPct,
+        min_xtar = 1,
+        burn_only = false,
+        enabled = true,
+        cast_time = castTime,
+    }
+
+    table.insert(loadout.clickies, entry)
+    saveLoadout(true)
+    print(string.format('\ag[Triune]\ax Added Clickie: [%s] (Spell: %s, Target: %s, Condition: %s)',
+        itemName, spellName, defTarget, defWhen))
+    return true
+end
+
+function UI.drawClickieTab()
+    if not ImGui.BeginTabItem('Clickies') then return end
+    ImGui.Dummy(0, 4)
+    ImGui.TextWrapped('Clickable Items: Manage inventory and equipped items with activatable spell effects. Click [+ Add Item on Cursor] while holding an item to add it.')
+    if ImGui.IsItemHovered() then
+        UI.setTooltip('Configure automated clickies (inventory/worn items). Items are clicked automatically when conditions are met.')
+    end
+    ImGui.Dummy(0, 2)
+
+    -- Cursor inspection info
+    local curItem = mq.TLO.Cursor
+    local hasCursorItem = curItem and curItem() and (curItem.ID() or 0) > 0
+    local curName = hasCursorItem and tostring(curItem.Name() or 'Item') or nil
+
+    if not hasCursorItem then ImGui.BeginDisabled() end
+    if ImGui.Button('+ Add Item on Cursor', 170, 24) then
+        addClickieFromCursor()
+    end
+    if not hasCursorItem then ImGui.EndDisabled() end
+
+    if ImGui.IsItemHovered() then
+        if hasCursorItem then
+            UI.setTooltip(string.format('Add [%s] from your cursor to the Clickies list.', curName))
+        else
+            UI.setTooltip('Pick up an item with a click effect onto your cursor, then click this button.')
+        end
+    end
+
+    ImGui.SameLine()
+    if hasCursorItem then
+        accent(GOOD, 'Cursor: ' .. curName)
+    else
+        accent(MUTED, 'Cursor: (Empty)')
+    end
+
+    ImGui.SameLine()
+    ImGui.TextDisabled(string.format('| %d item(s)', #(loadout.clickies or {})))
+
+    ImGui.Separator()
+
+    if ImGui.BeginChild('clickielist', 0, 0) then
+        loadout.clickies = loadout.clickies or {}
+        local toRemove = nil
+
+        for idx, c in ipairs(loadout.clickies) do
+            ImGui.PushID('clk_' .. idx .. '_' .. (c.name or ''))
+
+            -- Reorder Up
+            local isFirst = (idx == 1)
+            if isFirst then ImGui.BeginDisabled() end
+            if ImGui.Button('^##up', 20, 20) then
+                local tmp = loadout.clickies[idx]
+                loadout.clickies[idx] = loadout.clickies[idx - 1]
+                loadout.clickies[idx - 1] = tmp
+                saveLoadout(true)
+            end
+            if isFirst then ImGui.EndDisabled() end
+            if ImGui.IsItemHovered() and not isFirst then
+                UI.setTooltip('Move higher in priority order.')
+            end
+
+            ImGui.SameLine()
+            -- Reorder Down
+            local isLast = (idx == #loadout.clickies)
+            if isLast then ImGui.BeginDisabled() end
+            if ImGui.Button('v##dn', 20, 20) then
+                local tmp = loadout.clickies[idx]
+                loadout.clickies[idx] = loadout.clickies[idx + 1]
+                loadout.clickies[idx + 1] = tmp
+                saveLoadout(true)
+            end
+            if isLast then ImGui.EndDisabled() end
+            if ImGui.IsItemHovered() and not isLast then
+                UI.setTooltip('Move lower in priority order.')
+            end
+
+            ImGui.SameLine()
+            -- Delete button
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            local pCol = 0
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then pCol = pCol + 1 end
+            if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.85, 0.25, 0.25, 1.0) then pCol = pCol + 1 end
+            if ImGui.Button('X##del', 20, 20) then
+                toRemove = idx
+            end
+            if pCol > 0 then pcall(ImGui.PopStyleColor, pCol) end
+            if ImGui.IsItemHovered() then
+                UI.setTooltip(string.format('Remove [%s] from Clickies.', c.name))
+            end
+
+            ImGui.SameLine()
+            c.enabled = ImGui.Checkbox('##en', c.enabled ~= false)
+            if ImGui.IsItemHovered() then
+                UI.setTooltip(string.format('Enable or disable %s.', c.name))
+            end
+
+            ImGui.SameLine()
+            accent(GOOD, c.name or 'Item')
+            if ImGui.IsItemHovered() then
+                UI.setTooltip(string.format('Clickie Item: %s\nSpell Effect: %s', tostring(c.name), tostring(c.spell or 'Unknown')))
+            end
+
+            if c.spell and c.spell ~= '' then
+                ImGui.SameLine()
+                ImGui.TextDisabled('(' .. c.spell .. ')')
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip(string.format('Click Effect Spell: %s', c.spell))
+                end
+            end
+
+            if c.enabled ~= false then
+                ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                local ti = ImGui.Combo('##ct', idxOf(TARGETS, c.target or 'F: Myself'), TARGETS)
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('Target condition: who or what to use this clickie on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
+                end
+                c.target = TARGETS[ti]
+
+                ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                local wi = ImGui.Combo('##cw', idxOf(WHENS, c.when or 'missing buff'), WHENS)
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('Trigger condition: when this clickie should be used (e.g. missing buff, HP <=, in combat, always).')
+                end
+                c.when = WHENS[wi]
+
+                ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                local curPct = tonumber(c.pct)
+                if curPct == nil then curPct = 100 end
+                local isDis = (curPct == 0)
+                local pCount = 0
+                if isDis then pCount = UI.pushDisabledSliderStyle() end
+                local cpVal = ImGui.SliderInt('##cp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                local isHov = ImGui.IsItemHovered()
+                if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
+                c.pct = cpVal
+                if isHov then
+                    if cpVal == 0 then
+                        UI.setTooltip('Clickie is Disabled (0%). Drag slider above 0% to enable.')
+                    else
+                        UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this clickie).', cpVal))
+                    end
+                end
+
+                ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                local curXt = tonumber(c.min_xtar) or 1
+                if curXt < 1 then curXt = 1 end
+                if curXt > 10 then curXt = 10 end
+                local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                local xti = ImGui.Combo('##cmxt', curXt, xtOpts)
+                c.min_xtar = xti
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('Minimum number of active NPCs on XTarget required for this clickie to fire.')
+                end
+
+                ImGui.SameLine()
+                local cboVal = ImGui.Checkbox('Burn##cbo', c.burn_only or false)
+                c.burn_only = cboVal
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('Only use this clickie when Burn Mode is ON.')
+                end
+            end
+
+            ImGui.PopID()
+        end
+
+        if toRemove then
+            local removedName = loadout.clickies[toRemove] and loadout.clickies[toRemove].name or 'item'
+            table.remove(loadout.clickies, toRemove)
+            saveLoadout(true)
+            print('\ag[Triune]\ax Removed Clickie: [' .. removedName .. ']')
+        end
+
+        if #loadout.clickies == 0 then
+            ImGui.Dummy(0, 10)
+            accent(MUTED, '  (No clickies added yet -- pick up an item with a click effect on your cursor and click [+ Add Item on Cursor] above)')
+        end
+    end
+    ImGui.EndChild()
+    ImGui.EndTabItem()
+end
+
 local TIER_LABEL = { short = 'Short  (<= 1 min)', mid = 'Sustained  (1-5 min)', burn = 'Burn  (5 min+)' }
 local TIER_ORDER = { 'short', 'mid', 'burn' }
 
@@ -3669,7 +3934,7 @@ function UI.drawControlTab()
         local pullMinHpVal = ImGui.SliderInt('Min Pull HP %##pullMinHpCtrl', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
         ctrl.pull_min_hp_pct = pullMinHpVal
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(
+            ImGui.SetTooltip('%s',
                 'Pauses pulling and sits out of combat to recover if current HP drops below\n'
                 .. 'this threshold. Pulling resumes once HP reaches 100%.\n'
                 .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
@@ -4224,7 +4489,7 @@ function UI.drawSettingsTab()
     local minPullHpVal = ImGui.SliderInt('Min Pull HP %##minPullHpSettings', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
     ctrl.pull_min_hp_pct = minPullHpVal
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
+        ImGui.SetTooltip('%s',
             'Pauses pulling and sits out of combat to recover if current HP drops below\n'
             .. 'this threshold. Pulling resumes once HP reaches 100%.\n'
             .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
@@ -4496,6 +4761,7 @@ local function drawFullGui()
         UI.drawControlTab()
         UI.drawSettingsTab()
         UI.drawGemTab()
+        UI.drawClickieTab()
         UI.drawAATab()
         UI.drawDiscTab()
         UI.drawHelpTab()
@@ -5713,6 +5979,66 @@ runtime.fireSkill = function(name, a, id)
     runtime.lastCast[key] = now + cd
 
     print('\ag[Triune]\ax skill fired: ' .. name)
+    if not selfCast and orig ~= id then
+        mq.delay(60)
+        if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+    end
+    if (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
+        mq.cmd('/attack on')
+    end
+    return true
+end
+
+runtime.useClickie = function(c, id)
+    if not c or not c.name or c.name == '' then return false end
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+        mq.delay(50)
+    end
+    local key = 'c_' .. c.name
+    if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.5 then return false end
+
+    local fi = mq.TLO.FindItem('=' .. c.name)
+    if not fi or not fi() then fi = mq.TLO.FindItem(c.name) end
+    if not fi or not fi() then return false end
+
+    local ready = false
+    pcall(function()
+        if mq.TLO.Me.ItemReady(c.name)() then
+            ready = true
+        elseif fi.TimerReady and tonumber(fi.TimerReady()) == 0 then
+            ready = true
+        end
+    end)
+    if not ready then return false end
+
+    local castMs = 0
+    pcall(function() castMs = tonumber(fi.CastTime() or 0) or 0 end)
+    castMs = tonumber(castMs) or 0
+    if castMs > 0 and (isCasting() or isMoveActive()) then return false end
+
+    local dur = 0
+    if c.spell and c.spell ~= '' then
+        pcall(function() dur = tonumber(mq.TLO.Spell(c.spell).Duration()) or 0 end)
+        dur = tonumber(dur) or 0
+        if dur > 0 and buffActive(id, c.spell) then
+            return false
+        end
+    end
+
+    local selfCast = (id == mq.TLO.Me.ID())
+    local orig = mq.TLO.Target.ID() or 0
+    local wasAttacking = mq.TLO.Me.Combat()
+    if not selfCast and not setTarget(id) then return false end
+
+    clearCursor()
+    if ctrl.debug_mode then
+        print(string.format('\ao[DEBUG clickie]\ax "%s" (spell="%s") on target #%d', c.name, tostring(c.spell), id))
+    end
+    mq.cmdf('/useitem "%s"', c.name)
+    runtime.lastCast[key] = os.clock()
+    print('\ag[Triune]\ax Clickie used: ' .. c.name .. (c.spell and (' (' .. c.spell .. ')') or ''))
+
     if not selfCast and orig ~= id then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
@@ -8063,6 +8389,34 @@ local function combatTick()
                 if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
             elseif not isMoveActive() and tid > 0 then
                 moveToward(tid, desiredRange(tid))
+            end
+        end
+    end
+
+    if combatReady and not isCasting() and not isMoveActive() and loadout.clickies and #loadout.clickies > 0 then
+        for _, c in ipairs(loadout.clickies) do
+            local cPct = tonumber(c.pct)
+            if cPct == nil then cPct = 100 end
+            local isEnabled = (c.enabled ~= false) and (cPct > 0)
+            local minXt = tonumber(c.min_xtar) or 1
+            local xtOk = (numXtar >= minXt)
+            local burnOk = (not c.burn_only or ctrl.burn)
+            if isEnabled and burnOk and xtOk then
+                local effName = (c.spell and c.spell ~= '') and c.spell or c.name
+                local id = resolveTargetId(c.target, 'ALL', c.when, effName, cPct)
+                local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL')
+                if condOk then
+                    local isDet = isDetrimentalAction(effName, c.target, c)
+                    local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(effName, id))
+                    if targetValid and runtime.useClickie(c, id) then
+                        if c.when == 'missing buff' and c.spell and c.spell ~= '' then
+                            local bene = false
+                            pcall(function() bene = mq.TLO.Spell(c.spell).Beneficial() end)
+                            if bene then runtime.sungBuffs[sungKey(c.spell, id)] = true end
+                        end
+                        break
+                    end
+                end
             end
         end
     end

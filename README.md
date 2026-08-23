@@ -78,6 +78,14 @@ Triune keeps things simple with **3 main combat modes**:
 
 ---
 
+### 🎒 Automated Clickie Item Management
+- **Dynamic Setup from Cursor**: Pick up any inventory, bag, or equipped item with a clickable spell effect onto your cursor and click **`+ Add Item on Cursor`** in the **Clickies** tab.
+- **Context-Aware Trigger Rules**: Configure target condition (`F: Myself`, `F: Tank`, `E: Current Target`), trigger condition (`Missing Buff`, `HP <=`, `In Combat`, `Always`), health/mana threshold slider, and Min XTarget requirements.
+- **Priority Reordering & Deletion**: Use `▲` and `▼` buttons to reorder clickie priority and `✕` to remove items from your loadout.
+- **Smart Cooldown & Buff Detection**: Automatically checks item readiness (`ItemReady` / timer ready) and avoids re-clicking active duration buffs.
+
+---
+
 ### 🐾 Smart Pet Control
 - **No Early Aggro**: Pets stay on hold until you actually start hitting the mob, keeping them from pulling accidental adds.
 - **Pet Assist %**: Tell your pet to wait until the mob's HP drops to a certain percentage before engaging.
@@ -175,6 +183,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.6.14**
+Current version: **1.7.0**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.
