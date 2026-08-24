@@ -1829,18 +1829,12 @@ end
 -- of Wolf=buff). Shown in the picker so a low-level player isn't left
 -- guessing what an unfamiliar spell name actually does.
 
--- Base SKILLS (not spells/discs/AAs -- no extractor entry, no cooldown data,
--- fired via /doability) worth an emergency %-based condition. Keyed by class
--- so this stays correctly empty for classes with no notable one. Routine
--- rotation skills (Kick, Tiger Claw, Flying Kick, etc.) deliberately excluded
--- -- handled by the user's separate autoskill window. Rendered as its own
--- "Special Skills" section on the Disciplines tab (see UI.drawDiscTab) and
--- fired through the exact same eligible-ability/priority pipeline as real
--- Disciplines -- see isSpecialSkill() usage in combatTick() and
--- runtime.fireSkill(). Only Mend is exposed today: Feign Death is a real
--- innate skill too, but dropping to the floor on a bot-driven trigger has
--- enough failure modes (bad roll while grouped/raiding, aggro-clear timing)
--- that it needs its own deliberate design pass before going in this table.
+-- Base SKILLS (not spells/discs/AAs -- fired via /doability, no cooldown
+-- data). Keyed by class. Rendered as "Special Skills" on the Disciplines tab
+-- and fired through the same eligible-ability pipeline as real Disciplines
+-- (see isSpecialSkill()/runtime.fireSkill()). Feign Death deliberately
+-- omitted -- needs its own design pass before an automated trigger drops a
+-- character to the floor.
 local SPECIAL_SKILLS = {
     Mnk = { 'Mend' },
 }
@@ -1997,13 +1991,9 @@ local function applyEntry(e)
         end
     end
     loadout.discs = e.discs or {}
-    -- Backfill entry.kind on any persisted Special Skill entries (e.g. Mend)
-    -- saved before isDetrimentalAction() needed it to correctly classify
-    -- them as non-detrimental -- without it they'd silently never become
-    -- eligible to fire (see UI.drawDiscTab's Special Skills section for the
-    -- full explanation). Doing it here too, not just in the UI row, means a
-    -- character that never opens the Disciplines tab after upgrading still
-    -- gets a working entry on the very next load.
+    -- Backfill entry.kind on persisted Special Skill entries (e.g. Mend)
+    -- saved before isDetrimentalAction() needed it -- see UI.drawDiscTab.
+    -- Covers characters that never reopen the Disciplines tab after upgrading.
     for _, list in pairs(SPECIAL_SKILLS) do
         for _, nm in ipairs(list) do
             local d = loadout.discs[nm]
@@ -3572,14 +3562,11 @@ function UI.drawDiscTab()
     end
     ImGui.Separator()
     if ImGui.BeginChild('disclist', 0, 0) then
-        -- Special Skills: innate class abilities (Mend, currently the only
-        -- one exposed) that aren't real Disciplines -- no extractor level
-        -- data, fired via /doability instead of /disc -- but still run
-        -- through the exact same priority-ordered eligible-ability pipeline
-        -- as the Disciplines listed below (see isSpecialSkill()/fireSkill()
-        -- and the eligibleDiscs loop in combatTick()). Broken out into its
-        -- own labeled section so it doesn't blend into the leveled disc
-        -- list beneath it.
+        -- Special Skills: innate class abilities (just Mend, today) that
+        -- aren't real Disciplines -- fired via /doability, no level data --
+        -- but run through the same priority-ordered eligible-ability
+        -- pipeline as the Disciplines below (isSpecialSkill()/fireSkill()).
+        -- Own section so it doesn't blend into the leveled disc list.
         local anySpecial = false
         for _, cls in ipairs(myClasses) do
             for _, nm in ipairs(SPECIAL_SKILLS[cls] or {}) do
@@ -3587,16 +3574,10 @@ function UI.drawDiscTab()
                 ImGui.PushID('special_' .. cls .. '_' .. nm)
                 local entry = loadout.discs[nm] or
                     { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 75, boss_only = false, burn_only = false, priority = 50, kind = 'heal' }
-                -- isDetrimentalAction() classifies an ability by checking the
-                -- Spell/AltAbility/CombatAbility TLOs in turn -- none of
-                -- which resolve for a bare combat skill like Mend, since
-                -- it's none of those. Without entry.kind to short-circuit
-                -- that chain, it falls through to isDetrimentalAction's
-                -- "couldn't classify it, assume detrimental" default, which
-                -- then requires the resolved target (yourself, for Mend) to
-                -- be hostile -- impossible -- so it silently never becomes
-                -- eligible to fire. Backfill kind here unconditionally so
-                -- entries saved before this fix (missing kind) self-heal too.
+                -- kind='heal' short-circuits isDetrimentalAction(), which
+                -- can't classify a bare skill like Mend and otherwise
+                -- defaults to detrimental (requiring a hostile self -- never
+                -- true). Backfilled unconditionally so pre-fix saves recover.
                 entry.kind = entry.kind or 'heal'
                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
                 if ImGui.IsItemHovered() then
