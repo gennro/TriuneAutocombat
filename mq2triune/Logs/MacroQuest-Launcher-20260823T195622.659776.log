@@ -1,7 +1,0 @@
-D 2026-08-23 19:56:22.660642 [MQ] Logging Initialized (C:\Users\Public\source\repos\macroquest\src\loader\MacroQuest.cpp:316)
-I 2026-08-23 19:56:22.660768 [MQ] Starting MacroQuest Loader. Built Sun Nov 24 12:52:44 2024 (C:\Users\Public\source\repos\macroquest\src\loader\MacroQuest.cpp:1367)
-I 2026-08-23 19:56:22.662121 [MQ] Initializing crashpad handler (C:\Users\Public\source\repos\macroquest\src\loader\Crashpad.cpp:100)
-D 2026-08-23 19:56:22.662142 [MQ] Handler Path: C:\Fun Stuff\TAC\triunemq\TriuneAutocombat\mq2triune\crashpad_handler.exe (C:\Users\Public\source\repos\macroquest\src\loader\Crashpad.cpp:101)
-I 2026-08-23 19:56:22.662679 [MQ] Crash report submission is: disabled (C:\Users\Public\source\repos\macroquest\src\loader\Crashpad.cpp:115)
-I 2026-08-23 19:56:22.662691 [MQ] Using shared crash reporter for all MacroQuest instances (C:\Users\Public\source\repos\macroquest\src\loader\Crashpad.cpp:120)
-I 2026-08-23 19:56:22.702474 [MQ] Relaunching as spawned process (C:\Users\Public\source\repos\macroquest\src\loader\MacroQuest.cpp:1470)
