@@ -304,6 +304,7 @@ local function defaultCtrl()
         waypoint_radius      = 20,
         waypoint_scan_radius = 100,
         waypoint_direction   = 1,
+        waypoint_loop        = false,
         current_waypoint_idx = 1,
         waypoints            = {}
     }
@@ -2213,7 +2214,7 @@ function runtime.setNearestWaypoint()
     end
 
     ctrl.current_waypoint_idx = bestIdx
-    if bestIdx >= #wps and #wps > 1 then
+    if not ctrl.waypoint_loop and bestIdx >= #wps and #wps > 1 then
         ctrl.waypoint_direction = -1
     else
         ctrl.waypoint_direction = 1
@@ -4209,6 +4210,19 @@ function UI.drawControlTab()
                 'NPC search radius in units around your character to look for mobs while patrolling waypoints.')
             end
 
+            local newLoop = ImGui.Checkbox('Loop##wpLoop', ctrl.waypoint_loop == true)
+            if newLoop ~= ctrl.waypoint_loop then
+                ctrl.waypoint_loop = newLoop
+                if ctrl.waypoint_loop then ctrl.waypoint_direction = 1 end
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'On, patrol always moves forward and wraps to the first waypoint\n'
+                    .. 'after the last one. Off (default), patrol bounces back and forth,\n'
+                    .. 'reversing direction at each end.')
+            end
+
             if ImGui.Button('Add Current Location##addWpLoc') then
                 runtime.wpAdd()
             end
@@ -4254,8 +4268,12 @@ function UI.drawControlTab()
 
                         ImGui.TableNextColumn()
                         if (ctrl.current_waypoint_idx or 1) == idx then
-                            local dirStr = ((ctrl.waypoint_direction or 1) == -1) and '<<' or '>>'
-                            accent(GOOD, dirStr .. ' NEXT')
+                            if ctrl.waypoint_loop and idx == #wps and #wps > 1 then
+                                accent(GOOD, '>> LOOP')
+                            else
+                                local dirStr = ((ctrl.waypoint_direction or 1) == -1) and '<<' or '>>'
+                                accent(GOOD, dirStr .. ' NEXT')
+                            end
                         else
                             ImGui.Text('')
                         end
@@ -4263,7 +4281,9 @@ function UI.drawControlTab()
                         ImGui.TableNextColumn()
                         if ImGui.Button(string.format('Set##wpSet_%d', idx)) then
                             ctrl.current_waypoint_idx = idx
-                            if idx == #wps and #wps > 1 then
+                            if ctrl.waypoint_loop then
+                                ctrl.waypoint_direction = 1
+                            elseif idx == #wps and #wps > 1 then
                                 ctrl.waypoint_direction = -1
                             elseif idx == 1 then
                                 ctrl.waypoint_direction = 1
@@ -6660,6 +6680,13 @@ function runtime.wpTick()
         if #wps <= 1 then
             ctrl.current_waypoint_idx = 1
             ctrl.waypoint_direction = 1
+        elseif ctrl.waypoint_loop then
+            -- Looping: always advance forward, wrapping to the first
+            -- waypoint after the last instead of reversing direction.
+            local nextIdx = prevIdx + 1
+            if nextIdx > #wps then nextIdx = 1 end
+            ctrl.waypoint_direction = 1
+            ctrl.current_waypoint_idx = nextIdx
         else
             local dir = ctrl.waypoint_direction or 1
             if dir ~= 1 and dir ~= -1 then dir = 1 end

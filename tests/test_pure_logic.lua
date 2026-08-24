@@ -489,6 +489,7 @@ local EXPECTED_FIELDS = {
     { 'waypoint_radius',     'number'  },
     { 'waypoint_scan_radius','number'  },
     { 'waypoint_direction',  'number'  },
+    { 'waypoint_loop',       'boolean' },
     { 'current_waypoint_idx','number'  },
     { 'waypoints',           'table'   },
 }
