@@ -329,6 +329,15 @@ local runtime = {
     -- to melee attack mode).
     serverAttackMode = 'Melee',
     lastAttackModeCmdAt = 0,
+    -- Under server Ranged attack mode, /attack behaves as a pure on/off
+    -- toggle rather than "start attacking my current target": if it's
+    -- already sitting "on" from a previous mob, sending /attack on again
+    -- for a new target is a no-op and the character never actually fires,
+    -- even though Me.Combat() keeps reporting true. ensureRangedAutoAttack()
+    -- uses this field to detect a target change and force a real
+    -- off-then-on cycle (blocking briefly via mq.delay) instead of trusting
+    -- the current toggle state.
+    lastRangedAttackTargetId = 0,
     pendingMem = {},
     lastCast = {},
     lastTick = 0,
@@ -4538,7 +4547,7 @@ function UI.drawSettingsTab()
         end
     else
         ImGui.SetNextItemWidth(200)
-        local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 15, 200)
+        local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 5, 200)
         if changed or (newDist and newDist ~= ctrl.ranged_dist) then
             ctrl.ranged_dist = newDist
             saveLoadout(true)
@@ -6416,7 +6425,7 @@ local function repositionCloser()
     local currentDist = distToId(tid)
     local targetDist = desiredRange(tid)
     if (ctrl and ctrl.combat_style) ~= 'Melee' then
-        targetDist = math.max(15, math.min(targetDist, math.floor(currentDist - 15)))
+        targetDist = math.max(5, math.min(targetDist, math.floor(currentDist - 15)))
     else
         -- When EQ reports "too far away", ensure we close in tighter than current distance
         targetDist = math.max(5, math.min(targetDist, math.floor(currentDist - 8)))
@@ -6558,6 +6567,41 @@ revertAttackModeToMelee = function()
     if (os.clock() - (runtime.lastAttackModeCmdAt or 0)) < 1.0 then return end
     runtime.lastAttackModeCmdAt = os.clock()
     mq.cmd('/say #attackmode melee')
+end
+
+-- Call only once runtime.serverAttackMode == 'Ranged' is already confirmed
+-- and tid is a valid, in-range target we want to be firing at. Handles the
+-- toggle-vs-target-change quirk described above: on a genuine target
+-- change, forces /attack off then a short beat later /attack on (so the two
+-- commands don't collapse into a same-tick no-op), rather than only
+-- checking whether the toggle currently reads off. For the common case
+-- (same target as last tick, already firing) this is just the original
+-- "turn it on if it's off" check.
+--
+-- This is synchronous (uses mq.delay) rather than spreading the retoggle
+-- across two separate ticks via a pending flag. The earlier async version
+-- required a follow-up call after the delay window to send the completing
+-- /attack on, but this function is only invoked from inside conditionally
+-- gated combat-tick code (distance/casting/haveNPC checks) -- those gates
+-- can flip false on the very next tick and never call back in, permanently
+-- stranding the character with attack off. Blocking here for one short
+-- delay (this always runs on the main-loop coroutine, never an ImGui
+-- render callback, so mq.delay is safe) guarantees /attack off is always
+-- immediately followed by /attack on within the same call.
+local function ensureRangedAutoAttack(tid)
+    if tid ~= runtime.lastRangedAttackTargetId then
+        runtime.lastRangedAttackTargetId = tid
+        if mq.TLO.Me.Combat() then
+            mq.cmd('/attack off')
+            mq.delay(300)
+            mq.cmd('/attack on')
+        else
+            mq.cmd('/attack on')
+        end
+        return
+    end
+
+    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
 end
 
 -- Same idea for a fixed camp location (used returning from a pull).
@@ -6875,8 +6919,8 @@ local function checkCombatStall()
             if runtime.serverAttackMode ~= 'Ranged' and (os.clock() - (runtime.lastAttackModeCmdAt or 0)) > 1.0 then
                 runtime.lastAttackModeCmdAt = os.clock()
                 mq.cmd('/say #attackmode ranged')
-            elseif runtime.serverAttackMode == 'Ranged' and not mq.TLO.Me.Combat() then
-                mq.cmd('/attack on')
+            elseif runtime.serverAttackMode == 'Ranged' then
+                ensureRangedAutoAttack(t.ID())
             end
         end
     end
@@ -7361,10 +7405,33 @@ local function pullerTick()
             runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
         else
             local pullStyle = ctrl.pull_style or 'Melee'
-            local reqRange = (pullStyle == 'Melee') and desiredRange(runtime.pullTargetId) or (ctrl.pull_engage_dist or 100)
+            local reqRange
+            if pullStyle == 'Melee' then
+                reqRange = desiredRange(runtime.pullTargetId)
+            elseif pullStyle == 'Ranged' then
+                -- Close all the way to the real ranged engagement distance
+                -- (or the Stand Back distance, if that's enabled) instead of
+                -- parking at the looser pull_engage_dist -- this uses
+                -- ctrl.ranged_dist directly rather than desiredRange() so it
+                -- still closes to bow range even if overall combat_style is
+                -- Melee/Spell (bow-tag-then-melee/spell pulling).
+                reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)
+            else
+                reqRange = ctrl.pull_engage_dist or 100
+            end
 
-            if moveToward(runtime.pullTargetId, reqRange) then
-                local tid = runtime.pullTargetId
+            local tid = runtime.pullTargetId
+            local arrived = moveToward(tid, reqRange)
+            -- Ranged: start firing as soon as we're within the outer
+            -- pull-engage window and have LoS -- same threshold as before --
+            -- rather than waiting for full arrival at the tighter reqRange
+            -- above. Lets the character keep closing toward true engagement
+            -- range while already shooting, instead of stopping short and
+            -- standing still waiting for the mob to close the gap itself.
+            local inRange = arrived or
+                (pullStyle == 'Ranged' and distToId(tid) <= (ctrl.pull_engage_dist or 100) and hasLoS(tid))
+
+            if inRange then
                 local tagged = false
 
                 if pullStyle == 'Melee' then
@@ -7372,7 +7439,25 @@ local function pullerTick()
                     tagged = true
                 elseif pullStyle == 'Ranged' then
                     mq.cmd('/face fast')
-                    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                    if ctrl.combat_style == 'Ranged' then
+                        -- AutoCombat is set to Ranged: /autofire leaves the
+                        -- character not attacking at all on this server.
+                        -- Use the server's own #attackmode ranged toggle
+                        -- (tracked in runtime.serverAttackMode) plus plain
+                        -- /attack on instead -- same approach as general
+                        -- Ranged-style combat engagement.
+                        if runtime.serverAttackMode ~= 'Ranged' and (os.clock() - (runtime.lastAttackModeCmdAt or 0)) > 1.0 then
+                            runtime.lastAttackModeCmdAt = os.clock()
+                            mq.cmd('/say #attackmode ranged')
+                        elseif runtime.serverAttackMode == 'Ranged' then
+                            ensureRangedAutoAttack(tid)
+                        end
+                    else
+                        -- combat_style is Melee/Spell but pull_style is
+                        -- Ranged (bow-tag then melee/spell) -- unaffected,
+                        -- still uses /autofire as before.
+                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                    end
                     if isXTargetId(tid) or distToId(tid) <= 25 then
                         if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
                         tagged = true
@@ -8065,7 +8150,15 @@ local function combatTick()
                 -- initial tag. Once tagged (XTarget) or already in combat, fall back to
                 -- desiredRange() so the post-pull combat_style positioning takes over.
                 local reqRange
-                if pullStyle ~= 'Melee' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
+                if pullStyle == 'Ranged' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
+                    -- Close all the way to the real ranged engagement
+                    -- distance (or Stand Back distance) instead of parking
+                    -- at the looser pull_engage_dist -- uses ctrl.ranged_dist
+                    -- directly so it still closes to bow range even if
+                    -- overall combat_style is Melee/Spell (bow-tag-then-
+                    -- melee/spell pulling).
+                    reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)
+                elseif pullStyle ~= 'Melee' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
                     reqRange = ctrl.pull_engage_dist or 100
                 else
                     reqRange = desiredRange(id)
@@ -8134,17 +8227,46 @@ local function combatTick()
                         if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
                         if isXTargetId(id) or mq.TLO.Me.Combat() then
                             engage = true
+                            -- Already "tagged"/Me.Combat()==true doesn't mean we're
+                            -- actually firing at THIS id -- e.g. a fresh, already-
+                            -- adjacent mob picked up the instant the previous one
+                            -- died, while Me.Combat() is still reading true from
+                            -- that kill. This shortcut used to return here without
+                            -- ever calling ensureRangedAutoAttack, so the new
+                            -- target's off/on retoggle never happened and the
+                            -- character silently never fired on it. Route through
+                            -- it here too so a genuine target change is still
+                            -- caught even when we think we're already engaged.
+                            if ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged' then
+                                ensureRangedAutoAttack(id)
+                            end
                         else
                             local tsReady = false
                             pcall(function() tsReady = mq.TLO.Me.AbilityReady('Throw Stone')() end)
                             if tsReady then
                                 mq.cmd('/doability "Throw Stone"')
                             else
-                                -- Fallback to ranged weapon (bow/autofire)
+                                -- Fallback to ranged weapon (bow)
                                 local hasRanged = false
                                 pcall(function() hasRanged = mq.TLO.Me.Inventory('ranged')() ~= nil end)
                                 if hasRanged then
-                                    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                                    if ctrl.combat_style == 'Ranged' then
+                                        -- AutoCombat is set to Ranged: /autofire leaves
+                                        -- the character not attacking at all on this
+                                        -- server. Use the server's #attackmode ranged
+                                        -- toggle plus plain /attack on instead.
+                                        if runtime.serverAttackMode ~= 'Ranged' and (os.clock() - (runtime.lastAttackModeCmdAt or 0)) > 1.0 then
+                                            runtime.lastAttackModeCmdAt = os.clock()
+                                            mq.cmd('/say #attackmode ranged')
+                                        elseif runtime.serverAttackMode == 'Ranged' then
+                                            ensureRangedAutoAttack(id)
+                                        end
+                                    else
+                                        -- combat_style is Melee/Spell but pull_style is
+                                        -- Ranged (bow-tag then melee/spell) -- unaffected,
+                                        -- still uses /autofire as before.
+                                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                                    end
                                 else
                                     -- No ranged option available; fall back to melee
                                     if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
@@ -8309,10 +8431,12 @@ local function combatTick()
                         print(string.format('\ag[Triune]\ax Switching server attack mode -> Ranged -> %s (#%d)',
                             tostring(mq.TLO.Target.CleanName()), tid))
                         mq.cmd('/say #attackmode ranged')
-                    elseif runtime.serverAttackMode == 'Ranged' and not mq.TLO.Me.Combat() then
-                        print(string.format('\ag[Triune]\ax Engaging /attack on (ranged) -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
-                            tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
-                        mq.cmd('/attack on')
+                    elseif runtime.serverAttackMode == 'Ranged' then
+                        if tid ~= runtime.lastRangedAttackTargetId or not mq.TLO.Me.Combat() then
+                            print(string.format('\ag[Triune]\ax Engaging /attack on (ranged) -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
+                                tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
+                        end
+                        ensureRangedAutoAttack(tid)
                     end
                 end
                 if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
@@ -8978,7 +9102,7 @@ local function triuneCommand(...)
                 saveLoadout(true)
                 print(string.format('\ag[Triune]\ax Max Melee Distance set to %d units.', ctrl.melee_dist))
             else
-                ctrl.ranged_dist = math.max(15, math.min(200, math.floor(val)))
+                ctrl.ranged_dist = math.max(5, math.min(200, math.floor(val)))
                 saveLoadout(true)
                 print(string.format('\ag[Triune]\ax Ranged Engagement Distance set to %d units.', ctrl.ranged_dist))
             end
@@ -8986,7 +9110,7 @@ local function triuneCommand(...)
             if ctrl.combat_style == 'Melee' then
                 print(string.format('\ag[Triune]\ax Current Max Melee Distance: %d units. (usage: /ac range [5-50])', ctrl.melee_dist or 14))
             else
-                print(string.format('\ag[Triune]\ax Current Ranged Distance: %d units. (usage: /ac range [15-200])', ctrl.ranged_dist or 40))
+                print(string.format('\ag[Triune]\ax Current Ranged Distance: %d units. (usage: /ac range [5-200])', ctrl.ranged_dist or 40))
             end
         end
     elseif cmd == 'huntz' or cmd == 'z' then
