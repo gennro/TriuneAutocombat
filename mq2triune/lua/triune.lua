@@ -1988,6 +1988,19 @@ local function applyEntry(e)
         end
     end
     loadout.discs = e.discs or {}
+    -- Backfill entry.kind on any persisted Special Skill entries (e.g. Mend)
+    -- saved before isDetrimentalAction() needed it to correctly classify
+    -- them as non-detrimental -- without it they'd silently never become
+    -- eligible to fire (see UI.drawDiscTab's Special Skills section for the
+    -- full explanation). Doing it here too, not just in the UI row, means a
+    -- character that never opens the Disciplines tab after upgrading still
+    -- gets a working entry on the very next load.
+    for _, list in pairs(SPECIAL_SKILLS) do
+        for _, nm in ipairs(list) do
+            local d = loadout.discs[nm]
+            if type(d) == 'table' and not d.kind then d.kind = 'heal' end
+        end
+    end
     loadout.clickies = {}
     if type(e.clickies) == 'table' then
         for _, v in ipairs(e.clickies) do
@@ -3564,7 +3577,18 @@ function UI.drawDiscTab()
                 anySpecial = true
                 ImGui.PushID('special_' .. cls .. '_' .. nm)
                 local entry = loadout.discs[nm] or
-                    { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 75, boss_only = false, burn_only = false, priority = 50 }
+                    { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 75, boss_only = false, burn_only = false, priority = 50, kind = 'heal' }
+                -- isDetrimentalAction() classifies an ability by checking the
+                -- Spell/AltAbility/CombatAbility TLOs in turn -- none of
+                -- which resolve for a bare combat skill like Mend, since
+                -- it's none of those. Without entry.kind to short-circuit
+                -- that chain, it falls through to isDetrimentalAction's
+                -- "couldn't classify it, assume detrimental" default, which
+                -- then requires the resolved target (yourself, for Mend) to
+                -- be hostile -- impossible -- so it silently never becomes
+                -- eligible to fire. Backfill kind here unconditionally so
+                -- entries saved before this fix (missing kind) self-heal too.
+                entry.kind = entry.kind or 'heal'
                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
                 if ImGui.IsItemHovered() then
                     ImGui.SetTooltip(string.format('Enable or disable %s.', nm))

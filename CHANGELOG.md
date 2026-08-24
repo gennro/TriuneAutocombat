@@ -4,6 +4,7 @@
 
 - **Support Monk's Mend as a Special Skill on the Disciplines Tab (`triune.lua`, `README.md`).**
   - Mend is an innate class skill, not an AA or Discipline, so it never showed up anywhere to configure. Added a "Special Skills" section to the Disciplines tab (backed by a new module-level `SPECIAL_SKILLS` table, currently just `Mnk = { 'Mend' }`) with the same target/trigger/threshold/min-XTarget/burn/priority controls as a real Discipline, defaulting to self-heal at 75% HP. Fires through the existing `isSpecialSkill`/`runtime.fireSkill` pipeline (`/doability` instead of `/disc`), which was already wired into `combatTick()`'s eligible-Discipline loop but never exposed in the UI.
+  - **Fix (same day): Mend never actually fired once enabled.** `isDetrimentalAction()` classifies an ability by checking the Spell/AltAbility/CombatAbility TLOs in turn, none of which resolve for a bare combat skill like Mend -- so it fell through to the "couldn't classify it, assume detrimental" default, which then required the resolved target (yourself) to be hostile. Impossible, so the entry silently never became eligible regardless of HP or any other trigger. Fixed by setting `entry.kind = 'heal'` on the Special Skill entry (both in the UI row and, so an already-saved entry self-heals even if the Disciplines tab is never reopened, in `applyEntry()` on character load) so it short-circuits to non-detrimental before ever reaching that fallback.
 
 ## 2026-08-23
 
