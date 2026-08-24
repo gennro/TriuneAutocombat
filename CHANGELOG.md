@@ -2,6 +2,10 @@
 
 ## 2026-08-24
 
+- **Support Monk's Mend as a Special Skill on the Disciplines Tab (`triune.lua`, `README.md`).**
+  - Mend is an innate class skill (no AA/Discipline entry), so it never had anywhere to configure. Added a "Special Skills" section to the Disciplines tab with the same target/trigger/threshold/priority controls as a real Discipline, firing via `/doability` through the existing `isSpecialSkill`/`fireSkill` pipeline. Defaults to self-heal at 75% HP.
+  - **Fix (same day)**: Mend wasn't firing -- `isDetrimentalAction()` couldn't classify a bare skill and defaulted to detrimental, requiring a hostile self-target (never true). Fixed by tagging the entry `kind = 'heal'`, backfilled on load for anyone who saved it before the fix.
+
 - **Fix Ranged Auto-Attack Getting Stuck / Toggling Off On Target Switch (`triune.lua`).**
   - Under this server's `#attackmode ranged` scheme, `/attack` is a pure on/off toggle rather than "attack my current target," so switching targets while the toggle was already "on" was a no-op and the character silently stopped firing. Added `ensureRangedAutoAttack(tid)`, a shared helper that detects a genuine target change (`runtime.lastRangedAttackTargetId`) and forces a synchronous `/attack off` -> `/attack on` retoggle (via `mq.delay`) instead of trusting the current toggle state. Wired into all four Ranged auto-attack call sites: `checkCombatStall()`, `combatTick()`'s main Ranged engage block, both puller paths, and the Hunter-mode roam-pull "already engaged" shortcut that previously skipped the retoggle whenever mobs were clustered close together.
 

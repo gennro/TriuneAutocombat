@@ -1829,15 +1829,16 @@ end
 -- of Wolf=buff). Shown in the picker so a low-level player isn't left
 -- guessing what an unfamiliar spell name actually does.
 
--- Base SKILLS (not spells/discs/AAs -- no extractor entry, no cooldown data,
--- fired via /doability) worth an emergency %-based condition. Keyed by class
--- so this stays correctly empty for classes with no notable one. Routine
--- rotation skills (Kick, Tiger Claw, Flying Kick, etc.) deliberately excluded
--- -- handled by the user's separate autoskill window.
+-- Base SKILLS (not spells/discs/AAs -- fired via /doability, no cooldown
+-- data). Keyed by class. Rendered as "Special Skills" on the Disciplines tab
+-- and fired through the same eligible-ability pipeline as real Disciplines
+-- (see isSpecialSkill()/runtime.fireSkill()). Feign Death deliberately
+-- omitted -- needs its own design pass before an automated trigger drops a
+-- character to the floor.
+local SPECIAL_SKILLS = {
+    Mnk = { 'Mend' },
+}
 local function isSpecialSkill(name)
-    local SPECIAL_SKILLS = {
-        Mnk = { 'Mend', 'Feign Death' },
-    }
     for _, list in pairs(SPECIAL_SKILLS) do
         for _, n in ipairs(list) do if n == name then return true end end
     end
@@ -1990,6 +1991,15 @@ local function applyEntry(e)
         end
     end
     loadout.discs = e.discs or {}
+    -- Backfill entry.kind on persisted Special Skill entries (e.g. Mend)
+    -- saved before isDetrimentalAction() needed it -- see UI.drawDiscTab.
+    -- Covers characters that never reopen the Disciplines tab after upgrading.
+    for _, list in pairs(SPECIAL_SKILLS) do
+        for _, nm in ipairs(list) do
+            local d = loadout.discs[nm]
+            if type(d) == 'table' and not d.kind then d.kind = 'heal' end
+        end
+    end
     loadout.clickies = {}
     if type(e.clickies) == 'table' then
         for _, v in ipairs(e.clickies) do
@@ -3538,7 +3548,10 @@ function UI.drawDiscTab()
         'Boss Only gates a disc to Named targets (save long-cooldown offensive discs like Mighty Strike for real fights, while '
         ..
         'a survival disc like Whirlwind can stay on for regular grinding). Priority: when multiple discs are eligible at once, '
-        .. 'lower numbers are tried first -- if the top one is still on cooldown, the next one down the list fires instead.')
+        .. 'lower numbers are tried first -- if the top one is still on cooldown, the next one down the list fires instead. '
+        ..
+        'Special Skills (below, if your trio has any) are innate class abilities like Mend -- fired via /doability rather '
+        .. 'than /disc, but otherwise configured and prioritized exactly like a Discipline.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Combat disciplines and special skills share timer groups and are evaluated in order of assigned priority.')
     end
@@ -3549,6 +3562,97 @@ function UI.drawDiscTab()
     end
     ImGui.Separator()
     if ImGui.BeginChild('disclist', 0, 0) then
+        -- Special Skills: innate class abilities (just Mend, today) that
+        -- aren't real Disciplines -- fired via /doability, no level data --
+        -- but run through the same priority-ordered eligible-ability
+        -- pipeline as the Disciplines below (isSpecialSkill()/fireSkill()).
+        -- Own section so it doesn't blend into the leveled disc list.
+        local anySpecial = false
+        for _, cls in ipairs(myClasses) do
+            for _, nm in ipairs(SPECIAL_SKILLS[cls] or {}) do
+                anySpecial = true
+                ImGui.PushID('special_' .. cls .. '_' .. nm)
+                local entry = loadout.discs[nm] or
+                    { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 75, boss_only = false, burn_only = false, priority = 50, kind = 'heal' }
+                -- kind='heal' short-circuits isDetrimentalAction(), which
+                -- can't classify a bare skill like Mend and otherwise
+                -- defaults to detrimental (requiring a hostile self -- never
+                -- true). Backfilled unconditionally so pre-fix saves recover.
+                entry.kind = entry.kind or 'heal'
+                entry.enabled = ImGui.Checkbox('##en', entry.enabled)
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip(string.format('Enable or disable %s.', nm))
+                end
+                ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip(string.format('Class: %s', cls))
+                end
+                ImGui.SameLine(); ImGui.Text(nm)
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip(string.format('Innate skill: %s (not an AA or Discipline -- fired via /doability, no level data to show).', nm))
+                end
+                if entry.enabled then
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                    local ti = ImGui.Combo('##st', idxOf(TARGETS, entry.target), TARGETS)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Target condition: who or what to use this skill on (Mend only ever affects yourself -- leave this on Myself).')
+                    end
+                    entry.target = TARGETS[ti]
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                    local wi = ImGui.Combo('##sw', idxOf(WHENS, entry.when), WHENS)
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Trigger condition: when this skill should be used (e.g. my HP <=, always).')
+                    end
+                    entry.when = WHENS[wi]
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                    local curPct = tonumber(entry.pct)
+                    if curPct == nil then curPct = 75 end
+                    local isDis = (curPct == 0)
+                    local pCount = 0
+                    if isDis then pCount = UI.pushDisabledSliderStyle() end
+                    local spVal = ImGui.SliderInt('##sp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                    local isHov = ImGui.IsItemHovered()
+                    if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
+                    entry.pct = spVal
+                    if isHov then
+                        if spVal == 0 then
+                            UI.setTooltip('Skill is Disabled (0%). Drag slider above 0% to enable.')
+                        else
+                            UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this skill).', spVal))
+                        end
+                    end
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                    local curXt = tonumber(entry.min_xtar) or 1
+                    if curXt < 1 then curXt = 1 end
+                    if curXt > 10 then curXt = 10 end
+                    local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                    local xti = ImGui.Combo('##smxt', curXt, xtOpts)
+                    entry.min_xtar = xti
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(
+                            'Minimum number of active NPCs on XTarget required for this skill to fire.')
+                    end
+                    ImGui.SameLine()
+                    local sbrnVal = ImGui.Checkbox('Burn##sbrn', entry.burn_only or false)
+                    entry.burn_only = sbrnVal
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(
+                            'Only fires when Burn Mode is ON.')
+                    end
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(80)
+                    local priVal = ImGui.SliderInt('##spri', entry.priority or 50, 1, 99, 'Pri %d')
+                    entry.priority = priVal
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip(
+                            'Lower = tried first when more than one eligible\ndisc/skill is ready at the same time.')
+                    end
+                end
+                loadout.discs[nm] = entry
+                ImGui.PopID()
+            end
+        end
+        if anySpecial then ImGui.Separator() end
+
         local anyDisc = false
         for _, cls in ipairs(myClasses) do
             for _, row in ipairs(DATA.discs[cls] or {}) do
