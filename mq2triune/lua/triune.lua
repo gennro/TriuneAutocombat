@@ -246,6 +246,7 @@ local function defaultCtrl()
         combat_style         = 'Melee',
         melee_dist           = 14,
         ranged_dist          = 40,
+        los_face_only        = false,
         ma_name              = '',
         assist_at            = 98,
         chase                = true,
@@ -4539,6 +4540,16 @@ function UI.drawSettingsTab()
         end
     end
 
+    ctrl.los_face_only = ImGui.Checkbox('Re-face Instead Of Stepping Back On Lost Line-of-Sight', ctrl.los_face_only or false)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'On "cannot see target", just turn to face it instead of stepping\n'
+            .. 'back and strafing. Useful in tight spaces or areas cluttered\n'
+            .. 'with obstacles, where stepping back can wedge you against a\n'
+            .. 'wall/prop instead of helping. Applies to Melee, Ranged, and\n'
+            .. 'Spell alike. Off by default.')
+    end
+
     ImGui.Dummy(0, 4)
     accent(GOLD, 'Navigation')
     ctrl.nav_fallback_stick = ImGui.Checkbox('Fallback to Stick on Nav Failure', ctrl.nav_fallback_stick)
@@ -6922,6 +6933,14 @@ handleCannotSeeTarget = function()
 
     local isNpc = (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and tgt.Type() ~= 'Corpse'
     if not isNpc or not isHostileTarget(tid) then return end
+
+    -- User override (Settings tab): skip the step-back maneuver entirely,
+    -- for any combat style. Off by default -- see below for why melee still
+    -- needs the real maneuver in most cases.
+    if ctrl.los_face_only then
+        mq.cmd('/face fast')
+        return
+    end
 
     local d = distToId(tid)
     local maxReach = maxMeleeDistance(tid)

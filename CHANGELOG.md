@@ -2,8 +2,9 @@
 
 ## 2026-08-24
 
-- **Fix Ranged Style Backing Away From Target ("Cannot See Target" Loop) (`triune.lua`).**
+- **Fix Ranged Style Backing Away From Target ("Cannot See Target" Loop) + Settings Override (`triune.lua`).**
   - Lowering the min Ranged distance to 5 (see below) put bow users inside the proximity radius that `handleCannotSeeTarget()`'s melee/ranged check treated as "close enough to be melee," so a normal point-blank LoS hiccup triggered its step-back-and-strafe recovery -- which the Ranged engage logic then immediately undid by closing back to `ranged_dist`, repeating indefinitely. `combat_style == 'Ranged'` now always just re-faces (`/face fast`) instead.
+  - Added a Settings tab toggle, "Re-face Instead Of Stepping Back On Lost Line-of-Sight," that applies the same face-only behavior to all three combat styles (off by default -- Melee generally still needs the real step-back to restore LoS).
 
 - **Support Monk's Mend as a Special Skill on the Disciplines Tab (`triune.lua`, `README.md`).**
   - Mend is an innate class skill (no AA/Discipline entry), so it never had anywhere to configure. Added a "Special Skills" section to the Disciplines tab with the same target/trigger/threshold/priority controls as a real Discipline, firing via `/doability` through the existing `isSpecialSkill`/`fireSkill` pipeline. Defaults to self-heal at 75% HP.
