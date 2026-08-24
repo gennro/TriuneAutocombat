@@ -406,7 +406,15 @@ local pursuit = {
     nonXtarTargetId = 0,
     nonXtarEngageAt = 0,
     lastCombatFaceAt = 0,
-    lastStickDist = 0
+    lastStickDist = 0,
+    -- Ladder-climb detection sampling (see isClimbingLadder()). X/Y/Z are the
+    -- position at the last sample; climbingUntil is a grace-period expiry --
+    -- we're considered "climbing" any time os.clock() is before it.
+    climbLastX = nil,
+    climbLastY = nil,
+    climbLastZ = nil,
+    climbSampleAt = 0,
+    climbingUntil = 0
 }
 
 local stuckState = {
@@ -1042,6 +1050,41 @@ local function distToLoc(x, y, z)
     local dx, dy = mx - x, my - y
     local dz = z and (mz - z) or 0
     return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Ladders have no dedicated "am I climbing" TLO/flag to read, so this infers
+-- it purely from movement: climbing moves Z steadily while X/Y barely change
+-- (the opposite of being genuinely stuck, where NOTHING moves, and of normal
+-- ground travel, where X/Y change steadily and Z stays flat). Re-samples at
+-- most once per LADDER_CLIMB_SAMPLE_SEC so a single tick's jitter can't
+-- trigger it, and once a real climb is detected, stays "true" for a short
+-- grace period afterward so a momentary pause between rungs (or a slow
+-- server tick) doesn't immediately flip callers back to "not climbing" mid-
+-- climb. Used by checkStuck() (skip false-positive stuck detection) and
+-- moveToward() (skip false-positive pursuit-stall/unreachable marking) --
+-- see comments at each call site.
+local LADDER_CLIMB_Z_DELTA = 3      -- minimum Z moved per sample to count as climbing
+local LADDER_CLIMB_XY_DELTA = 3     -- maximum X/Y moved per sample to still count as climbing (not just running)
+local LADDER_CLIMB_SAMPLE_SEC = 1.0 -- resample cadence
+local LADDER_CLIMB_GRACE_SEC = 3.0  -- keep reporting "climbing" this long after the last positive sample
+local function isClimbingLadder()
+    local now = os.clock()
+    if (now - (pursuit.climbSampleAt or 0)) >= LADDER_CLIMB_SAMPLE_SEC then
+        local x, y, z = 0, 0, 0
+        pcall(function() x = mq.TLO.Me.X() or 0 end)
+        pcall(function() y = mq.TLO.Me.Y() or 0 end)
+        pcall(function() z = mq.TLO.Me.Z() or 0 end)
+        if pursuit.climbLastX then
+            local dxy = math.sqrt((x - pursuit.climbLastX) ^ 2 + (y - pursuit.climbLastY) ^ 2)
+            local dz = math.abs(z - pursuit.climbLastZ)
+            if dz >= LADDER_CLIMB_Z_DELTA and dxy <= LADDER_CLIMB_XY_DELTA then
+                pursuit.climbingUntil = now + LADDER_CLIMB_GRACE_SEC
+            end
+        end
+        pursuit.climbLastX, pursuit.climbLastY, pursuit.climbLastZ = x, y, z
+        pursuit.climbSampleAt = now
+    end
+    return (pursuit.climbingUntil or 0) > now
 end
 
 local function hasLoS(id)
@@ -6268,13 +6311,20 @@ local function moveToward(id, dist, followOnly)
     local targetDist = dist or desiredRange(id)
     local effectiveArrivalDist = targetDist + (isMelee and 2 or 3)
 
-    -- Update pursuit tracking for stall detection
+    -- Update pursuit tracking for stall detection. `d` (distToId) is MQ's 2D
+    -- Distance -- X/Y only -- so climbing a ladder toward a target mostly
+    -- above/below us shows as zero progress here even while we're actually
+    -- closing in via Z. Left unhandled, PURSUIT_STALL_TIMEOUT below would
+    -- eventually give up and markUnreachable() a target we're mid-climb
+    -- toward, purely because the ladder segment isn't meshed. Treat active
+    -- climbing as progress too so the stall timer keeps getting refreshed
+    -- for as long as we're genuinely climbing.
     if pursuit.id ~= id then
         pursuit.id = id; pursuit.bestDist = d; pursuit.improvedAt = os.clock()
         pursuit.navStalls = 0; pursuit.wasNavActive = false
         pursuit.lastLoSAt = 0
-    elseif d < pursuit.bestDist - 2 then
-        pursuit.bestDist = d; pursuit.improvedAt = os.clock()
+    elseif d < pursuit.bestDist - 2 or isClimbingLadder() then
+        pursuit.bestDist = math.min(pursuit.bestDist, d); pursuit.improvedAt = os.clock()
         pursuit.navStalls = 0
     end
 
@@ -6854,6 +6904,18 @@ local function checkStuck()
                 return
             end
         end
+    end
+
+    -- Climbing a ladder moves almost entirely in Z, so the X/Y-only distance
+    -- check below reads it as no progress at all and eventually calls
+    -- performUnstuck() mid-climb -- exactly the wrong response (jumping/
+    -- strafing off a ladder rung is far more likely to actually get us
+    -- stuck, or knock us off, than doing nothing). Treat active climbing the
+    -- same as the other legitimate-progress cases above.
+    if isClimbingLadder() then
+        stuckState.counter = 0
+        stuckState.lastX, stuckState.lastY = mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0
+        return
     end
 
     tryOpenNearbyDoor() -- open any door we're walking past, before we ever stall on it
