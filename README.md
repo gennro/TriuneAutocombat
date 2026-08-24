@@ -70,6 +70,7 @@ Triune keeps things simple with **3 main combat modes**:
 
 ### 🔮 Simple & Powerful Spell Loadouts
 - **12 Spell Gem Slots + AAs + Disciplines**: Set up spells, activated AA abilities, and combat disciplines from all 3 of your classes in one unified loadout.
+- **Innate Class Skills**: A few core class abilities aren't AAs or Disciplines but still deserve automation -- Monk's Mend shows up as its own "Special Skills" entry on the Disciplines tab, with the same target/trigger/threshold/priority controls.
 - **Easy Trigger Rules**: Tell each spell exactly when to fire (e.g. *Target HP < 90%*, *My HP < 40%*, *Missing Buff*, *Always*, *In Combat*).
 - **No Wasted Mana**: Triune automatically checks if a DoT, snare, slow, or debuff is already on the mob before casting, so you never double-cast or waste mana.
 - **Burn Mode**: Tag big cooldowns and nukes as **Burn Only**, then toggle Burn on when fighting named mobs or big pulls (`/ac burn`).

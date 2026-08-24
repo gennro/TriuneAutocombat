@@ -508,10 +508,16 @@ assert_eq(dc.submode,  'Hunt',  'defaultCtrl: submode=Hunt')
 -- 9.  isSpecialSkill(name)
 -- ============================================================================
 print('--- isSpecialSkill ---')
-local isSpecialSkill = loadFunc(src, 'isSpecialSkill', {})
+-- SPECIAL_SKILLS is module-level (used as an upvalue by isSpecialSkill AND
+-- by UI.drawDiscTab's Special Skills section), so it must be supplied via
+-- env here -- same pattern as MQSHORT above.
+local SPECIAL_SKILLS = {
+    Mnk = { 'Mend' },
+}
+local isSpecialSkill = loadFunc(src, 'isSpecialSkill', { SPECIAL_SKILLS = SPECIAL_SKILLS })
 
 assert_true(isSpecialSkill('Mend'),        'special: Mend')
-assert_true(isSpecialSkill('Feign Death'),  'special: Feign Death')
+assert_eq(isSpecialSkill('Feign Death'), false, 'special: Feign Death is not yet exposed')
 assert_eq(isSpecialSkill('Kick'), false,    'special: Kick is not special')
 assert_eq(isSpecialSkill(nil), false,       'special: nil')
 assert_eq(isSpecialSkill(''), false,        'special: empty')

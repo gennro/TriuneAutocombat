@@ -1,5 +1,10 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-24
+
+- **Support Monk's Mend as a Special Skill on the Disciplines Tab (`triune.lua`, `README.md`).**
+  - Mend is an innate class skill, not an AA or Discipline, so it never showed up anywhere to configure. Added a "Special Skills" section to the Disciplines tab (backed by a new module-level `SPECIAL_SKILLS` table, currently just `Mnk = { 'Mend' }`) with the same target/trigger/threshold/min-XTarget/burn/priority controls as a real Discipline, defaulting to self-heal at 75% HP. Fires through the existing `isSpecialSkill`/`runtime.fireSkill` pipeline (`/doability` instead of `/disc`), which was already wired into `combatTick()`'s eligible-Discipline loop but never exposed in the UI.
+
 ## 2026-08-23
 
 - **Server-Native Ranged Attack Mode Replaces `/autofire` for Ranged Style (`triune.lua`).**
