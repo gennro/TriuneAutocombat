@@ -138,7 +138,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
 | `/ac style [melee\|ranged\|spell]` | | Set combat style |
-| `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (15-200) distance |
+| `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (5-200) distance |
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |
 | `/ac track` | `/ac zone` | Open the Zone NPC Tracker |
 | `/ac update` | `/ac checkupdate` | Check for updates |
