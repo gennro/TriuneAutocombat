@@ -2,6 +2,9 @@
 
 ## 2026-08-24
 
+- **Optional Looping For Waypoint Patrol Routes (`triune.lua`, `README.md`).**
+  - Patrol previously only bounced back and forth (1→2→3→2→1). Added a "Loop" toggle on the Settings tab: when on, `runtime.wpTick()` always advances forward and wraps to the first waypoint after the last instead of reversing. Off by default -- existing bounce behavior is unchanged.
+
 - **Support Monk's Mend as a Special Skill on the Disciplines Tab (`triune.lua`, `README.md`).**
   - Mend is an innate class skill (no AA/Discipline entry), so it never had anywhere to configure. Added a "Special Skills" section to the Disciplines tab with the same target/trigger/threshold/priority controls as a real Discipline, firing via `/doability` through the existing `isSpecialSkill`/`fireSkill` pipeline. Defaults to self-heal at 75% HP.
   - **Fix (same day)**: Mend wasn't firing -- `isDetrimentalAction()` couldn't classify a bare skill and defaulted to detrimental, requiring a hostile self-target (never true). Fixed by tagging the entry `kind = 'heal'`, backfilled on load for anyone who saved it before the fix.
