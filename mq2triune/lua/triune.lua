@@ -6931,8 +6931,14 @@ handleCannotSeeTarget = function()
     -- let it count toward "melee" when we're not confirmed in server Ranged
     -- attack mode.
     local isConfirmedRanged = ctrl and ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged'
-    local isMelee = (ctrl and ctrl.combat_style == 'Melee') or (mq.TLO.Me.Combat() and not isConfirmedRanged) or
-        (d <= (maxReach + 10))
+    -- combat_style == 'Ranged' always re-faces instead of stepping back: the
+    -- distance fallback below (d <= maxReach+10) used to catch Ranged too
+    -- once low ranged_dist values (down to 5) put bow users inside that
+    -- radius, causing a back-away/re-approach loop as the normal Ranged
+    -- engage logic immediately closed the gap back to ranged_dist.
+    local isMelee = (ctrl and ctrl.combat_style ~= 'Ranged') and
+        ((ctrl and ctrl.combat_style == 'Melee') or (mq.TLO.Me.Combat() and not isConfirmedRanged) or
+            (d <= (maxReach + 10)))
 
     if not isMelee then
         -- In Ranged / caster mode or far away, re-align view vector
