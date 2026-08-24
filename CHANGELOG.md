@@ -2,8 +2,9 @@
 
 ## 2026-08-24
 
-- **Optional Looping For Waypoint Patrol Routes (`triune.lua`, `README.md`).**
-  - Patrol previously only bounced back and forth (1→2→3→2→1). Added a "Loop" toggle on the Settings tab: when on, `runtime.wpTick()` always advances forward and wraps to the first waypoint after the last instead of reversing. Off by default -- existing bounce behavior is unchanged.
+- **Ladder-Climbing False Positives in Stuck/Unreachable Detection (`triune.lua`).**
+  - Climbing a ladder moves almost entirely in Z with X/Y barely changing, which both `checkStuck()` and `moveToward()`'s pursuit-stall tracking read as "no progress" (they only ever measured X/Y). That eventually triggered `performUnstuck()`'s directional jump/strafe recovery mid-climb, or `markUnreachable()`'d a target we were actively climbing toward, purely because the ladder segment isn't on the navmesh. Added `isClimbingLadder()`, a movement-based heuristic (Z moving while X/Y stays put, sampled once/sec with a short grace period) with no dependency on any ladder-specific TLO since none exists. `checkStuck()` now treats active climbing as legitimate progress; `moveToward()`'s stall-timeout/`navStalls` give-up path now does too.
+  - Scoped narrowly to the two spots directly driven by X/Y-only distance tracking. Left the Hunter-mode elevation/distance target-drop check and the 15s non-XTarget engagement timeout untouched -- those are closer to the (separately planned) slow-climb-timeout problem than to this one.
 
 - **Support Monk's Mend as a Special Skill on the Disciplines Tab (`triune.lua`, `README.md`).**
   - Mend is an innate class skill (no AA/Discipline entry), so it never had anywhere to configure. Added a "Special Skills" section to the Disciplines tab with the same target/trigger/threshold/priority controls as a real Discipline, firing via `/doability` through the existing `isSpecialSkill`/`fireSkill` pipeline. Defaults to self-heal at 75% HP.
