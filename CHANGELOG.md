@@ -2,6 +2,25 @@
 
 ## 2026-08-24
 
+- **Intelligent Closer-NPC Retargeting & Directional Arc Filtering (`triune.lua`, v1.7.2).**
+  - **Configurable Retarget Limits (`ctrl.max_closer_retargets`)**: Replaced the rigid single-switch lock with a configurable slider (`0–5`, default `1` / `0` to disable). Allows players in massive open zones to progressively retarget to closer mobs while retaining strict loop limits.
+  - **Forward Arc Cone Gate (`runtime.isHeadingInForwardCone`, `runtime.isSpawnInForwardCone`)**: Filters candidates using a $\pm 75^\circ$ forward movement vector calculation. Prevents characters from turning $180^\circ$ backwards to chase mobs that spawned behind them after passing.
+  - **Proximity Scan Throttling (`ctrl.closer_scan_interval`)**: Throttles closer-mob proximity searches to 1.0s intervals during transit, eliminating micro-stutters and reducing CPU load in mob-dense areas.
+  - **Line-of-Sight Priority (`ctrl.closer_los_priority`)**: If the current distant target is obstructed behind a corner/wall while a closer candidate has clear Line of Sight, relaxes distance-saving thresholds (to 15 units closer and $\le 85\%$ distance) to prioritize immediately engageable mobs.
+  - **Anti-Ping-Pong Cycle Blacklisting (`pursuit.cycleTargetIds`)**: Tracks all target IDs engaged or switched during the current pull transit leg, preventing rapid oscillation between two equidistant candidates.
+  - **Navigation Settings UI**: Added controls for closer mob switching, forward arc filtering, LoS prioritization, and max retarget count slider in `UI.drawSettingsTab()`.
+  - **Project Version Bump (v1.7.2)**: Synchronized version **1.7.2** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+- **Intelligent Navigation & Autonomous Hazard Avoidance Suite (`triune.lua`, v1.7.1).**
+  - **Stuck Memory & Zone Hazard Clustering (`recordStuckHazard`)**: Automatically logs the coordinates whenever `performUnstuck()` is triggered, clustering nearby points within 14 units into a persistent zone hazard database (`ctrl.zone_hazards` / `ALLDATA.__zoneHazards`). Once a location triggers 2+ stuck incidents, it becomes an active avoidance bubble.
+  - **Dynamic Avoidance Detour Waypoints (`calculateDetourWaypoint`, `findPathHazardIntersection`)**: Evaluates movement trajectories in `moveToward` and `moveTowardLoc`. If a path crosses a known hazard bubble, calculates perpendicular detour waypoints to route smoothly around the obstacle before resuming pathing to the destination.
+  - **Reverse Breadcrumbs for Safe Camp Return (`recordBreadcrumb`)**: In `Puller (Camp)` mode, records forward movement coordinates into a ring-buffer (`runtime.pullBreadcrumbs`) during the outward `TO_MOB` journey. When returning with aggro (`TO_CAMP`), reverses the exact breadcrumbs back to camp, preventing pathing through uncleared mob rooms or flawed navmesh geometry.
+  - **Path Complexity & Sanity Ratio Gate (`ctrl.nav_max_path_ratio`)**: Evaluates `NavMesh PathLength / 3D Distance` in `findRoamTarget()` (default limit: 2.5x). Discards candidate mobs located across thin walls or high balconies that would otherwise cause 300+ unit long dungeon detours.
+  - **Proactive Door & Gate Automation (`checkProactiveDoorAndLev`)**: Scans ahead for closed `Switch` objects within 22 units and opens them before collision occurs, maintaining forward running momentum without pausing.
+  - **Levitation Duck-to-Clear (`ctrl.nav_levitation_clear`)**: Automatically executes a momentary crouch/duck when floating under door frames and archways with levitation active, eliminating ceiling collisions.
+  - **Hazard Management UI (Settings Tab)**: Added navigation controls, sliders for path ratio and hazard radius, live zone hazard statistics, and a one-click `Clear Zone Hazards` button.
+  - **Project Version Bump (v1.7.1)**: Bumped version to **1.7.1** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
 - **Fix Ranged Style Backing Away From Target ("Cannot See Target" Loop) + Settings Override (`triune.lua`).**
   - Lowering the min Ranged distance to 5 (see below) put bow users inside the proximity radius that `handleCannotSeeTarget()`'s melee/ranged check treated as "close enough to be melee," so a normal point-blank LoS hiccup triggered its step-back-and-strafe recovery -- which the Ranged engage logic then immediately undid by closing back to `ranged_dist`, repeating indefinitely. `combat_style == 'Ranged'` now always just re-faces (`/face fast`) instead.
   - Added a Settings tab toggle, "Re-face Instead Of Stepping Back On Lost Line-of-Sight," that applies the same face-only behavior to all three combat styles (off by default -- Melee generally still needs the real step-back to restore LoS).

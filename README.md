@@ -88,6 +88,17 @@ Triune keeps things simple with **3 main combat modes**:
 
 ---
 
+### 🧭 Intelligent Navigation & Hazard Avoidance
+- **Stuck Memory & Autonomous Detours**: Remembers locations where characters get stuck in each zone, clusters them into hazard hotspots, and dynamically routes around them using perpendicular detour waypoints.
+- **Reverse Breadcrumbs (Puller Mode)**: When pulling mobs in `Puller (Camp)` mode, Triune records the exact path walked to reach the mob and traverses it in reverse to guarantee a safe return to camp along cleared ground.
+- **Closer-NPC Retargeting & Directional Arc Filtering**: Dynamically switches to closer mobs encountered during movement with configurable retarget limits (0–5), forward arc cone constraints ($\pm 75^\circ$) to prevent 180° turnarounds, scan throttling, and Line-of-Sight prioritization.
+- **Path Ratio Sanity Gates**: Evaluates `NavMesh PathLength / 3D Distance` before engaging targets to prevent taking massive loops through distant corridors to reach mobs behind thin walls or on high balconies.
+- **Proactive Door & Gate Automation**: Scans the path ahead while moving and opens doors predictively before colliding with them.
+- **Levitation Duck-to-Clear**: Automatically ducks momentarily under low door headers and archways while floating with levitation to eliminate ceiling snags.
+- **Hazard Management UI**: Inspect logged hazard counts and clear zone hotspots with a single click from the Settings tab.
+
+---
+
 ### 🐾 Smart Pet Control
 - **No Early Aggro**: Pets stay on hold until you actually start hitting the mob, keeping them from pulling accidental adds.
 - **Pet Assist %**: Tell your pet to wait until the mob's HP drops to a certain percentage before engaging.
@@ -185,6 +196,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.7.0**
+Current version: **1.7.2**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

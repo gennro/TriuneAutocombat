@@ -96,7 +96,10 @@ local function extractFunction(src, funcName)
     for line in src:gmatch('[^\n]*') do
         if not capturing then
             -- Match top-level function declarations (no leading whitespace)
-            if line:match('^local function ' .. funcName .. '%s*%(') then
+            if line:match('^local function ' .. funcName .. '%s*%(')
+                or line:match('^function runtime%.' .. funcName .. '%s*%(')
+                or line:match('^runtime%.' .. funcName .. '%s*=%s*function%s*%(')
+                or line:match('^' .. funcName .. '%s*=%s*function%s*%(') then
                 capturing = true
                 lines[#lines + 1] = line
             end
@@ -116,11 +119,15 @@ local function extractFunction(src, funcName)
 end
 
 -- Load a function body with a given environment of upvalues.
--- The extracted code is a `local function X(...) ... end` block;
--- we append `return X` so `loadstring` returns the function itself.
+-- The extracted code is a function block; we append `return X`
+-- so `loadstring` returns the function itself.
 local function loadFunc(src, funcName, env)
     local code = extractFunction(src, funcName)
-    code = code .. '\nreturn ' .. funcName
+    if code:match('^function runtime%.') or code:match('^runtime%.') then
+        code = code .. '\nreturn runtime.' .. funcName
+    else
+        code = code .. '\nreturn ' .. funcName
+    end
 
     local chunk, err = loadstring(code, funcName)
     if not chunk then error('loadstring failed for ' .. funcName .. ': ' .. err) end
@@ -128,8 +135,12 @@ local function loadFunc(src, funcName, env)
     -- Merge env onto a copy of _G so standard library is available
     local sandbox = {}
     for k, v in pairs(_G) do sandbox[k] = v end
+    if not sandbox.runtime then sandbox.runtime = {} end
     if env then
-        for k, v in pairs(env) do sandbox[k] = v end
+        for k, v in pairs(env) do
+            sandbox[k] = v
+            sandbox.runtime[k] = v
+        end
     end
     setfenv(chunk, sandbox)
 
@@ -471,6 +482,14 @@ local EXPECTED_FIELDS = {
     { 'pull_max_level',      'number'  },
     { 'pull_con_filter',     'table'   },
     { 'check_closer_mobs',   'boolean' },
+    { 'nav_hazard_avoidance','boolean' },
+    { 'nav_hazard_radius',   'number'  },
+    { 'nav_hazard_min_hits', 'number'  },
+    { 'nav_reverse_breadcrumbs', 'boolean' },
+    { 'nav_max_path_ratio',  'number'  },
+    { 'nav_proactive_doors', 'boolean' },
+    { 'nav_levitation_clear','boolean' },
+    { 'zone_hazards',        'table'   },
     { 'debug_mode',          'boolean' },
     { 'scribed_only',        'boolean' },
     { 'aa_purchased_only',   'boolean' },
@@ -1072,6 +1091,248 @@ end
 for abbr in pairs(DATA_LOADED.aas) do
     assert_true(abbrSet[abbr], 'data: aas key "' .. abbr .. '" is valid class')
 end
+
+-- ============================================================================
+-- 29. Hazard Avoidance & Stuck Memory
+-- ============================================================================
+print('--- hazard avoidance & stuck memory ---')
+local dummyCtrl = {
+    nav_hazard_avoidance = true,
+    nav_hazard_radius = 15,
+    nav_hazard_min_hits = 2,
+    zone_hazards = {}
+}
+local dummyEnv = {
+    ctrl = dummyCtrl,
+    saveLoadout = function() end,
+    getCurrentZoneShortName = function() return 'poknowledge' end
+}
+
+local getZoneHazards = loadFunc(src, 'getZoneHazards', dummyEnv)
+local recordStuckHazard = loadFunc(src, 'recordStuckHazard', {
+    ctrl = dummyCtrl,
+    getZoneHazards = getZoneHazards,
+    saveLoadout = function() end,
+    getCurrentZoneShortName = function() return 'poknowledge' end
+})
+local clearZoneHazards = loadFunc(src, 'clearZoneHazards', {
+    ctrl = dummyCtrl,
+    saveLoadout = function() end,
+    getCurrentZoneShortName = function() return 'poknowledge' end
+})
+local isCoordInActiveHazard = loadFunc(src, 'isCoordInActiveHazard', {
+    ctrl = dummyCtrl,
+    getZoneHazards = getZoneHazards
+})
+
+-- Record first stuck at (100, 200, 10)
+recordStuckHazard(100, 200, 10, 'poknowledge')
+local hzList = getZoneHazards('poknowledge')
+assert_eq(#hzList, 1, 'hazard: 1 hazard logged')
+assert_eq(hzList[1].hits, 1, 'hazard: hits=1')
+assert_eq(isCoordInActiveHazard(100, 200, 10, 'poknowledge'), false, 'hazard: hits=1 not active yet (needs 2)')
+
+-- Record nearby stuck at (105, 202, 10) -> clusters into existing
+recordStuckHazard(105, 202, 10, 'poknowledge')
+assert_eq(#hzList, 1, 'hazard: clustered into single hazard')
+assert_eq(hzList[1].hits, 2, 'hazard: hits incremented to 2')
+local isActive, activeH = isCoordInActiveHazard(100, 200, 10, 'poknowledge')
+assert_eq(isActive, true, 'hazard: now active with 2 hits')
+assert_neq(activeH, nil, 'hazard: returns active hazard table')
+
+-- Far away point is not in hazard
+assert_eq(isCoordInActiveHazard(500, 500, 10, 'poknowledge'), false, 'hazard: far coord not in hazard')
+
+-- Clear hazards
+clearZoneHazards('poknowledge')
+assert_eq(#getZoneHazards('poknowledge'), 0, 'hazard: clearZoneHazards emptied list')
+
+-- ============================================================================
+-- 30. Path Intersection & Detour Calculation
+-- ============================================================================
+print('--- path intersection & detour ---')
+dummyCtrl.zone_hazards = {
+    poknowledge = {
+        { x = 100, y = 100, z = 0, radius = 15, hits = 3 }
+    }
+}
+local findPathHazardIntersection = loadFunc(src, 'findPathHazardIntersection', {
+    ctrl = dummyCtrl,
+    getZoneHazards = getZoneHazards
+})
+local calculateDetourWaypoint = loadFunc(src, 'calculateDetourWaypoint', {
+    navLoaded = function() return false end
+})
+
+-- Path from (0, 100) to (200, 100) passes straight through (100, 100)
+local hitH, _, distToSeg = findPathHazardIntersection(0, 100, 200, 100, 0, 'poknowledge')
+assert_neq(hitH, nil, 'intersection: detected hazard on straight path')
+assert_eq(distToSeg, 0, 'intersection: passed directly through center')
+
+-- Path from (0, 0) to (200, 0) does not pass near (100, 100)
+local missH = findPathHazardIntersection(0, 0, 200, 0, 0, 'poknowledge')
+assert_nil(missH, 'intersection: clear path does not trigger hazard')
+
+-- Detour waypoint calculation generates perpendicular offset
+local detour = calculateDetourWaypoint(0, 100, 100, 100, 0, 15)
+assert_neq(detour, nil, 'detour: calculated waypoint')
+assert_type(detour.x, 'number', 'detour: x is number')
+assert_type(detour.y, 'number', 'detour: y is number')
+-- Detour should be offset from (100, 100)
+local offsetDist = math.sqrt((detour.x - 100)^2 + (detour.y - 100)^2)
+assert_true(offsetDist >= 15, 'detour: offset distance outside hazard radius')
+
+-- ============================================================================
+-- 31. Reverse Breadcrumbs
+-- ============================================================================
+print('--- reverse breadcrumbs ---')
+local dummyRuntime = { pullBreadcrumbs = {} }
+local dummyPos = { x = 0, y = 0, z = 0 }
+local dummyMq = {
+    TLO = {
+        Me = setmetatable({}, {
+            __call = function() return true end,
+            __index = {
+                X = function() return dummyPos.x end,
+                Y = function() return dummyPos.y end,
+                Z = function() return dummyPos.z end,
+            }
+        })
+    }
+}
+local recordBreadcrumb = loadFunc(src, 'recordBreadcrumb', {
+    ctrl = { nav_reverse_breadcrumbs = true },
+    runtime = dummyRuntime,
+    mq = dummyMq
+})
+local clearBreadcrumbs = loadFunc(src, 'clearBreadcrumbs', {
+    runtime = dummyRuntime
+})
+
+dummyPos.x, dummyPos.y, dummyPos.z = 10, 10, 0
+recordBreadcrumb()
+assert_eq(#dummyRuntime.pullBreadcrumbs, 1, 'breadcrumb: initial point recorded')
+
+-- Moving only 2 units shouldn't record a new breadcrumb (< 12 units)
+dummyPos.x, dummyPos.y = 11, 11
+recordBreadcrumb()
+assert_eq(#dummyRuntime.pullBreadcrumbs, 1, 'breadcrumb: slight move ignored')
+
+-- Moving 20 units records a new breadcrumb
+dummyPos.x, dummyPos.y = 30, 10
+recordBreadcrumb()
+assert_eq(#dummyRuntime.pullBreadcrumbs, 2, 'breadcrumb: significant move recorded')
+
+-- Clear breadcrumbs
+clearBreadcrumbs()
+assert_eq(#dummyRuntime.pullBreadcrumbs, 0, 'breadcrumb: cleared')
+
+-- ============================================================================
+-- 32. Forward Arc Cone Calculations
+-- ============================================================================
+print('--- forward arc cone calculations ---')
+local isHeadingInForwardCone = loadFunc(src, 'isHeadingInForwardCone', {})
+
+-- Facing North (0 deg), at (0, 0)
+assert_eq(isHeadingInForwardCone(0, 0, 0, 0, 100, 75), true, 'forward cone: target North is in front')
+assert_eq(isHeadingInForwardCone(0, 0, 0, 50, 50, 75), true, 'forward cone: target North-West (45 deg) is in front')
+assert_eq(isHeadingInForwardCone(0, 0, 0, 100, 0, 75), false, 'forward cone: target West (90 deg) is outside 75 deg cone')
+assert_eq(isHeadingInForwardCone(0, 0, 0, 0, -100, 75), false, 'forward cone: target South (180 deg, behind) is rejected')
+
+-- Facing West (90 deg), at (0, 0)
+assert_eq(isHeadingInForwardCone(90, 0, 0, 100, 0, 75), true, 'forward cone: target West is in front when facing West')
+assert_eq(isHeadingInForwardCone(90, 0, 0, 0, 100, 75), false, 'forward cone: target North is outside 75 deg cone when facing West')
+
+-- Same location (0 distance) returns true
+assert_eq(isHeadingInForwardCone(0, 0, 0, 0, 0, 75), true, 'forward cone: same location passes')
+
+-- ============================================================================
+-- 33. Closer-NPC Retargeting Suite
+-- ============================================================================
+print('--- closer-npc retargeting ---')
+local dummyDistances = {
+    [101] = 100, -- current distant target
+    [102] = 40,  -- closer candidate (40 <= 100-25 and 40 <= 75)
+    [103] = 80,  -- candidate not close enough (80 > 75)
+    [104] = 78   -- candidate with LoS while current lacks LoS (78 <= 85)
+}
+local dummyLoS = {
+    [101] = false,
+    [102] = true,
+    [103] = true,
+    [104] = true
+}
+local dummyPursuit = {
+    retargetCount = 0,
+    cycleTargetIds = {},
+    lastCloserScanAt = 0
+}
+local dummyRoamCandidate = 102
+local dummyForwardConeResult = true
+
+local checkCloserTarget = loadFunc(src, 'checkCloserTarget', {
+    ctrl = {
+        check_closer_mobs = true,
+        max_closer_retargets = 1,
+        closer_forward_cone_only = true,
+        closer_los_priority = true,
+        closer_scan_interval = 1.0
+    },
+    pursuit = dummyPursuit,
+    distToId = function(id) return dummyDistances[id] or 100 end,
+    hasLoS = function(id) return dummyLoS[id] end,
+    mq = {
+        TLO = {
+            Me = {
+                Combat = function() return false end
+            }
+        }
+    },
+    findRoamTarget = function() return dummyRoamCandidate end,
+    isSpawnInForwardCone = function() return dummyForwardConeResult end
+})
+
+-- 1. Valid closer candidate switches target
+local candId, candDist, curDist = checkCloserTarget(101, 1000, 75, 1, 100)
+assert_eq(candId, 102, 'closer retarget: valid candidate chosen')
+assert_eq(candDist, 40, 'closer retarget: candidate dist 40')
+assert_eq(curDist, 100, 'closer retarget: current dist 100')
+
+-- 2. Throttled scan within interval returns nil
+local throttled = checkCloserTarget(101, 1000, 75, 1, 100)
+assert_nil(throttled, 'closer retarget: scan throttled within interval')
+
+-- Advance clock past throttle interval
+dummyPursuit.lastCloserScanAt = os.clock() - 2.0
+
+-- 3. Retarget count limit stops retargeting
+dummyPursuit.retargetCount = 1
+local maxed = checkCloserTarget(101, 1000, 75, 1, 100)
+assert_nil(maxed, 'closer retarget: blocked by max_closer_retargets count')
+
+-- Reset retarget count for subsequent tests
+dummyPursuit.retargetCount = 0
+dummyPursuit.lastCloserScanAt = 0
+
+-- 4. Cycle blacklist prevents ping-ponging to already-visited mob
+dummyPursuit.cycleTargetIds = { [102] = true }
+local blacklisted = checkCloserTarget(101, 1000, 75, 1, 100)
+assert_nil(blacklisted, 'closer retarget: cycle blacklist ignores candidate 102')
+dummyPursuit.cycleTargetIds = {}
+
+-- 5. Forward cone filter rejects mob behind player
+dummyForwardConeResult = false
+local behind = checkCloserTarget(101, 1000, 75, 1, 100)
+assert_nil(behind, 'closer retarget: forward cone filter rejects candidate')
+dummyForwardConeResult = true
+
+-- 6. LoS priority relaxes threshold for visible candidate
+dummyRoamCandidate = 104 -- distance 78 (78% of 100; normal ratio 75% would fail, but LoS ratio 85% passes)
+dummyLoS[101] = false
+dummyLoS[104] = true
+dummyPursuit.lastCloserScanAt = 0
+local losCand = checkCloserTarget(101, 1000, 75, 1, 100)
+assert_eq(losCand, 104, 'closer retarget: LoS priority allowed visible mob at 78% distance')
 
 -- ============================================================================
 -- Results
