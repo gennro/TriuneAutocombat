@@ -147,7 +147,9 @@ local ctrl = {
     tellDelayMs   = 2500,
     minManaPct    = 15,
     completionMsg = "All buffs cast! Enjoy!",
-    allowLowLevel = {} -- [spellName] = true/false (true = can cast on level <= 46 players)
+    banMsg        = "You are banned from getting buffs.",
+    allowLowLevel = {}, -- [spellName] = true/false (true = can cast on level <= 46 players)
+    ignoreList    = {}  -- array of ignored/banned player names
 }
 
 local runtime = {
@@ -163,6 +165,7 @@ local runtime = {
     lastTablePruneTime = os.time(),
     currentRequester   = nil,
     currentSpellsText  = "",
+    newIgnorePlayerName= "",
     log                = {},
     pendingAction      = nil -- queued thread-safe UI actions
 }
@@ -324,7 +327,9 @@ local function saveConfig(silent)
         tellDelayMs   = ctrl.tellDelayMs,
         minManaPct    = ctrl.minManaPct,
         completionMsg = ctrl.completionMsg,
-        allowLowLevel = ctrl.allowLowLevel or {}
+        banMsg        = ctrl.banMsg,
+        allowLowLevel = ctrl.allowLowLevel or {},
+        ignoreList    = ctrl.ignoreList or {}
     }
 
     local f = io.open(cfg .. '/triune_buffbot_config.lua', 'w')
@@ -360,13 +365,74 @@ local function loadConfig()
         if charData.tellDelayMs then ctrl.tellDelayMs = charData.tellDelayMs else ctrl.tellDelayMs = 2500 end
         if charData.minManaPct then ctrl.minManaPct = charData.minManaPct end
         if charData.completionMsg then ctrl.completionMsg = charData.completionMsg end
+        if charData.banMsg then ctrl.banMsg = charData.banMsg else ctrl.banMsg = "You are banned from getting buffs." end
         if charData.allowLowLevel and type(charData.allowLowLevel) == 'table' then
             ctrl.allowLowLevel = charData.allowLowLevel
         else
             ctrl.allowLowLevel = {}
         end
+        if charData.ignoreList and type(charData.ignoreList) == 'table' then
+            ctrl.ignoreList = charData.ignoreList
+        else
+            ctrl.ignoreList = {}
+        end
         logMsg("Loaded saved buffbot configuration for " .. charKey .. ".")
     end
+end
+
+-- ============================================================================
+-- Player Ignore / Ban List Helpers
+-- ============================================================================
+local function isPlayerIgnored(name)
+    if not name or name == '' or not ctrl.ignoreList then return false end
+    local lower = tostring(name):lower():gsub("^%s*(.-)%s*$", "%1")
+    if lower == '' then return false end
+    for k, v in pairs(ctrl.ignoreList) do
+        if type(v) == 'string' and v:lower():gsub("^%s*(.-)%s*$", "%1") == lower then
+            return true
+        end
+        if type(k) == 'string' and k:lower():gsub("^%s*(.-)%s*$", "%1") == lower and v == true then
+            return true
+        end
+    end
+    return false
+end
+
+local function addIgnoredPlayer(name)
+    if not name or name == '' then return false end
+    local clean = tostring(name):gsub("^%s*(.-)%s*$", "%1")
+    if clean == '' then return false end
+    if isPlayerIgnored(clean) then return false end
+    if not ctrl.ignoreList or type(ctrl.ignoreList) ~= 'table' then
+        ctrl.ignoreList = {}
+    end
+    table.insert(ctrl.ignoreList, clean)
+    saveConfig(true)
+    return true
+end
+
+local function removeIgnoredPlayer(name)
+    if not name or not ctrl.ignoreList then return false end
+    local lower = tostring(name):lower():gsub("^%s*(.-)%s*$", "%1")
+    if lower == '' then return false end
+    local found = false
+    for i = #ctrl.ignoreList, 1, -1 do
+        local v = ctrl.ignoreList[i]
+        if type(v) == 'string' and v:lower():gsub("^%s*(.-)%s*$", "%1") == lower then
+            table.remove(ctrl.ignoreList, i)
+            found = true
+        end
+    end
+    for k, _ in pairs(ctrl.ignoreList) do
+        if type(k) == 'string' and k:lower():gsub("^%s*(.-)%s*$", "%1") == lower then
+            ctrl.ignoreList[k] = nil
+            found = true
+        end
+    end
+    if found then
+        saveConfig(true)
+    end
+    return found
 end
 
 -- ============================================================================
@@ -582,6 +648,22 @@ local function onTellReceived(line, sender, msg)
     local myName = nil
     pcall(function() myName = mq.TLO.Me.CleanName() end)
     if myName and cleanSender:lower() == myName:lower() then return end
+
+    -- Check if sender is in player ignore list
+    if isPlayerIgnored(cleanSender) then
+        local now = os.time()
+        local cd = runtime.cooldowns[cleanSender:lower()]
+        if cd and (now - cd) < ctrl.cooldownSec then
+            return
+        end
+        runtime.cooldowns[cleanSender:lower()] = now
+
+        local banMsg = (ctrl.banMsg and ctrl.banMsg ~= '') and ctrl.banMsg or "You are banned from getting buffs."
+        queueTell(cleanSender, banMsg)
+        logMsg(string.format("Blocked request from banned player '%s'. Sent ban notice.", cleanSender), true, false)
+        print(string.format('\ay[Triune Buffbot]\ax Blocked tell from banned player \aw%s\ax: \ar"%s"\ax', cleanSender, banMsg))
+        return
+    end
 
     -- Clean quotes/whitespace from message
     local cleanMsg = tostring(msg):gsub("^['\"%s]+", ""):gsub("['\"%s]+$", "")
@@ -972,6 +1054,11 @@ local function onHailReceived(line, sender, targetName)
     pcall(function() myName = mq.TLO.Me.CleanName() end)
     if not myName or myName == '' then return end
     if cleanSender:lower() == myName:lower() then return end
+
+    -- Silently ignore hails from banned players
+    if isPlayerIgnored(cleanSender) then
+        return
+    end
 
     -- If target was specified, verify it was directed at this buffbot
     if targetName and targetName ~= '' then
@@ -1499,6 +1586,110 @@ local function drawActivityTab()
     end
 end
 
+local function drawIgnoreTab()
+    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Player Ignore & Ban Management")
+    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+        "Players on this list will be refused buffs and sent a ban notification message.")
+    ImGui.Separator()
+
+    ImGui.Text("Ban Notification Tell Message:")
+    local newBanMsg, banMsgChanged = ImGui.InputText("##banMsg", ctrl.banMsg or "You are banned from getting buffs.", 256)
+    if banMsgChanged then
+        ctrl.banMsg = newBanMsg
+        saveConfig(true)
+    end
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Add Player to Ignore List")
+
+    if not runtime.newIgnorePlayerName then runtime.newIgnorePlayerName = "" end
+    local newName, nameChanged = ImGui.InputText("##newIgnoreName", runtime.newIgnorePlayerName, 64)
+    if nameChanged then
+        runtime.newIgnorePlayerName = newName
+    end
+
+    ImGui.SameLine()
+    if ImGui.Button("Add Player##addIgnoreBtn") then
+        if runtime.newIgnorePlayerName and runtime.newIgnorePlayerName ~= "" then
+            if addIgnoredPlayer(runtime.newIgnorePlayerName) then
+                logMsg(string.format("Added '%s' to player ignore list.", runtime.newIgnorePlayerName))
+                runtime.newIgnorePlayerName = ""
+            end
+        end
+    end
+
+    ImGui.SameLine()
+    local targetPcName = nil
+    pcall(function()
+        if mq.TLO.Target() and mq.TLO.Target.Type() == 'PC' then
+            targetPcName = mq.TLO.Target.CleanName()
+        end
+    end)
+    if targetPcName and targetPcName ~= '' then
+        if ImGui.Button(string.format("Add Target (%s)##addTarIgnoreBtn", targetPcName)) then
+            if addIgnoredPlayer(targetPcName) then
+                logMsg(string.format("Added target '%s' to player ignore list.", targetPcName))
+            end
+        end
+    end
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Current Ignored Players")
+
+    local list = {}
+    if ctrl.ignoreList and type(ctrl.ignoreList) == 'table' then
+        for k, v in pairs(ctrl.ignoreList) do
+            if type(v) == 'string' and v ~= '' then
+                table.insert(list, v)
+            elseif type(k) == 'string' and k ~= '' and v == true then
+                table.insert(list, k)
+            end
+        end
+    end
+
+    if #list == 0 then
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "No players currently on ignore list.")
+    else
+        table.sort(list, function(a, b) return a:lower() < b:lower() end)
+        if ImGui.BeginTable("##ignoreTable", 3, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
+            ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthFixed, 35)
+            ImGui.TableSetupColumn("Player Name", ImGuiTableColumnFlags.WidthStretch, 200)
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableHeadersRow()
+
+            local toRemove = nil
+            for idx, pName in ipairs(list) do
+                ImGui.TableNextRow()
+                ImGui.TableSetColumnIndex(0)
+                ImGui.Text(tostring(idx))
+
+                ImGui.TableSetColumnIndex(1)
+                ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], pName)
+
+                ImGui.TableSetColumnIndex(2)
+                if ImGui.Button(string.format("Remove##ign_%d", idx)) then
+                    toRemove = pName
+                end
+            end
+            ImGui.EndTable()
+
+            if toRemove then
+                removeIgnoredPlayer(toRemove)
+                logMsg(string.format("Removed '%s' from player ignore list.", toRemove))
+            end
+        end
+
+        ImGui.Spacing()
+        if ImGui.Button("Clear All Ignored Players##clearIgnoreBtn") then
+            ctrl.ignoreList = {}
+            saveConfig(true)
+            logMsg("Cleared all players from ignore list.")
+        end
+    end
+end
+
 local function renderGUI()
     if not runtime.openGUI then return end
 
@@ -1510,6 +1701,10 @@ local function renderGUI()
         if ImGui.BeginTabBar("BuffbotTabBar") then
             if ImGui.BeginTabItem("Controls") then
                 drawControlTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem("Ignore List") then
+                drawIgnoreTab()
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem("Activity Log") then

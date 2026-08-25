@@ -1397,7 +1397,9 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
                     if s() then
                         local stype = s.Type() or ''
                         local cname = s.CleanName() or ''
-                        local dist = s.Distance3D() or 999
+                        local dist = 999
+                        local okDist, sDist = pcall(function() return s.Distance3D() or s.Distance() end)
+                        if okDist and sDist then dist = sDist end
                         local okZ, sz = pcall(function() return s.Z() end)
                         local zOk = (not maxZ) or (okZ and sz and math.abs(sz - myZ) <= maxZ)
                         if (stype == 'NPC' or stype == 'Pet')
@@ -5254,8 +5256,8 @@ end
 
 local isUnreachable -- forward declaration; defined in the pursuit section below
 
-local function firstNPCXtarget(unmezzedOnly, maxZ)
-    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, nil, maxZ)
+local function firstNPCXtarget(unmezzedOnly, maxZ, maxDist)
+    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, maxDist, maxZ)
 end
 
 -- Returns count of live, non-ignored NPCs occupying XTarget slots.
@@ -5311,8 +5313,7 @@ isXTargetId = function(id)
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) == id
             and not xt.Dead() and (xt.Type() or '') ~= 'Corpse'
-            and not isIgnored(xt.CleanName())
-            and not isUnreachable(id) then
+            and not isIgnored(xt.CleanName()) then
             local stype = xt.Type() or ''
             if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
                 return true
@@ -7597,14 +7598,12 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                                     local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
                                                     if ok and not hasPath then
                                                         pathOk = false
-                                                        runtime.markUnreachable(sid)
                                                     elseif ok and hasPath then
                                                         local pathLen = 0
                                                         pcall(function() pathLen = mq.TLO.Navigation.PathLength('id ' .. sid)() or 0 end)
                                                         local maxRatio = ctrl.nav_max_path_ratio or 2.5
                                                         if pathLen > 0 and dist > 20 and (pathLen / dist) > maxRatio then
                                                             pathOk = false
-                                                            runtime.markUnreachable(sid)
                                                         end
                                                     end
                                                 end
@@ -8501,18 +8500,20 @@ local function combatTick()
             local hasWps = (ctrl.waypoints and #ctrl.waypoints > 0 and ctrl.use_waypoints ~= false)
             local maxHuntZ = ctrl.hunter_z or 75
             local myZ = mq.TLO.Me.Z() or 0
+            local maxScan = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
+            local maxHuntXtarDist = math.max(ctrl.xtar_nav_dist or 150, maxScan)
+            local maxHuntXtarZ = math.max(maxHuntZ, 75) + 25
+
             if haveNPC then
                 local tid = mq.TLO.Target.ID() or 0
                 local tspawn = mq.TLO.Spawn(tid)
-                local maxScan = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
                 -- Add hysteresis buffer (+35 units for waypoint patrol, +30% for free roam) so boundary spawns are not dropped
                 local dropDist = hasWps and (maxScan + 35) or (maxScan * 1.3 + 50)
                 if not tspawn() or tspawn.Dead() or tspawn.Type() == 'Corpse' or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
                     haveNPC = false
                     mq.cmd('/target clear')
                 elseif isXTargetId(tid) then
-                    local maxXtarDist = (ctrl.xtar_nav_dist or 150)
-                    if distToId(tid) > (maxXtarDist + 20) and not mq.TLO.Me.Combat() then
+                    if distToId(tid) > (maxHuntXtarDist + 20) and not mq.TLO.Me.Combat() then
                         -- XTarget is beyond max chase range + buffer and not actively engaged in melee
                         haveNPC = false
                         mq.cmd('/target clear')
@@ -8529,7 +8530,7 @@ local function combatTick()
                         -- opens up (same TTL as the navmesh-fail unreachable entries).
                         local reason = tooFarZ and 'elevation diff' or 'stationary+out-of-range'
                         print(string.format(
-                            '\\ay[Triune]\\ax Hunt: dropping #%d (%s) -- %s. Blacklisting for 60s.',
+                            '\ay[Triune]\ax Hunt: dropping #%d (%s) -- %s. Blacklisting for 60s.',
                             tid, tostring(tspawn.CleanName()), reason))
                         markUnreachable(tid)
                         haveNPC = false
@@ -8538,8 +8539,9 @@ local function combatTick()
                 end
             end
 
-            local xtarId = firstNPCXtarget(false, maxHuntZ)
+            local xtarId = firstNPCXtarget(false, maxHuntXtarZ, maxHuntXtarDist)
             if xtarId then
+                if pursuit.unreachableIds then pursuit.unreachableIds[xtarId] = nil end
                 local curId = haveNPC and mq.TLO.Target.ID() or 0
                 if curId ~= xtarId and (curId == 0 or not isXTargetId(curId)) then
                     stopMoving()
@@ -8547,18 +8549,20 @@ local function combatTick()
                     pursuit.lastNavTargetId = 0
                     if setTarget(xtarId) then
                         print(string.format('\ay[Triune]\ax Puller (Hunt) XTarget detected -- engaging #%d (%s) [dist %.1f, max chase %d]',
-                            xtarId, tostring(mq.TLO.Target.CleanName()), distToId(xtarId), ctrl.xtar_nav_dist or 150))
+                            xtarId, tostring(mq.TLO.Target.CleanName()), distToId(xtarId), maxHuntXtarDist))
                     end
                     haveNPC = true
                 end
             end
 
             if haveNPC then
-                if runtime.pullHpRest and not isXTargetId(mq.TLO.Target.ID()) then
+                local curTid = mq.TLO.Target.ID() or 0
+                local isCurXtar = isXTargetId(curTid) or (xtarId and (curTid == xtarId or curTid == 0))
+                if runtime.pullHpRest and not isCurXtar then
                     mq.cmd('/target clear')
                     haveNPC = false
-                elseif not isXTargetId(mq.TLO.Target.ID()) and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
-                    local curId = mq.TLO.Target.ID()
+                elseif not isCurXtar and not anyXtarAlive() and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
+                    local curId = curTid
                     local closerId, candDist, curDist = checkCloserTarget(curId, nil, maxHuntZ, ctrl.hunter_min_level,
                         ctrl.hunter_max_level)
                     if closerId and setTarget(closerId) then
@@ -8582,7 +8586,10 @@ local function combatTick()
             if not haveNPC then
                 if checkPullHpRest() then return end
                 local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
-                local id = findRoamTarget(scanRadius, maxHuntZ, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                local id = firstNPCXtarget(false, maxHuntXtarZ, maxHuntXtarDist)
+                if not id then
+                    id = findRoamTarget(scanRadius, maxHuntZ, ctrl.hunter_min_level, ctrl.hunter_max_level)
+                end
                 if id and setTarget(id) then
                     if not runtime.verifyTargetCon(id, true) then
                         print(string.format(

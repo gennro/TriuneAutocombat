@@ -1025,7 +1025,57 @@ assert_eq(isThankYou(nil), false,            'thx: nil → false')
 assert_eq(isThankYou(''), false,             'thx: empty → false')
 
 -- ============================================================================
--- 28. triune_data.lua — structural validation
+-- 28. isPlayerIgnored / ignore list helpers (buffbot)
+-- ============================================================================
+print('--- isPlayerIgnored (buffbot) ---')
+local testCtrl = {
+    ignoreList = { 'BadActor', 'Griefer' },
+    banMsg = "You are banned from getting buffs."
+}
+local dummySaveCalled = false
+local isPlayerIgnored = loadFunc(bbSrc, 'isPlayerIgnored', { ctrl = testCtrl })
+local addIgnoredPlayer = loadFunc(bbSrc, 'addIgnoredPlayer', {
+    ctrl = testCtrl,
+    isPlayerIgnored = isPlayerIgnored,
+    saveConfig = function() dummySaveCalled = true end
+})
+local removeIgnoredPlayer = loadFunc(bbSrc, 'removeIgnoredPlayer', {
+    ctrl = testCtrl,
+    saveConfig = function() dummySaveCalled = true end
+})
+
+-- Test isPlayerIgnored
+assert_true(isPlayerIgnored('BadActor'), 'ignore: exact match BadActor')
+assert_true(isPlayerIgnored('badactor'), 'ignore: lower case badactor')
+assert_true(isPlayerIgnored('  GRIEFER  '), 'ignore: whitespace and uppercase')
+assert_eq(isPlayerIgnored('GoodPlayer'), false, 'ignore: non-ignored player is false')
+assert_eq(isPlayerIgnored(''), false, 'ignore: empty name is false')
+assert_eq(isPlayerIgnored(nil), false, 'ignore: nil name is false')
+
+-- Test addIgnoredPlayer
+dummySaveCalled = false
+local addRes1 = addIgnoredPlayer('Troublemaker')
+assert_true(addRes1, 'ignore: adding new player returns true')
+assert_true(isPlayerIgnored('Troublemaker'), 'ignore: newly added player is ignored')
+assert_true(dummySaveCalled, 'ignore: add calls saveConfig')
+
+-- Duplicate add
+dummySaveCalled = false
+local addRes2 = addIgnoredPlayer('troublemaker')
+assert_eq(addRes2, false, 'ignore: adding duplicate player returns false')
+
+-- Test removeIgnoredPlayer
+dummySaveCalled = false
+local remRes1 = removeIgnoredPlayer('troublemaker')
+assert_true(remRes1, 'ignore: removing player returns true')
+assert_eq(isPlayerIgnored('troublemaker'), false, 'ignore: removed player is no longer ignored')
+assert_true(dummySaveCalled, 'ignore: remove calls saveConfig')
+
+local remRes2 = removeIgnoredPlayer('NonExistent')
+assert_eq(remRes2, false, 'ignore: removing non-existent player returns false')
+
+-- ============================================================================
+-- 29. triune_data.lua — structural validation
 -- ============================================================================
 print('--- triune_data.lua validation ---')
 local dataFile = assert(loadfile('mq2triune/config/triune_data.lua'))
@@ -1333,6 +1383,87 @@ dummyLoS[104] = true
 dummyPursuit.lastCloserScanAt = 0
 local losCand = checkCloserTarget(101, 1000, 75, 1, 100)
 assert_eq(losCand, 104, 'closer retarget: LoS priority allowed visible mob at 78% distance')
+
+-- ============================================================================
+-- 34. XTarget Detection & Range Suite
+-- ============================================================================
+print('--- xtarget detection & range ---')
+local dummyXtarSlots = {
+    [1] = { id = 201, type = 'NPC', dead = false, cleanName = 'a_moss_snake', hp = 80, dist = 180, z = 10 },
+    [2] = { id = 202, type = 'NPC', dead = false, cleanName = 'a_decaying_skeleton', hp = 40, dist = 50, z = 5 },
+    [3] = { id = 203, type = 'Corpse', dead = true, cleanName = 'a_dead_rat', hp = 0, dist = 10, z = 0 }
+}
+local dummyMqXtar = {
+    TLO = {
+        Me = {
+            Z = function() return 0 end,
+            XTargetSlots = function() return 3 end,
+            XTarget = function(i)
+                local slot = dummyXtarSlots[i]
+                if not slot then return function() return false end end
+                return setmetatable({
+                    ID = function() return slot.id end,
+                    Type = function() return slot.type end,
+                    Dead = function() return slot.dead end,
+                    CleanName = function() return slot.cleanName end,
+                    PctHPs = function() return slot.hp end,
+                    Distance3D = function() return slot.dist end,
+                    Z = function() return slot.z end
+                }, { __call = function() return true end })
+            end
+        },
+        Spawn = function(id)
+            for _, slot in pairs(dummyXtarSlots) do
+                if slot.id == id then
+                    return setmetatable({
+                        ID = function() return slot.id end,
+                        Type = function() return slot.type end,
+                        Dead = function() return slot.dead end,
+                        CleanName = function() return slot.cleanName end,
+                        PctHPs = function() return slot.hp end,
+                        Distance3D = function() return slot.dist end,
+                        Z = function() return slot.z end
+                    }, { __call = function() return true end })
+                end
+            end
+            return function() return false end
+        end
+    }
+}
+
+local findFirstNPCXtarget = loadFunc(src, 'findFirstNPCXtarget', {
+    ctrl = { xtar_nav_dist = 150 },
+    mq = dummyMqXtar,
+    isSpawnAlive = function(id) return id ~= 203 end,
+    isGroupOrRaidMember = function() return false end,
+    isSpawnPetOrPlayer = function() return false end,
+    isHostileTarget = function() return true end,
+    buffActive = function() return false end
+})
+
+local isXTargetId = loadFunc(src, 'isXTargetId', {
+    mq = dummyMqXtar,
+    isGroupOrRaidMember = function() return false end,
+    isSpawnPetOrPlayer = function() return false end,
+    isHostileTarget = function() return true end,
+    isIgnored = function() return false end
+})
+
+-- 1. Default maxDist (150) picks lowest HP within 150 (mob 202 at dist 50, hp 40; ignores 201 at dist 180)
+local xtId1 = findFirstNPCXtarget(false, nil, nil, nil, nil)
+assert_eq(xtId1, 202, 'xtarget: default maxDist 150 picks lowest HP mob within 150')
+
+-- 2. Extended maxDist (200) allows reaching mob 201 at dist 180 if mob 202 was not eligible
+dummyXtarSlots[2].dead = true
+local xtId2 = findFirstNPCXtarget(false, nil, nil, 200, 50)
+assert_eq(xtId2, 201, 'xtarget: extended maxDist 200 acquires mob 201 at dist 180')
+dummyXtarSlots[2].dead = false
+
+-- 3. isXTargetId returns true for valid hostile NPC on XTarget
+assert_eq(isXTargetId(201), true, 'isXTargetId: recognizes mob 201 on XTarget')
+assert_eq(isXTargetId(202), true, 'isXTargetId: recognizes mob 202 on XTarget')
+assert_eq(isXTargetId(203), false, 'isXTargetId: corpse 203 returns false')
+assert_eq(isXTargetId(999), false, 'isXTargetId: non-xtarget id returns false')
 
 -- ============================================================================
 -- Results

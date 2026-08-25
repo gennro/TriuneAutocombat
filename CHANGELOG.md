@@ -1,5 +1,23 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-25
+
+- **Fix Puller (Hunt) Mode Ignoring In-Range XTarget Enemies (`triune.lua`).**
+  - **Dynamic XTarget Chase Distance (`maxHuntXtarDist`, `maxHuntXtarZ`)**: In `Puller (Hunt)` mode, XTarget mob detection and chase range now scale up to the active hunt / waypoint scan radius (`math.max(ctrl.xtar_nav_dist, scanRadius)` with relaxed Z threshold `maxHuntXtarZ`), preventing the engine from dropping or ignoring aggroed XTarget enemies beyond the default 150-unit slider limit while roaming.
+  - **Preempt Ambient Roam Scanning (`firstNPCXtarget` Priority)**: When acquiring new targets in Hunt mode, verifies and engages active in-range XTarget enemies before scanning the zone for distant unaggroed roaming spawns.
+  - **Closer-NPC Retargeting Guard (`checkCloserTarget`)**: Added checks ensuring `checkCloserTarget()` will never execute or switch targets away to ambient roam spawns while an XTarget enemy is currently targeted or active on the Extended Target list.
+  - **Ambient Spawn Unreachable Blacklist Fix**: Removed aggressive `markUnreachable()` calls in `findRoamTarget()` during candidate scanning loops. Candidate mobs that temporarily lack a path mesh are simply skipped without contaminating `pursuit.unreachableIds` for 60 seconds.
+  - **XTarget Hostile Recognition (`isXTargetId`)**: Removed stale unreachable blacklist checks from `isXTargetId()` so active hostile enemies engaged in combat with the player or party are never falsely ignored.
+
+- **Player Ignore List & Automated Ban Notification (`triune_buffbot.lua`).**
+  - **Ignore / Ban List Management (`ctrl.ignoreList`, `isPlayerIgnored`)**: Added persistent player ignore list support per character. Tells from ignored/banned players are automatically blocked from receiving the buff menu or queueing buffs.
+  - **Customizable Ban Tell Notification (`ctrl.banMsg`)**: Automatically responds to blocked requests with a ban tell notification (defaults to `"You are banned from getting buffs."`, configurable in the UI and persisted to character config).
+  - **Dedicated UI Tab ("Ignore List")**: Added a management tab featuring an input text box to add players by name, a one-click "Add Target" button for the current PC target, an interactive table of currently banned players with individual "Remove" buttons, a "Clear All" action, and a live input field for editing the ban tell message.
+  - **Hail & Spam Protection**: Silently ignores `/say` hails from banned players and applies standard request cooldowns to prevent tell spam.
+  - **Unit Tests**: Added pure-logic unit test suite (Suite 28) in `tests/test_pure_logic.lua` covering case-insensitive matching, whitespace trimming, duplicate prevention, and add/remove helper operations.
+
+---
+
 ## 2026-08-24
 
 - **Intelligent Closer-NPC Retargeting & Directional Arc Filtering (`triune.lua`, v1.7.2).**
