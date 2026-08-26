@@ -27,6 +27,12 @@
 - **Luacheck Static Analysis Fix (`triune.lua`).**
   - **Shadowed `locKey` Variable**: Removed redundant duplicate `local locKey` declaration in `runtime.moveTowardLoc`, resolving a static analysis shadowing warning and ensuring a clean zero-warning Luacheck run across all files.
 
+- **Per-Zone Waypoint Persistence & Named Presets (`triune.lua`).**
+  - **Auto-Save/Load Per Zone (`ctrl.zone_waypoints`)**: Waypoint routes and settings (radius, scan radius, loop) are now auto-saved per zone and auto-loaded when you re-enter that zone. Shared across all characters, like zone hazards.
+  - **Named Presets (`ctrl.zone_waypoint_presets`)**: Added a dropdown next to the waypoint list, filtered to presets saved for the current zone, plus Save / Load / Edit / Delete buttons. Save prompts for a name (overwrites on duplicate); Edit renames the selected preset. Entries display as `<name> - <zone>`.
+  - Loading a preset or the auto-saved "Current" route always restarts at waypoint 1.
+  - **Unit Tests**: Added `copyWaypointList` pure-logic tests and extended `defaultCtrl()` field validation for the new fields.
+
 ---
 
 ## 2026-08-25

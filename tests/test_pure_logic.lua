@@ -545,6 +545,8 @@ local EXPECTED_FIELDS = {
     { 'waypoint_loop',           'boolean' },
     { 'current_waypoint_idx',    'number' },
     { 'waypoints',               'table' },
+    { 'zone_waypoints',          'table' },
+    { 'zone_waypoint_presets',   'table' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -1667,7 +1669,24 @@ local testMeshLoaded3 = loadFunc(src, 'navMeshLoaded', {
 })
 assert_eq(testMeshLoaded3(), false, 'navMeshLoaded: false when MeshLoaded returns false')
 
+-- ============================================================================
+-- 36. copyWaypointList (per-zone waypoint routes/presets)
+-- ============================================================================
+print('--- copyWaypointList ---')
+local copyWaypointList = loadFunc(src, 'copyWaypointList', {})
 
+do
+    local original = { { name = 'A', x = 1, y = 2, z = 3 }, { name = 'B', x = 4, y = 5, z = 6 } }
+    local copy = copyWaypointList(original)
+    assert_eq(#copy, 2, 'copyWaypointList: preserves length')
+    assert_eq(copy[1].name, 'A', 'copyWaypointList: preserves entry fields')
+    assert_eq(copy[2].z, 6, 'copyWaypointList: preserves entry fields (2)')
+    copy[1].name = 'Changed'
+    assert_eq(original[1].name, 'A', 'copyWaypointList: mutating the copy does not affect the original')
+end
+
+assert_eq(#copyWaypointList(nil), 0, 'copyWaypointList: nil input returns empty list')
+assert_eq(#copyWaypointList({}), 0, 'copyWaypointList: empty input returns empty list')
 
 -- ============================================================================
 -- Results
