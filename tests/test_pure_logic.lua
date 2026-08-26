@@ -66,7 +66,7 @@ local function assert_tbl_eq(got, expect, label)
         local function dump(t)
             if type(t) ~= 'table' then return tostring(t) end
             local parts = {}
-            for k, v in pairs(t) do parts[#parts+1] = tostring(k)..'='..tostring(v) end
+            for k, v in pairs(t) do parts[#parts + 1] = tostring(k) .. '=' .. tostring(v) end
             return '{' .. table.concat(parts, ', ') .. '}'
         end
         errors[#errors + 1] = string.format(
@@ -152,7 +152,7 @@ end
 -- ---------------------------------------------------------------------------
 -- Source file path (relative to repo root)
 -- ---------------------------------------------------------------------------
-local srcPath = 'mq2triune/lua/triune.lua'
+local srcPath = 'TAC/lua/triune.lua'
 local src = readFile(srcPath)
 
 -- ---------------------------------------------------------------------------
@@ -171,22 +171,56 @@ local PULL_CON_LIST = {
 -- The MQSHORT lookup table (used inside toCanonicalClassAbbr as a local, and
 -- referenced by parseClassLine as an upvalue that SHOULD be module-level).
 local MQSHORT = {
-    WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
-    CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
-    PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
-    RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
-    SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
-    DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
-    MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
-    BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
-    ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
-    SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
-    NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
-    WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
-    MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
-    ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
-    BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
-    BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber',
+    WARRIOR = 'War',
+    WAR = 'War',
+    WARRIORS = 'War',
+    CLERIC = 'Clr',
+    CLR = 'Clr',
+    CLERICS = 'Clr',
+    PALADIN = 'Pal',
+    PAL = 'Pal',
+    PALADINS = 'Pal',
+    RANGER = 'Rng',
+    RNG = 'Rng',
+    RANGERS = 'Rng',
+    SHADOWKNIGHT = 'SK',
+    SHADOW = 'SK',
+    SHD = 'SK',
+    SK = 'SK',
+    SHADOWKNIGHTS = 'SK',
+    DRUID = 'Dru',
+    DRU = 'Dru',
+    DRUIDS = 'Dru',
+    MONK = 'Mnk',
+    MNK = 'Mnk',
+    MONKS = 'Mnk',
+    BARD = 'Brd',
+    BRD = 'Brd',
+    BARDS = 'Brd',
+    ROGUE = 'Rog',
+    ROG = 'Rog',
+    ROGUES = 'Rog',
+    SHAMAN = 'Shm',
+    SHM = 'Shm',
+    SHAMANS = 'Shm',
+    NECROMANCER = 'Nec',
+    NEC = 'Nec',
+    NECROMANCERS = 'Nec',
+    WIZARD = 'Wiz',
+    WIZ = 'Wiz',
+    WIZARDS = 'Wiz',
+    MAGICIAN = 'Mag',
+    MAG = 'Mag',
+    MAGICIANS = 'Mag',
+    ENCHANTER = 'Enc',
+    ENC = 'Enc',
+    ENCHANTERS = 'Enc',
+    BEASTLORD = 'Bst',
+    BST = 'Bst',
+    BEASTLORDS = 'Bst',
+    BERSERKER = 'Ber',
+    BER = 'Ber',
+    BERSERKERS = 'Ber',
 }
 
 -- ============================================================================
@@ -195,12 +229,12 @@ local MQSHORT = {
 print('--- idxOf ---')
 local idxOf = loadFunc(src, 'idxOf', {})
 
-assert_eq(idxOf({'a','b','c'}, 'b'), 2,   'idxOf: find middle element')
-assert_eq(idxOf({'a','b','c'}, 'a'), 1,   'idxOf: find first element')
-assert_eq(idxOf({'a','b','c'}, 'c'), 3,   'idxOf: find last element')
-assert_eq(idxOf({'a','b','c'}, 'z'), 1,   'idxOf: not found returns 1')
-assert_eq(idxOf(nil, 'x'),            1,   'idxOf: nil table returns 1')
-assert_eq(idxOf({}, 'x'),             1,   'idxOf: empty table returns 1')
+assert_eq(idxOf({ 'a', 'b', 'c' }, 'b'), 2, 'idxOf: find middle element')
+assert_eq(idxOf({ 'a', 'b', 'c' }, 'a'), 1, 'idxOf: find first element')
+assert_eq(idxOf({ 'a', 'b', 'c' }, 'c'), 3, 'idxOf: find last element')
+assert_eq(idxOf({ 'a', 'b', 'c' }, 'z'), 1, 'idxOf: not found returns 1')
+assert_eq(idxOf(nil, 'x'), 1, 'idxOf: nil table returns 1')
+assert_eq(idxOf({}, 'x'), 1, 'idxOf: empty table returns 1')
 
 -- ============================================================================
 -- 2.  toCanonicalClassAbbr(str)
@@ -210,21 +244,21 @@ local toCanonicalClassAbbr = loadFunc(src, 'toCanonicalClassAbbr',
     { ALL_ABBR = ALL_ABBR, MQSHORT = MQSHORT, idxOf = idxOf })
 
 -- Full names (case-insensitive)
-assert_eq(toCanonicalClassAbbr('warrior'),      'War', 'canon: lowercase warrior')
-assert_eq(toCanonicalClassAbbr('WARRIOR'),      'War', 'canon: uppercase WARRIOR')
-assert_eq(toCanonicalClassAbbr('Warrior'),      'War', 'canon: mixed Warrior')
-assert_eq(toCanonicalClassAbbr('Shadow Knight'),'SK',  'canon: Shadow Knight (space)')
-assert_eq(toCanonicalClassAbbr('shadowknight'), 'SK',  'canon: shadowknight')
-assert_eq(toCanonicalClassAbbr('Necromancer'),  'Nec', 'canon: Necromancer')
-assert_eq(toCanonicalClassAbbr('Beastlord'),    'Bst', 'canon: Beastlord')
-assert_eq(toCanonicalClassAbbr('Berserker'),    'Ber', 'canon: Berserker')
+assert_eq(toCanonicalClassAbbr('warrior'), 'War', 'canon: lowercase warrior')
+assert_eq(toCanonicalClassAbbr('WARRIOR'), 'War', 'canon: uppercase WARRIOR')
+assert_eq(toCanonicalClassAbbr('Warrior'), 'War', 'canon: mixed Warrior')
+assert_eq(toCanonicalClassAbbr('Shadow Knight'), 'SK', 'canon: Shadow Knight (space)')
+assert_eq(toCanonicalClassAbbr('shadowknight'), 'SK', 'canon: shadowknight')
+assert_eq(toCanonicalClassAbbr('Necromancer'), 'Nec', 'canon: Necromancer')
+assert_eq(toCanonicalClassAbbr('Beastlord'), 'Bst', 'canon: Beastlord')
+assert_eq(toCanonicalClassAbbr('Berserker'), 'Ber', 'canon: Berserker')
 
 -- MQ-style 3-letter abbreviations
 assert_eq(toCanonicalClassAbbr('WAR'), 'War', 'canon: WAR')
 assert_eq(toCanonicalClassAbbr('CLR'), 'Clr', 'canon: CLR')
 assert_eq(toCanonicalClassAbbr('PAL'), 'Pal', 'canon: PAL')
 assert_eq(toCanonicalClassAbbr('RNG'), 'Rng', 'canon: RNG')
-assert_eq(toCanonicalClassAbbr('SHD'), 'SK',  'canon: SHD → SK')
+assert_eq(toCanonicalClassAbbr('SHD'), 'SK', 'canon: SHD → SK')
 assert_eq(toCanonicalClassAbbr('DRU'), 'Dru', 'canon: DRU')
 assert_eq(toCanonicalClassAbbr('MNK'), 'Mnk', 'canon: MNK')
 assert_eq(toCanonicalClassAbbr('BRD'), 'Brd', 'canon: BRD')
@@ -236,7 +270,7 @@ assert_eq(toCanonicalClassAbbr('MAG'), 'Mag', 'canon: MAG')
 assert_eq(toCanonicalClassAbbr('ENC'), 'Enc', 'canon: ENC')
 assert_eq(toCanonicalClassAbbr('BST'), 'Bst', 'canon: BST')
 assert_eq(toCanonicalClassAbbr('BER'), 'Ber', 'canon: BER')
-assert_eq(toCanonicalClassAbbr('SK'),  'SK',  'canon: SK')
+assert_eq(toCanonicalClassAbbr('SK'), 'SK', 'canon: SK')
 
 -- Mixed-case canonical form (should pass through if in ALL_ABBR)
 assert_eq(toCanonicalClassAbbr('War'), 'War', 'canon: War pass-through')
@@ -244,13 +278,13 @@ assert_eq(toCanonicalClassAbbr('Clr'), 'Clr', 'canon: Clr pass-through')
 
 -- Plurals
 assert_eq(toCanonicalClassAbbr('Warriors'), 'War', 'canon: Warriors plural')
-assert_eq(toCanonicalClassAbbr('Clerics'),  'Clr', 'canon: Clerics plural')
+assert_eq(toCanonicalClassAbbr('Clerics'), 'Clr', 'canon: Clerics plural')
 
 -- Edge cases
-assert_nil(toCanonicalClassAbbr(nil),    'canon: nil input')
-assert_nil(toCanonicalClassAbbr(''),     'canon: empty string')
+assert_nil(toCanonicalClassAbbr(nil), 'canon: nil input')
+assert_nil(toCanonicalClassAbbr(''), 'canon: empty string')
 assert_nil(toCanonicalClassAbbr('NULL'), 'canon: NULL string')
-assert_nil(toCanonicalClassAbbr('nil'),  'canon: "nil" string')
+assert_nil(toCanonicalClassAbbr('nil'), 'canon: "nil" string')
 
 -- ============================================================================
 -- 3.  cleanSpellName(name)
@@ -258,13 +292,13 @@ assert_nil(toCanonicalClassAbbr('nil'),  'canon: "nil" string')
 print('--- cleanSpellName ---')
 local cleanSpellName = loadFunc(src, 'cleanSpellName', {})
 
-assert_eq(cleanSpellName('Complete Heal'),              'Complete Heal',     'clean: no parens')
-assert_eq(cleanSpellName('Chloroplast (Group)'),        'Chloroplast',       'clean: strip (Group)')
-assert_eq(cleanSpellName('Spirit of Wolf (Spell)'),     'Spirit of Wolf',    'clean: strip (Spell)')
-assert_eq(cleanSpellName('  Heal  '),                   'Heal',              'clean: trim whitespace')
-assert_eq(cleanSpellName(nil),                          '',                  'clean: nil → empty')
-assert_eq(cleanSpellName(42),                           '',                  'clean: number → empty')
-assert_eq(cleanSpellName(''),                           '',                  'clean: empty → empty')
+assert_eq(cleanSpellName('Complete Heal'), 'Complete Heal', 'clean: no parens')
+assert_eq(cleanSpellName('Chloroplast (Group)'), 'Chloroplast', 'clean: strip (Group)')
+assert_eq(cleanSpellName('Spirit of Wolf (Spell)'), 'Spirit of Wolf', 'clean: strip (Spell)')
+assert_eq(cleanSpellName('  Heal  '), 'Heal', 'clean: trim whitespace')
+assert_eq(cleanSpellName(nil), '', 'clean: nil → empty')
+assert_eq(cleanSpellName(42), '', 'clean: number → empty')
+assert_eq(cleanSpellName(''), '', 'clean: empty → empty')
 
 -- ============================================================================
 -- 4.  normalizeSpellName(name)
@@ -272,15 +306,15 @@ assert_eq(cleanSpellName(''),                           '',                  'cl
 print('--- normalizeSpellName ---')
 local normalizeSpellName = loadFunc(src, 'normalizeSpellName', {})
 
-assert_eq(normalizeSpellName('Complete Heal'),           'completeheal',      'norm: basic')
-assert_eq(normalizeSpellName('Complete Heal Rk. II'),    'completeheal',      'norm: strip Rk. II')
-assert_eq(normalizeSpellName('Chloroplast (Group)'),     'chloroplast',       'norm: strip parens')
-assert_eq(normalizeSpellName('Spirit of Wolf'),          'spiritofwolf',      'norm: spaces removed')
-assert_eq(normalizeSpellName('Nuke Rk.III'),             'nuke',              'norm: Rk.III variant')
-assert_eq(normalizeSpellName('Heal (Rk II)'),            'heal',              'norm: (Rk II) in parens')
-assert_eq(normalizeSpellName(nil),                       '',                  'norm: nil → empty')
-assert_eq(normalizeSpellName(42),                        '',                  'norm: number → empty')
-assert_eq(normalizeSpellName(''),                        '',                  'norm: empty → empty')
+assert_eq(normalizeSpellName('Complete Heal'), 'completeheal', 'norm: basic')
+assert_eq(normalizeSpellName('Complete Heal Rk. II'), 'completeheal', 'norm: strip Rk. II')
+assert_eq(normalizeSpellName('Chloroplast (Group)'), 'chloroplast', 'norm: strip parens')
+assert_eq(normalizeSpellName('Spirit of Wolf'), 'spiritofwolf', 'norm: spaces removed')
+assert_eq(normalizeSpellName('Nuke Rk.III'), 'nuke', 'norm: Rk.III variant')
+assert_eq(normalizeSpellName('Heal (Rk II)'), 'heal', 'norm: (Rk II) in parens')
+assert_eq(normalizeSpellName(nil), '', 'norm: nil → empty')
+assert_eq(normalizeSpellName(42), '', 'norm: number → empty')
+assert_eq(normalizeSpellName(''), '', 'norm: empty → empty')
 
 -- ============================================================================
 -- 5.  defaultsForKind(kind, bene)
@@ -291,21 +325,21 @@ local defaultsForKind = loadFunc(src, 'defaultsForKind', {})
 local function check_defaults(kind, bene, expTarget, expWhen, expPct, label)
     local t, w, p = defaultsForKind(kind, bene)
     assert_eq(t, expTarget, label .. ' target')
-    assert_eq(w, expWhen,   label .. ' when')
-    assert_eq(p, expPct,    label .. ' pct')
+    assert_eq(w, expWhen, label .. ' when')
+    assert_eq(p, expPct, label .. ' pct')
 end
 
-check_defaults('heal',     nil,  'F: Myself',           'my HP <=',       75,  'defaults: heal')
-check_defaults('buff',     nil,  'F: Myself',           'missing buff',   100, 'defaults: buff')
-check_defaults('pet_buff', nil,  'F: Pet',              'missing buff',   100, 'defaults: pet_buff')
-check_defaults('pet',      nil,  'F: Myself',           'missing pet',    100, 'defaults: pet')
-check_defaults('util',     nil,  'F: Myself',           'always',         100, 'defaults: util')
-check_defaults('debuff',   nil,  'E: Current Target',   'target HP <=',   98,  'defaults: debuff')
-check_defaults('dot',      nil,  'E: Current Target',   'target HP <=',   98,  'defaults: dot')
-check_defaults('dd',       nil,  'E: Current Target',   'target HP <=',   95,  'defaults: dd')
-check_defaults(nil,        true, 'F: Myself',           'missing buff',   100, 'defaults: bene=true')
-check_defaults(nil,        nil,  'E: Current Target',   'target HP <=',   95,  'defaults: unknown')
-check_defaults('bogus',    nil,  'E: Current Target',   'target HP <=',   95,  'defaults: bogus kind')
+check_defaults('heal', nil, 'F: Myself', 'my HP <=', 75, 'defaults: heal')
+check_defaults('buff', nil, 'F: Myself', 'missing buff', 100, 'defaults: buff')
+check_defaults('pet_buff', nil, 'F: Pet', 'missing buff', 100, 'defaults: pet_buff')
+check_defaults('pet', nil, 'F: Myself', 'missing pet', 100, 'defaults: pet')
+check_defaults('util', nil, 'F: Myself', 'always', 100, 'defaults: util')
+check_defaults('debuff', nil, 'E: Current Target', 'target HP <=', 98, 'defaults: debuff')
+check_defaults('dot', nil, 'E: Current Target', 'target HP <=', 98, 'defaults: dot')
+check_defaults('dd', nil, 'E: Current Target', 'target HP <=', 95, 'defaults: dd')
+check_defaults(nil, true, 'F: Myself', 'missing buff', 100, 'defaults: bene=true')
+check_defaults(nil, nil, 'E: Current Target', 'target HP <=', 95, 'defaults: unknown')
+check_defaults('bogus', nil, 'E: Current Target', 'target HP <=', 95, 'defaults: bogus kind')
 
 -- ============================================================================
 -- 6.  sanitizeModeConfig(c)
@@ -326,42 +360,42 @@ local m, s
 -- Hunter → Puller/Hunt
 m, s = smc('Hunter', nil)
 assert_eq(m, 'Puller', 'sanitize: Hunter → Puller')
-assert_eq(s, 'Hunt',   'sanitize: Hunter → Hunt')
+assert_eq(s, 'Hunt', 'sanitize: Hunter → Hunt')
 
 -- Manual Hunter → Manual/Hunt
 m, s = smc('Manual Hunter', nil)
 assert_eq(m, 'Manual', 'sanitize: Manual Hunter → Manual')
-assert_eq(s, 'Hunt',   'sanitize: Manual Hunter → Hunt')
+assert_eq(s, 'Hunt', 'sanitize: Manual Hunter → Hunt')
 
 -- Pet Tank → Puller/Hunt
 m, s = smc('Pet Tank', nil)
 assert_eq(m, 'Puller', 'sanitize: Pet Tank → Puller')
-assert_eq(s, 'Hunt',   'sanitize: Pet Tank → Hunt')
+assert_eq(s, 'Hunt', 'sanitize: Pet Tank → Hunt')
 
 -- Pull & Assist → Puller/Camp
 m, s = smc('Pull & Assist', nil)
 assert_eq(m, 'Puller', 'sanitize: Pull & Assist → Puller')
-assert_eq(s, 'Camp',   'sanitize: Pull & Assist → Camp')
+assert_eq(s, 'Camp', 'sanitize: Pull & Assist → Camp')
 
 -- Chase Assist → Assist/Chase
 m, s = smc('Chase Assist', nil)
 assert_eq(m, 'Assist', 'sanitize: Chase Assist → Assist')
-assert_eq(s, 'Chase',  'sanitize: Chase Assist → Chase')
+assert_eq(s, 'Chase', 'sanitize: Chase Assist → Chase')
 
 -- Garrison → Assist/Camp
 m, s = smc('Garrison', nil)
 assert_eq(m, 'Assist', 'sanitize: Garrison → Assist')
-assert_eq(s, 'Camp',   'sanitize: Garrison → Camp')
+assert_eq(s, 'Camp', 'sanitize: Garrison → Camp')
 
 -- Tank → Assist/Camp
 m, s = smc('Tank', nil)
 assert_eq(m, 'Assist', 'sanitize: Tank → Assist')
-assert_eq(s, 'Camp',   'sanitize: Tank → Camp')
+assert_eq(s, 'Camp', 'sanitize: Tank → Camp')
 
 -- Unknown mode → Manual
 m, s = smc('BogusMode', nil)
 assert_eq(m, 'Manual', 'sanitize: unknown → Manual')
-assert_eq(s, 'Hunt',   'sanitize: unknown → default submode Hunt')
+assert_eq(s, 'Hunt', 'sanitize: unknown → default submode Hunt')
 
 -- Valid modes pass through
 m, s = smc('Manual', 'Hunt')
@@ -369,18 +403,18 @@ assert_eq(m, 'Manual', 'sanitize: Manual stays')
 
 m, s = smc('Puller', 'Hunt')
 assert_eq(m, 'Puller', 'sanitize: Puller stays')
-assert_eq(s, 'Hunt',   'sanitize: Puller/Hunt stays')
+assert_eq(s, 'Hunt', 'sanitize: Puller/Hunt stays')
 
 m, s = smc('Puller', 'Camp')
 assert_eq(m, 'Puller', 'sanitize: Puller/Camp stays')
-assert_eq(s, 'Camp',   'sanitize: Puller/Camp submode stays')
+assert_eq(s, 'Camp', 'sanitize: Puller/Camp submode stays')
 
 m, s = smc('Assist', 'Chase')
 assert_eq(m, 'Assist', 'sanitize: Assist stays')
-assert_eq(s, 'Chase',  'sanitize: Assist/Chase stays')
+assert_eq(s, 'Chase', 'sanitize: Assist/Chase stays')
 
 m, s = smc('Assist', 'Backline')
-assert_eq(m, 'Assist',   'sanitize: Assist/Backline stays')
+assert_eq(m, 'Assist', 'sanitize: Assist/Backline stays')
 assert_eq(s, 'Backline', 'sanitize: Backline submode stays')
 
 -- Invalid submode for Puller → default
@@ -419,29 +453,29 @@ print('--- parseClassLine ---')
 local parseClassLine = loadFunc(src, 'parseClassLine', { MQSHORT = MQSHORT })
 
 -- Numbered lines (e.g. from inventory window list items)
-assert_eq(parseClassLine('1. Warrior'),     'War', 'parse: "1. Warrior"')
-assert_eq(parseClassLine('2: Cleric'),      'Clr', 'parse: "2: Cleric"')
-assert_eq(parseClassLine('  3  Paladin'),   'Pal', 'parse: "  3  Paladin"')
+assert_eq(parseClassLine('1. Warrior'), 'War', 'parse: "1. Warrior"')
+assert_eq(parseClassLine('2: Cleric'), 'Clr', 'parse: "2: Cleric"')
+assert_eq(parseClassLine('  3  Paladin'), 'Pal', 'parse: "  3  Paladin"')
 
 -- Plain class names
-assert_eq(parseClassLine('Ranger'),         'Rng', 'parse: "Ranger"')
-assert_eq(parseClassLine('Shadow Knight'),  'SK',  'parse: "Shadow Knight"')
-assert_eq(parseClassLine('Necromancer'),    'Nec', 'parse: "Necromancer"')
+assert_eq(parseClassLine('Ranger'), 'Rng', 'parse: "Ranger"')
+assert_eq(parseClassLine('Shadow Knight'), 'SK', 'parse: "Shadow Knight"')
+assert_eq(parseClassLine('Necromancer'), 'Nec', 'parse: "Necromancer"')
 
 -- 3-letter codes
-assert_eq(parseClassLine('WAR'),            'War', 'parse: "WAR" 3-letter')
-assert_eq(parseClassLine('CLR'),            'Clr', 'parse: "CLR" 3-letter')
-assert_eq(parseClassLine('SHD'),            'SK',  'parse: "SHD" 3-letter')
+assert_eq(parseClassLine('WAR'), 'War', 'parse: "WAR" 3-letter')
+assert_eq(parseClassLine('CLR'), 'Clr', 'parse: "CLR" 3-letter')
+assert_eq(parseClassLine('SHD'), 'SK', 'parse: "SHD" 3-letter')
 
 -- 2-letter code
-assert_eq(parseClassLine('SK'),             'SK',  'parse: "SK" 2-letter')
+assert_eq(parseClassLine('SK'), 'SK', 'parse: "SK" 2-letter')
 
 -- Lines that should return nil
-assert_nil(parseClassLine(nil),             'parse: nil')
-assert_nil(parseClassLine(''),              'parse: empty')
-assert_nil(parseClassLine('NULL'),          'parse: NULL')
-assert_nil(parseClassLine('Level 60'),      'parse: "Level 60" filtered')
-assert_nil(parseClassLine('LVL 50'),        'parse: "LVL 50" filtered')
+assert_nil(parseClassLine(nil), 'parse: nil')
+assert_nil(parseClassLine(''), 'parse: empty')
+assert_nil(parseClassLine('NULL'), 'parse: NULL')
+assert_nil(parseClassLine('Level 60'), 'parse: "Level 60" filtered')
+assert_nil(parseClassLine('LVL 50'), 'parse: "LVL 50" filtered')
 
 -- ============================================================================
 -- 8.  defaultCtrl() — shape validation
@@ -453,64 +487,64 @@ local dc = defaultCtrl()
 -- Check required fields exist and have correct types
 local EXPECTED_FIELDS = {
     -- field name            expected type
-    { 'running',             'boolean' },
-    { 'mode',                'string'  },
-    { 'submode',             'string'  },
-    { 'pull_style',          'string'  },
-    { 'pull_spell',          'string'  },
-    { 'pull_spell_gem',      'number'  },
-    { 'pull_engage_dist',    'number'  },
-    { 'xtar_nav_dist',       'number'  },
-    { 'combat_style',        'string'  },
-    { 'melee_dist',          'number'  },
-    { 'ranged_dist',         'number'  },
-    { 'ma_name',             'string'  },
-    { 'assist_at',           'number'  },
-    { 'chase',               'boolean' },
-    { 'chase_dist',          'number'  },
-    { 'automem',             'boolean' },
-    { 'camp_radius',         'number'  },
-    { 'camp_z',              'number'  },
-    { 'camp_z_plane',        'number'  },
-    { 'hunter_radius',       'number'  },
-    { 'hunter_z_plane',      'number'  },
-    { 'hunter_z',            'number'  },
-    { 'hunter_min_level',    'number'  },
-    { 'hunter_max_level',    'number'  },
-    { 'hunter_combat_radius','number'  },
-    { 'pull_min_level',      'number'  },
-    { 'pull_max_level',      'number'  },
-    { 'pull_con_filter',     'table'   },
-    { 'check_closer_mobs',   'boolean' },
-    { 'nav_hazard_avoidance','boolean' },
-    { 'nav_hazard_radius',   'number'  },
-    { 'nav_hazard_min_hits', 'number'  },
+    { 'running',                 'boolean' },
+    { 'mode',                    'string' },
+    { 'submode',                 'string' },
+    { 'pull_style',              'string' },
+    { 'pull_spell',              'string' },
+    { 'pull_spell_gem',          'number' },
+    { 'pull_engage_dist',        'number' },
+    { 'xtar_nav_dist',           'number' },
+    { 'combat_style',            'string' },
+    { 'melee_dist',              'number' },
+    { 'ranged_dist',             'number' },
+    { 'ma_name',                 'string' },
+    { 'assist_at',               'number' },
+    { 'chase',                   'boolean' },
+    { 'chase_dist',              'number' },
+    { 'automem',                 'boolean' },
+    { 'camp_radius',             'number' },
+    { 'camp_z',                  'number' },
+    { 'camp_z_plane',            'number' },
+    { 'hunter_radius',           'number' },
+    { 'hunter_z_plane',          'number' },
+    { 'hunter_z',                'number' },
+    { 'hunter_min_level',        'number' },
+    { 'hunter_max_level',        'number' },
+    { 'hunter_combat_radius',    'number' },
+    { 'pull_min_level',          'number' },
+    { 'pull_max_level',          'number' },
+    { 'pull_con_filter',         'table' },
+    { 'check_closer_mobs',       'boolean' },
+    { 'nav_hazard_avoidance',    'boolean' },
+    { 'nav_hazard_radius',       'number' },
+    { 'nav_hazard_min_hits',     'number' },
     { 'nav_reverse_breadcrumbs', 'boolean' },
-    { 'nav_max_path_ratio',  'number'  },
-    { 'nav_proactive_doors', 'boolean' },
-    { 'nav_levitation_clear','boolean' },
-    { 'zone_hazards',        'table'   },
-    { 'debug_mode',          'boolean' },
-    { 'scribed_only',        'boolean' },
-    { 'aa_purchased_only',   'boolean' },
-    { 'disc_trained_only',   'boolean' },
-    { 'medbreak_enabled',    'boolean' },
-    { 'cast_max_retries',    'number'  },
-    { 'cast_lockout_sec',    'number'  },
-    { 'min_mana_pct',        'number'  },
-    { 'pull_min_hp_pct',     'number'  },
-    { 'pet_assist_at',       'number'  },
-    { 'pet_hold_enabled',    'boolean' },
-    { 'show_map_radius',     'boolean' },
-    { 'burn',                'boolean' },
-    { 'compact',             'boolean' },
-    { 'use_waypoints',       'boolean' },
-    { 'waypoint_radius',     'number'  },
-    { 'waypoint_scan_radius','number'  },
-    { 'waypoint_direction',  'number'  },
-    { 'waypoint_loop',       'boolean' },
-    { 'current_waypoint_idx','number'  },
-    { 'waypoints',           'table'   },
+    { 'nav_max_path_ratio',      'number' },
+    { 'nav_proactive_doors',     'boolean' },
+    { 'nav_levitation_clear',    'boolean' },
+    { 'zone_hazards',            'table' },
+    { 'debug_mode',              'boolean' },
+    { 'scribed_only',            'boolean' },
+    { 'aa_purchased_only',       'boolean' },
+    { 'disc_trained_only',       'boolean' },
+    { 'medbreak_enabled',        'boolean' },
+    { 'cast_max_retries',        'number' },
+    { 'cast_lockout_sec',        'number' },
+    { 'min_mana_pct',            'number' },
+    { 'pull_min_hp_pct',         'number' },
+    { 'pet_assist_at',           'number' },
+    { 'pet_hold_enabled',        'boolean' },
+    { 'show_map_radius',         'boolean' },
+    { 'burn',                    'boolean' },
+    { 'compact',                 'boolean' },
+    { 'use_waypoints',           'boolean' },
+    { 'waypoint_radius',         'number' },
+    { 'waypoint_scan_radius',    'number' },
+    { 'waypoint_direction',      'number' },
+    { 'waypoint_loop',           'boolean' },
+    { 'current_waypoint_idx',    'number' },
+    { 'waypoints',               'table' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -520,9 +554,9 @@ for _, spec in ipairs(EXPECTED_FIELDS) do
 end
 
 -- Specific default values
-assert_eq(dc.running,  false,   'defaultCtrl: running=false')
-assert_eq(dc.mode,     'Manual','defaultCtrl: mode=Manual')
-assert_eq(dc.submode,  'Hunt',  'defaultCtrl: submode=Hunt')
+assert_eq(dc.running, false, 'defaultCtrl: running=false')
+assert_eq(dc.mode, 'Manual', 'defaultCtrl: mode=Manual')
+assert_eq(dc.submode, 'Hunt', 'defaultCtrl: submode=Hunt')
 
 -- ============================================================================
 -- 9.  isSpecialSkill(name)
@@ -536,11 +570,11 @@ local SPECIAL_SKILLS = {
 }
 local isSpecialSkill = loadFunc(src, 'isSpecialSkill', { SPECIAL_SKILLS = SPECIAL_SKILLS })
 
-assert_true(isSpecialSkill('Mend'),        'special: Mend')
+assert_true(isSpecialSkill('Mend'), 'special: Mend')
 assert_eq(isSpecialSkill('Feign Death'), false, 'special: Feign Death is not yet exposed')
-assert_eq(isSpecialSkill('Kick'), false,    'special: Kick is not special')
-assert_eq(isSpecialSkill(nil), false,       'special: nil')
-assert_eq(isSpecialSkill(''), false,        'special: empty')
+assert_eq(isSpecialSkill('Kick'), false, 'special: Kick is not special')
+assert_eq(isSpecialSkill(nil), false, 'special: nil')
+assert_eq(isSpecialSkill(''), false, 'special: empty')
 
 -- ============================================================================
 -- 10. aaTier(sec)
@@ -548,12 +582,12 @@ assert_eq(isSpecialSkill(''), false,        'special: empty')
 print('--- aaTier ---')
 local aaTier = loadFunc(src, 'aaTier', {})
 
-assert_eq(aaTier(5),   'short', 'aaTier: 5s → short')
-assert_eq(aaTier(60),  'short', 'aaTier: 60s → short')
-assert_eq(aaTier(61),  'mid',   'aaTier: 61s → mid')
-assert_eq(aaTier(300), 'mid',   'aaTier: 300s → mid')
-assert_eq(aaTier(301), 'burn',  'aaTier: 301s → burn')
-assert_eq(aaTier(3600),'burn',  'aaTier: 3600s → burn')
+assert_eq(aaTier(5), 'short', 'aaTier: 5s → short')
+assert_eq(aaTier(60), 'short', 'aaTier: 60s → short')
+assert_eq(aaTier(61), 'mid', 'aaTier: 61s → mid')
+assert_eq(aaTier(300), 'mid', 'aaTier: 300s → mid')
+assert_eq(aaTier(301), 'burn', 'aaTier: 301s → burn')
+assert_eq(aaTier(3600), 'burn', 'aaTier: 3600s → burn')
 
 -- ============================================================================
 -- 11. fmtSec(s)
@@ -561,12 +595,12 @@ assert_eq(aaTier(3600),'burn',  'aaTier: 3600s → burn')
 print('--- fmtSec ---')
 local fmtSec = loadFunc(src, 'fmtSec', {})
 
-assert_eq(fmtSec(5),   '5s',       'fmtSec: 5s')
-assert_eq(fmtSec(59),  '59s',      'fmtSec: 59s')
-assert_eq(fmtSec(60),  '1m',       'fmtSec: 60s → 1m')
-assert_eq(fmtSec(90),  '1m 30s',   'fmtSec: 90s → 1m 30s')
-assert_eq(fmtSec(120), '2m',       'fmtSec: 120s → 2m')
-assert_eq(fmtSec(3661),'61m 1s',   'fmtSec: 3661s')
+assert_eq(fmtSec(5), '5s', 'fmtSec: 5s')
+assert_eq(fmtSec(59), '59s', 'fmtSec: 59s')
+assert_eq(fmtSec(60), '1m', 'fmtSec: 60s → 1m')
+assert_eq(fmtSec(90), '1m 30s', 'fmtSec: 90s → 1m 30s')
+assert_eq(fmtSec(120), '2m', 'fmtSec: 120s → 2m')
+assert_eq(fmtSec(3661), '61m 1s', 'fmtSec: 3661s')
 
 -- ============================================================================
 -- 12. baseTok(token) — target token normalization
@@ -574,15 +608,15 @@ assert_eq(fmtSec(3661),'61m 1s',   'fmtSec: 3661s')
 print('--- baseTok ---')
 local baseTok = loadFunc(src, 'baseTok', {})
 
-assert_eq(baseTok('F: Myself'),        'Myself',         'baseTok: F: Myself')
-assert_eq(baseTok('E: Current Target'),'Current Target',  'baseTok: E: Current Target')
-assert_eq(baseTok('F: Pet'),           'Pet',             'baseTok: F: Pet')
-assert_eq(baseTok('Target'),           'Current Target',  'baseTok: Target alias')
-assert_eq(baseTok('Current Target'),   'Current Target',  'baseTok: Current Target')
-assert_eq(baseTok('Self'),             'Myself',          'baseTok: Self alias')
-assert_eq(baseTok('Myself'),           'Myself',          'baseTok: Myself')
-assert_eq(baseTok(nil),                '',                'baseTok: nil')
-assert_eq(baseTok(''),                 '',                'baseTok: empty')
+assert_eq(baseTok('F: Myself'), 'Myself', 'baseTok: F: Myself')
+assert_eq(baseTok('E: Current Target'), 'Current Target', 'baseTok: E: Current Target')
+assert_eq(baseTok('F: Pet'), 'Pet', 'baseTok: F: Pet')
+assert_eq(baseTok('Target'), 'Current Target', 'baseTok: Target alias')
+assert_eq(baseTok('Current Target'), 'Current Target', 'baseTok: Current Target')
+assert_eq(baseTok('Self'), 'Myself', 'baseTok: Self alias')
+assert_eq(baseTok('Myself'), 'Myself', 'baseTok: Myself')
+assert_eq(baseTok(nil), '', 'baseTok: nil')
+assert_eq(baseTok(''), '', 'baseTok: empty')
 
 -- ============================================================================
 -- 13. normalizeCommandKey(text) — slash command argument normalization
@@ -590,12 +624,12 @@ assert_eq(baseTok(''),                 '',                'baseTok: empty')
 print('--- normalizeCommandKey ---')
 local normalizeCommandKey = loadFunc(src, 'normalizeCommandKey', {})
 
-assert_eq(normalizeCommandKey('Manual'),     'manual',     'cmdKey: Manual')
-assert_eq(normalizeCommandKey('PULLER'),      'puller',     'cmdKey: PULLER')
-assert_eq(normalizeCommandKey('Chase Assist'),'chaseassist','cmdKey: Chase Assist')
-assert_eq(normalizeCommandKey('pull & assist'),'pullassist','cmdKey: pull & assist')
-assert_eq(normalizeCommandKey(nil),           '',           'cmdKey: nil')
-assert_eq(normalizeCommandKey(''),            '',           'cmdKey: empty')
+assert_eq(normalizeCommandKey('Manual'), 'manual', 'cmdKey: Manual')
+assert_eq(normalizeCommandKey('PULLER'), 'puller', 'cmdKey: PULLER')
+assert_eq(normalizeCommandKey('Chase Assist'), 'chaseassist', 'cmdKey: Chase Assist')
+assert_eq(normalizeCommandKey('pull & assist'), 'pullassist', 'cmdKey: pull & assist')
+assert_eq(normalizeCommandKey(nil), '', 'cmdKey: nil')
+assert_eq(normalizeCommandKey(''), '', 'cmdKey: empty')
 
 -- ============================================================================
 -- 14. setTriuneMode(arg1, arg2) — partial test (mode/submode resolution only)
@@ -608,14 +642,21 @@ print('--- setTriuneMode (mode parsing) ---')
 -- since setTriuneMode has side effects we can't call outside MQ.
 -- Instead, verify the command key mappings are self-consistent:
 local MODE_MAP = {
-    manual = {'Manual','Hunt'}, manualhunter = {'Manual','Hunt'},
-    puller = {'Puller',nil},
-    hunter = {'Puller','Hunt'}, pethunter = {'Puller','Hunt'}, pettank = {'Puller','Hunt'},
-    pull = {'Puller','Camp'}, pullassist = {'Puller','Camp'},
-    assist = {'Assist',nil},
-    chase = {'Assist','Chase'}, chaseassist = {'Assist','Chase'},
-    garrison = {'Assist','Camp'}, tank = {'Assist','Camp'},
-    backline = {'Assist','Backline'}, ranged = {'Assist','Backline'},
+    manual = { 'Manual', 'Hunt' },
+    manualhunter = { 'Manual', 'Hunt' },
+    puller = { 'Puller', nil },
+    hunter = { 'Puller', 'Hunt' },
+    pethunter = { 'Puller', 'Hunt' },
+    pettank = { 'Puller', 'Hunt' },
+    pull = { 'Puller', 'Camp' },
+    pullassist = { 'Puller', 'Camp' },
+    assist = { 'Assist', nil },
+    chase = { 'Assist', 'Chase' },
+    chaseassist = { 'Assist', 'Chase' },
+    garrison = { 'Assist', 'Camp' },
+    tank = { 'Assist', 'Camp' },
+    backline = { 'Assist', 'Backline' },
+    ranged = { 'Assist', 'Backline' },
 }
 for input, expected in pairs(MODE_MAP) do
     local key = normalizeCommandKey(input)
@@ -628,9 +669,9 @@ end
 print('--- sungKey ---')
 local sungKey = loadFunc(src, 'sungKey', {})
 
-assert_eq(sungKey('Heal', 123),     '123_Heal', 'sungKey: basic')
-assert_eq(sungKey('Buff', 0),       '0_Buff',   'sungKey: id 0')
-assert_eq(sungKey('Spell', nil),    '0_Spell',  'sungKey: nil id')
+assert_eq(sungKey('Heal', 123), '123_Heal', 'sungKey: basic')
+assert_eq(sungKey('Buff', 0), '0_Buff', 'sungKey: id 0')
+assert_eq(sungKey('Spell', nil), '0_Spell', 'sungKey: nil id')
 
 -- ============================================================================
 -- 16. classPlausible(abbr) — checks if a class abbreviation is valid
@@ -639,12 +680,12 @@ print('--- classPlausible ---')
 local classPlausible = loadFunc(src, 'classPlausible',
     { ALL_ABBR = ALL_ABBR, DATA = { spells = {} } })
 
-assert_true(classPlausible('War'),  'plausible: War')
-assert_true(classPlausible('SK'),   'plausible: SK')
-assert_true(classPlausible('Ber'),  'plausible: Ber')
+assert_true(classPlausible('War'), 'plausible: War')
+assert_true(classPlausible('SK'), 'plausible: SK')
+assert_true(classPlausible('Ber'), 'plausible: Ber')
 assert_eq(classPlausible('Xyz'), false, 'plausible: Xyz invalid')
-assert_eq(classPlausible(nil), false,   'plausible: nil')
-assert_eq(classPlausible(42), false,    'plausible: number')
+assert_eq(classPlausible(nil), false, 'plausible: nil')
+assert_eq(classPlausible(42), false, 'plausible: number')
 
 -- ============================================================================
 -- 17. serialize(o, f, indent) — round-trip persistence
@@ -656,7 +697,7 @@ local serialize = loadFunc(src, 'serialize', {})
 local function serializeToString(o)
     local buf = {}
     local fakefile = {
-        write = function(_, s) buf[#buf+1] = s end
+        write = function(_, s) buf[#buf + 1] = s end
     }
     serialize(o, fakefile, 1)
     return table.concat(buf)
@@ -718,12 +759,12 @@ local function extractConName(line)
 end
 
 assert_eq(extractConName('a fire beetle scowls at you'), 'a fire beetle', 'con: scowls')
-assert_eq(extractConName('Guard Hanlon glares at you'),  'Guard Hanlon',  'con: glares')
-assert_eq(extractConName('a moss snake regards you'),    'a moss snake',  'con: regards')
-assert_eq(extractConName('Merchant looks at you'),       'Merchant',      'con: looks')
-assert_eq(extractConName('a_gnoll judges you'),          'a_gnoll',       'con: judges')
+assert_eq(extractConName('Guard Hanlon glares at you'), 'Guard Hanlon', 'con: glares')
+assert_eq(extractConName('a moss snake regards you'), 'a moss snake', 'con: regards')
+assert_eq(extractConName('Merchant looks at you'), 'Merchant', 'con: looks')
+assert_eq(extractConName('a_gnoll judges you'), 'a_gnoll', 'con: judges')
 assert_nil(extractConName(nil), 'con: nil')
-assert_nil(extractConName(''),  'con: empty')
+assert_nil(extractConName(''), 'con: empty')
 
 -- ============================================================================
 -- 19. createCastTracker — failure counting and lockout system
@@ -738,7 +779,7 @@ print('--- createCastTracker ---')
 local function testCastTracker()
     local failureCount = {}
     local lockouts = {}
-    local mockClock = 100  -- fake os.clock()
+    local mockClock = 100 -- fake os.clock()
 
     local function recordFailure(spellName, maxRetries, lockoutSec)
         if not spellName then return end
@@ -778,7 +819,7 @@ local function testCastTracker()
     assert_eq(isLockedOut('Heal'), true, 'tracker: 2 failures, locked out')
 
     -- Test: lockout expires after time passes
-    mockClock = 131  -- 100 + 30 + 1
+    mockClock = 131 -- 100 + 30 + 1
     assert_eq(isLockedOut('Heal'), false, 'tracker: lockout expired')
 
     -- Test: recordSuccess clears everything
@@ -792,7 +833,7 @@ local function testCastTracker()
 
     -- Test: custom max_retries
     mockClock = 200
-    recordFailure('Dot', 1, 10)  -- 1 retry = lock on first fail
+    recordFailure('Dot', 1, 10) -- 1 retry = lock on first fail
     assert_eq(isLockedOut('Dot'), true, 'tracker: max_retries=1 locks immediately')
 end
 testCastTracker()
@@ -800,7 +841,7 @@ testCastTracker()
 -- ============================================================================
 -- CROSS-MODULE TESTS: triune_dps.lua
 -- ============================================================================
-local dpsSrc = readFile('mq2triune/lua/triune_dps.lua')
+local dpsSrc = readFile('TAC/lua/triune_dps.lua')
 
 -- ============================================================================
 -- 20. cleanLine (DPS) — strip MQ color codes
@@ -849,51 +890,79 @@ print('--- getVerbCategory (dps) ---')
 -- getVerbCategory references module-level SKILL_VERBS and MELEE_VERBS as upvalues.
 -- We provide them in the sandbox.
 local MELEE_VERBS = {
-    ['hit'] = true, ['hits'] = true,
-    ['slash'] = true, ['slashes'] = true,
-    ['pierce'] = true, ['pierces'] = true,
-    ['crush'] = true, ['crushes'] = true,
-    ['bite'] = true, ['bites'] = true,
-    ['claw'] = true, ['claws'] = true,
-    ['strike'] = true, ['strikes'] = true,
-    ['slice'] = true, ['slices'] = true,
-    ['gore'] = true, ['gores'] = true,
-    ['punch'] = true, ['punches'] = true,
-    ['shoot'] = true, ['shoots'] = true,
+    ['hit'] = true,
+    ['hits'] = true,
+    ['slash'] = true,
+    ['slashes'] = true,
+    ['pierce'] = true,
+    ['pierces'] = true,
+    ['crush'] = true,
+    ['crushes'] = true,
+    ['bite'] = true,
+    ['bites'] = true,
+    ['claw'] = true,
+    ['claws'] = true,
+    ['strike'] = true,
+    ['strikes'] = true,
+    ['slice'] = true,
+    ['slices'] = true,
+    ['gore'] = true,
+    ['gores'] = true,
+    ['punch'] = true,
+    ['punches'] = true,
+    ['shoot'] = true,
+    ['shoots'] = true,
     ['hand to hand'] = true,
 }
 local SKILL_VERBS = {
-    ['bash'] = true, ['bashes'] = true,
-    ['kick'] = true, ['kicks'] = true,
-    ['backstab'] = true, ['backstabs'] = true,
-    ['frenzy'] = true, ['frenzies'] = true,
-    ['flying kick'] = true, ['flying kicks'] = true,
-    ['dragon punch'] = true, ['dragon punches'] = true,
-    ['eagle strike'] = true, ['eagle strikes'] = true,
-    ['tiger claw'] = true, ['tiger claws'] = true,
-    ['roundhouse kick'] = true, ['roundhouse kicks'] = true,
-    ['slam'] = true, ['slams'] = true,
-    ['headbutt'] = true, ['headbutts'] = true,
-    ['maul'] = true, ['mauls'] = true,
-    ['pummel'] = true, ['pummels'] = true,
-    ['rend'] = true, ['rends'] = true,
-    ['rip'] = true, ['rips'] = true,
-    ['sweep'] = true, ['sweeps'] = true,
-    ['finishing blow'] = true, ['finishing blows'] = true,
+    ['bash'] = true,
+    ['bashes'] = true,
+    ['kick'] = true,
+    ['kicks'] = true,
+    ['backstab'] = true,
+    ['backstabs'] = true,
+    ['frenzy'] = true,
+    ['frenzies'] = true,
+    ['flying kick'] = true,
+    ['flying kicks'] = true,
+    ['dragon punch'] = true,
+    ['dragon punches'] = true,
+    ['eagle strike'] = true,
+    ['eagle strikes'] = true,
+    ['tiger claw'] = true,
+    ['tiger claws'] = true,
+    ['roundhouse kick'] = true,
+    ['roundhouse kicks'] = true,
+    ['slam'] = true,
+    ['slams'] = true,
+    ['headbutt'] = true,
+    ['headbutts'] = true,
+    ['maul'] = true,
+    ['mauls'] = true,
+    ['pummel'] = true,
+    ['pummels'] = true,
+    ['rend'] = true,
+    ['rends'] = true,
+    ['rip'] = true,
+    ['rips'] = true,
+    ['sweep'] = true,
+    ['sweeps'] = true,
+    ['finishing blow'] = true,
+    ['finishing blows'] = true,
 }
 
 local getVerbCategory = loadFunc(dpsSrc, 'getVerbCategory',
     { SKILL_VERBS = SKILL_VERBS, MELEE_VERBS = MELEE_VERBS })
 
-assert_eq(getVerbCategory('hits'),       'Melee', 'verbCat: hits → Melee')
-assert_eq(getVerbCategory('slashes'),    'Melee', 'verbCat: slashes → Melee')
-assert_eq(getVerbCategory('crush'),      'Melee', 'verbCat: crush → Melee')
-assert_eq(getVerbCategory('kick'),       'Skill', 'verbCat: kick → Skill')
-assert_eq(getVerbCategory('backstabs'),  'Skill', 'verbCat: backstabs → Skill')
-assert_eq(getVerbCategory('flying kick'),'Skill', 'verbCat: flying kick → Skill')
-assert_eq(getVerbCategory('dragon punch'),'Skill','verbCat: dragon punch → Skill')
-assert_eq(getVerbCategory('unknown'),    'Melee', 'verbCat: unknown → Melee fallback')
-assert_eq(getVerbCategory(nil),          'Melee', 'verbCat: nil → Melee fallback')
+assert_eq(getVerbCategory('hits'), 'Melee', 'verbCat: hits → Melee')
+assert_eq(getVerbCategory('slashes'), 'Melee', 'verbCat: slashes → Melee')
+assert_eq(getVerbCategory('crush'), 'Melee', 'verbCat: crush → Melee')
+assert_eq(getVerbCategory('kick'), 'Skill', 'verbCat: kick → Skill')
+assert_eq(getVerbCategory('backstabs'), 'Skill', 'verbCat: backstabs → Skill')
+assert_eq(getVerbCategory('flying kick'), 'Skill', 'verbCat: flying kick → Skill')
+assert_eq(getVerbCategory('dragon punch'), 'Skill', 'verbCat: dragon punch → Skill')
+assert_eq(getVerbCategory('unknown'), 'Melee', 'verbCat: unknown → Melee fallback')
+assert_eq(getVerbCategory(nil), 'Melee', 'verbCat: nil → Melee fallback')
 
 -- ============================================================================
 -- 24. calculateCategoryTotals (DPS) — damage category aggregation
@@ -902,9 +971,9 @@ print('--- calculateCategoryTotals (dps) ---')
 local calculateCategoryTotals = loadFunc(dpsSrc, 'calculateCategoryTotals', {})
 
 local playerBD = {
-    ['Slash']    = { category = 'Melee', totalDmg = 1000 },
-    ['Kick']     = { category = 'Skill', totalDmg = 500 },
-    ['Ice Comet']= { category = 'Spell', totalDmg = 2000 },
+    ['Slash']     = { category = 'Melee', totalDmg = 1000 },
+    ['Kick']      = { category = 'Skill', totalDmg = 500 },
+    ['Ice Comet'] = { category = 'Spell', totalDmg = 2000 },
 }
 local petBD = {
     ['warder'] = {
@@ -915,10 +984,10 @@ local petBD = {
 }
 local totals = calculateCategoryTotals(playerBD, petBD)
 assert_eq(totals.melee, 1300, 'catTotals: melee (player + pet)')
-assert_eq(totals.skill, 500,  'catTotals: skill')
+assert_eq(totals.skill, 500, 'catTotals: skill')
 assert_eq(totals.spell, 2000, 'catTotals: spell')
-assert_eq(totals.dot,   0,    'catTotals: dot (none)')
-assert_eq(totals.ds,    0,    'catTotals: ds (none)')
+assert_eq(totals.dot, 0, 'catTotals: dot (none)')
+assert_eq(totals.ds, 0, 'catTotals: ds (none)')
 
 -- Empty inputs
 local emptyTotals = calculateCategoryTotals({}, nil)
@@ -933,8 +1002,8 @@ local getFightDPS = loadFunc(dpsSrc, 'getFightDPS', {})
 
 assert_eq(getFightDPS(1000, 10), 100, 'dps: 1000/10 = 100')
 assert_eq(getFightDPS(1500, 10), 150, 'dps: 1500/10 = 150')
-assert_eq(getFightDPS(0, 10),    0,   'dps: 0 dmg = 0')
-assert_eq(getFightDPS(1000, 0),  0,   'dps: 0 duration = 0')
+assert_eq(getFightDPS(0, 10), 0, 'dps: 0 dmg = 0')
+assert_eq(getFightDPS(1000, 0), 0, 'dps: 0 duration = 0')
 -- Rounding test
 assert_eq(getFightDPS(100, 3), 33, 'dps: 100/3 rounds to 33')
 assert_eq(getFightDPS(200, 3), 67, 'dps: 200/3 rounds to 67')
@@ -942,7 +1011,7 @@ assert_eq(getFightDPS(200, 3), 67, 'dps: 200/3 rounds to 67')
 -- ============================================================================
 -- CROSS-MODULE TESTS: triune_buffbot.lua
 -- ============================================================================
-local bbSrc = readFile('mq2triune/lua/triune_buffbot.lua')
+local bbSrc = readFile('TAC/lua/triune_buffbot.lua')
 
 -- ============================================================================
 -- 26. parseBuffRequest (buffbot) — tell message parsing
@@ -952,9 +1021,9 @@ local parseBuffRequest = loadFunc(bbSrc, 'parseBuffRequest', {})
 
 -- Gem list for testing
 local testGems = {
-    { name = 'Virtue', gem = 1 },
+    { name = 'Virtue',           gem = 1 },
     { name = 'Symbol of Marzin', gem = 2 },
-    { name = 'Aegolism', gem = 3 },
+    { name = 'Aegolism',         gem = 3 },
 }
 
 -- Basic requests
@@ -1001,28 +1070,28 @@ print('--- isThankYou (buffbot) ---')
 local isThankYou = loadFunc(bbSrc, 'isThankYou', {})
 
 -- Positive cases
-assert_true(isThankYou('ty'),              'thx: ty')
-assert_true(isThankYou('TY'),              'thx: TY')
-assert_true(isThankYou('ty!'),             'thx: ty!')
-assert_true(isThankYou('tyvm'),            'thx: tyvm')
-assert_true(isThankYou('tysm'),            'thx: tysm')
-assert_true(isThankYou('thx'),             'thx: thx')
-assert_true(isThankYou('thanks'),          'thx: thanks')
-assert_true(isThankYou('Thanks!'),         'thx: Thanks!')
-assert_true(isThankYou('thank you'),       'thx: thank you')
-assert_true(isThankYou('Thank You!'),      'thx: Thank You!')
-assert_true(isThankYou('thank u'),         'thx: thank u')
-assert_true(isThankYou('thankyou'),        'thx: thankyou')
-assert_true(isThankYou('much appreciated'),'thx: much appreciated')
-assert_true(isThankYou('appreciate it'),   'thx: appreciate it')
-assert_true(isThankYou('ty for the buffs'),'thx: ty for the buffs')
+assert_true(isThankYou('ty'), 'thx: ty')
+assert_true(isThankYou('TY'), 'thx: TY')
+assert_true(isThankYou('ty!'), 'thx: ty!')
+assert_true(isThankYou('tyvm'), 'thx: tyvm')
+assert_true(isThankYou('tysm'), 'thx: tysm')
+assert_true(isThankYou('thx'), 'thx: thx')
+assert_true(isThankYou('thanks'), 'thx: thanks')
+assert_true(isThankYou('Thanks!'), 'thx: Thanks!')
+assert_true(isThankYou('thank you'), 'thx: thank you')
+assert_true(isThankYou('Thank You!'), 'thx: Thank You!')
+assert_true(isThankYou('thank u'), 'thx: thank u')
+assert_true(isThankYou('thankyou'), 'thx: thankyou')
+assert_true(isThankYou('much appreciated'), 'thx: much appreciated')
+assert_true(isThankYou('appreciate it'), 'thx: appreciate it')
+assert_true(isThankYou('ty for the buffs'), 'thx: ty for the buffs')
 
 -- Negative cases
 assert_eq(isThankYou('buffs please'), false, 'thx: buffs please → false')
-assert_eq(isThankYou('hello'), false,        'thx: hello → false')
-assert_eq(isThankYou('1 3'), false,          'thx: 1 3 → false')
-assert_eq(isThankYou(nil), false,            'thx: nil → false')
-assert_eq(isThankYou(''), false,             'thx: empty → false')
+assert_eq(isThankYou('hello'), false, 'thx: hello → false')
+assert_eq(isThankYou('1 3'), false, 'thx: 1 3 → false')
+assert_eq(isThankYou(nil), false, 'thx: nil → false')
+assert_eq(isThankYou(''), false, 'thx: empty → false')
 
 -- ============================================================================
 -- 28. isPlayerIgnored / ignore list helpers (buffbot)
@@ -1078,7 +1147,7 @@ assert_eq(remRes2, false, 'ignore: removing non-existent player returns false')
 -- 29. triune_data.lua — structural validation
 -- ============================================================================
 print('--- triune_data.lua validation ---')
-local dataFile = assert(loadfile('mq2triune/config/triune_data.lua'))
+local dataFile = assert(loadfile('TAC/config/triune_data.lua'))
 assert_neq(dataFile, nil, 'data: loadfile succeeds')
 
 local dataOk, DATA_LOADED = pcall(dataFile)
@@ -1229,7 +1298,7 @@ assert_neq(detour, nil, 'detour: calculated waypoint')
 assert_type(detour.x, 'number', 'detour: x is number')
 assert_type(detour.y, 'number', 'detour: y is number')
 -- Detour should be offset from (100, 100)
-local offsetDist = math.sqrt((detour.x - 100)^2 + (detour.y - 100)^2)
+local offsetDist = math.sqrt((detour.x - 100) ^ 2 + (detour.y - 100) ^ 2)
 assert_true(offsetDist >= 15, 'detour: offset distance outside hazard radius')
 
 -- ============================================================================
@@ -1291,7 +1360,8 @@ assert_eq(isHeadingInForwardCone(0, 0, 0, 0, -100, 75), false, 'forward cone: ta
 
 -- Facing West (90 deg), at (0, 0)
 assert_eq(isHeadingInForwardCone(90, 0, 0, 100, 0, 75), true, 'forward cone: target West is in front when facing West')
-assert_eq(isHeadingInForwardCone(90, 0, 0, 0, 100, 75), false, 'forward cone: target North is outside 75 deg cone when facing West')
+assert_eq(isHeadingInForwardCone(90, 0, 0, 0, 100, 75), false,
+    'forward cone: target North is outside 75 deg cone when facing West')
 
 -- Same location (0 distance) returns true
 assert_eq(isHeadingInForwardCone(0, 0, 0, 0, 0, 75), true, 'forward cone: same location passes')

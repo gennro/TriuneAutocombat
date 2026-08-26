@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TriuneAutocombat Linux Updater Shell Wrapper (located inside mq2triune/)
+# TriuneAutocombat Linux Updater Shell Wrapper (located inside TAC/)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
