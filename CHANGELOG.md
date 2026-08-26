@@ -32,6 +32,8 @@
   - **Named Presets (`ctrl.zone_waypoint_presets`)**: Added a dropdown next to the waypoint list, filtered to presets saved for the current zone, plus Save / Load / Edit / Delete buttons. Save prompts for a name (overwrites on duplicate); Edit renames the selected preset. Entries display as `<name> - <zone>`.
   - Loading a preset or the auto-saved "Current" route always restarts at waypoint 1.
   - **Unit Tests**: Added `copyWaypointList` pure-logic tests and extended `defaultCtrl()` field validation for the new fields.
+  - **Export/Import Presets**: Added Export/Import buttons for named presets. Export copies a shareable `TACWP1:...` string to your clipboard; Import parses a pasted string, warns if it was exported from a different zone than you're currently in, and prompts to confirm before overwriting a same-named preset. Import strings are parsed as plain data only (never executed as code) and unsupported format versions are rejected with a clear message.
+  - **Unit Tests**: Added `sanitizeWpField`, `base64Encode`/`base64Decode` (including round-trip), and `splitByChar` pure-logic tests.
 
 ---
 
