@@ -28,7 +28,7 @@ Just type `/ac run` (or click **Start** in the UI) and let your character go to 
 Getting started takes less than two minutes:
 
 1. **Download & Extract**: Grab the latest release from the link above and extract it into a folder under your user directory (for example, `Documents\MacroQuest`).
-2. **Start MacroQuest** and log into [Project Triune](https://nms.bestemu.com/).
+2. **Start MacroQuest** and log into Everquest.
 3. **Open Triune**: Triune starts automatically on login. If the window is closed, type `/ac` or `/lua run triune`.
 4. **Verify Your Classes**: In the **Character Classes & Loadout** section, verify your 3 classes (or click **Re-Detect** to let Triune detect them automatically).
 5. **Set Up Your Spells**: Go to the **Spell Gems** tab and choose what each gem slot should do (e.g. *Heal when HP < 50%*, *Snare on incoming mobs*, *Nuke in combat*).

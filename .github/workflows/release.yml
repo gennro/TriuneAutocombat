@@ -43,10 +43,9 @@ jobs:
           ## 📦 Installation & Updating Instructions
 
           ### 🆕 New Installation
-          1. Under **Assets** below, download **`Source code (zip)`**.
-          2. Extract the downloaded archive to a folder under your user directory (for example, `C:\\Users\\<YourUsername>\\Documents\\MacroQuest` or `~/Documents/MacroQuest`).
+          1. Go here and grab the latest macroquest release https://github.com/macroquest/macroquest/releases and extract under your user folder.
+          2. Download TriuneAutocombat-full.zip below and extract contents to the same folder you extract macroquest to.
           3. Start **`MacroQuest.exe`** before launching EverQuest.
-          4. Log into [Project Triune](https://nms.bestemu.com/) — Triune loads automatically on login (or type `/lua run triune` / `/ac` in chat).
 
           ### 🔄 Updating an Existing Install
           - **Option 1 (Recommended — Easiest)**: **In-Game Updater**
@@ -55,7 +54,7 @@ jobs:
             - Alternatively, run **`update.bat`** (Windows) or **`update.sh`** (Linux) from your `mq2triune/` folder.
           - **Option 2 (Manual Update)**:
             - Download **`TriuneAutocombat-Update.zip`** from the Assets below.
-            - Extract and overwrite the files into your existing Triune / MacroQuest directory.
+            - Extract and overwrite the files into your existing MacroQuest directory.
             - *Note: Your personal settings and saved loadouts in `triune_loadout.lua` are preserved and will never be overwritten.*
           '''
 
@@ -78,13 +77,14 @@ jobs:
 
       - name: Package Release Archives
         run: |
-          git archive --format=zip -o TriuneAutocombat-Update.zip HEAD mq2triune/lua mq2triune/config mq2triune/macros mq2triune/triune_updater.py mq2triune/update.bat mq2triune/update.sh README.md CHANGELOG.md
-
+          git archive --format=zip -o TriuneAutocombat-Update.zip HEAD TAC/lua TAC/config TAC/triune_updater.py TAC/update.bat TAC/update.sh README.md CHANGELOG.md
+          git archive --format=zip -o TriuneAutocombat-full.zip HEAD TAC/lua TAC/config TAC/triune_updater.py TAC/update.bat TAC/update.sh TAC/resources README.md CHANGELOG.md
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             TriuneAutocombat-Update.zip
+            TriuneAutocombat-full.zip
           tag_name: ${{ inputs.tag_name || github.ref_name }}
           body_path: RELEASE_NOTES.md
         env:
