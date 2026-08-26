@@ -51,7 +51,7 @@ jobs:
           - **Option 1 (Recommended — Easiest)**: **In-Game Updater**
             - Click the **[Updater]** button on the top window header or type `/ac update` in chat.
             - Click **Check for Updates**, then **Update Now** to update and reload all scripts automatically without leaving the game.
-            - Alternatively, run **`update.bat`** (Windows) or **`update.sh`** (Linux) from your `mq2triune/` folder.
+            - Alternatively, run **`update.bat`** (Windows) or **`update.sh`** (Linux) from your `TAC/` folder.
           - **Option 2 (Manual Update)**:
             - Download **`TriuneAutocombat-Update.zip`** from the Assets below.
             - Extract and overwrite the files into your existing MacroQuest directory.

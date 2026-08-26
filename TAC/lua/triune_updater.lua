@@ -11,7 +11,7 @@ local ImGui = require('ImGui')
 local VERSION = '1.7.2'
 local GITHUB_REPO = 'gennro/TriuneAutocombat'
 local API_URL = 'https://api.github.com/repos/' .. GITHUB_REPO .. '/releases/latest'
-local latestTag = nil  -- raw git tag from API (e.g. 'V1.3')
+local latestTag = nil -- raw git tag from API (e.g. 'V1.3')
 
 local isOpen = true
 local isRunning = true
@@ -99,13 +99,17 @@ local function pushTheme()
 end
 
 local function popTheme()
-    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 end ---@diagnostic disable-line: undefined-field
-    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 end ---@diagnostic disable-line: undefined-field
+    if _varN > 0 then
+        pcall(mq.imgui.PopStyleVar, _varN); _varN = 0
+    end ---@diagnostic disable-line: undefined-field
+    if _colN > 0 then
+        pcall(mq.imgui.PopStyleColor, _colN); _colN = 0
+    end ---@diagnostic disable-line: undefined-field
 end
 
 local function cleanTag(tag)
     if not tag then return '' end
-    if tag:sub(1,1):lower() == 'v' then
+    if tag:sub(1, 1):lower() == 'v' then
         return tag:sub(2)
     end
     return tag
@@ -240,7 +244,7 @@ local function checkForUpdates()
 
     local rootDir = mq.rootDir or '.'
     local configDir = mq.configDir or (rootDir .. '/config')
-    local sep = package.config:sub(1,1)
+    local sep = package.config:sub(1, 1)
     local tmpFile = configDir .. sep .. 'triune_check.tmp'
 
     diag('rootDir: ' .. tostring(rootDir))
@@ -250,10 +254,10 @@ local function checkForUpdates()
 
     -- Determine python updater script location dynamically
     local pyScript = rootDir .. sep .. 'triune_updater.py'
-    local f = io.open(rootDir .. sep .. 'mq2triune' .. sep .. 'triune_updater.py', 'r')
+    local f = io.open(rootDir .. sep .. 'TAC' .. sep .. 'triune_updater.py', 'r')
     if f then
         f:close()
-        pyScript = rootDir .. sep .. 'mq2triune' .. sep .. 'triune_updater.py'
+        pyScript = rootDir .. sep .. 'TAC' .. sep .. 'triune_updater.py'
     end
     diag('pyScript path: ' .. tostring(pyScript))
 
@@ -279,7 +283,8 @@ local function checkForUpdates()
     table.insert(candidates, {
         name = 'Python Updater Script',
         run = function()
-            local pyCmd = (sep == '\\') and ('python "' .. pyScript .. '" --check') or ('python3 "' .. pyScript .. '" --check')
+            local pyCmd = (sep == '\\') and ('python "' .. pyScript .. '" --check') or
+            ('python3 "' .. pyScript .. '" --check')
             return execCommand(pyCmd, tmpFile)
         end
     })
@@ -374,7 +379,7 @@ local function checkForUpdates()
     local body = output:match('"body"%s*:%s*"([^"]+)"') or output:match('Release Notes:\r?\n(.*)')
 
     if tag then
-        latestTag = tag  -- store raw tag for download URLs
+        latestTag = tag -- store raw tag for download URLs
         latestVersion = cleanTag(tag)
         diag('Parsed tag_name: ' .. tostring(tag) .. ' -> cleanVersion: ' .. tostring(latestVersion))
         if body then
@@ -411,7 +416,7 @@ local function executeUpdate()
     diag('--- Starting Update Execution ---')
     local rootDir = mq.rootDir or '.'
     local configDir = mq.configDir or (rootDir .. '/config')
-    local sep = package.config:sub(1,1)
+    local sep = package.config:sub(1, 1)
     local logFile = configDir .. sep .. 'triune_update.log'
 
     -- Dynamically resolve target file destinations based on current script location
@@ -424,18 +429,18 @@ local function executeUpdate()
     diag('Dynamic configDirTarget: ' .. tostring(configDirTarget))
 
     local UPDATE_MAP = {
-        { repo = 'mq2triune/lua/triune.lua',           target = luaDir .. '/triune.lua' },
-        { repo = 'mq2triune/lua/triune_spellbook.lua', target = luaDir .. '/triune_spellbook.lua' },
-        { repo = 'mq2triune/lua/triune_cursor.lua',    target = luaDir .. '/triune_cursor.lua' },
-        { repo = 'mq2triune/lua/triune_updater.lua',   target = luaDir .. '/triune_updater.lua' },
-        { repo = 'mq2triune/lua/triune_buffbot.lua',   target = luaDir .. '/triune_buffbot.lua' },
-        { repo = 'mq2triune/lua/triune_dps.lua',       target = luaDir .. '/triune_dps.lua' },
-        { repo = 'mq2triune/config/triune_data.lua',   target = configDirTarget .. '/triune_data.lua' },
-        { repo = 'mq2triune/triune_updater.py',        target = parentDir .. '/triune_updater.py' },
-        { repo = 'mq2triune/update.bat',               target = parentDir .. '/update.bat' },
-        { repo = 'mq2triune/update.sh',                target = parentDir .. '/update.sh' },
-        { repo = 'README.md',                          target = parentDir .. '/README.md' },
-        { repo = 'CHANGELOG.md',                       target = parentDir .. '/CHANGELOG.md' },
+        { repo = 'TAC/lua/triune.lua',           target = luaDir .. '/triune.lua' },
+        { repo = 'TAC/lua/triune_spellbook.lua', target = luaDir .. '/triune_spellbook.lua' },
+        { repo = 'TAC/lua/triune_cursor.lua',    target = luaDir .. '/triune_cursor.lua' },
+        { repo = 'TAC/lua/triune_updater.lua',   target = luaDir .. '/triune_updater.lua' },
+        { repo = 'TAC/lua/triune_buffbot.lua',   target = luaDir .. '/triune_buffbot.lua' },
+        { repo = 'TAC/lua/triune_dps.lua',       target = luaDir .. '/triune_dps.lua' },
+        { repo = 'TAC/config/triune_data.lua',   target = configDirTarget .. '/triune_data.lua' },
+        { repo = 'TAC/triune_updater.py',        target = parentDir .. '/triune_updater.py' },
+        { repo = 'TAC/update.bat',               target = parentDir .. '/update.bat' },
+        { repo = 'TAC/update.sh',                target = parentDir .. '/update.sh' },
+        { repo = 'README.md',                    target = parentDir .. '/README.md' },
+        { repo = 'CHANGELOG.md',                 target = parentDir .. '/CHANGELOG.md' },
     }
 
     -- Determine script paths for fallback candidates
@@ -466,13 +471,15 @@ local function executeUpdate()
             local cmd = 'curl -sL -H "User-Agent: TriuneUpdater" "' .. url .. '"'
             local content = execCommand(cmd, tmpDlFile)
 
-            local isValidContent = content and #content > 0 and not content:find('404: Not Found') and not content:find('404 Page Not Found')
-            if not isValidContent and item.repo:sub(1,10) == 'mq2triune/' then
-                -- Fallback for legacy tags without mq2triune/ path prefix
+            local isValidContent = content and #content > 0 and not content:find('404: Not Found') and
+            not content:find('404 Page Not Found')
+            if not isValidContent and item.repo:sub(1, 10) == 'TAC/' then
+                -- Fallback for legacy tags without TAC/ path prefix
                 local fallbackUrl = rawBase .. '/' .. item.repo:sub(11) .. '?t=' .. os.time()
                 local cmd2 = 'curl -sL -H "User-Agent: TriuneUpdater" "' .. fallbackUrl .. '"'
                 content = execCommand(cmd2, tmpDlFile)
-                isValidContent = content and #content > 0 and not content:find('404: Not Found') and not content:find('404 Page Not Found')
+                isValidContent = content and #content > 0 and not content:find('404: Not Found') and
+                not content:find('404 Page Not Found')
             end
 
             if isValidContent then
@@ -584,8 +591,8 @@ local function executeUpdate()
             .. '    If Err.Number = 0 And http.Status = 200 Then\r\n'
             .. '        gotData = True\r\n'
             .. '        textData = http.responseText\r\n'
-            .. '    ElseIf Left(repoPath, 10) = "mq2triune/" Then\r\n'
-            .. '        \' Fallback for legacy release tags without mq2triune/ prefix\r\n'
+            .. '    ElseIf Left(repoPath, 10) = "TAC/" Then\r\n'
+            .. '        \' Fallback for legacy release tags without TAC/ prefix\r\n'
             .. '        Err.Clear\r\n'
             .. '        url = rawBase & "/" & Mid(repoPath, 11) & tParam\r\n'
             .. '        http.Open "GET", url, False\r\n'

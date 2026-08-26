@@ -15,7 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-LUA_DIR="$REPO_ROOT/mq2triune/lua"
+LUA_DIR="$REPO_ROOT/TAC/lua"
 
 # The canonical satellite module (smallest, cleanest pushTheme copy)
 CANONICAL="$LUA_DIR/triune_buttons.lua"

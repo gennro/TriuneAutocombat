@@ -26,7 +26,7 @@ jobs:
             else
               echo "OK: $f"
             fi
-          done < <(find mq2triune -name '*.lua' -type f)
+          done < <(find TAC -name '*.lua' -type f)
           exit $fail
 
   version-sync:
@@ -38,8 +38,8 @@ jobs:
       - name: Extract versions
         id: ver
         run: |
-          MAIN=$(grep -oP "^local VERSION\s+= '\K[^']+" mq2triune/lua/triune.lua)
-          UPDATER=$(grep -oP "^local VERSION = '\K[^']+" mq2triune/lua/triune_updater.lua)
+          MAIN=$(grep -oP "^local VERSION\s+= '\K[^']+" TAC/lua/triune.lua)
+          UPDATER=$(grep -oP "^local VERSION = '\K[^']+" TAC/lua/triune_updater.lua)
           README=$(grep -oP "Current version: \*\*\K[^*]+" README.md)
           echo "main=$MAIN"    >> "$GITHUB_OUTPUT"
           echo "updater=$UPDATER" >> "$GITHUB_OUTPUT"
@@ -67,7 +67,7 @@ jobs:
           sudo luarocks install luacheck
 
       - name: Run Luacheck
-        run: luacheck mq2triune/
+        run: luacheck TAC/
 
   unit-tests:
     name: Pure-logic unit tests

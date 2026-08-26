@@ -164,7 +164,7 @@ You can control almost everything using simple in-game chat commands:
 
 ```
 TriuneAutocombat/
-├── mq2triune/
+├── TAC/
 │   ├── triune_updater.py    # Python updater script
 │   ├── update.bat           # Windows updater launcher
 │   ├── update.sh            # Linux updater launcher

@@ -119,7 +119,7 @@
 - **Tool-Launch Deduplication (`triune.lua`).**
   - Consolidated 14 identical copy-pasted "stop-if-running / run-if-stopped" tool-launch blocks (header toolbar, Mini HUD, and slash-command handler) into a single new `toggleTool(scriptName, stopCmd)` helper. All original chat messages and the DPS parser's `/dps toggle` special case are preserved exactly.
 - **CI Pipeline (`.github/workflows/ci.yml`).**
-  - Added a LuaJIT bytecode-compile (`luajit -bl`) syntax check across every `.lua` file in `mq2triune/`, catching Lua 5.1/LuaJIT-incompatible syntax before release.
+  - Added a LuaJIT bytecode-compile (`luajit -bl`) syntax check across every `.lua` file in `TAC/`, catching Lua 5.1/LuaJIT-incompatible syntax before release.
   - Added a version-consistency gate that fails CI if `triune.lua`, `triune_updater.lua`, and `README.md` ever drift apart in version.
 - **Buffbot User-Controlled Low-Level (<= 46) Buff Checkboxes (`triune_buffbot.lua`, v1.5).**
   - **Per-Spell Low-Level Checkboxes in Controls Tab**: Added an intuitive checkbox next to every memorized spell gem in the Controls tab. Checking the box designates that the spell can land on players Level 46 and below. Unchecked spells are restricted to players Level 47+ (and cast on pets of any level).

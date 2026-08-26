@@ -1,5 +1,5 @@
 -- .luacheckrc — Luacheck configuration for TriuneAutocombat
--- Runs on CI via `luacheck mq2triune/` to catch typos, unused vars, shadowed
+-- Runs on CI via `luacheck TAC/` to catch typos, unused vars, shadowed
 -- locals, and references to undefined globals.
 
 std = "luajit"
@@ -45,30 +45,30 @@ read_globals = {
 }
 
 -- Per-file overrides
-files["mq2triune/config/triune_data.lua"] = {
+files["TAC/config/triune_data.lua"] = {
     -- Generated file; suppress all warnings
     ignore = { "" },
 }
 
-files["mq2triune/lua/kissedit/*"] = {
+files["TAC/lua/kissedit/*"] = {
     -- Legacy code with different conventions
     ignore = { "" },
 }
-files["mq2triune/lua/kissedit/**/*"] = {
+files["TAC/lua/kissedit/**/*"] = {
     ignore = { "" },
 }
 
-files["mq2triune/lua/triune.lua"] = {
+files["TAC/lua/triune.lua"] = {
     -- classPlausible is tested by test_pure_logic.lua test suite
     ignore = { "211/classPlausible" },
 }
 
-files["mq2triune/lua/triune_buttons.lua"] = {
+files["TAC/lua/triune_buttons.lua"] = {
     -- Standalone duplicated color palette constants
     ignore = { "211/GOOD", "211/WARN", "211/ERR", "211/MUTED" },
 }
 
-files["mq2triune/lua/triune_buffbot.lua"] = {
+files["TAC/lua/triune_buffbot.lua"] = {
     -- Standalone duplicated ImGui theme popCol helper
     ignore = { "211/popCol" },
 }
