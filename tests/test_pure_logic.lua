@@ -1251,13 +1251,21 @@ assert_eq(#hzList, 1, 'hazard: 1 hazard logged')
 assert_eq(hzList[1].hits, 1, 'hazard: hits=1')
 assert_eq(isCoordInActiveHazard(100, 200, 10, 'poknowledge'), false, 'hazard: hits=1 not active yet (needs 2)')
 
--- Record nearby stuck at (105, 202, 10) -> clusters into existing
-recordStuckHazard(105, 202, 10, 'poknowledge')
+-- Record nearby stuck at (106, 202, 10) -> clusters into existing with weighted centroid ((100+106)/2, (200+202)/2) = (103, 201)
+recordStuckHazard(106, 202, 10, 'poknowledge')
 assert_eq(#hzList, 1, 'hazard: clustered into single hazard')
 assert_eq(hzList[1].hits, 2, 'hazard: hits incremented to 2')
+assert_eq(hzList[1].x, 103, 'hazard: weighted centroid x')
+assert_eq(hzList[1].y, 201, 'hazard: weighted centroid y')
 local isActive, activeH = isCoordInActiveHazard(100, 200, 10, 'poknowledge')
 assert_eq(isActive, true, 'hazard: now active with 2 hits')
 assert_neq(activeH, nil, 'hazard: returns active hazard table')
+
+-- Record 3rd hit at (103, 198, 10) -> ((103*2 + 103)/3 = 103, (201*2 + 198)/3 = 200)
+recordStuckHazard(103, 198, 10, 'poknowledge')
+assert_eq(hzList[1].hits, 3, 'hazard: hits incremented to 3')
+assert_eq(hzList[1].x, 103, 'hazard: 3-hit centroid x exact')
+assert_eq(hzList[1].y, 200, 'hazard: 3-hit centroid y exact')
 
 -- Far away point is not in hazard
 assert_eq(isCoordInActiveHazard(500, 500, 10, 'poknowledge'), false, 'hazard: far coord not in hazard')
@@ -1279,8 +1287,27 @@ local findPathHazardIntersection = loadFunc(src, 'findPathHazardIntersection', {
     ctrl = dummyCtrl,
     getZoneHazards = getZoneHazards
 })
+local dummyPursuit = {
+    detourActive = true,
+    detourX = 120,
+    detourY = 130,
+    detourZ = 10,
+    detourTargetId = 42,
+    detourTargetKey = '130.0_120.0_10.0',
+    detourStartedAt = 100,
+    detourExpiresAt = 106
+}
+local clearDetour = loadFunc(src, 'clearDetour', {
+    pursuit = dummyPursuit
+})
+clearDetour()
+assert_eq(dummyPursuit.detourActive, false, 'clearDetour: resets detourActive')
+assert_eq(dummyPursuit.detourX, 0, 'clearDetour: resets detourX')
+assert_eq(dummyPursuit.detourTargetId, 0, 'clearDetour: resets detourTargetId')
+
 local calculateDetourWaypoint = loadFunc(src, 'calculateDetourWaypoint', {
-    navLoaded = function() return false end
+    navLoaded = function() return false end,
+    isCoordInActiveHazard = isCoordInActiveHazard
 })
 
 -- Path from (0, 100) to (200, 100) passes straight through (100, 100)
@@ -1300,6 +1327,11 @@ assert_type(detour.y, 'number', 'detour: y is number')
 -- Detour should be offset from (100, 100)
 local offsetDist = math.sqrt((detour.x - 100) ^ 2 + (detour.y - 100) ^ 2)
 assert_true(offsetDist >= 15, 'detour: offset distance outside hazard radius')
+
+-- Detour with destination selection: target is at (200, 150) -> cand with higher Y is closer to target
+local detourDest = calculateDetourWaypoint(0, 100, 100, 100, 0, 15, 200, 150, 20)
+assert_neq(detourDest, nil, 'detour: calculated waypoint with destination')
+assert_eq(detourDest.z, 10, 'detour: ground clamped Z is interpolated (0 + 20)/2 = 10')
 
 -- ============================================================================
 -- 31. Reverse Breadcrumbs
@@ -1534,6 +1566,108 @@ assert_eq(isXTargetId(201), true, 'isXTargetId: recognizes mob 201 on XTarget')
 assert_eq(isXTargetId(202), true, 'isXTargetId: recognizes mob 202 on XTarget')
 assert_eq(isXTargetId(203), false, 'isXTargetId: corpse 203 returns false')
 assert_eq(isXTargetId(999), false, 'isXTargetId: non-xtarget id returns false')
+
+-- ============================================================================
+-- 34. MQ2Nav Plugin Loaded Detection
+-- ============================================================================
+print('--- mq2nav loaded detection ---')
+
+-- 1. Navigation TLO Active/MeshLoaded returns true
+local dummyMqNavLoaded = {
+    TLO = {
+        Navigation = setmetatable({
+            MeshLoaded = function() return true end,
+        }, {
+            __call = function() return true end,
+        }),
+        Plugin = function() return nil end,
+    }
+}
+local testNavLoaded1 = loadFunc(src, 'navLoaded', {
+    mq = dummyMqNavLoaded,
+    pcall = pcall,
+})
+assert_eq(testNavLoaded1(), true, 'navLoaded: true when Navigation TLO and mesh is loaded')
+
+-- 2. Plugin('mq2nav').IsLoaded() returns true
+local dummyMqPluginLoaded = {
+    TLO = {
+        Navigation = nil,
+        Plugin = function(name)
+            if string.lower(name) == 'mq2nav' or string.lower(name) == 'nav' then
+                return setmetatable({
+                    IsLoaded = function() return true end,
+                }, {
+                    __call = function() return 'mq2nav' end,
+                })
+            end
+            return nil
+        end
+    }
+}
+local testNavLoaded2 = loadFunc(src, 'navLoaded', {
+    mq = dummyMqPluginLoaded,
+    pcall = pcall,
+})
+assert_eq(testNavLoaded2(), true, 'navLoaded: true when Plugin mq2nav IsLoaded returns true')
+
+-- 3. Neither loaded returns false
+local dummyMqUnloaded = {
+    TLO = {
+        Navigation = nil,
+        Plugin = function() return nil end,
+    }
+}
+local testNavLoaded3 = loadFunc(src, 'navLoaded', {
+    mq = dummyMqUnloaded,
+    pcall = pcall,
+})
+assert_eq(testNavLoaded3(), false, 'navLoaded: false when neither Navigation TLO nor Plugin is loaded')
+
+-- ============================================================================
+-- 35. NavMesh Loaded Detection
+-- ============================================================================
+print('--- navmesh loaded detection ---')
+
+-- 1. navLoaded() is false -> navMeshLoaded() returns false
+local testMeshLoaded1 = loadFunc(src, 'navMeshLoaded', {
+    navLoaded = function() return false end,
+    mq = dummyMqNavLoaded,
+    pcall = pcall,
+})
+assert_eq(testMeshLoaded1(), false, 'navMeshLoaded: false when navLoaded is false')
+
+-- 2. navLoaded() is true and MeshLoaded() is true -> navMeshLoaded() returns true
+local dummyMqMeshTrue = {
+    TLO = {
+        Navigation = {
+            MeshLoaded = function() return true end,
+        }
+    }
+}
+local testMeshLoaded2 = loadFunc(src, 'navMeshLoaded', {
+    navLoaded = function() return true end,
+    mq = dummyMqMeshTrue,
+    pcall = pcall,
+})
+assert_eq(testMeshLoaded2(), true, 'navMeshLoaded: true when MeshLoaded returns true')
+
+-- 3. navLoaded() is true and MeshLoaded() is false -> navMeshLoaded() returns false
+local dummyMqMeshFalse = {
+    TLO = {
+        Navigation = {
+            MeshLoaded = function() return false end,
+        }
+    }
+}
+local testMeshLoaded3 = loadFunc(src, 'navMeshLoaded', {
+    navLoaded = function() return true end,
+    mq = dummyMqMeshFalse,
+    pcall = pcall,
+})
+assert_eq(testMeshLoaded3(), false, 'navMeshLoaded: false when MeshLoaded returns false')
+
+
 
 -- ============================================================================
 -- Results

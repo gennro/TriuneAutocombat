@@ -1,5 +1,31 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-27
+
+- **Auto-Avoid Stuck Hotspots Routing Architecture Rework (`triune.lua`).**
+  - **Detour State Machine (`pursuit.detourActive`, `runtime.clearDetour`)**: Replaced stateless per-tick detour recalculation with a locked detour state machine. When routing around a hazard, locks in a stable detour waypoint with a safety timeout and 8-unit arrival threshold, completely eliminating waypoint drifting, `/nav` command spam, and curved movement jitter.
+  - **PathLength & Travel Cost Candidate Selection (`calculateDetourWaypoint`)**: Queries `Navigation.PathLength` and straight-line distance to destination for both left and right detour candidates, selecting the candidate that yields the shortest total valid travel path to the target.
+  - **Multi-Hazard Avoidance Filter**: Validates candidate waypoints against all active zone hazards (`isCoordInActiveHazard`), discarding candidates that would push the character into a neighboring hazard.
+  - **Ground Elevation Clamping**: Validates and interpolates candidate Z elevation between the player, hazard, and target ground heights, preventing airborne or subterranean detour waypoints.
+  - **Mathematically Accurate Centroid Calculation (`recordStuckHazard`)**: Replaced running exponential averaging with exact cumulative centroid math ($\text{newPos} = (\text{oldPos} \cdot (N - 1) + \text{pos}) / N$), accurately clustering multiple stuck points into precise geometric hotspot centers.
+  - **Comprehensive Safety Resets**: Automatically clears detour state on unstuck maneuvers (`performUnstuck`), unreachable target blacklisting (`markUnreachable`), repositioning events (`repositionCloser`, `handleCantHitFromHere`), target clearing, and script stop (`fullStop`).
+  - **Unit Tests**: Updated and expanded unit tests in `tests/test_pure_logic.lua` covering exact 3-hit centroid calculations, detour state clearing, candidate selection with destination cost evaluation, and ground elevation clamping.
+
+- **MQ2Nav Plugin & Zone NavMesh Detection with Center-Screen Warning (`triune.lua`).**
+  - **Automatic Plugin Load Attempt on Startup**: On script initialization, Triune now automatically attempts to load `mq2nav` (`/plugin mq2nav`) if it is not already loaded, waiting briefly for MacroQuest to complete initialization.
+  - **Zone NavMesh Loaded Check (`navMeshLoaded`)**: Added validation via `Navigation.MeshLoaded()` to verify that a valid `.nav` navmesh is loaded for the character's active zone.
+  - **Center-Screen EverQuest `/popup` Warning**: Fires an in-game center-screen `/popup` alert across the middle of the player's screen on startup, when entering a new zone without a navmesh, and when starting combat if either `MQ2Nav` is missing or the zone lacks a navmesh.
+  - **GUI Warning Banners & Quick-Actions**: Added dynamic warning notices with `[Load MQ2Nav]` and `[Reload Mesh]` (`/nav reload`) buttons across the main window header bar, the Settings tab under Navigation & Hazard Avoidance, and the Mini GUI HUD overlay.
+  - **Combat Execution Gate Warning**: Added warning messages in chat and center-screen `/popup` alerts when starting autocombat (`/ac run`, `/triunerun`, or START buttons) if MQ2Nav is missing or no navmesh exists.
+  - **Unit Tests**: Added pure-logic unit test suites (Suites 34 & 35) in `tests/test_pure_logic.lua` covering Navigation TLO presence, Plugin loaded detection, and Zone NavMesh loaded validation.
+
+- **Relocate Start/Pause and Burn Buttons to Top Level & Move Classes to Settings (`triune.lua`).**
+  - **Global Top-Level Action Buttons (`UI.drawActionControls`)**: Moved the main `START` / `PAUSE` and `BURN (ON)` / `BURN (OFF)` action buttons out of the `Control` tab and placed them at the top of the main Triune window above all tabs, ensuring combat controls are immediately accessible regardless of active tab.
+  - **Character Classes & Loadout in Settings Tab (`UI.drawSettingsTab`)**: Relocated the `Character Classes & Loadout` collapsible header and class picker dropdowns from the top-level window into the `Settings` tab (`ImGuiTreeNodeFlags.DefaultOpen`), decluttering the top window header and organizing loadout configuration with other character settings.
+  - **Clean Control Tab Layout (`UI.drawControlTab`)**: Streamlined the `Control` tab to focus exclusively on combat modes, submodes, camp controls, waypoint routing, and target management.
+
+---
+
 ## 2026-08-25
 
 - **Fix Puller (Hunt) Mode Ignoring In-Range XTarget Enemies (`triune.lua`).**

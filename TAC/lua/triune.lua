@@ -443,6 +443,15 @@ local pursuit = {
     nonXtarEngageAt = 0,
     lastCombatFaceAt = 0,
     lastStickDist = 0,
+    -- Detour state machine fields
+    detourActive = false,
+    detourX = 0,
+    detourY = 0,
+    detourZ = 0,
+    detourTargetId = 0,
+    detourTargetKey = nil,
+    detourStartedAt = 0,
+    detourExpiresAt = 0,
     -- Ladder-climb detection sampling (see isClimbingLadder()). X/Y/Z are the
     -- position at the last sample; climbingUntil is a grace-period expiry --
     -- we're considered "climbing" any time os.clock() is before it.
@@ -1155,6 +1164,14 @@ local function navLoaded()
     return ok and (loaded == true)
 end
 
+local function navMeshLoaded()
+    if not navLoaded() then return false end
+    local ok, loaded = pcall(function()
+        return mq.TLO.Navigation.MeshLoaded() or false
+    end)
+    return ok and (loaded == true)
+end
+
 local function stickLoaded()
     local ok, loaded = pcall(function()
         if mq.TLO.Stick and (mq.TLO.Stick() ~= nil or mq.TLO.Stick.Status() ~= nil) then
@@ -1220,6 +1237,14 @@ local function stopMoving()
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
     pursuit.lastStickDist = 0
+    pursuit.detourActive = false
+    pursuit.detourX = 0
+    pursuit.detourY = 0
+    pursuit.detourZ = 0
+    pursuit.detourTargetId = 0
+    pursuit.detourTargetKey = nil
+    pursuit.detourStartedAt = 0
+    pursuit.detourExpiresAt = 0
 end
 
 -- Returns true if the spawn ID belongs to the player, their pet, any group member,
@@ -2916,6 +2941,28 @@ function UI.drawHeaderBar()
         accent(WARN,
             'No triune_data.lua found in your MQ config folder -- run extract_spells.py and copy it there. Spell/AA lists will be empty.')
     end
+    if not navLoaded() then
+        accent(WARN,
+            'MQ2Nav plugin is NOT loaded. Pathing, hunter roaming, chase, and return-to-camp require MQ2Nav.')
+        ImGui.SameLine()
+        if ImGui.Button('Load MQ2Nav##hdrLoadNav') then
+            mq.cmd('/plugin mq2nav')
+        end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Executes /plugin mq2nav to load the MQ2Nav plugin.')
+        end
+    elseif not navMeshLoaded() then
+        local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+        accent(WARN,
+            string.format('No NavMesh loaded for zone "%s". Pathing, roaming, and chase require a zone mesh.', curZone))
+        ImGui.SameLine()
+        if ImGui.Button('Reload Mesh##hdrReloadMesh') then
+            mq.cmd('/nav reload')
+        end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
+        end
+    end
     ImGui.Separator()
 end
 
@@ -2923,7 +2970,7 @@ local CLASS_PICKER_OPTIONS = { '-- None --', 'War', 'Clr', 'Pal', 'Rng', 'SK', '
     'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
 
 function UI.drawClassPicker()
-    if ImGui.CollapsingHeader('Character Classes & Loadout') then
+    if ImGui.CollapsingHeader('Character Classes & Loadout', ImGuiTreeNodeFlags.DefaultOpen) then
         ImGui.TextDisabled('Auto-detected from Inventory Window on login; adjust manually if needed:')
         for i = 1, 3 do
             ImGui.SetNextItemWidth(95)
@@ -3862,9 +3909,8 @@ end
 local desiredRange    -- forward declaration; defined in the engine section below
 local maxMeleeDistance -- forward declaration; defined in the engine section below
 
--- UI: control/settings tab
-function UI.drawControlTab()
-    if not ImGui.BeginTabItem('Control') then return end
+-- UI: Action controls (Start / Pause, Burn)
+function UI.drawActionControls()
     if ctrl.running then
         local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local pCount = 0
@@ -3898,6 +3944,14 @@ function UI.drawControlTab()
             end
             ctrl.running = true
             runtime.wasRunning = true
+            if not navLoaded() and ctrl.mode ~= 'Manual' then
+                mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
+                print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
+            elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
+                local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+                mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+                print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+            end
         end
 
         if pCount > 0 then
@@ -3940,8 +3994,13 @@ function UI.drawControlTab()
         ImGui.SetTooltip(
             'Enable/disable Burn Mode. When enabled, spells, AAs, and disciplines marked "Burn Only" will fire.\nTurns off automatically when extended target list clears.')
     end
+    ImGui.Dummy(0, 4)
+end
 
-    ImGui.Dummy(0, 6)
+-- UI: control tab
+function UI.drawControlTab()
+    if not ImGui.BeginTabItem('Control') then return end
+    ImGui.Dummy(0, 4)
     accent(GOLD, 'Combat Mode')
     ImGui.SetNextItemWidth(160)
     local curPrimaryIdx = idxOf(PRIMARY_MODES, ctrl.mode)
@@ -4591,6 +4650,9 @@ function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
     ImGui.Dummy(0, 4)
 
+    UI.drawClassPicker()
+
+    ImGui.Dummy(0, 4)
     accent(GOLD, 'Combat Style')
     if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
         ctrl.combat_style = 'Melee'
@@ -4653,6 +4715,26 @@ function UI.drawSettingsTab()
 
     ImGui.Dummy(0, 4)
     accent(GOLD, 'Navigation & Hazard Avoidance')
+    if not navLoaded() then
+        accent(WARN, 'MQ2Nav is NOT loaded! Navigation and pathfinding require MQ2Nav.')
+        ImGui.SameLine()
+        if ImGui.Button('Load MQ2Nav##settingsLoadNav') then
+            mq.cmd('/plugin mq2nav')
+        end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Executes /plugin mq2nav to load the MQ2Nav plugin.')
+        end
+    elseif not navMeshLoaded() then
+        local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+        accent(WARN, string.format('No NavMesh loaded for zone "%s" (/nav reload).', curZone))
+        ImGui.SameLine()
+        if ImGui.Button('Reload Mesh##settingsReloadMesh') then
+            mq.cmd('/nav reload')
+        end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
+        end
+    end
     ctrl.nav_hazard_avoidance = ImGui.Checkbox('Auto-Avoid Stuck Hotspots', ctrl.nav_hazard_avoidance ~= false)
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Remembers locations where the character repeatedly gets stuck and routes around them with detour waypoints.')
@@ -4936,6 +5018,29 @@ local function drawMiniGui()
 
         ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
 
+        if not navLoaded() then
+            accent(WARN, '[!] MQ2Nav is NOT loaded')
+            if ImGui.IsItemHovered() then
+                UI.setTooltip('MQ2Nav plugin is required for pathing and navigation.\nClick Load MQ2Nav or type /plugin mq2nav.')
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Load MQ2Nav##miniLoadNav', 90, 20) then
+                mq.cmd('/plugin mq2nav')
+            end
+            ImGui.Spacing()
+        elseif not navMeshLoaded() then
+            local curZone = mq.TLO.Zone.ShortName() or 'zone'
+            accent(WARN, string.format('[!] No NavMesh for %s', curZone))
+            if ImGui.IsItemHovered() then
+                UI.setTooltip(string.format('No navmesh loaded for %s.\nClick Reload or run /nav reload in chat.', curZone))
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Reload##miniReloadMesh', 65, 20) then
+                mq.cmd('/nav reload')
+            end
+            ImGui.Spacing()
+        end
+
         -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
         if ctrl.running then
             if ImGui.Button('Pause##miniRunBtn', 65, 22) then
@@ -4959,6 +5064,14 @@ local function drawMiniGui()
                 end
                 ctrl.running = true
                 runtime.wasRunning = true
+                if not navLoaded() and ctrl.mode ~= 'Manual' then
+                    mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
+                    print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
+                elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
+                    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+                    mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+                    print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+                end
             end
             if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
         end
@@ -5064,7 +5177,7 @@ local function drawFullGui()
     end
 
     UI.drawHeaderBar()
-    UI.drawClassPicker()
+    UI.drawActionControls()
 
     if ImGui.BeginTabBar('triuneTabs') then
         UI.drawControlTab()
@@ -6438,7 +6551,10 @@ local LOS_FLICKER_GRACE = 2.5   -- treat LoS as still good this long after the l
 -- state changes (a door opens, etc). findRoamTarget skips these when picking a
 -- fresh target; Hunter/Puller drop their current target the moment it lands here
 -- rather than continuing to sit on something they can never reach.
-function runtime.markUnreachable(id) pursuit.unreachableIds[id] = os.clock() end
+function runtime.markUnreachable(id)
+    pursuit.unreachableIds[id] = os.clock()
+    if runtime.clearDetour then runtime.clearDetour() end
+end
 isUnreachable = function(id)
     local t = pursuit.unreachableIds[id]
     if not t then return false end
@@ -6496,10 +6612,12 @@ function runtime.recordStuckHazard(x, y, z, zs)
         end
     end
     if found then
-        found.hits = (found.hits or 1) + 1
-        found.x = (found.x + x) * 0.5
-        found.y = (found.y + y) * 0.5
-        found.z = (found.z + z) * 0.5
+        local newHits = (found.hits or 1) + 1
+        found.x = ((found.x * (newHits - 1)) + x) / newHits
+        found.y = ((found.y * (newHits - 1)) + y) / newHits
+        found.z = ((found.z * (newHits - 1)) + z) / newHits
+        found.hits = newHits
+        found.lastHitAt = os.time()
         print(string.format('\ay[Triune]\ax Updated navigation hazard hotspot in %s at (Y:%.1f, X:%.1f, Z:%.1f) [Hits: %d]',
             zs, found.y, found.x, found.z, found.hits))
     else
@@ -6509,7 +6627,8 @@ function runtime.recordStuckHazard(x, y, z, zs)
             z = z,
             radius = ctrl.nav_hazard_radius or 15,
             hits = 1,
-            addedAt = os.time()
+            addedAt = os.time(),
+            lastHitAt = os.time()
         })
         print(string.format('\ay[Triune]\ax Logged new navigation hazard hotspot in %s at (Y:%.1f, X:%.1f, Z:%.1f)',
             zs, y, x, z))
@@ -6534,7 +6653,7 @@ function runtime.isCoordInActiveHazard(x, y, z, zs)
         if (h.hits or 1) >= minHits then
             local r = h.radius or ctrl.nav_hazard_radius or 15
             local d = math.sqrt((x - h.x) ^ 2 + (y - h.y) ^ 2)
-            if d <= r and math.abs(z - h.z) <= 15 then
+            if d <= r and math.abs((z or h.z) - h.z) <= 15 then
                 return true, h
             end
         end
@@ -6552,7 +6671,7 @@ function runtime.findPathHazardIntersection(x1, y1, x2, y2, z1, zs)
     if segLenSq < 4.0 then return nil end
 
     for _, h in ipairs(hazards) do
-        if (h.hits or 1) >= minHits and math.abs(z1 - h.z) <= 15 then
+        if (h.hits or 1) >= minHits and math.abs((z1 or h.z) - h.z) <= 15 then
             local r = (h.radius or ctrl.nav_hazard_radius or 15)
             local t = ((h.x - x1) * dx + (h.y - y1) * dy) / segLenSq
             if t > 0.05 and t < 0.95 then
@@ -6568,7 +6687,18 @@ function runtime.findPathHazardIntersection(x1, y1, x2, y2, z1, zs)
     return nil
 end
 
-function runtime.calculateDetourWaypoint(x1, y1, hx, hy, hz, r)
+function runtime.clearDetour()
+    pursuit.detourActive = false
+    pursuit.detourX = 0
+    pursuit.detourY = 0
+    pursuit.detourZ = 0
+    pursuit.detourTargetId = 0
+    pursuit.detourTargetKey = nil
+    pursuit.detourStartedAt = 0
+    pursuit.detourExpiresAt = 0
+end
+
+function runtime.calculateDetourWaypoint(x1, y1, hx, hy, hz, r, destX, destY, destZ, zs)
     local vx = hx - x1
     local vy = hy - y1
     local vlen = math.sqrt(vx * vx + vy * vy)
@@ -6578,18 +6708,72 @@ function runtime.calculateDetourWaypoint(x1, y1, hx, hy, hz, r)
     end
     local nx = -vy / vlen
     local ny = vx / vlen
-    local offsetDist = r + 8.0
+    local offsetDist = (r or 15) + 8.0
 
-    local cand1 = { x = hx + nx * offsetDist, y = hy + ny * offsetDist, z = hz }
-    local cand2 = { x = hx - nx * offsetDist, y = hy - ny * offsetDist, z = hz }
+    -- Candidate ground elevation estimation
+    local candZ = hz or 0
+    if destZ and type(destZ) == 'number' then
+        candZ = (candZ + destZ) * 0.5
+    end
+
+    local cand1 = { x = hx + nx * offsetDist, y = hy + ny * offsetDist, z = candZ }
+    local cand2 = { x = hx - nx * offsetDist, y = hy - ny * offsetDist, z = candZ }
+
+    -- Multi-hazard filter: check if candidate falls inside another active hazard
+    zs = zs or (runtime.getCurrentZoneShortName and runtime.getCurrentZoneShortName()) or 'unknown'
+    local c1InHazard = false
+    local c2InHazard = false
+    if runtime.isCoordInActiveHazard then
+        c1InHazard = runtime.isCoordInActiveHazard(cand1.x, cand1.y, cand1.z, zs)
+        c2InHazard = runtime.isCoordInActiveHazard(cand2.x, cand2.y, cand2.z, zs)
+    end
 
     if navLoaded() then
+        local loc1Str = string.format('locyx %.2f %.2f', cand1.y, cand1.x)
+        local loc2Str = string.format('locyx %.2f %.2f', cand2.y, cand2.x)
         local p1 = false
         local p2 = false
-        pcall(function() p1 = mq.TLO.Navigation.PathExists(string.format('locyx %.2f %.2f', cand1.y, cand1.x))() end)
-        pcall(function() p2 = mq.TLO.Navigation.PathExists(string.format('locyx %.2f %.2f', cand2.y, cand2.x))() end)
-        if p1 and not p2 then return cand1 end
-        if p2 and not p1 then return cand2 end
+        pcall(function() p1 = mq.TLO.Navigation.PathExists(loc1Str)() or false end)
+        pcall(function() p2 = mq.TLO.Navigation.PathExists(loc2Str)() or false end)
+
+        -- If one candidate is inside another hazard and the other is clear, prefer the clear candidate
+        if p1 and not c1InHazard and (not p2 or c2InHazard) then return cand1 end
+        if p2 and not c2InHazard and (not p1 or c1InHazard) then return cand2 end
+
+        if p1 and p2 then
+            -- Both paths exist on mesh. Compare total travel cost (PathLength to candidate + distance to destination)
+            local len1 = 9999
+            local len2 = 9999
+            pcall(function() len1 = mq.TLO.Navigation.PathLength(loc1Str)() or 9999 end)
+            pcall(function() len2 = mq.TLO.Navigation.PathLength(loc2Str)() or 9999 end)
+
+            if destX and destY then
+                local d1ToDest = math.sqrt((cand1.x - destX) ^ 2 + (cand1.y - destY) ^ 2)
+                local d2ToDest = math.sqrt((cand2.x - destX) ^ 2 + (cand2.y - destY) ^ 2)
+                local cost1 = len1 + d1ToDest
+                local cost2 = len2 + d2ToDest
+                if c1InHazard then cost1 = cost1 + 1000 end
+                if c2InHazard then cost2 = cost2 + 1000 end
+                return (cost1 <= cost2) and cand1 or cand2
+            else
+                if c1InHazard and not c2InHazard then return cand2 end
+                if c2InHazard and not c1InHazard then return cand1 end
+                return (len1 <= len2) and cand1 or cand2
+            end
+        elseif p1 and not p2 then
+            return cand1
+        elseif p2 and not p1 then
+            return cand2
+        end
+    end
+
+    -- Fallback without MQ2Nav or when off-mesh
+    if c1InHazard and not c2InHazard then return cand2 end
+    if c2InHazard and not c1InHazard then return cand1 end
+    if destX and destY then
+        local d1 = (cand1.x - destX) ^ 2 + (cand1.y - destY) ^ 2
+        local d2 = (cand2.x - destX) ^ 2 + (cand2.y - destY) ^ 2
+        return (d1 <= d2) and cand1 or cand2
     end
     return cand1
 end
@@ -6701,21 +6885,49 @@ function runtime.moveToward(id, dist, followOnly)
 
     runtime.checkProactiveDoorAndLev()
 
-    -- Check if travel path to target intersects a known navigation hazard hotspot
+    -- Detour State Machine & Hazard Avoidance
     local me = mq.TLO.Me
     if me() and ctrl.nav_hazard_avoidance and not followOnly then
         local mx, my, mz = me.X() or 0, me.Y() or 0, me.Z() or 0
-        local ts = mq.TLO.Spawn(id)
-        if ts() then
-            local tx, ty = ts.X() or 0, ts.Y() or 0
-            local hz = runtime.findPathHazardIntersection(mx, my, tx, ty, mz)
-            if hz then
-                local detour = runtime.calculateDetourWaypoint(mx, my, hz.x, hz.y, hz.z, hz.radius or 15)
-                if detour then
-                    local dDetour = math.sqrt((mx - detour.x) ^ 2 + (my - detour.y) ^ 2)
-                    if dDetour > 8 then
-                        runtime.moveTowardLoc(detour.x, detour.y, detour.z, 6)
-                        return false
+        local now = os.clock()
+
+        -- 1. Check in-flight active detour
+        if pursuit.detourActive then
+            if now > (pursuit.detourExpiresAt or 0) or pursuit.detourTargetId ~= id then
+                runtime.clearDetour()
+            else
+                local dDetour = math.sqrt((mx - pursuit.detourX) ^ 2 + (my - pursuit.detourY) ^ 2)
+                if dDetour <= 8 then
+                    runtime.clearDetour()
+                else
+                    runtime.moveTowardLoc(pursuit.detourX, pursuit.detourY, pursuit.detourZ, 6)
+                    return false
+                end
+            end
+        end
+
+        -- 2. If no active detour, check if straight path intersects a known hazard
+        if not pursuit.detourActive then
+            local ts = mq.TLO.Spawn(id)
+            if ts() then
+                local tx, ty, tz = ts.X() or 0, ts.Y() or 0, ts.Z() or mz
+                local hz = runtime.findPathHazardIntersection(mx, my, tx, ty, mz)
+                if hz then
+                    local detour = runtime.calculateDetourWaypoint(mx, my, hz.x, hz.y, hz.z, hz.radius or 15, tx, ty, tz)
+                    if detour then
+                        local dDetour = math.sqrt((mx - detour.x) ^ 2 + (my - detour.y) ^ 2)
+                        if dDetour > 8 then
+                            pursuit.detourActive = true
+                            pursuit.detourX = detour.x
+                            pursuit.detourY = detour.y
+                            pursuit.detourZ = detour.z
+                            pursuit.detourTargetId = id
+                            pursuit.detourTargetKey = nil
+                            pursuit.detourStartedAt = now
+                            pursuit.detourExpiresAt = now + 6.0
+                            runtime.moveTowardLoc(detour.x, detour.y, detour.z, 6)
+                            return false
+                        end
                     end
                 end
             end
@@ -6856,6 +7068,7 @@ local function repositionCloser()
     pursuit.id = 0
     pursuit.lastNavTargetId = 0
     pursuit.lastStickDist = 0
+    if runtime.clearDetour then runtime.clearDetour() end
 
     mq.cmd('/face fast')
 
@@ -6908,6 +7121,7 @@ local function handleCantHitFromHere()
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
     pursuit.lastStickDist = 0
+    if runtime.clearDetour then runtime.clearDetour() end
 
     mq.cmd('/face fast')
 
@@ -7027,27 +7241,36 @@ function runtime.moveTowardLoc(x, y, z, dist)
     if distToLoc(x, y, z) <= dist then
         stopMoving()
         pursuit.lastNavLoc = nil
+        if runtime.clearDetour then runtime.clearDetour() end
         return true
     end
 
     runtime.checkProactiveDoorAndLev()
 
-    -- Check if travel to destination loc intersects an active hazard bubble
+    local locKey = string.format('%.1f_%.1f_%.1f', y, x, z)
+
+    -- Detour State Machine for Loc navigation (e.g. camp return, waypoints)
+    -- Do not trigger a new detour if we are currently moving toward a detour waypoint itself!
     local me = mq.TLO.Me
-    if me() and ctrl.nav_hazard_avoidance then
+    if me() and ctrl.nav_hazard_avoidance and not string.find(tostring(pursuit.lastNavLoc or ''), '^detour_') then
         local mx, my, mz = me.X() or 0, me.Y() or 0, me.Z() or 0
-        local hz = runtime.findPathHazardIntersection(mx, my, x, y, mz)
-        if hz then
-            local detour = runtime.calculateDetourWaypoint(mx, my, hz.x, hz.y, hz.z, hz.radius or 15)
-            if detour then
-                local dDetour = math.sqrt((mx - detour.x) ^ 2 + (my - detour.y) ^ 2)
-                if dDetour > 8 then
-                    local detourKey = string.format('detour_%.1f_%.1f_%.1f', detour.y, detour.x, detour.z)
+        local now = os.clock()
+
+        -- 1. Check in-flight active detour for this loc target
+        if pursuit.detourActive then
+            if now > (pursuit.detourExpiresAt or 0) or pursuit.detourTargetKey ~= locKey then
+                runtime.clearDetour()
+            else
+                local dDetour = math.sqrt((mx - pursuit.detourX) ^ 2 + (my - pursuit.detourY) ^ 2)
+                if dDetour <= 8 then
+                    runtime.clearDetour()
+                else
+                    local detourKey = string.format('detour_%.1f_%.1f_%.1f', pursuit.detourY, pursuit.detourX, pursuit.detourZ)
                     if navLoaded() then
                         local navActive = false
                         pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
                         if pursuit.lastNavLoc ~= detourKey or not navActive then
-                            local locyxStr = string.format('locyx %.2f %.2f', detour.y, detour.x)
+                            local locyxStr = string.format('locyx %.2f %.2f', pursuit.detourY, pursuit.detourX)
                             local ok = false
                             pcall(function() ok = mq.TLO.Navigation.PathExists(locyxStr)() end)
                             if ok then
@@ -7057,6 +7280,45 @@ function runtime.moveTowardLoc(x, y, z, dist)
                             end
                         else
                             return false
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 2. If no active detour, check if straight path to destination intersects a known hazard
+        if not pursuit.detourActive then
+            local hz = runtime.findPathHazardIntersection(mx, my, x, y, mz)
+            if hz then
+                local detour = runtime.calculateDetourWaypoint(mx, my, hz.x, hz.y, hz.z, hz.radius or 15, x, y, z)
+                if detour then
+                    local dDetour = math.sqrt((mx - detour.x) ^ 2 + (my - detour.y) ^ 2)
+                    if dDetour > 8 then
+                        pursuit.detourActive = true
+                        pursuit.detourX = detour.x
+                        pursuit.detourY = detour.y
+                        pursuit.detourZ = detour.z
+                        pursuit.detourTargetId = 0
+                        pursuit.detourTargetKey = locKey
+                        pursuit.detourStartedAt = now
+                        pursuit.detourExpiresAt = now + 6.0
+
+                        local detourKey = string.format('detour_%.1f_%.1f_%.1f', detour.y, detour.x, detour.z)
+                        if navLoaded() then
+                            local navActive = false
+                            pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+                            if pursuit.lastNavLoc ~= detourKey or not navActive then
+                                local locyxStr = string.format('locyx %.2f %.2f', detour.y, detour.x)
+                                local ok = false
+                                pcall(function() ok = mq.TLO.Navigation.PathExists(locyxStr)() end)
+                                if ok then
+                                    mq.cmdf('/nav %s', locyxStr)
+                                    pursuit.lastNavLoc = detourKey
+                                    return false
+                                end
+                            else
+                                return false
+                            end
                         end
                     end
                 end
@@ -7182,6 +7444,7 @@ function runtime.performUnstuck()
         stuckState.counter = 0
         stuckState.lastStuckRecoveryAt = os.clock()
         pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil
+        if runtime.clearDetour then runtime.clearDetour() end
         return
     end
 
@@ -7287,6 +7550,7 @@ function runtime.performUnstuck()
         pursuit.lastNavTargetId = 0
         pursuit.lastNavLoc = nil
         pursuit.wanderLoc = nil
+        if runtime.clearDetour then runtime.clearDetour() end
         runtime.pullTargetId = 0
         runtime.pullState = 'IDLE'
 
@@ -7299,6 +7563,7 @@ function runtime.performUnstuck()
     stuckState.counter = 0
     stuckState.lastX, stuckState.lastY = mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0
     pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil -- force a fresh /nav command next tick
+    if runtime.clearDetour then runtime.clearDetour() end
 end
 
 function runtime.checkStuck()
@@ -8180,7 +8445,7 @@ fullStop = function()
     pursuit.cycleTargetIds = {}
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
-    runtime.activeDetour = nil
+    if runtime.clearDetour then runtime.clearDetour() end
     runtime.clearBreadcrumbs()
     if runtime.pullHpRest then
         runtime.pullHpRest = false
@@ -8252,6 +8517,7 @@ runtime.hasLoS = hasLoS
 runtime.isMoveActive = isMoveActive
 runtime.isCasting = isCasting
 runtime.navLoaded = navLoaded
+runtime.navMeshLoaded = navMeshLoaded
 runtime.stickLoaded = stickLoaded
 runtime.hasActivePet = hasActivePet
 runtime.trioHasPetClass = trioHasPetClass
@@ -9377,6 +9643,14 @@ local function triuneCommand(...)
             ctrl.running = true
             runtime.wasRunning = true
             print('\ag[Triune]\ax running.')
+            if not navLoaded() and ctrl.mode ~= 'Manual' then
+                mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
+                print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
+            elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
+                local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+                mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+                print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+            end
         end
     elseif cmd == 'pause' or cmd == 'stop' then
         if not ctrl.running then
@@ -9694,6 +9968,14 @@ triuneToggle = function()
         ctrl.running = true
         runtime.wasRunning = true
         print('\ag[Triune]\ax running.')
+        if not navLoaded() and ctrl.mode ~= 'Manual' then
+            mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
+            print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
+        elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
+            local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+            mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+            print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+        end
     end
 end
 
@@ -9706,12 +9988,25 @@ mq.bind('/triunerun', triuneToggle)
 mq.unbind('/ac')
 mq.bind('/ac', triuneCommand)
 
+if not navLoaded() then
+    mq.cmd('/plugin mq2nav')
+    mq.delay(250)
+end
+
 mq.imgui.init('TriuneAutoCombat', draw)
 print('\ag[Triune]\ax loaded v' ..
     VERSION ..
     '. Data: ' ..
     (DATA_OK and 'triune_data.lua OK' or 'MISSING -- run extract_spells.py') ..
     '. Use /ac run | /ac pause | /ac status | /ac spellbook | /ac <mode>. /lua stop triune to exit.')
+if not navLoaded() then
+    mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded! Load via /plugin mq2nav')
+    print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Navigation, chase, and pathing require MQ2Nav. Load it using: \ay/plugin mq2nav\ax')
+elseif not navMeshLoaded() then
+    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+    mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+    print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Pathing and navigation require a valid zone mesh.', curZone))
+end
 
 -- ============================================================================
 -- Map Visualization Helper
@@ -9876,6 +10171,10 @@ local function runMainLoop()
             reconcilePets()
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
+            end
+            if navLoaded() and not navMeshLoaded() then
+                mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+                print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Pathing and navigation require a valid zone mesh.', curZone))
             end
         end
         if reDetectRequested then
