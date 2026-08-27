@@ -8425,7 +8425,12 @@ fullStop = function()
     stopMoving()
     if not ctrl.running and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if not ctrl.running and mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-    if not ctrl.running then revertAttackModeToMelee() end
+    -- Deliberately NOT reverting server attackmode to melee here: pausing
+    -- or stopping the script should preserve whatever attack mode
+    -- (melee/ranged) was active, not force it back. revertAttackModeToMelee()
+    -- is still called on an explicit combat_style change to Melee/Spell
+    -- (radio button, /ac style command) -- that's a real user choice, unlike
+    -- a pause/stop.
     if isCasting() then
         mq.cmd('/stopsong')
         mq.cmd('/stopcast')

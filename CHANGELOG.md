@@ -27,6 +27,9 @@
 - **Luacheck Static Analysis Fix (`triune.lua`).**
   - **Shadowed `locKey` Variable**: Removed redundant duplicate `local locKey` declaration in `runtime.moveTowardLoc`, resolving a static analysis shadowing warning and ensuring a clean zero-warning Luacheck run across all files.
 
+- **Preserve Server Attack Mode On Pause/Stop (`triune.lua`).**
+  - `fullStop()` unconditionally called `revertAttackModeToMelee()` whenever the script stopped or paused, forcing `#attackmode melee` on the server even for a Ranged/Spell character just being paused. Removed -- server attack mode now stays whatever it was. `revertAttackModeToMelee()` is still called on an explicit combat-style change to Melee/Spell (radio button, `/ac style`), which is a real user choice, not a pause.
+
 ---
 
 ## 2026-08-25
