@@ -1,4 +1,4 @@
-# Triune AutoCombat Change Log
+﻿# Triune AutoCombat Change Log
 
 ## 2026-08-27
 
@@ -47,7 +47,7 @@
 ## 2026-08-24
 
 - **Intelligent Closer-NPC Retargeting & Directional Arc Filtering (`triune.lua`, v1.7.2).**
-  - **Configurable Retarget Limits (`ctrl.max_closer_retargets`)**: Replaced the rigid single-switch lock with a configurable slider (`0–5`, default `1` / `0` to disable). Allows players in massive open zones to progressively retarget to closer mobs while retaining strict loop limits.
+  - **Configurable Retarget Limits (`ctrl.max_closer_retargets`)**: Replaced the rigid single-switch lock with a configurable slider (`0â€“5`, default `1` / `0` to disable). Allows players in massive open zones to progressively retarget to closer mobs while retaining strict loop limits.
   - **Forward Arc Cone Gate (`runtime.isHeadingInForwardCone`, `runtime.isSpawnInForwardCone`)**: Filters candidates using a $\pm 75^\circ$ forward movement vector calculation. Prevents characters from turning $180^\circ$ backwards to chase mobs that spawned behind them after passing.
   - **Proximity Scan Throttling (`ctrl.closer_scan_interval`)**: Throttles closer-mob proximity searches to 1.0s intervals during transit, eliminating micro-stutters and reducing CPU load in mob-dense areas.
   - **Line-of-Sight Priority (`ctrl.closer_los_priority`)**: If the current distant target is obstructed behind a corner/wall while a closer candidate has clear Line of Sight, relaxes distance-saving thresholds (to 15 units closer and $\le 85\%$ distance) to prioritize immediately engageable mobs.
@@ -108,12 +108,12 @@
 - **Automated Clickie Item Management Tab (`triune.lua`, v1.7.0).**
   - **Dedicated Clickies Tab (`UI.drawClickieTab`)**: Added a full-featured "Clickies" tab alongside Spell Gems and Abilities & AAs for managing clickable inventory, bag, and worn items.
   - **Dynamic Cursor Item Addition (`addClickieFromCursor`)**: Added `+ Add Item on Cursor` button that inspects the currently held item on the player's cursor, validates its clickable spell effect (`it.Clicky` / `it.Spell`), extracts spell metadata, and assigns smart default triggers (`F: Myself` + `missing buff` for beneficial effects, `E: Current Target` + `in combat` for offensive effects).
-  - **Per-Item Trigger Rules & Controls**: Each clickie row includes enable/disable toggle, target dropdown (`TARGETS`), trigger condition dropdown (`WHENS`), threshold slider (`0–100%`), Min XTarget requirement (`1–10`), Burn Mode checkbox (`burn_only`), and priority reordering buttons (`▲` / `▼`).
+  - **Per-Item Trigger Rules & Controls**: Each clickie row includes enable/disable toggle, target dropdown (`TARGETS`), trigger condition dropdown (`WHENS`), threshold slider (`0â€“100%`), Min XTarget requirement (`1â€“10`), Burn Mode checkbox (`burn_only`), and priority reordering buttons (`â–²` / `â–¼`).
   - **Combat & Out-of-Combat Automation (`runtime.useClickie`)**: Seamlessly integrated clickie execution into `autocombatTick()`. Automates buff maintenance out of combat and emergency heals/offensive clickies in combat with item readiness verification (`Me.ItemReady` / timer check), movement guards, and throttle timers.
   - **Full Persistence Support**: Updated `collectEntry()`, `applyEntry()`, and `onCharacterChanged()` to save and restore `loadout.clickies` directly in `triune_loadout.lua`.
   - **Project Version Bump (v1.7.0)**: Bumped version to **1.7.0** across `triune.lua`, `triune_updater.lua`, and `README.md`.
 - **Minimum Pull HP % Threshold & Out-of-Combat Rest System (`triune.lua`).**
-  - **Configurable Min Pull HP % Setting (`ctrl.pull_min_hp_pct`)**: Added a slider (`Min Pull HP %`, 0–95%, default 0 / disabled) in both the Settings tab (under *Health & Mana Management*) and the Control tab (under *Puller Mode Controls*).
+  - **Configurable Min Pull HP % Setting (`ctrl.pull_min_hp_pct`)**: Added a slider (`Min Pull HP %`, 0â€“95%, default 0 / disabled) in both the Settings tab (under *Health & Mana Management*) and the Control tab (under *Puller Mode Controls*).
   - **Automated Out-of-Combat Resting (`checkPullHpRest`)**: When Puller mode is active (both *Hunt* and *Camp* submodes) and player HP drops below the threshold, pulling and waypoint navigation pause immediately, non-engaged targets are cleared, and the character sits out of combat until HP recovers to 100%.
   - **Combat & Aggro Safety Guards**: Integrates thorough checks (`isCombat()`, hostile XTargets, `Me.Combat()`, `CombatState == 'COMBAT'`). If an enemy attacks while resting, the character immediately stands up (`/stand`) and engages/defends without delay.
   - **Mini HUD Status Indicator**: Added `HP RESTING` badge in the compact Mini HUD when resting for HP.
@@ -163,7 +163,7 @@
 ## 2026-08-22
 
 - **Buffbot Configurable Tell Dispatch Delay & Menu Compaction (`triune_buffbot.lua`, v1.4).**
-  - **Configurable Outgoing Tell Dispatch Delay (`ctrl.tellDelayMs`)**: Increased the default outgoing tell interval from 1100ms to 2500ms (2.5 seconds) and added an interactive UI slider (`Tell Dispatch Delay (ms)`, 1000–5000ms) with character config persistence. Spacing out outgoing `/tell` packets prevents chat rate limiter kicks on servers with strict anti-flood protections.
+  - **Configurable Outgoing Tell Dispatch Delay (`ctrl.tellDelayMs`)**: Increased the default outgoing tell interval from 1100ms to 2500ms (2.5 seconds) and added an interactive UI slider (`Tell Dispatch Delay (ms)`, 1000â€“5000ms) with character config persistence. Spacing out outgoing `/tell` packets prevents chat rate limiter kicks on servers with strict anti-flood protections.
   - **Compact Tell Menu Chunking**: Increased line packing threshold in `sendMenuTells` from 75 to 100 characters, condensing memorized buff lists into fewer total messages (reducing overall chat packet volume).
   - **Requester Repeat Cooldown Increase**: Raised default per-character request repeat cooldown to 3 seconds (`ctrl.cooldownSec`) to prevent rapid-fire requests from queuing duplicate tell bursts.
 
@@ -172,10 +172,10 @@
 ## 2026-08-21
 
 - **Buffbot Disconnect Prevention & Anti-AFK Engine Overhaul (`triune_buffbot.lua`, v1.3).**
-  - **Simulated DirectInput Hardware Keystroke for Native IdleTimer Reset**: Overhauled the Anti-AFK pulse mechanism to issue `/nomodkey /keypress HOME` every 120 seconds. In EverQuest, slash commands like `/stand`, `/sit`, and `/afk off` do not generate DirectInput hardware events and fail to reset EverQuest's internal `IdleTimer` (`${EverQuest.IdleTime}`), causing the EQ client to auto-camp to Character Select after 15–45 minutes of inactivity. Simulating a harmless keypress directly resets the idle timer without breaking meditation or casting.
+  - **Simulated DirectInput Hardware Keystroke for Native IdleTimer Reset**: Overhauled the Anti-AFK pulse mechanism to issue `/nomodkey /keypress HOME` every 120 seconds. In EverQuest, slash commands like `/stand`, `/sit`, and `/afk off` do not generate DirectInput hardware events and fail to reset EverQuest's internal `IdleTimer` (`${EverQuest.IdleTime}`), causing the EQ client to auto-camp to Character Select after 15â€“45 minutes of inactivity. Simulating a harmless keypress directly resets the idle timer without breaking meditation or casting.
   - **Auto-Med Sitting Command Rate Limiting**: Added `lastSitAttemptTime` and a 2-3 second throttle to `/sit` execution across Auto-Med idle upkeep, pre-cast mana recovery, and post-cast meditation. Prevents the 100ms main loop from spamming rapid-fire `/sit` packets while waiting for server position acknowledgement, eliminating server-side stance flood and anti-warp kicks.
   - **GameState Validation Guard**: Added an `mq.TLO.MacroQuest.GameState() == 'INGAME'` check to wrap the main loop and mana meditation loops, cleanly yielding when zoning, logging in, or camping rather than executing commands into uninitialized game states.
-  - **Radius-Bounded & Capped Pet Discovery**: Constrained secondary and tertiary pet scanning in `getRequesterPets` to `pet radius <maxRange>` and capped inspection to 15 pets. Eliminates O(N²) full-zone linear scans and frame lag freezes in high-population hub zones (e.g. PoK, Guild Lobby) that caused UDP heartbeat timeout disconnects ("Server not responding").
+  - **Radius-Bounded & Capped Pet Discovery**: Constrained secondary and tertiary pet scanning in `getRequesterPets` to `pet radius <maxRange>` and capped inspection to 15 pets. Eliminates O(NÂ²) full-zone linear scans and frame lag freezes in high-population hub zones (e.g. PoK, Guild Lobby) that caused UDP heartbeat timeout disconnects ("Server not responding").
   - **Hail `/say` Rate Limiting**: Increased per-player hail cooldown to 5 seconds and global cooldown to 3 seconds to prevent chat packet flooding when multiple players hail simultaneously.
   - **Cast Bar Registration Verification**: Updated `processBuffQueue` to allow up to 800ms for `mq.TLO.Me.Casting()` to register before waiting for cast completion, preventing network ping from causing premature loop exits or ghost casts.
   - **Memory Table Pruning**: Added a periodic 10-minute maintenance cycle to prune stale entries from `runtime.cooldowns`, `lastTellBySender`, and `lastHailTimes` to guarantee low memory usage during long-running 24/7 sessions.
@@ -242,19 +242,19 @@
   - **Spell Pull**: Closes to `pull_engage_dist` (Engagement Distance slider), faces target, and casts the selected pull spell via `castGem()`. Engages once mob appears on XTarget. Respects spell gem selector and fallback detrimental search.
   - **Pet Pull**: Dispatches pets (`/pet attack` + `#petcmd attack all`) **during navigation** to the target with a 3-second throttle, rather than waiting until arrival. Pet hold is suppressed during approach. Considers mob tagged once on XTarget, pet has aggro, or within 35 units.
   - **Ranged Pull**: Closes to `pull_engage_dist`, then tries Throw Stone ability (`/doability "Throw Stone"`) first. Falls back to ranged weapon autofire (`/autofire on`) if Throw Stone unavailable. Falls back to melee (`/attack on`) if no ranged option exists.
-  - **Melee Pull**: Completely unchanged — walks to melee range and auto-attacks exactly as before.
+  - **Melee Pull**: Completely unchanged â€” walks to melee range and auto-attacks exactly as before.
   - **Stand Back extended to Hunt**: `pull_stand_back` checkbox and `desiredRange()` now apply to both Hunt and Camp submodes (was Camp-only). `isPullStandBack` gate in auto-attack and combat stall logic also extended.
   - **Post-pull combat_style transition**: After initial tag, `reqRange` switches from `pull_engage_dist` to `desiredRange()` (based on `combat_style`) so the player closes to melee range (Melee style) or stays at ranged distance (Ranged/Spell style) for the actual fight.
 - **Two-Tier Z-Plane NPC Target Acquisition Engine (`triune.lua`, v1.6.8).**
   - **Two-Tier Elevation Targeting**: Replaced single-pass proximity roaming with a tiered target acquisition system for Hunt mode (`findRoamTarget`).
     - **Tier 1 (Same Floor / Z Plane)**: First prioritizes NPCs on the player's immediate level/elevation within `ctrl.hunter_z_plane` (default 15 units) using MacroQuest's native `zradius` filter (`npc targetable radius %d zradius %d`) and delta Z validation. Prevents the engine from acquiring mobs on lower/upper floors when valid targets exist on the current level.
     - **Tier 2 (Max Z Range Expansion)**: If (and only if) no valid candidates exist on the player's immediate level, expands vertical scanning up to `ctrl.hunter_z` (default 75 units) to engage mobs on other floors and ledges.
-  - **Interactive Floor Height Slider**: Added `Floor Height (Z Plane)` slider (5–50 units, default 15) to the Control tab under Puller (Hunt) settings, with detailed tooltip documentation.
+  - **Interactive Floor Height Slider**: Added `Floor Height (Z Plane)` slider (5â€“50 units, default 15) to the Control tab under Puller (Hunt) settings, with detailed tooltip documentation.
   - **Slash Command Controls**: Added `/ac zplane [5-100]` (aliases `/ac huntplane`, `/ac floorz`) to adjust Tier 1 floor height and `/ac huntz [10-300]` (alias `/ac z`) to adjust Tier 2 max vertical difference.
   - **Diagnostic Telemetry**: Enhanced idle search status messages to output both Max Z and Floor Z thresholds (e.g. `(Lvl 1-100, Radius 1500, Max Z 75, Floor Z 15)`).
   - **Configuration Persistence**: Added `ctrl.hunter_z_plane` to character loadout serialization and profile migration in `triune_loadout.lua`.
 - **Configurable Melee Range Slider & Dynamic Strike Distance (`triune.lua`, v1.6.7).**
-  - **Interactive Melee Range Slider**: Added a dedicated `Melee Distance##meleeRangeSlider` slider (5–50 units, default 14) under the Settings tab's Combat Style section on a dedicated row with explicit `changed` detection and auto-saving.
+  - **Interactive Melee Range Slider**: Added a dedicated `Melee Distance##meleeRangeSlider` slider (5â€“50 units, default 14) under the Settings tab's Combat Style section on a dedicated row with explicit `changed` detection and auto-saving.
   - **Direct Melee Positioning & Reach Logic (`maxMeleeDistance` & `desiredRange`)**: Overhauled `maxMeleeDistance(id)` and `desiredRange(id)` to directly use the user-configured `ctrl.melee_dist`. The bot now reliably navigates to and sticks at the exact desired melee distance (e.g. 8 for tight stick, 20 for loose melee), bounded safely by mob hitbox limits without ignoring user inputs.
   - **Fixed Reposition & Arrival Distance Stalls**: Fixed `moveToward()` and `repositionCloser()` calculating destination distance from inflated `MaxRangeTo` values (e.g. 70 units), which caused Nav to falsely declare destination reached while 50+ units away from the mob and stall in "Target too far away" loops. Repositioning now always drives the character closer into `desiredRange(id)`.
   - **Loadout Configuration Persistence**: Added `ctrl.melee_dist` to character profile serialization in `triune_loadout.lua`.
@@ -395,7 +395,7 @@
   - **Fixed Premature Nav Arrival Shortcut**: Removed the `d <= dist + 20` bypass in `moveToward()` which was causing characters to declare arrival 35+ units away from mobs on XTarget, halting movement before reaching actual melee range and firing spells from distance. Movement now drives all the way to `desiredRange(id)` before stopping and attacking.
   - **Live Combat Diagnostic Telemetry & `/ac debug`**: Added live combat diagnostic logging across all modes (`Manual`, `Puller`, `Assist`), printing real-time target details, 3D distance, melee reach, LoS, navigation plugin states, attack engagement, and cast states to chat. Added `/ac debug` slash command to quickly toggle diagnostics.
   - **Scoped `pull_stand_back` Strictly to Puller Camp Submode**: Fixed an issue where `desiredRange()` returned 100 in `Puller (Hunt)` mode because `ctrl.submode == 'Camp'` was missing from the check. This caused the bot to stop 96-97 units away from mobs in Hunt mode. Also clamped melee repositioning to max 14 units.
-  - Fixed crash: `isHostileTarget` was called in `setTarget` (line 4070) but defined as a `local function` 300 lines later — added forward declaration.
+  - Fixed crash: `isHostileTarget` was called in `setTarget` (line 4070) but defined as a `local function` 300 lines later â€” added forward declaration.
 
 
 - **Project Version & Documentation Overhaul (v1.6.1).**
@@ -422,7 +422,7 @@
   - **Live Dynamic Scan Radius Circle**: Uses `/mapfilter castradius` to render a scan radius circle on the map that dynamically follows your character in real-time as you move.
 
 - **Waypoint Scan Radius Controls & Slash Commands.**
-  - **Interactive Scan Radius Slider**: Added a dedicated `Scan Radius` slider (20–500 units) in the Puller Waypoint Patrol panel alongside the arrival radius slider.
+  - **Interactive Scan Radius Slider**: Added a dedicated `Scan Radius` slider (20â€“500 units) in the Puller Waypoint Patrol panel alongside the arrival radius slider.
   - **New Slash Commands**: Added `/ac wp scan [20-500]` and `/ac wp radius [5-100]` to tweak patrol search and arrival distances on the fly from chat.
 
 - **Combat Engine Stability & Safety Fixes.**
@@ -498,7 +498,7 @@
 
 - **Customizable Pull Methods for Puller Mode.**
   - **4 Pull Styles**: Choose between **Melee** (runs up and attacks), **Spell** (casts a chosen spell gem), **Pet** (sends pet to tag from 100 units), or **Ranged** (shoots with bow/throwing).
-  - **Engagement Distance Slider (15–250 units)**: Customize how close the puller approaches before casting a pull spell, shooting, or sending pets.
+  - **Engagement Distance Slider (15â€“250 units)**: Customize how close the puller approaches before casting a pull spell, shooting, or sending pets.
   - **Stand Back (Pet Tank / Ranged) Mode**: Lets pets tank while your character stays safely at range without entering melee.
   - **Puller Target Lists**: Integrated Whitelist (**NPCs to Pull**) and Blacklist (**NPCs to Ignore**) directly into the Puller UI.
 
