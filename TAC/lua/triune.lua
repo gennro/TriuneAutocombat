@@ -7327,7 +7327,6 @@ function runtime.moveTowardLoc(x, y, z, dist)
     end
 
     local locStr = string.format('loc %.2f %.2f %.2f', y, x, z) -- Y X Z, matches EQ standard
-    local locKey = string.format('%.1f_%.1f_%.1f', y, x, z)
 
     if navLoaded() then
         local navActive = false

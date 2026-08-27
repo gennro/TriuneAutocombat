@@ -1,4 +1,4 @@
-﻿# Triune AutoCombat Change Log
+# Triune AutoCombat Change Log
 
 ## 2026-08-27
 
@@ -23,6 +23,9 @@
   - **Global Top-Level Action Buttons (`UI.drawActionControls`)**: Moved the main `START` / `PAUSE` and `BURN (ON)` / `BURN (OFF)` action buttons out of the `Control` tab and placed them at the top of the main Triune window above all tabs, ensuring combat controls are immediately accessible regardless of active tab.
   - **Character Classes & Loadout in Settings Tab (`UI.drawSettingsTab`)**: Relocated the `Character Classes & Loadout` collapsible header and class picker dropdowns from the top-level window into the `Settings` tab (`ImGuiTreeNodeFlags.DefaultOpen`), decluttering the top window header and organizing loadout configuration with other character settings.
   - **Clean Control Tab Layout (`UI.drawControlTab`)**: Streamlined the `Control` tab to focus exclusively on combat modes, submodes, camp controls, waypoint routing, and target management.
+
+- **Luacheck Static Analysis Fix (`triune.lua`).**
+  - **Shadowed `locKey` Variable**: Removed redundant duplicate `local locKey` declaration in `runtime.moveTowardLoc`, resolving a static analysis shadowing warning and ensuring a clean zero-warning Luacheck run across all files.
 
 ---
 
