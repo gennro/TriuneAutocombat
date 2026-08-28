@@ -66,6 +66,8 @@ Triune keeps things simple with **3 main combat modes**:
 - **Map Path Lines**: Your waypoint route and arrival circles are drawn directly on your in-game EverQuest map so you can see exactly where your character will walk.
 - **Pause & Resume**: Whenever a mob is spotted, patrol pauses to fight. Once the mob dies, patrol picks right back up where it left off.
 - **Easy Setup**: Click **Add Current Location** to drop waypoints as you walk, or use chat commands like `/ac wp add`.
+- **Per-Zone Saving & Named Presets**: Your route and settings auto-save per zone and reload the next time you enter it. Save named presets (e.g. `<name> - <zone>`) from a dropdown to keep multiple routes per zone and switch between them with Load/Edit/Delete.
+- **Export & Share Routes**: Export a named preset as a copy/paste string to share with guildmates; Import pastes one back in, filed under whichever zone it was made for.
 
 ---
 

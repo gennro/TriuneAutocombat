@@ -232,6 +232,8 @@ local function sanitizeModeConfig(c)
     if c.nav_proactive_doors == nil then c.nav_proactive_doors = true end
     if c.nav_levitation_clear == nil then c.nav_levitation_clear = true end
     if type(c.zone_hazards) ~= 'table' then c.zone_hazards = {} end
+    if type(c.zone_waypoints) ~= 'table' then c.zone_waypoints = {} end
+    if type(c.zone_waypoint_presets) ~= 'table' then c.zone_waypoint_presets = {} end
 
     if type(c.pull_con_filter) ~= 'table' then
         c.pull_con_filter = {}
@@ -333,7 +335,9 @@ local function defaultCtrl()
         waypoint_direction       = 1,
         waypoint_loop            = false,
         current_waypoint_idx     = 1,
-        waypoints                = {}
+        waypoints                = {},
+        zone_waypoints           = {},
+        zone_waypoint_presets    = {}
     }
 end
 ctrl = defaultCtrl()
@@ -2133,6 +2137,100 @@ local function applyEntry(e)
     end
 end
 
+-- Waypoints are plain {name,x,y,z} tables with no nesting -- a per-entry
+-- shallow copy is enough to keep a saved zone/preset snapshot from aliasing
+-- the live ctrl.waypoints list (so editing one doesn't silently edit the other).
+local function copyWaypointList(list)
+    local out = {}
+    for i, wp in ipairs(list or {}) do
+        out[i] = { name = wp.name, x = wp.x, y = wp.y, z = wp.z }
+    end
+    return out
+end
+
+-- ============================================================================
+-- Waypoint preset export/import string helpers
+-- ============================================================================
+-- Exported strings look like "TACWP1:<base64>". The number after TACWP is a
+-- schema version (independent of the addon's own version -- it only bumps if
+-- this payload layout changes), so an import from a newer Triune can be
+-- rejected with a clear message instead of being misread.
+--
+-- The base64 payload is plain fielded data, NEVER Lua source -- it must only
+-- ever be parsed by splitByChar()/tonumber() below, never handed to
+-- load()/loadstring(). These strings get pasted from other players, so
+-- treating them as data instead of code is the whole point.
+--
+-- Fields are joined with \30 (record separator) and \31 (unit separator,
+-- used inside each waypoint's own 4 fields) -- both control characters a
+-- player can't type into a name field, so sanitizeWpField() strips any stray
+-- control characters before a field is written out, guaranteeing they can
+-- never collide with our own delimiters.
+local WP_EXPORT_VERSION = 1
+local WP_EXPORT_PREFIX  = 'TACWP' .. WP_EXPORT_VERSION .. ':'
+local WP_RS = string.char(30)
+local WP_US = string.char(31)
+
+local B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+local B64_LOOKUP = {}
+for i = 1, #B64_CHARS do B64_LOOKUP[B64_CHARS:sub(i, i)] = i - 1 end
+
+local function sanitizeWpField(s)
+    return (tostring(s or ''):gsub('%c', ''))
+end
+
+local function base64Encode(data)
+    local out = {}
+    local len = #data
+    for i = 1, len, 3 do
+        local b1, b2, b3 = data:byte(i, i + 2)
+        b2 = b2 or 0
+        b3 = b3 or 0
+        local n = b1 * 65536 + b2 * 256 + b3
+        local rem = math.min(3, len - i + 1)
+        out[#out + 1] = B64_CHARS:sub(math.floor(n / 262144) % 64 + 1, math.floor(n / 262144) % 64 + 1)
+        out[#out + 1] = B64_CHARS:sub(math.floor(n / 4096) % 64 + 1, math.floor(n / 4096) % 64 + 1)
+        out[#out + 1] = (rem >= 2) and B64_CHARS:sub(math.floor(n / 64) % 64 + 1, math.floor(n / 64) % 64 + 1) or '='
+        out[#out + 1] = (rem >= 3) and B64_CHARS:sub(n % 64 + 1, n % 64 + 1) or '='
+    end
+    return table.concat(out)
+end
+
+local function base64Decode(str)
+    str = tostring(str or ''):gsub('[^A-Za-z0-9%+%/%=]', '')
+    local out = {}
+    local i = 1
+    local slen = #str
+    while i + 3 <= slen do
+        local c1 = B64_LOOKUP[str:sub(i, i)]
+        local c2 = B64_LOOKUP[str:sub(i + 1, i + 1)]
+        local s3, s4 = str:sub(i + 2, i + 2), str:sub(i + 3, i + 3)
+        local c3, c4 = B64_LOOKUP[s3], B64_LOOKUP[s4]
+        if not c1 or not c2 then return nil end
+        local n = c1 * 262144 + c2 * 4096 + (c3 or 0) * 64 + (c4 or 0)
+        out[#out + 1] = string.char(math.floor(n / 65536) % 256)
+        if s3 ~= '=' and c3 then out[#out + 1] = string.char(math.floor(n / 256) % 256) end
+        if s4 ~= '=' and c4 then out[#out + 1] = string.char(n % 256) end
+        i = i + 4
+    end
+    return table.concat(out)
+end
+
+local function splitByChar(s, sep)
+    local out = {}
+    local start = 1
+    while true do
+        local idx = s:find(sep, start, true)
+        if not idx then
+            out[#out + 1] = s:sub(start)
+            break
+        end
+        out[#out + 1] = s:sub(start, idx - 1)
+        start = idx + 1
+    end
+    return out
+end
+
 local function loadAll()
     local fn = loadfile(cfg .. '/triune_loadout.lua')
     if not fn then return end
@@ -2142,7 +2240,26 @@ local function loadAll()
         if type(ALLDATA.__ignore) == 'table' then runtime.ignoreList = ALLDATA.__ignore end
         if type(ALLDATA.__pullList) == 'table' then runtime.pullList = ALLDATA.__pullList end
         if type(ALLDATA.__zoneHazards) == 'table' then ctrl.zone_hazards = ALLDATA.__zoneHazards end
+        if type(ALLDATA.__zoneWaypoints) == 'table' then ctrl.zone_waypoints = ALLDATA.__zoneWaypoints end
+        if type(ALLDATA.__zoneWaypointPresets) == 'table' then ctrl.zone_waypoint_presets = ALLDATA.__zoneWaypointPresets end
     end
+end
+
+-- Snapshots the live waypoint list/settings into ctrl.zone_waypoints for the
+-- current zone (shared across all characters, like zone_hazards). Called from
+-- saveLoadout() so it stays current without needing to be hooked into every
+-- individual waypoint-editing call site.
+local function syncCurrentZoneWaypoints()
+    local zs
+    pcall(function() zs = mq.TLO.Zone.ShortName() end)
+    if not zs or zs == '' then return end
+    if not ctrl.zone_waypoints then ctrl.zone_waypoints = {} end
+    ctrl.zone_waypoints[zs] = {
+        waypoints            = copyWaypointList(ctrl.waypoints),
+        waypoint_radius      = ctrl.waypoint_radius,
+        waypoint_scan_radius = ctrl.waypoint_scan_radius,
+        waypoint_loop        = ctrl.waypoint_loop,
+    }
 end
 
 local function saveLoadout(silent)
@@ -2150,6 +2267,9 @@ local function saveLoadout(silent)
     ALLDATA.__ignore = runtime.ignoreList
     ALLDATA.__pullList = runtime.pullList
     ALLDATA.__zoneHazards = ctrl.zone_hazards
+    syncCurrentZoneWaypoints()
+    ALLDATA.__zoneWaypoints = ctrl.zone_waypoints
+    ALLDATA.__zoneWaypointPresets = ctrl.zone_waypoint_presets
     local f = io.open(cfg .. '/triune_loadout.lua', 'w')
     if not f then return end
     f:write('return '); serialize(ALLDATA, f, 1); f:close()
@@ -2396,6 +2516,245 @@ function runtime.wpMoveDown(idx)
     end
     saveLoadout(true)
     runtime.syncWaypointMapLines()
+    return true
+end
+
+-- ============================================================================
+-- Per-Zone Waypoint Routes & Named Presets
+-- ============================================================================
+-- "Current" (ctrl.zone_waypoints, keyed by zone) auto-tracks whatever route/
+-- settings are live in each zone -- see syncCurrentZoneWaypoints() above and
+-- runtime.loadZoneWaypoints() below (called from onZoned()). Named presets
+-- (ctrl.zone_waypoint_presets) are explicit user-saved snapshots on top of
+-- that, also keyed by zone, shared across all characters like zone_hazards.
+
+function runtime.getZoneDisplayName(zs)
+    local nm
+    pcall(function() nm = mq.TLO.Zone.LongName() end)
+    if not nm or nm == '' then nm = zs end
+    return tostring(nm)
+end
+
+-- Applies the zone's auto-saved "Current" route (if any) into the live
+-- ctrl.waypoints/settings. No-op if nothing has been saved for this zone yet
+-- -- whatever's already loaded is left alone rather than cleared.
+function runtime.loadZoneWaypoints(zs)
+    zs = zs or runtime.getCurrentZoneShortName()
+    local saved = ctrl.zone_waypoints and ctrl.zone_waypoints[zs]
+    if not saved then return false end
+    ctrl.waypoints            = copyWaypointList(saved.waypoints)
+    ctrl.waypoint_radius      = saved.waypoint_radius or ctrl.waypoint_radius
+    ctrl.waypoint_scan_radius = saved.waypoint_scan_radius or ctrl.waypoint_scan_radius
+    ctrl.waypoint_loop        = saved.waypoint_loop or false
+    ctrl.current_waypoint_idx = 1
+    ctrl.waypoint_direction   = 1
+    runtime.wpSelectedPreset  = nil
+    runtime.syncWaypointMapLines(zs, true)
+    return true
+end
+
+function runtime.wpPresetsForZone(zs)
+    zs = zs or runtime.getCurrentZoneShortName()
+    if not ctrl.zone_waypoint_presets then ctrl.zone_waypoint_presets = {} end
+    if not ctrl.zone_waypoint_presets[zs] then ctrl.zone_waypoint_presets[zs] = {} end
+    return ctrl.zone_waypoint_presets[zs]
+end
+
+-- Inserts/overwrites `snapshot` (must have a .name) into the given zone's
+-- preset list, keyed by name. Shared by manual Save and Import.
+local function upsertZonePreset(zs, snapshot)
+    local list = runtime.wpPresetsForZone(zs)
+    for i, p in ipairs(list) do
+        if p.name == snapshot.name then
+            list[i] = snapshot
+            saveLoadout(true)
+            return
+        end
+    end
+    table.insert(list, snapshot)
+    saveLoadout(true)
+end
+
+-- Saving over an existing name overwrites that preset in place.
+function runtime.wpPresetSave(name)
+    name = tostring(name or ''):match('^%s*(.-)%s*$')
+    if name == '' then return false, 'Enter a name for the preset.' end
+    local zs = runtime.getCurrentZoneShortName()
+    upsertZonePreset(zs, {
+        name                 = name,
+        zoneName             = runtime.getZoneDisplayName(zs),
+        waypoints            = copyWaypointList(ctrl.waypoints),
+        waypoint_radius      = ctrl.waypoint_radius,
+        waypoint_scan_radius = ctrl.waypoint_scan_radius,
+        waypoint_loop        = ctrl.waypoint_loop,
+    })
+    return true, nil, name
+end
+
+function runtime.wpPresetLoad(name)
+    local zs = runtime.getCurrentZoneShortName()
+    local list = runtime.wpPresetsForZone(zs)
+    for _, p in ipairs(list) do
+        if p.name == name then
+            ctrl.waypoints            = copyWaypointList(p.waypoints)
+            ctrl.waypoint_radius      = p.waypoint_radius or ctrl.waypoint_radius
+            ctrl.waypoint_scan_radius = p.waypoint_scan_radius or ctrl.waypoint_scan_radius
+            ctrl.waypoint_loop        = p.waypoint_loop or false
+            ctrl.current_waypoint_idx = 1
+            ctrl.waypoint_direction   = 1
+            runtime.syncWaypointMapLines(zs, true)
+            saveLoadout(true) -- also refreshes this zone's "Current" snapshot to match
+            return true
+        end
+    end
+    return false
+end
+
+function runtime.wpPresetDelete(name)
+    local zs = runtime.getCurrentZoneShortName()
+    local list = runtime.wpPresetsForZone(zs)
+    for i, p in ipairs(list) do
+        if p.name == name then
+            table.remove(list, i)
+            saveLoadout(true)
+            return true
+        end
+    end
+    return false
+end
+
+function runtime.wpPresetRename(oldName, newName)
+    newName = tostring(newName or ''):match('^%s*(.-)%s*$')
+    if newName == '' then return false, 'Enter a new name.' end
+    local zs = runtime.getCurrentZoneShortName()
+    local list = runtime.wpPresetsForZone(zs)
+    for _, p in ipairs(list) do
+        if p.name == newName and p.name ~= oldName then
+            return false, 'A preset with that name already exists.'
+        end
+    end
+    for _, p in ipairs(list) do
+        if p.name == oldName then
+            p.name = newName
+            saveLoadout(true)
+            return true, nil, newName
+        end
+    end
+    return false
+end
+
+-- Exports a named preset as a shareable "TACWP1:..." string. Only named
+-- presets can be exported (not the auto-tracked "Current" state) so every
+-- export always carries a name for the recipient to import under.
+function runtime.wpPresetExport(name)
+    name = tostring(name or ''):match('^%s*(.-)%s*$')
+    if name == '' then return nil, 'Select a preset to export first.' end
+    local zs = runtime.getCurrentZoneShortName()
+    local snap
+    for _, p in ipairs(runtime.wpPresetsForZone(zs)) do
+        if p.name == name then snap = p break end
+    end
+    if not snap then return nil, 'Preset not found.' end
+    if not snap.waypoints or #snap.waypoints == 0 then
+        return nil, 'That preset has no waypoints in it.'
+    end
+
+    local fields = {
+        sanitizeWpField(snap.name),
+        sanitizeWpField(zs or ''),
+        sanitizeWpField(snap.zoneName or runtime.getZoneDisplayName(zs)),
+        string.format('%.2f', snap.waypoint_radius or 0),
+        string.format('%.2f', snap.waypoint_scan_radius or 0),
+        snap.waypoint_loop and '1' or '0',
+    }
+    local payload = { table.concat(fields, WP_RS) }
+    for _, wp in ipairs(snap.waypoints) do
+        payload[#payload + 1] = table.concat({
+            sanitizeWpField(wp.name or ''),
+            string.format('%.2f', wp.x or 0),
+            string.format('%.2f', wp.y or 0),
+            string.format('%.2f', wp.z or 0),
+        }, WP_US)
+    end
+    return WP_EXPORT_PREFIX .. base64Encode(table.concat(payload, WP_RS))
+end
+
+-- Parses an exported string WITHOUT writing anything -- callers decide what
+-- to do next (e.g. confirm before overwriting a same-named preset). Never
+-- executes the string as code; only tonumber()/splitByChar() touch it.
+function runtime.wpPresetParseImport(str)
+    str = tostring(str or ''):match('^%s*(.-)%s*$')
+    if str == '' then return nil, 'Paste an exported waypoint string first.' end
+
+    local versionStr, body = str:match('^TACWP(%d+):(.+)$')
+    if not versionStr then return nil, 'Not a recognized Triune waypoint string.' end
+    local version = tonumber(versionStr)
+    if version ~= WP_EXPORT_VERSION then
+        return nil, string.format(
+            'This string uses waypoint format v%s, but this version of Triune only supports v%d. Update Triune and try again.',
+            versionStr, WP_EXPORT_VERSION)
+    end
+
+    local payload = base64Decode(body)
+    if not payload or payload == '' then
+        return nil, 'Could not decode that string -- it looks corrupted or incomplete.'
+    end
+
+    local parts = splitByChar(payload, WP_RS)
+    if #parts < 6 then return nil, 'That string is missing data -- it looks corrupted or incomplete.' end
+
+    local name, zoneShort, zoneDisplay = parts[1], parts[2], parts[3]
+    local radius = tonumber(parts[4])
+    local scanRadius = tonumber(parts[5])
+    if name == '' then return nil, 'That string has no preset name in it -- it looks corrupted.' end
+    if zoneShort == '' or not radius or not scanRadius then
+        return nil, 'That string is missing data -- it looks corrupted or incomplete.'
+    end
+
+    local waypoints = {}
+    for i = 7, #parts do
+        local wpFields = splitByChar(parts[i], WP_US)
+        local wx, wy, wz = tonumber(wpFields[2]), tonumber(wpFields[3]), tonumber(wpFields[4])
+        if not (wx and wy and wz) then
+            return nil, 'That string is missing data -- it looks corrupted or incomplete.'
+        end
+        waypoints[#waypoints + 1] = { name = wpFields[1] or '', x = wx, y = wy, z = wz }
+    end
+    if #waypoints == 0 then return nil, 'That string has no waypoints in it.' end
+
+    local currentZs = runtime.getCurrentZoneShortName()
+    local collision = false
+    for _, p in ipairs(runtime.wpPresetsForZone(zoneShort)) do
+        if p.name == name then collision = true break end
+    end
+
+    return {
+        name                 = name,
+        zoneShort            = zoneShort,
+        zoneDisplay          = zoneDisplay ~= '' and zoneDisplay or zoneShort,
+        waypoint_radius      = radius,
+        waypoint_scan_radius = scanRadius,
+        waypoint_loop        = parts[6] == '1',
+        waypoints            = waypoints,
+        zoneMismatch         = (currentZs ~= '' and currentZs ~= zoneShort),
+        currentZoneDisplay   = runtime.getZoneDisplayName(currentZs),
+        collision            = collision,
+    }
+end
+
+-- Writes a pending import (from wpPresetParseImport) into that zone's preset
+-- list, overwriting any same-named preset. Callers are expected to have
+-- already confirmed the overwrite with the user when pending.collision is true.
+function runtime.wpPresetCommitImport(pending)
+    if not pending then return false end
+    upsertZonePreset(pending.zoneShort, {
+        name                 = pending.name,
+        zoneName             = pending.zoneDisplay,
+        waypoints            = copyWaypointList(pending.waypoints),
+        waypoint_radius      = pending.waypoint_radius,
+        waypoint_scan_radius = pending.waypoint_scan_radius,
+        waypoint_loop        = pending.waypoint_loop,
+    })
     return true
 end
 
@@ -4363,6 +4722,187 @@ function UI.drawControlTab()
                     .. 'after the last one. Off (default), patrol bounces back and forth,\n'
                     .. 'reversing direction at each end.')
             end
+
+            ImGui.Dummy(0, 4)
+            do
+                local zs = runtime.getCurrentZoneShortName()
+                local zoneDisplay = runtime.getZoneDisplayName(zs)
+                local presets = runtime.wpPresetsForZone(zs)
+                local options = { 'Current' }
+                for _, p in ipairs(presets) do
+                    options[#options + 1] = string.format('%s - %s', p.name, p.zoneName or zoneDisplay)
+                end
+                local curIdx = 1
+                if runtime.wpSelectedPreset then
+                    for i, p in ipairs(presets) do
+                        if p.name == runtime.wpSelectedPreset then curIdx = i + 1; break end
+                    end
+                    if curIdx == 1 then runtime.wpSelectedPreset = nil end -- selection no longer exists (e.g. deleted)
+                end
+                ImGui.SetNextItemWidth(220)
+                local newIdx = ImGui.Combo('##wpPresetCombo', curIdx, options)
+                if newIdx ~= curIdx then
+                    runtime.wpSelectedPreset = (newIdx > 1) and presets[newIdx - 1].name or nil
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Named waypoint presets saved for this zone (' .. zoneDisplay .. ').')
+                end
+
+                ImGui.SameLine()
+                if ImGui.Button('Save##wpPresetSaveBtn') then
+                    runtime.wpPresetNameInput = runtime.wpSelectedPreset or ''
+                    runtime.wpPresetModalMode = 'save'
+                    runtime.wpPresetModalOpen = true
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip(
+                        'Save the current waypoints/settings as a named preset for this zone.\n'
+                        .. 'Saving over an existing name overwrites it.')
+                end
+
+                local hasSelection = runtime.wpSelectedPreset ~= nil
+                if not hasSelection then ImGui.BeginDisabled() end
+                ImGui.SameLine()
+                if ImGui.Button('Load##wpPresetLoadBtn') then
+                    if runtime.wpSelectedPreset then runtime.wpPresetLoad(runtime.wpSelectedPreset) end
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Load the selected preset, overwriting the current waypoints/settings.')
+                end
+
+                ImGui.SameLine()
+                if ImGui.Button('Edit##wpPresetEditBtn') then
+                    runtime.wpPresetNameInput = runtime.wpSelectedPreset or ''
+                    runtime.wpPresetModalMode = 'rename'
+                    runtime.wpPresetModalOpen = true
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Rename the selected preset.')
+                end
+
+                ImGui.SameLine()
+                if ImGui.Button('Delete##wpPresetDeleteBtn') then
+                    if runtime.wpSelectedPreset then
+                        runtime.wpPresetDelete(runtime.wpSelectedPreset)
+                        runtime.wpSelectedPreset = nil
+                    end
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Delete the selected preset.')
+                end
+
+                ImGui.SameLine()
+                if ImGui.Button('Export##wpPresetExportBtn') then
+                    local str, err = runtime.wpPresetExport(runtime.wpSelectedPreset)
+                    if str then
+                        pcall(ImGui.SetClipboardText, str)
+                        print(string.format('\ag[Triune]\ax Copied waypoint preset "%s" to clipboard:', runtime.wpSelectedPreset))
+                        print(str)
+                    elseif err then
+                        print('\ay[Triune]\ax ' .. err)
+                    end
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Copy the selected preset to your clipboard as a shareable string.')
+                end
+                if not hasSelection then ImGui.EndDisabled() end
+
+                ImGui.Dummy(0, 4)
+                ImGui.SetNextItemWidth(320)
+                runtime.wpImportInput = ImGui.InputText('##wpImportInput', runtime.wpImportInput or '', 4096)
+                ImGui.SameLine()
+                if ImGui.Button('Import##wpPresetImportBtn') then
+                    local pending, err = runtime.wpPresetParseImport(runtime.wpImportInput)
+                    if not pending then
+                        print('\ay[Triune]\ax ' .. err)
+                    elseif pending.collision then
+                        runtime.wpImportPending = pending
+                        runtime.wpPresetModalMode = 'importConfirm'
+                        runtime.wpPresetModalOpen = true
+                    else
+                        runtime.wpPresetCommitImport(pending)
+                        runtime.wpSelectedPreset = pending.name
+                        runtime.wpImportInput = ''
+                        print(string.format('\ag[Triune]\ax Imported waypoint preset "%s" for %s.',
+                            pending.name, pending.zoneDisplay))
+                        if pending.zoneMismatch then
+                            print(string.format('\ay[Triune]\ax Note: this was exported from %s -- you are currently in %s.',
+                                pending.zoneDisplay, pending.currentZoneDisplay))
+                        end
+                    end
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Paste a waypoint string from Export, then click Import.')
+                end
+
+                if runtime.wpPresetModalOpen then
+                    runtime.wpPresetModalOpen = false
+                    if runtime.wpPresetModalMode == 'importConfirm' then
+                        ImGui.OpenPopup('Confirm Import##wpPresetImportConfirmPopup')
+                    else
+                        ImGui.OpenPopup('Waypoint Preset Name##wpPresetNamePopup')
+                    end
+                end
+
+                local _, importModalDraw = ImGui.BeginPopupModal('Confirm Import##wpPresetImportConfirmPopup', true,
+                    ImGuiWindowFlags.AlwaysAutoResize)
+                if importModalDraw then
+                    local p = runtime.wpImportPending
+                    if not p then
+                        ImGui.CloseCurrentPopup()
+                    else
+                        ImGui.Text(string.format('A preset named "%s" already exists for %s.', p.name, p.zoneDisplay))
+                        ImGui.Text('Importing will overwrite it.')
+                        if p.zoneMismatch then
+                            ImGui.Dummy(0, 2)
+                            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format(
+                                'Note: this was exported from %s -- you are currently in %s.',
+                                p.zoneDisplay, p.currentZoneDisplay))
+                        end
+                        if ImGui.Button('Overwrite##wpImportConfirmOk') then
+                            runtime.wpPresetCommitImport(p)
+                            runtime.wpSelectedPreset = p.name
+                            runtime.wpImportInput = ''
+                            runtime.wpImportPending = nil
+                            ImGui.CloseCurrentPopup()
+                        end
+                        ImGui.SameLine()
+                        if ImGui.Button('Cancel##wpImportConfirmCancel') then
+                            runtime.wpImportPending = nil
+                            ImGui.CloseCurrentPopup()
+                        end
+                    end
+                    ImGui.EndPopup()
+                end
+
+                local _, presetModalDraw = ImGui.BeginPopupModal('Waypoint Preset Name##wpPresetNamePopup', true,
+                    ImGuiWindowFlags.AlwaysAutoResize)
+                if presetModalDraw then
+                    ImGui.Text(runtime.wpPresetModalMode == 'rename' and 'Rename preset:' or 'Save preset as:')
+                    ImGui.SetNextItemWidth(240)
+                    runtime.wpPresetNameInput = ImGui.InputText('##wpPresetNameInput', runtime.wpPresetNameInput or '')
+                    if ImGui.Button('OK##wpPresetNameOk') then
+                        local ok, err, finalName
+                        if runtime.wpPresetModalMode == 'rename' then
+                            ok, err, finalName = runtime.wpPresetRename(runtime.wpSelectedPreset, runtime.wpPresetNameInput)
+                        else
+                            ok, err, finalName = runtime.wpPresetSave(runtime.wpPresetNameInput)
+                        end
+                        if ok then
+                            runtime.wpSelectedPreset = finalName
+                            ImGui.CloseCurrentPopup()
+                        elseif err then
+                            print('\ay[Triune]\ax ' .. err)
+                        end
+                    end
+                    ImGui.SameLine()
+                    if ImGui.Button('Cancel##wpPresetNameCancel') then
+                        ImGui.CloseCurrentPopup()
+                    end
+                    ImGui.EndPopup()
+                end
+            end
+            ImGui.Dummy(0, 4)
 
             if ImGui.Button('Add Current Location##addWpLoc') then
                 runtime.wpAdd()
@@ -8496,6 +9036,10 @@ onZoned = function()
     if ctrl.hunter_combat_loc then
         print('\ay[Triune]\ax zoned -- clearing Hunter combat anchor (it was set in the previous zone).')
         ctrl.hunter_combat_loc = nil
+    end
+    if runtime.loadZoneWaypoints() then
+        print(string.format('\ag[Triune]\ax Loaded saved waypoint route for %s (%d waypoint(s)).',
+            runtime.getZoneDisplayName(runtime.getCurrentZoneShortName()), #(ctrl.waypoints or {})))
     end
     local detected = classesFromInventoryWindow(false, true)
     if detected then

@@ -223,6 +223,13 @@ local MQSHORT = {
     BERSERKERS = 'Ber',
 }
 
+-- Waypoint export/import string constants (must match triune.lua's module-level definitions)
+local B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+local B64_LOOKUP = {}
+for i = 1, #B64_CHARS do B64_LOOKUP[B64_CHARS:sub(i, i)] = i - 1 end
+local WP_RS = string.char(30)
+local WP_US = string.char(31)
+
 -- ============================================================================
 -- 1.  idxOf(tbl, val)
 -- ============================================================================
@@ -545,6 +552,8 @@ local EXPECTED_FIELDS = {
     { 'waypoint_loop',           'boolean' },
     { 'current_waypoint_idx',    'number' },
     { 'waypoints',               'table' },
+    { 'zone_waypoints',          'table' },
+    { 'zone_waypoint_presets',   'table' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -1667,7 +1676,87 @@ local testMeshLoaded3 = loadFunc(src, 'navMeshLoaded', {
 })
 assert_eq(testMeshLoaded3(), false, 'navMeshLoaded: false when MeshLoaded returns false')
 
+-- ============================================================================
+-- 36. copyWaypointList (per-zone waypoint routes/presets)
+-- ============================================================================
+print('--- copyWaypointList ---')
+local copyWaypointList = loadFunc(src, 'copyWaypointList', {})
 
+do
+    local original = { { name = 'A', x = 1, y = 2, z = 3 }, { name = 'B', x = 4, y = 5, z = 6 } }
+    local copy = copyWaypointList(original)
+    assert_eq(#copy, 2, 'copyWaypointList: preserves length')
+    assert_eq(copy[1].name, 'A', 'copyWaypointList: preserves entry fields')
+    assert_eq(copy[2].z, 6, 'copyWaypointList: preserves entry fields (2)')
+    copy[1].name = 'Changed'
+    assert_eq(original[1].name, 'A', 'copyWaypointList: mutating the copy does not affect the original')
+end
+
+assert_eq(#copyWaypointList(nil), 0, 'copyWaypointList: nil input returns empty list')
+assert_eq(#copyWaypointList({}), 0, 'copyWaypointList: empty input returns empty list')
+
+-- ============================================================================
+-- sanitizeWpField (waypoint preset export/import)
+-- ============================================================================
+print('--- sanitizeWpField ---')
+local sanitizeWpField = loadFunc(src, 'sanitizeWpField', {})
+
+assert_eq(sanitizeWpField('Camp 1'), 'Camp 1', 'sanitizeWpField: leaves normal text untouched')
+assert_eq(sanitizeWpField('a' .. WP_RS .. 'b' .. WP_US .. 'c'), 'abc',
+    'sanitizeWpField: strips record/unit separator control characters')
+assert_eq(sanitizeWpField('a\tb\nc'), 'abc', 'sanitizeWpField: strips other control characters (tab/newline)')
+assert_eq(sanitizeWpField(nil), '', 'sanitizeWpField: nil input returns empty string')
+assert_eq(sanitizeWpField(123), '123', 'sanitizeWpField: coerces non-string input')
+
+-- ============================================================================
+-- base64Encode / base64Decode (waypoint preset export/import)
+-- ============================================================================
+print('--- base64Encode/base64Decode ---')
+local base64Encode = loadFunc(src, 'base64Encode', { B64_CHARS = B64_CHARS })
+local base64Decode = loadFunc(src, 'base64Decode', { B64_LOOKUP = B64_LOOKUP })
+
+assert_eq(base64Encode(''), '', 'base64Encode: empty input returns empty string')
+assert_eq(base64Encode('f'), 'Zg==', 'base64Encode: single byte pads with ==')
+assert_eq(base64Encode('fo'), 'Zm8=', 'base64Encode: two bytes pads with =')
+assert_eq(base64Encode('foo'), 'Zm9v', 'base64Encode: three bytes, no padding')
+assert_eq(base64Encode('foobar'), 'Zm9vYmFy', 'base64Encode: matches known reference value')
+
+assert_eq(base64Decode(''), '', 'base64Decode: empty input returns empty string')
+assert_eq(base64Decode('Zm9vYmFy'), 'foobar', 'base64Decode: matches known reference value')
+assert_eq(base64Decode('Zg=='), 'f', 'base64Decode: decodes single-byte padded input')
+
+do
+    local samples = { '', 'f', 'fo', 'foo', 'foobar', 'Camp 1' .. WP_RS .. '100.50' .. WP_US .. '-20.25' }
+    for _, s in ipairs(samples) do
+        assert_eq(base64Decode(base64Encode(s)), s, 'base64: round-trips ' .. string.format('%q', s))
+    end
+end
+
+-- ============================================================================
+-- splitByChar (waypoint preset export/import)
+-- ============================================================================
+print('--- splitByChar ---')
+local splitByChar = loadFunc(src, 'splitByChar', {})
+
+do
+    local parts = splitByChar('a' .. WP_RS .. 'b' .. WP_RS .. 'c', WP_RS)
+    assert_eq(#parts, 3, 'splitByChar: splits into the expected number of parts')
+    assert_eq(parts[1], 'a', 'splitByChar: preserves first field')
+    assert_eq(parts[2], 'b', 'splitByChar: preserves middle field')
+    assert_eq(parts[3], 'c', 'splitByChar: preserves last field')
+end
+
+do
+    local parts = splitByChar('onlyfield', WP_RS)
+    assert_eq(#parts, 1, 'splitByChar: no separator present returns single-element list')
+    assert_eq(parts[1], 'onlyfield', 'splitByChar: preserves the single field')
+end
+
+do
+    local parts = splitByChar('a' .. WP_RS .. WP_RS .. 'c', WP_RS)
+    assert_eq(#parts, 3, 'splitByChar: preserves empty fields between separators')
+    assert_eq(parts[2], '', 'splitByChar: empty field between two separators is an empty string')
+end
 
 -- ============================================================================
 -- Results
