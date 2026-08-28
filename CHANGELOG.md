@@ -221,6 +221,12 @@
 
 ---
 
+## 2026-08-28
+
+- **[Experimental] Ignore Distant XTargets When Pulling (`triune.lua`).**
+  - **New Puller (Hunt) Option (`ctrl.ignore_distant_xtargets`)**: Added a checkbox next to Max XTarget Chase Range. When checked, an XTarget enemy farther than that range is skipped entirely instead of being chased -- Puller looks for a different mob instead, rather than closing a long distance. Off by default, which keeps the existing behavior of widening the chase range to the search/waypoint scan radius so in-range XTargets aren't ignored.
+  - **Mostly Useful For Multi-Puller Groups**: When more than one puller is running, a groupmate's XTarget enemy can land on your own XTarget list far outside your effective range. Without this option, Puller (Hunt) will still chase it since the chase range widens to cover the whole search/waypoint area; with it checked, that distant enemy is left for whoever pulled it and your puller grabs a closer mob instead.
+
 ## 2026-08-27
 
 - **Critical Hit Floating Text Overlay (`triune.lua`).**
