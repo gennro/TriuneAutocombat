@@ -1880,6 +1880,65 @@ do
     assert_eq(zoneHazards[1].hits, 4, 'triune loadout sync: hazard hit count')
 end
 
+do
+    -- Triune Map Settings & Zoom Persistence Roundtrip
+    local function serializeVal(val, indent)
+        indent = indent or 1
+        local indStr = string.rep('  ', indent)
+        if type(val) == 'string' then
+            return string.format("%q", val)
+        elseif type(val) == 'number' or type(val) == 'boolean' then
+            return tostring(val)
+        elseif type(val) == 'table' then
+            local parts = {}
+            for k, v in pairs(val) do
+                local keyStr = (type(k) == 'number') and string.format("[%d]", k) or string.format("[%q]", tostring(k))
+                local valStr = serializeVal(v, indent + 1)
+                if valStr then
+                    parts[#parts + 1] = indStr .. keyStr .. " = " .. valStr
+                end
+            end
+            if #parts == 0 then return "{}" end
+            return "{\n" .. table.concat(parts, ",\n") .. "\n" .. string.rep('  ', indent - 1) .. "}"
+        end
+        return "nil"
+    end
+
+    local mapConfig = {
+        __global = {
+            customMapsDir = 'C:/CustomMaps',
+            selectedMapFolder = 'Brewall',
+        },
+        ['server_PlayerName'] = {
+            zoom = 1.45,
+            followPlayer = true,
+            showSearchRadius = true,
+            customSearchRadius = 350,
+            showNPCs = true,
+            colorModeIndex = 2,
+            layer0 = true,
+            layer1 = false,
+            useZFilter = true,
+            zFilterRange = 90,
+            lineThickness = 1.8,
+        }
+    }
+
+    local code = "return " .. serializeVal(mapConfig)
+    local fn, err = loadstring(code)
+    assert_true(fn ~= nil, 'map config serialization creates valid lua chunk')
+    if fn then
+        local restored = fn()
+        assert_eq(restored.__global.selectedMapFolder, 'Brewall', 'map config global selected folder restored')
+        local charCfg = restored['server_PlayerName']
+        assert_eq(charCfg.zoom, 1.45, 'map config zoom restored')
+        assert_eq(charCfg.customSearchRadius, 350, 'map config custom search radius restored')
+        assert_eq(charCfg.colorModeIndex, 2, 'map config color mode index restored')
+        assert_true(charCfg.useZFilter, 'map config z filter restored')
+        assert_eq(charCfg.zFilterRange, 90, 'map config z range restored')
+    end
+end
+
 -- ============================================================================
 -- Results
 -- ============================================================================

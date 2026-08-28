@@ -179,6 +179,10 @@ local state = {
     pathableOnly        = false,
     losOnly             = false,
 
+    -- Settings Persistence State
+    dirtySettings       = false,
+    dirtySettingsTime   = 0,
+
     -- Tooltip & Mouse Hover State
     hoveredMobId        = 0,
     cursorWorldX        = 0,
@@ -299,6 +303,197 @@ local actionQueue = {
     pendingStopNav      = false,
     pendingZoneReload   = false,
 }
+
+-- ============================================================================
+-- PERSISTENCE & CONFIGURATION (triune_map_config.lua in mq.configDir)
+-- ============================================================================
+local CONFIG_FILE = mq.configDir and (mq.configDir .. '/triune_map_config.lua') or 'triune_map_config.lua'
+
+local function serializeValue(val, indent)
+    indent = indent or 1
+    local indStr = string.rep('  ', indent)
+    if type(val) == 'string' then
+        return string.format("%q", val)
+    elseif type(val) == 'number' or type(val) == 'boolean' then
+        return tostring(val)
+    elseif type(val) == 'table' then
+        local parts = {}
+        for k, v in pairs(val) do
+            local keyStr = (type(k) == 'number') and string.format("[%d]", k) or string.format("[%q]", tostring(k))
+            local valStr = serializeValue(v, indent + 1)
+            if valStr then
+                parts[#parts + 1] = indStr .. keyStr .. " = " .. valStr
+            end
+        end
+        if #parts == 0 then return "{}" end
+        return "{\n" .. table.concat(parts, ",\n") .. "\n" .. string.rep('  ', indent - 1) .. "}"
+    end
+    return "nil"
+end
+
+local function charKey()
+    local myName, myServer = nil, nil
+    pcall(function()
+        myName   = mq.TLO.Me.CleanName()
+        myServer = mq.TLO.EverQuest.Server()
+    end)
+    return (myServer or 'default') .. '_' .. (myName or 'default')
+end
+
+local function saveConfig(silent)
+    if not CONFIG_FILE then return end
+    local allData = {}
+    local fn = loadfile(CONFIG_FILE)
+    if fn then
+        local ok, t = pcall(fn)
+        if ok and type(t) == 'table' then allData = t end
+    end
+
+    allData.__global = {
+        customMapsDir       = state.customMapsDir or '',
+        selectedMapFolder   = state.mapFolderNames[state.selectedFolderIndex] or '',
+    }
+
+    local activeFolder = state.mapFolderNames[state.selectedFolderIndex] or ''
+
+    allData[charKey()] = {
+        -- Viewport & Zoom
+        zoom                = viewport.zoom,
+        followPlayer        = ctrl.followPlayer,
+
+        -- Display & Layer Toggles
+        showLabels          = ctrl.showLabels,
+        showGrid            = ctrl.showGrid,
+        showNPCs            = ctrl.showNPCs,
+        showPCs             = ctrl.showPCs,
+        showGroup           = ctrl.showGroup,
+        showRaid            = ctrl.showRaid,
+        showPets            = ctrl.showPets,
+        showCorpses         = ctrl.showCorpses,
+        showNPCNames        = ctrl.showNPCNames,
+        showNavLine         = ctrl.showNavLine,
+        colorModeIndex      = ctrl.colorModeIndex,
+
+        -- Triune Overlays
+        showSearchRadius    = ctrl.showSearchRadius,
+        showCampRadius      = ctrl.showCampRadius,
+        showPullRadius      = ctrl.showPullRadius,
+        showWaypoints       = ctrl.showWaypoints,
+        showHazards         = ctrl.showHazards,
+        customSearchRadius  = ctrl.customSearchRadius,
+
+        -- Map Layers 0-3
+        layer0              = ctrl.layer0,
+        layer1              = ctrl.layer1,
+        layer2              = ctrl.layer2,
+        layer3              = ctrl.layer3,
+        layerLabels         = ctrl.layerLabels,
+
+        -- Z-Height Filtering
+        useZFilter          = ctrl.useZFilter,
+        zFilterRange        = ctrl.zFilterRange,
+
+        -- Visual Geometry
+        lineThickness       = ctrl.lineThickness,
+        npcNodeRadius       = ctrl.npcNodeRadius,
+        playerNodeRadius    = ctrl.playerNodeRadius,
+
+        -- Tracker Filters & Sorting
+        conFilterIndex      = state.conFilterIndex,
+        sortColumn          = state.sortColumn,
+        sortAsc             = state.sortAsc,
+        pathableOnly        = state.pathableOnly,
+        losOnly             = state.losOnly,
+        activeMapFolder     = activeFolder,
+    }
+
+    local f = io.open(CONFIG_FILE, 'w')
+    if f then
+        f:write("return " .. serializeValue(allData) .. "\n")
+        f:close()
+        if not silent then
+            print('\ag[Triune Map]\ax Settings and zoom saved to ' .. tostring(CONFIG_FILE))
+        end
+    end
+end
+
+local function loadConfig()
+    if not CONFIG_FILE then return end
+    local fn = loadfile(CONFIG_FILE)
+    if not fn then return end
+    local ok, allData = pcall(fn)
+    if not ok or type(allData) ~= 'table' then return end
+
+    -- 1. Global settings
+    if type(allData.__global) == 'table' then
+        if allData.__global.customMapsDir ~= nil then
+            state.customMapsDir = allData.__global.customMapsDir
+        end
+    end
+
+    -- 2. Character settings
+    local cData = allData[charKey()]
+    if type(cData) ~= 'table' then
+        cData = allData['default_default'] or {}
+    end
+
+    if type(cData) == 'table' then
+        if cData.zoom ~= nil then
+            local zVal = tonumber(cData.zoom) or viewport.zoom
+            viewport.zoom = math.max(viewport.minZoom, math.min(viewport.maxZoom, zVal))
+        end
+        if cData.followPlayer ~= nil then ctrl.followPlayer = (cData.followPlayer == true) end
+
+        if cData.showLabels ~= nil then ctrl.showLabels = (cData.showLabels == true) end
+        if cData.showGrid ~= nil then ctrl.showGrid = (cData.showGrid == true) end
+        if cData.showNPCs ~= nil then ctrl.showNPCs = (cData.showNPCs == true) end
+        if cData.showPCs ~= nil then ctrl.showPCs = (cData.showPCs == true) end
+        if cData.showGroup ~= nil then ctrl.showGroup = (cData.showGroup == true) end
+        if cData.showRaid ~= nil then ctrl.showRaid = (cData.showRaid == true) end
+        if cData.showPets ~= nil then ctrl.showPets = (cData.showPets == true) end
+        if cData.showCorpses ~= nil then ctrl.showCorpses = (cData.showCorpses == true) end
+        if cData.showNPCNames ~= nil then ctrl.showNPCNames = (cData.showNPCNames == true) end
+        if cData.showNavLine ~= nil then ctrl.showNavLine = (cData.showNavLine == true) end
+        if cData.colorModeIndex ~= nil then ctrl.colorModeIndex = tonumber(cData.colorModeIndex) or 1 end
+
+        if cData.showSearchRadius ~= nil then ctrl.showSearchRadius = (cData.showSearchRadius == true) end
+        if cData.showCampRadius ~= nil then ctrl.showCampRadius = (cData.showCampRadius == true) end
+        if cData.showPullRadius ~= nil then ctrl.showPullRadius = (cData.showPullRadius == true) end
+        if cData.showWaypoints ~= nil then ctrl.showWaypoints = (cData.showWaypoints == true) end
+        if cData.showHazards ~= nil then ctrl.showHazards = (cData.showHazards == true) end
+        if cData.customSearchRadius ~= nil then ctrl.customSearchRadius = tonumber(cData.customSearchRadius) or 200 end
+
+        if cData.layer0 ~= nil then ctrl.layer0 = (cData.layer0 == true) end
+        if cData.layer1 ~= nil then ctrl.layer1 = (cData.layer1 == true) end
+        if cData.layer2 ~= nil then ctrl.layer2 = (cData.layer2 == true) end
+        if cData.layer3 ~= nil then ctrl.layer3 = (cData.layer3 == true) end
+        if cData.layerLabels ~= nil then ctrl.layerLabels = (cData.layerLabels == true) end
+
+        if cData.useZFilter ~= nil then ctrl.useZFilter = (cData.useZFilter == true) end
+        if cData.zFilterRange ~= nil then ctrl.zFilterRange = tonumber(cData.zFilterRange) or 75 end
+
+        if cData.lineThickness ~= nil then ctrl.lineThickness = tonumber(cData.lineThickness) or 1.0 end
+        if cData.npcNodeRadius ~= nil then ctrl.npcNodeRadius = tonumber(cData.npcNodeRadius) or 4.5 end
+        if cData.playerNodeRadius ~= nil then ctrl.playerNodeRadius = tonumber(cData.playerNodeRadius) or 6.0 end
+
+        if cData.conFilterIndex ~= nil then state.conFilterIndex = tonumber(cData.conFilterIndex) or 1 end
+        if cData.sortColumn ~= nil then state.sortColumn = cData.sortColumn end
+        if cData.sortAsc ~= nil then state.sortAsc = (cData.sortAsc == true) end
+        if cData.pathableOnly ~= nil then state.pathableOnly = (cData.pathableOnly == true) end
+        if cData.losOnly ~= nil then state.losOnly = (cData.losOnly == true) end
+
+        local savedFolder = cData.activeMapFolder or (allData.__global and allData.__global.selectedMapFolder)
+        if savedFolder and savedFolder ~= '' then
+            for idx, fName in ipairs(state.mapFolderNames) do
+                if fName == savedFolder then
+                    state.selectedFolderIndex = idx
+                    state.activeMapsDirectory = state.mapFolders[idx] and state.mapFolders[idx].fullPath
+                    break
+                end
+            end
+        end
+    end
+end
 
 -- ============================================================================
 -- MAP DIRECTORY DISCOVERY & FILE PARSER
@@ -1008,6 +1203,9 @@ local function DrawMapCanvas(availW, availH)
             local cy = cY + availH * 0.5
             viewport.centerEqX = mWorldX + (mousePos.x - cx) / newZoom
             viewport.centerEqY = mWorldY + (mousePos.y - cy) / newZoom
+
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
         end
     end
 
@@ -1715,6 +1913,8 @@ local function DrawSettingsTab()
             state.activeMapsDirectory = state.mapFolders[fIdx].fullPath
             loadZoneMap(state.currentZoneShort)
         end
+        state.dirtySettings = true
+        state.dirtySettingsTime = mq.gettime()
     end
     ImGui.PopItemWidth()
 
@@ -1745,6 +1945,8 @@ local function DrawSettingsTab()
             state.customMapsDir = custDir
             scanMapFolders()
             loadZoneMap(state.currentZoneShort)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
         end
         ImGui.PopItemWidth()
         ImGui.SameLine()
@@ -1752,6 +1954,8 @@ local function DrawSettingsTab()
             state.customMapsDir = ''
             scanMapFolders()
             loadZoneMap(state.currentZoneShort)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
         end
         ImGui.TreePop()
     end
@@ -1761,42 +1965,42 @@ local function DrawSettingsTab()
     ImGui.Separator()
 
     local l0, c0 = ImGui.Checkbox('Layer 0 (Base Terrain / Geometry)##L0', ctrl.layer0)
-    if c0 then ctrl.layer0 = l0 end
+    if c0 then ctrl.layer0 = l0; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local l1, c1 = ImGui.Checkbox('Layer 1 (Structures / Buildings)##L1', ctrl.layer1)
-    if c1 then ctrl.layer1 = l1 end
+    if c1 then ctrl.layer1 = l1; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     local l2, c2 = ImGui.Checkbox('Layer 2 (Objects / Details)##L2', ctrl.layer2)
-    if c2 then ctrl.layer2 = l2 end
+    if c2 then ctrl.layer2 = l2; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local l3, c3 = ImGui.Checkbox('Layer 3 (Waypoints / Triune Lines)##L3', ctrl.layer3)
-    if c3 then ctrl.layer3 = l3 end
+    if c3 then ctrl.layer3 = l3; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     local lb, cl = ImGui.Checkbox('Labels (Map Text & POIs)##LabelsCheck', ctrl.layerLabels)
-    if cl then ctrl.layerLabels = lb end
+    if cl then ctrl.layerLabels = lb; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local grid, cg = ImGui.Checkbox('Grid Coordinate Lines##GridCheck', ctrl.showGrid)
-    if cg then ctrl.showGrid = grid end
+    if cg then ctrl.showGrid = grid; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.Spacing()
     ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Entity & Visual Options')
     ImGui.Separator()
 
     local sn, csn = ImGui.Checkbox('Show NPCs on Map##ShowNPCCheck', ctrl.showNPCs)
-    if csn then ctrl.showNPCs = sn end
+    if csn then ctrl.showNPCs = sn; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local sg, csg = ImGui.Checkbox('Show Group Members##ShowGrpCheck', ctrl.showGroup)
-    if csg then ctrl.showGroup = sg end
+    if csg then ctrl.showGroup = sg; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     local snn, csnn = ImGui.Checkbox('Show NPC Name Labels on Map##ShowNpcNamesCheck', ctrl.showNPCNames)
-    if csnn then ctrl.showNPCNames = snn end
+    if csnn then ctrl.showNPCNames = snn; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local snl, csnl = ImGui.Checkbox('Show Active Nav Path Line##ShowNavLineCheck', ctrl.showNavLine)
-    if csnl then ctrl.showNavLine = snl end
+    if csnl then ctrl.showNavLine = snl; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.PushItemWidth(220)
     local cmIdx, cmChanged = ImGui.Combo('Node Color Mode##ColorModeCombo', ctrl.colorModeIndex, COLOR_MODE_OPTIONS)
-    if cmChanged then ctrl.colorModeIndex = cmIdx end
+    if cmChanged then ctrl.colorModeIndex = cmIdx; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.PopItemWidth()
 
     ImGui.Spacing()
@@ -1818,20 +2022,20 @@ local function DrawSettingsTab()
     end
 
     local ss, css = ImGui.Checkbox('Show Search / Roam Radius##ShowSearchRadiusCheck', ctrl.showSearchRadius)
-    if css then ctrl.showSearchRadius = ss end
+    if css then ctrl.showSearchRadius = ss; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local sc, csc = ImGui.Checkbox('Show Camp / Combat Radius##ShowCampRadiusCheck', ctrl.showCampRadius)
-    if csc then ctrl.showCampRadius = sc end
+    if csc then ctrl.showCampRadius = sc; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     local sw, csw = ImGui.Checkbox('Show Patrol Waypoints & Paths##ShowWaypointsCheck', ctrl.showWaypoints)
-    if csw then ctrl.showWaypoints = sw end
+    if csw then ctrl.showWaypoints = sw; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local sh, csh = ImGui.Checkbox('Show Navigation Hazard Hotspots##ShowHazardsCheck', ctrl.showHazards)
-    if csh then ctrl.showHazards = sh end
+    if csh then ctrl.showHazards = sh; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.PushItemWidth(250)
     local srVal, srChanged = ImGui.SliderInt('Search / Pull Radius (yards)##SearchRadSlider', ctrl.customSearchRadius, 25, 600)
-    if srChanged then ctrl.customSearchRadius = srVal end
+    if srChanged then ctrl.customSearchRadius = srVal; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.PopItemWidth()
 
     ImGui.Spacing()
@@ -1839,12 +2043,12 @@ local function DrawSettingsTab()
     ImGui.Separator()
 
     local uz, cuz = ImGui.Checkbox('Enable Z-Height Filtering (Multi-Floor Dungeons)##UseZFilter', ctrl.useZFilter)
-    if cuz then ctrl.useZFilter = uz end
+    if cuz then ctrl.useZFilter = uz; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     if ctrl.useZFilter then
         ImGui.PushItemWidth(250)
         local zRangeVal, zChanged = ImGui.SliderInt('Z Altitude Window (+/- yards)##ZRangeSlider', ctrl.zFilterRange, 15, 300)
-        if zChanged then ctrl.zFilterRange = zRangeVal end
+        if zChanged then ctrl.zFilterRange = zRangeVal; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
         ImGui.PopItemWidth()
     end
 
@@ -1854,11 +2058,20 @@ local function DrawSettingsTab()
 
     ImGui.PushItemWidth(250)
     local lt, clt = ImGui.SliderFloat('Map Line Thickness##LineThickSlider', ctrl.lineThickness, 0.5, 3.5, '%.1f')
-    if clt then ctrl.lineThickness = lt end
+    if clt then ctrl.lineThickness = lt; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     local nr, cnr = ImGui.SliderFloat('NPC Node Radius##NodeRadSlider', ctrl.npcNodeRadius, 2.0, 9.0, '%.1f')
-    if cnr then ctrl.npcNodeRadius = nr end
+    if cnr then ctrl.npcNodeRadius = nr; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.PopItemWidth()
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    if ImGui.Button('Save Settings & Zoom Now##ManualSaveSettingsBtn') then
+        saveConfig(false)
+        state.dirtySettings = false
+    end
+    ImGui.SameLine()
+    ImGui.TextDisabled('(Settings & zoom auto-save on change and on exit)')
 end
 
 -- ============================================================================
@@ -1996,8 +2209,10 @@ end
 -- ============================================================================
 -- INITIALIZATION & MAIN YIELDABLE ENGINE LOOP
 -- ============================================================================
-local okZoneShort, zShort = pcall(function() return mq.TLO.Zone.ShortName() end)
 scanMapFolders()
+loadConfig()
+
+local okZoneShort, zShort = pcall(function() return mq.TLO.Zone.ShortName() end)
 if okZoneShort and zShort then
     state.currentZoneShort = zShort
     local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
@@ -2033,6 +2248,12 @@ while state.isRunning do
     -- Periodic Triune Loadout Sync (every 2.5s)
     if (now - state.triuneData.lastSyncTime) >= 2500 then
         syncTriuneLoadout()
+    end
+
+    -- Periodic Settings Auto-Save (when marked dirty and quiet for 1.5s)
+    if state.dirtySettings and (now - state.dirtySettingsTime) >= 1500 then
+        saveConfig(true)
+        state.dirtySettings = false
     end
 
     -- Regular Spawn Scanning
@@ -2082,4 +2303,5 @@ while state.isRunning do
     mq.delay(40)
 end
 
+saveConfig(true)
 print('\ag[Triune Map]\ax Unloaded cleanly.')
