@@ -2,6 +2,15 @@
 
 ## 2026-08-27
 
+- **Critical Hit Floating Text Overlay (`triune.lua`).**
+  - Adds a full-screen transparent ImGui overlay that renders floating damage numbers above the player character whenever a critical hit, crippling blow, deadly strike, spell crit, heal crit, flurry, assassinate, headshot, slay undead, or finishing blow lands.
+  - Each floater type has a unique color theme (golden crit, fiery red crippling blow, purple deadly strike, arcane blue spell crit, etc.) with pulsing brightness and gentle horizontal wobble animation.
+  - Big hits (>500 dmg) render at a larger font size with an exaggerated pop-in bounce; massive hits (>2000 dmg) get a full rainbow hue-cycling shimmer; hits >1000 dmg spawn orbiting sparkle particles.
+  - Text has a black shadow outline for readability over any game background, fades in quickly, floats upward, and fades out over 2 seconds.
+  - Capped at 20 simultaneous floaters to prevent AoE spam from overwhelming the overlay.
+  - Registered as an independent `mq.imgui.init` callback (`TriuneCritOverlay`) to avoid nested `ImGui.Begin()` violations.
+  - Togglable via `ctrl.show_crit_floaters` (Settings tab checkbox: "Critical Hit Floating Text"), persisted with the loadout, enabled by default.
+  - Classic EQ progression server message patterns captured: `You score a critical hit! (X)`, `You land a Crippling Blow!(X)`, `You score a Deadly Strike!(X)`, `You flurry`, `You assassinate`, `You headshotted`, `You slay undead`, `You land a Finishing Blow!(X)`, `critical blast!(X)`, `critical heal(X)`, `critical dot(X)`.
 - **Auto-Avoid Stuck Hotspots Routing Architecture Rework (`triune.lua`).**
   - **Detour State Machine (`pursuit.detourActive`, `runtime.clearDetour`)**: Replaced stateless per-tick detour recalculation with a locked detour state machine. When routing around a hazard, locks in a stable detour waypoint with a safety timeout and 8-unit arrival threshold, completely eliminating waypoint drifting, `/nav` command spam, and curved movement jitter.
   - **PathLength & Travel Cost Candidate Selection (`calculateDetourWaypoint`)**: Queries `Navigation.PathLength` and straight-line distance to destination for both left and right detour candidates, selecting the candidate that yields the shortest total valid travel path to the target.

@@ -325,6 +325,7 @@ local function defaultCtrl()
         pet_assist_at            = 100,
         pet_hold_enabled         = true,
         show_map_radius          = true,
+        show_crit_floaters       = true,
         burn                     = false,
         compact                  = false,
         use_waypoints            = false,
@@ -406,7 +407,8 @@ local runtime = {
     gemSyncWarned = {},
     lastGemSyncCheckAt = 0,
     colN = 0,
-    varN = 0
+    varN = 0,
+    critFloaters = {}
 }
 
 local petState = {
@@ -4842,6 +4844,13 @@ function UI.drawSettingsTab()
         ImGui.SetTooltip(
             'Draws green radius circles on the in-game map window\n'
             .. 'for Hunter, Anchor, and Pull/Camp radii.')
+    end
+    ctrl.show_crit_floaters = ImGui.Checkbox('Critical Hit Floating Text', ctrl.show_crit_floaters)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip(
+            'Shows flashy floating damage numbers above your character\n'
+            .. 'when you land a critical hit, crippling blow, deadly strike,\n'
+            .. 'or other special melee/spell criticals.')
     end
     ctrl.compact = ImGui.Checkbox('Compact Mini-Window HUD Mode', ctrl.compact or false)
     if ImGui.IsItemHovered() then
@@ -9997,6 +10006,259 @@ if not navLoaded() then
     mq.delay(250)
 end
 
+-- ============================================================================
+-- Critical Hit Floating Text Overlay
+-- ============================================================================
+-- Renders flashy floating damage numbers above the player character when a
+-- critical hit / crippling blow / deadly strike / spell crit lands. Drawn as
+-- a separate, transparent, click-through ImGui overlay window registered via
+-- its own mq.imgui.init (never nested inside the main Triune window).
+--
+-- Each floater entry: { text, type, dmg, spawnedAt, x, y, seed }
+-- "type" drives the visual theme: 'crit', 'crip', 'deadly', 'spellcrit',
+--                                   'holy', 'flurry', 'finish', 'assassin',
+--                                   'headshot', 'slay'.
+-- ============================================================================
+
+local CRIT_LIFETIME   = 2.0    -- seconds a floater lives
+local CRIT_RISE_SPEED = 80     -- pixels per second upward drift
+local CRIT_SPREAD     = 120    -- horizontal jitter range (pixels)
+local CRIT_BASE_SIZE  = 22     -- base font scale for normal crits
+local CRIT_BIG_SIZE   = 32     -- font scale for massive hits
+
+-- Color palettes per crit type: {r, g, b} base color (0-1 floats).
+-- The renderer pulses / cycles around these to keep things lively.
+local CRIT_COLORS = {
+    crit      = { 1.0, 0.85, 0.20 },   -- golden yellow
+    crip      = { 1.0, 0.30, 0.15 },   -- fiery red-orange
+    deadly    = { 0.85, 0.10, 1.0  },   -- purple
+    spellcrit = { 0.30, 0.80, 1.0  },   -- arcane blue
+    holy      = { 1.0, 1.0,  0.75 },   -- holy white-gold
+    flurry    = { 0.20, 1.0,  0.50 },   -- emerald green
+    finish    = { 1.0, 0.55, 0.0  },    -- finishing blow orange
+    assassin  = { 0.65, 0.0,  0.0 },    -- dark blood red
+    headshot  = { 0.95, 0.60, 0.80 },   -- rose pink
+    slay      = { 1.0, 0.95, 0.60 },    -- radiant gold
+}
+
+local function spawnCritFloater(text, critType, dmg)
+    if not ctrl.show_crit_floaters then return end
+    local seed = math.random(1000)
+    local xOff = math.random(-CRIT_SPREAD / 2, CRIT_SPREAD / 2)
+    table.insert(runtime.critFloaters, {
+        text      = text,
+        type      = critType or 'crit',
+        dmg       = dmg or 0,
+        spawnedAt = os.clock(),
+        xOff      = xOff,
+        seed      = seed,
+    })
+    -- cap the queue so a massive AoE can't pile up unbounded entries
+    while #runtime.critFloaters > 20 do
+        table.remove(runtime.critFloaters, 1)
+    end
+end
+
+local function drawCritOverlay()
+    if not ctrl.show_crit_floaters then return end
+    if #runtime.critFloaters == 0 then return end
+
+    -- Get screen dimensions for centering
+    local screenW, screenH = 0, 0
+    pcall(function()
+        local io = ImGui.GetIO()
+        screenW = io.DisplaySize.x
+        screenH = io.DisplaySize.y
+    end)
+    if screenW < 100 or screenH < 100 then return end
+
+    -- The anchor point: horizontally centered, vertically at ~35% from top
+    -- (roughly where the player character's head would be in a typical view).
+    local anchorX = screenW / 2
+    local anchorY = screenH * 0.35
+
+    -- Overlay window: fully transparent, no decorations, click-through, always on top
+    local overlayFlags = bit.bor(
+        ImGuiWindowFlags.NoTitleBar,
+        ImGuiWindowFlags.NoResize,
+        ImGuiWindowFlags.NoMove,
+        ImGuiWindowFlags.NoScrollbar,
+        ImGuiWindowFlags.NoBackground,
+        ImGuiWindowFlags.NoInputs,
+        ImGuiWindowFlags.NoFocusOnAppearing,
+        ImGuiWindowFlags.NoBringToFrontOnFocus,
+        ImGuiWindowFlags.NoSavedSettings,
+        ImGuiWindowFlags.NoNav
+    )
+
+    ImGui.SetNextWindowPos(0, 0)
+    ImGui.SetNextWindowSize(screenW, screenH)
+    ImGui.SetNextWindowBgAlpha(0)
+
+    local _, show = ImGui.Begin('TriuneCritOverlay###critOverlay', true, overlayFlags)
+    if show then
+        local now = os.clock()
+        local dl = ImGui.GetWindowDrawList()
+        local ImVec2Type = _G.ImVec2 or ImVec2
+
+        -- Walk floaters newest-to-oldest, prune expired ones
+        local i = 1
+        while i <= #runtime.critFloaters do
+            local f = runtime.critFloaters[i]
+            local age = now - f.spawnedAt
+            if age > CRIT_LIFETIME then
+                table.remove(runtime.critFloaters, i)
+            else
+                local t = age / CRIT_LIFETIME  -- 0..1 normalized lifetime
+
+                -- Position: float upward, slight horizontal wobble via sin
+                local wobble = math.sin(age * 4 + f.seed) * 8
+                local px = anchorX + f.xOff + wobble
+                local py = anchorY - (age * CRIT_RISE_SPEED) - (t * t * 30)
+
+                -- Alpha: fade in fast, hold, fade out in last 30%
+                local alpha
+                if t < 0.1 then
+                    alpha = t / 0.1
+                elseif t > 0.7 then
+                    alpha = 1.0 - ((t - 0.7) / 0.3)
+                else
+                    alpha = 1.0
+                end
+                alpha = math.max(0, math.min(1, alpha))
+
+                -- Scale: initial pop-in bounce, then settle
+                local isBig = f.dmg > 500
+                local baseSize = isBig and CRIT_BIG_SIZE or CRIT_BASE_SIZE
+                local scale
+                if t < 0.15 then
+                    -- Pop-in: overshoot to 1.5x then settle
+                    scale = 1.0 + 0.5 * math.sin(t / 0.15 * math.pi)
+                else
+                    -- Gentle pulse
+                    scale = 1.0 + 0.08 * math.sin(age * 6 + f.seed)
+                end
+                local fontSize = baseSize * scale
+
+                -- Color: use type palette with pulsing brightness / hue shift
+                local c = CRIT_COLORS[f.type] or CRIT_COLORS.crit
+                local pulse = 0.7 + 0.3 * math.sin(age * 8 + f.seed)
+                local r = math.min(1, c[1] * pulse + 0.15 * math.sin(age * 5))
+                local g = math.min(1, c[2] * pulse + 0.10 * math.cos(age * 6))
+                local b = math.min(1, c[3] * pulse + 0.10 * math.sin(age * 7))
+
+                -- Rainbow shimmer for really big hits (>2000 damage)
+                if f.dmg > 2000 then
+                    local hueShift = (age * 3 + f.seed * 0.01) % 1.0
+                    r = 0.5 + 0.5 * math.sin(hueShift * 6.28)
+                    g = 0.5 + 0.5 * math.sin(hueShift * 6.28 + 2.09)
+                    b = 0.5 + 0.5 * math.sin(hueShift * 6.28 + 4.19)
+                end
+
+                local colU32 = IM_COL32(
+                    math.floor(r * 255),
+                    math.floor(g * 255),
+                    math.floor(b * 255),
+                    math.floor(alpha * 255)
+                )
+
+                -- Shadow/outline: draw text offset by 1px in black for readability
+                local shadowCol = IM_COL32(0, 0, 0, math.floor(alpha * 180))
+                pcall(function()
+                    dl:AddText(nil, fontSize, ImVec2Type(px + 1, py + 1), shadowCol, f.text)
+                    dl:AddText(nil, fontSize, ImVec2Type(px, py), colU32, f.text)
+                end)
+
+                -- Sparkle particles for crits >1000 — tiny bright dots around the text
+                if f.dmg > 1000 and t < 0.6 then
+                    pcall(function()
+                        for s = 1, 3 do
+                            local sx = px + math.sin(age * 10 + s * 2.1 + f.seed) * (30 + s * 10)
+                            local sy = py + math.cos(age * 10 + s * 1.7 + f.seed) * (15 + s * 8)
+                            local sparkleA = alpha * (1.0 - t / 0.6) * (0.5 + 0.5 * math.sin(age * 20 + s))
+                            local sparkleCol = IM_COL32(255, 255, 200, math.floor(sparkleA * 255))
+                            dl:AddCircleFilled(ImVec2Type(sx, sy), 2 + math.sin(age * 15 + s) * 1, sparkleCol, 6)
+                        end
+                    end)
+                end
+
+                i = i + 1
+            end
+        end
+    end
+    ImGui.End()
+end
+
+-- Event handlers: capture EQ critical hit chat messages and spawn floaters.
+-- Progression server (classic) format: separate lines like
+--   "You score a critical hit! (123)"
+--   "You land a Crippling Blow!(456)"
+--   "You score a Deadly Strike!(789)"
+-- Modern format (TBL+): appended to the damage line:
+--   "You hit a gnoll for 123 points of damage. (Critical)"
+-- We handle both patterns.
+
+mq.event('TriuneCritHit', '#*#You score a critical hit!#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('CRITICAL! %d', dmg), 'crit', dmg)
+end)
+
+mq.event('TriuneCripBlow', '#*#You land a Crippling Blow!#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('CRIPPLING BLOW! %d', dmg), 'crip', dmg)
+end)
+
+mq.event('TriuneDeadlyStrike', '#*#You score a Deadly Strike!#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('DEADLY STRIKE! %d', dmg), 'deadly', dmg)
+end)
+
+-- Holy Forge (Paladin Slay Undead)
+mq.event('TriuneSlayUndead', '#*#You slay#*#undead!#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('SLAY UNDEAD! %d', dmg), 'slay', dmg)
+end)
+
+-- Finishing Blow (low HP instant-kill)
+mq.event('TriuneFinishBlow', '#*#You land a Finishing Blow!#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('FINISHING BLOW! %d', dmg), 'finish', dmg)
+end)
+
+-- Assassinate (Rogue)
+mq.event('TriuneAssassinate', '#*#You assassinate#*#', function()
+    spawnCritFloater('ASSASSINATE!', 'assassin', 32000)
+end)
+
+-- Headshot (Ranger)
+mq.event('TriuneHeadshot', '#*#You headshotted#*#', function()
+    spawnCritFloater('HEADSHOT!', 'headshot', 32000)
+end)
+
+-- Flurry (extra melee swings)
+mq.event('TriuneFlurry', '#*#You flurry#*#', function()
+    spawnCritFloater('FLURRY!', 'flurry', 0)
+end)
+
+-- Critical spell nuke (modern format: "You deliver a critical blast! (X)")
+mq.event('TriuneSpellCrit', '#*#critical blast!#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('SPELL CRIT! %d', dmg), 'spellcrit', dmg)
+end)
+
+-- Critical heal
+mq.event('TriuneHealCrit', '#*#critical heal#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('CRIT HEAL! %d', dmg), 'holy', dmg)
+end)
+
+-- Critical DoT tick (older format)
+mq.event('TriuneDotCrit', '#*#critical dot#*#(#1#)#*#', function(_, dmgStr)
+    local dmg = tonumber(dmgStr) or 0
+    spawnCritFloater(string.format('CRIT DOT! %d', dmg), 'spellcrit', dmg)
+end)
+
+mq.imgui.init('TriuneCritOverlay', drawCritOverlay)
 mq.imgui.init('TriuneAutoCombat', draw)
 print('\ag[Triune]\ax loaded v' ..
     VERSION ..
