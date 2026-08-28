@@ -36,8 +36,13 @@
 - **Luacheck Static Analysis Fix (`triune.lua`).**
   - **Shadowed `locKey` Variable**: Removed redundant duplicate `local locKey` declaration in `runtime.moveTowardLoc`, resolving a static analysis shadowing warning and ensuring a clean zero-warning Luacheck run across all files.
 
-- **Preserve Server Attack Mode On Pause/Stop (`triune.lua`).**
-  - `fullStop()` unconditionally called `revertAttackModeToMelee()` whenever the script stopped or paused, forcing `#attackmode melee` on the server even for a Ranged/Spell character just being paused. Removed -- server attack mode now stays whatever it was. `revertAttackModeToMelee()` is still called on an explicit combat-style change to Melee/Spell (radio button, `/ac style`), which is a real user choice, not a pause.
+- **Per-Zone Waypoint Persistence & Named Presets (`triune.lua`).**
+  - **Auto-Save/Load Per Zone (`ctrl.zone_waypoints`)**: Waypoint routes and settings (radius, scan radius, loop) are now auto-saved per zone and auto-loaded when you re-enter that zone. Shared across all characters, like zone hazards.
+  - **Named Presets (`ctrl.zone_waypoint_presets`)**: Added a dropdown next to the waypoint list, filtered to presets saved for the current zone, plus Save / Load / Edit / Delete buttons. Save prompts for a name (overwrites on duplicate); Edit renames the selected preset. Entries display as `<name> - <zone>`.
+  - Loading a preset or the auto-saved "Current" route always restarts at waypoint 1.
+  - **Unit Tests**: Added `copyWaypointList` pure-logic tests and extended `defaultCtrl()` field validation for the new fields.
+  - **Export/Import Presets**: Added Export/Import buttons for named presets. Export copies a shareable `TACWP1:...` string to your clipboard; Import parses a pasted string, warns if it was exported from a different zone than you're currently in, and prompts to confirm before overwriting a same-named preset. Import strings are parsed as plain data only (never executed as code) and unsupported format versions are rejected with a clear message.
+  - **Unit Tests**: Added `sanitizeWpField`, `base64Encode`/`base64Decode` (including round-trip), and `splitByChar` pure-logic tests.
 
 ---
 
