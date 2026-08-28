@@ -1,5 +1,29 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-28
+
+- **Standalone In-Game 2D Map Replacement & NPC Tracker (`triune_map.lua`).**
+  - **Standalone Architecture**: Fully independent MacroQuest ImGui 2D map engine launched via `/lua run triune_map` or `/ac map`, carrying a standalone copy of the unified dark cyan theme.
+  - **EverQuest Map Directory File Parser**: Auto-detects EverQuest map files (`maps/` in EQ folder, MQ folder, or custom path) and parses all four zone layers (`<zone>.txt`, `<zone>_1.txt`, `<zone>_2.txt`, `<zone>_3.txt`) plus label files (`<zone>_labels.txt` and `P` map points).
+  - **Interactive 2D Map Viewport**: High-performance canvas rendering via `ImGui.GetWindowDrawList` with frustum culling, smooth dragging/panning, mouse-wheel zooming centered on cursor, automatic "Follow Player" mode, coordinate grid lines, and Z-height altitude filtering for multi-story dungeons.
+  - **Real-Time Navmesh Reachability Visualization (Green / Red Filter)**:
+    - Integrates with MQ2Nav (`mq.TLO.Navigation.PathExists` / `PathLength`) using a throttled background batch queue (evaluating 10 NPCs per tick) to maintain a steady 60 FPS without UI stutter.
+    - Three color modes: **Dual Mode** (Con-colored fill with Green/Red navmesh halo), **Navmesh Reachability Only** (Green for pathable, Red for unreachable/blocked), and **Consideration Colors Only**.
+    - Filter checkbox: "Pathable Only" instantly removes unreachable NPCs from both the map viewport and the tracker table.
+  - **Map Click-to-Move & Interactive Targeting**:
+    - Left-click on any NPC node targets the spawn (`/target id <id>`).
+    - Double-click on any NPC node targets and starts navigation (`/nav id <id>` or stick fallback).
+    - Double-click or Ctrl+Left-Click on open ground calculates world coordinates and commands navigation (`/nav loc <y> <x> <z>`).
+    - Draws active navigation line and waypoint marker when MQ2Nav is in progress.
+  - **Dedicated NPC Tracking Tab**: Interactive searchable table featuring fuzzy text search, con filters, LoS filters, sort orders, and color-coded `[PATHABLE]` (green with distance) / `[NO PATH]` (red) / `[NO MESH]` status badges.
+  - **Triune Integration & Tracker Button Replacement**: Replaced the legacy Zone Tracker toolbar buttons in the main header and Mini HUD with `Map` launching `triune_map.lua`, and routed `/ac track` / `/ac tracker` / `/ac map` slash commands to `triune_map`.
+  - **Navigation Destination & Input Safety Fixes (`triune_map.lua`)**: Replaced non-existent `Navigation.DestinationY/X` calls with state-tracked destination coordinates and spawn tracking, pcall-guarded all `Zone.ID` calls, and added safe numeric type validation for `io.MouseWheel` and `io.KeyCtrl` to prevent nil arithmetic crashes.
+  - **Player Heading Vector & Active Path Nav Line Fix (`triune_map.lua`)**: Fixed heading directional vector math to match standard clockwise compass degrees in 2D screen space (correcting East/West inversion), prevented premature destination state clearing before MQ2Nav starts, and rendered an emerald green path line with dark contrast borders and a pulsing waypoint bullseye.
+  - **Map Pack Subfolder Discovery & Dropdown Selector (`triune_map.lua`)**: Automatically scans for all map subfolders under `maps/` (e.g. `Brewall`, `Goodurden`, `MyMaps`, `Custom`), provides a dropdown selector under Settings, highlights the currently active map pack with a bright badge and file status metrics, and allows on-the-fly switching between map packs.
+  - **Triune Combat Radii, Waypoints & Hazard Hotspot Overlays (`triune_map.lua`)**: Automatically syncs character loadout and zone data from `triune_loadout.lua`. Renders Camp/Combat tether radius circles, dynamic Search / Roam / Pull perimeter radii (anchored to Camp if set or centered dynamically on the Player character), waypoint scan radii and connected patrol routes with pulsing active target pins, and anti-stuck hazard danger rings on the 2D map canvas with independent visibility toggles and a real-time radius slider.
+
+---
+
 ## 2026-08-27
 
 - **Critical Hit Floating Text Overlay (`triune.lua`).**

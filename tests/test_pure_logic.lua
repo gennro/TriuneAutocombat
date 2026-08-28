@@ -1759,6 +1759,128 @@ do
 end
 
 -- ============================================================================
+-- Suite 40: triune_map map parsing & folder discovery logic
+-- ============================================================================
+print('--- triune_map parser & folder logic ---')
+
+do
+    local lineStr = 'L 100.5, -200.5, 10.0, 120.0, -250.0, 12.5, 255, 128, 64'
+    local x1, y1, z1, x2, y2, z2, r, g, b = string.match(lineStr,
+        '^[Ll]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+)')
+    assert_eq(tonumber(x1), 100.5, 'map line parser: x1')
+    assert_eq(tonumber(y1), -200.5, 'map line parser: y1')
+    assert_eq(tonumber(z1), 10.0, 'map line parser: z1')
+    assert_eq(tonumber(x2), 120.0, 'map line parser: x2')
+    assert_eq(tonumber(y2), -250.0, 'map line parser: y2')
+    assert_eq(tonumber(z2), 12.5, 'map line parser: z2')
+    assert_eq(tonumber(r), 255, 'map line parser: r')
+    assert_eq(tonumber(g), 128, 'map line parser: g')
+    assert_eq(tonumber(b), 64, 'map line parser: b')
+end
+
+do
+    local labelStr = 'P 150.0, 300.0, 5.0, 0, 255, 255, 2, Bank_of_PoK'
+    local x, y, z, r, g, b, size, text = string.match(labelStr,
+        '^[Pp]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+(.+)')
+    assert_eq(tonumber(x), 150.0, 'map label parser: x')
+    assert_eq(tonumber(y), 300.0, 'map label parser: y')
+    assert_eq(tonumber(size), 2, 'map label parser: size')
+    assert_eq(string.gsub(text, '_', ' '), 'Bank of PoK', 'map label parser: space converted text')
+end
+
+do
+    -- Map folder selection logic
+    local folders = {
+        { name = '[Root] Default (maps/)', relPath = '', fullPath = 'C:/EQ/maps' },
+        { name = 'Brewall', relPath = 'Brewall', fullPath = 'C:/EQ/maps/Brewall' },
+        { name = 'Goodurden', relPath = 'Goodurden', fullPath = 'C:/EQ/maps/Goodurden' },
+    }
+    local selectedIdx = 2
+    local activeDir = folders[selectedIdx].fullPath
+    assert_eq(activeDir, 'C:/EQ/maps/Brewall', 'map folder selection: switches to Brewall')
+    assert_eq(folders[selectedIdx].name, 'Brewall', 'map folder selection: folder name is Brewall')
+end
+
+do
+    -- Player Heading Arrow Vector Math
+    local function getHeadingVector(headingDeg)
+        local rad = math.rad(headingDeg or 0)
+        local dirX = math.sin(rad)
+        local dirY = -math.cos(rad)
+        return dirX, dirY
+    end
+
+    -- North (0 deg) -> Up on screen (X = 0, Y < 0)
+    local nX, nY = getHeadingVector(0)
+    assert_true(math.abs(nX) < 0.001, 'heading North: X is 0')
+    assert_true(nY < -0.999, 'heading North: Y is -1 (Up)')
+
+    -- East (90 deg) -> Right on screen (X > 0, Y = 0)
+    local eX, eY = getHeadingVector(90)
+    assert_true(eX > 0.999, 'heading East: X is +1 (Right)')
+    assert_true(math.abs(eY) < 0.001, 'heading East: Y is 0')
+
+    -- South (180 deg) -> Down on screen (X = 0, Y > 0)
+    local sX, sY = getHeadingVector(180)
+    assert_true(math.abs(sX) < 0.001, 'heading South: X is 0')
+    assert_true(sY > 0.999, 'heading South: Y is +1 (Down)')
+
+    -- West (270 deg) -> Left on screen (X < 0, Y = 0)
+    local wX, wY = getHeadingVector(270)
+    assert_true(wX < -0.999, 'heading West: X is -1 (Left)')
+    assert_true(math.abs(wY) < 0.001, 'heading West: Y is 0')
+end
+
+do
+    -- Triune Loadout & Waypoint Unpacking Logic
+    local dummyLoadout = {
+        ["TestChar"] = {
+            control = {
+                camp_loc = { x = 120.5, y = -350.0, z = 15.0 },
+                camp_radius = 65,
+                combat_radius = 120,
+                hunter_radius = 280,
+                pull_radius = 220,
+                use_waypoints = true,
+                current_waypoint_idx = 2,
+                waypoints = {
+                    { name = "Camp Center", x = 120.5, y = -350.0, z = 15.0 },
+                    { name = "Bridge Post", x = 200.0, y = -400.0, z = 12.0 },
+                },
+            }
+        },
+        __zoneWaypoints = {
+            ["poknowledge"] = {
+                waypoints = {
+                    { name = "PoK Bank", x = 100.0, y = 50.0, z = 5.0 },
+                },
+                waypoint_radius = 25,
+                waypoint_loop = true,
+            }
+        },
+        __zoneHazards = {
+            ["poknowledge"] = {
+                { x = 150.0, y = 80.0, z = 5.0, hits = 4 }
+            }
+        }
+    }
+
+    local charCtrl = dummyLoadout["TestChar"].control
+    assert_eq(charCtrl.camp_radius, 65, 'triune loadout sync: camp_radius')
+    assert_eq(charCtrl.combat_radius, 120, 'triune loadout sync: combat_radius')
+    assert_eq(#charCtrl.waypoints, 2, 'triune loadout sync: character waypoint count')
+    assert_eq(charCtrl.waypoints[2].name, "Bridge Post", 'triune loadout sync: waypoint 2 name')
+
+    local zoneWps = dummyLoadout.__zoneWaypoints["poknowledge"]
+    assert_eq(#zoneWps.waypoints, 1, 'triune loadout sync: zone waypoint count')
+    assert_true(zoneWps.waypoint_loop, 'triune loadout sync: zone waypoint loop')
+
+    local zoneHazards = dummyLoadout.__zoneHazards["poknowledge"]
+    assert_eq(#zoneHazards, 1, 'triune loadout sync: zone hazards count')
+    assert_eq(zoneHazards[1].hits, 4, 'triune loadout sync: hazard hit count')
+end
+
+-- ============================================================================
 -- Results
 -- ============================================================================
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

@@ -156,6 +156,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (5-200) distance |
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |
 | `/ac track` | `/ac zone` | Open the Zone NPC Tracker |
+| `/ac map` | `/ac mapui` | Open the 2D Map & Navmesh Reachability Tracker |
 | `/ac update` | `/ac checkupdate` | Check for updates |
 | `/dps` | `/triunedps` | Open/toggle the DPS parser |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
@@ -172,6 +173,7 @@ TriuneAutocombat/
 │   ├── update.sh            # Linux updater launcher
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
+│   │   ├── triune_map.lua       # Standalone 2D in-game map & NPC tracker
 │   │   ├── triune_track.lua     # Zone NPC tracker & navigation tool
 │   │   ├── triune_updater.lua   # In-game updater window
 │   │   ├── triune_spellbook.lua # Spellbook browser & loadout helper

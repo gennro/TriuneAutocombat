@@ -1,0 +1,2085 @@
+---@diagnostic disable: undefined-global, undefined-field
+-- ============================================================================
+-- TRIUNE MAP v1.0 (Standalone In-Game Map & NPC Tracker)
+-- ----------------------------------------------------------------------------
+-- Live 2D EverQuest map replacement and zone tracker for MacroQuest ImGui.
+-- Features:
+--   - Auto-loads map line and label files from EverQuest maps directory (Layers 0-3).
+--   - Interactive 2D map viewport: smooth pan, zoom, follow-player, and Z-filtering.
+--   - Entity overlays for Player, Group, Raid, Pets, Corpses, and all Zone NPCs.
+--   - Real-time Navmesh Reachability: Visualizes NPCs as Green (Pathable) or Red (Unreachable).
+--   - Map Click-to-Move: Click on any terrain location or double-click an NPC to navigate.
+--   - Dedicated NPC Tracking tab with live search, consideration, and pathability filters.
+-- Compatible with MacroQuest LuaJIT (Lua 5.1 safe).
+-- Run via:  /lua run triune_map
+-- Stop via: /lua stop triune_map
+-- ============================================================================
+
+local mq    = require('mq')
+local ImGui = require('ImGui')
+local bit   = require('bit') -- LuaJIT bitwise library
+
+local VERSION = '1.0'
+
+-- ============================================================================
+-- THEME & STYLE HELPERS (Unified Dark Cyan/Blue Theme)
+-- ============================================================================
+local _colN, _varN = 0, 0
+local function pushCol(id, r, g, b, a)
+    if id == nil then return end
+    local ImGuiColType = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
+    local enumVal = ImGuiColType and ImGuiColType(id) or id
+    if pcall(mq.imgui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end ---@diagnostic disable-line: undefined-field
+end
+
+local function pushVar(id, a, b)
+    if id == nil then return end
+    local ok
+    local ImGuiSVType = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+    local enumVal = ImGuiSVType and ImGuiSVType(id) or id
+    if b ~= nil then
+        local ImVec2Type = _G.ImVec2
+        if type(ImVec2Type) == 'function' then
+            ok = pcall(mq.imgui.PushStyleVar, enumVal, ImVec2Type(a, b)) ---@diagnostic disable-line: undefined-field
+        else
+            ok = pcall(mq.imgui.PushStyleVar, enumVal, a, b) ---@diagnostic disable-line: undefined-field
+        end
+    else
+        ok = pcall(mq.imgui.PushStyleVar, enumVal, a) ---@diagnostic disable-line: undefined-field
+    end
+    if ok then _varN = _varN + 1 end
+end
+
+local function pushTheme()
+    _colN, _varN = 0, 0
+    local ImGuiCol = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
+    local ImGuiStyleVar = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
+    if ImGuiCol then
+        pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
+        pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
+        pushCol(ImGuiCol.PopupBg, 0.047, 0.075, 0.118, 1)
+        pushCol(ImGuiCol.Border, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.Text, 0.851, 0.898, 0.953, 1)
+        pushCol(ImGuiCol.TextDisabled, 0.490, 0.561, 0.651, 1)
+        pushCol(ImGuiCol.TitleBg, 0.043, 0.067, 0.106, 1)
+        pushCol(ImGuiCol.TitleBgActive, 0.047, 0.078, 0.125, 1)
+        pushCol(ImGuiCol.FrameBg, 0.047, 0.078, 0.125, 1)
+        pushCol(ImGuiCol.FrameBgHovered, 0.090, 0.150, 0.220, 1)
+        pushCol(ImGuiCol.FrameBgActive, 0.120, 0.190, 0.270, 1)
+        pushCol(ImGuiCol.Button, 0.086, 0.125, 0.196, 1)
+        pushCol(ImGuiCol.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
+        pushCol(ImGuiCol.ButtonActive, 0.300, 0.700, 1.000, 0.60)
+        pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
+        pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
+        pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
+        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
+        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
+        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
+        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
+        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
+        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
+        pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
+        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
+        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
+    end
+    if ImGuiStyleVar then
+        local ImGuiSV = ImGuiStyleVar
+        pushVar(ImGuiSV.WindowRounding, 6)
+        pushVar(ImGuiSV.ChildRounding, 5)
+        pushVar(ImGuiSV.FrameRounding, 4)
+        pushVar(ImGuiSV.PopupRounding, 4)
+        pushVar(ImGuiSV.TabRounding, 4)
+        pushVar(ImGuiSV.GrabRounding, 3)
+        pushVar(ImGuiSV.ScrollbarRounding, 6)
+
+        pushVar(ImGuiSV.FrameBorderSize, 1)
+        pushVar(ImGuiSV.FramePadding, 7, 4)
+        pushVar(ImGuiSV.ItemSpacing, 8, 6)
+        pushVar(ImGuiSV.WindowPadding, 12, 10)
+    end
+end
+
+local function popTheme()
+    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 end ---@diagnostic disable-line: undefined-field
+    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 end ---@diagnostic disable-line: undefined-field
+end
+
+-- Consideration Colors & Badges
+local CON_COLOR_MAP = {
+    ['DARK RED']   = { r = 0.85, g = 0.10, b = 0.10, badge = '[DRK]' },
+    ['RED']        = { r = 0.95, g = 0.25, b = 0.25, badge = '[RED]' },
+    ['YELLOW']     = { r = 1.00, g = 0.90, b = 0.20, badge = '[YEL]' },
+    ['WHITE']      = { r = 0.95, g = 0.95, b = 0.95, badge = '[WHT]' },
+    ['BLUE']       = { r = 0.30, g = 0.60, b = 1.00, badge = '[BLU]' },
+    ['LIGHT BLUE'] = { r = 0.40, g = 0.80, b = 1.00, badge = '[LBL]' },
+    ['GREEN']      = { r = 0.20, g = 0.90, b = 0.35, badge = '[GRN]' },
+    ['GREY']       = { r = 0.60, g = 0.60, b = 0.60, badge = '[GRY]' },
+    ['GRAY']       = { r = 0.60, g = 0.60, b = 0.60, badge = '[GRY]' },
+}
+
+local function getConStyle(conStr)
+    local upper = string.upper(tostring(conStr or ''))
+    return CON_COLOR_MAP[upper] or { r = 0.70, g = 0.70, b = 0.70, badge = '[UNK]' }
+end
+
+local CON_OPTIONS = {
+    'All Considerations',
+    'Red / Dark Red',
+    'Yellow',
+    'White',
+    'Blue',
+    'Light Blue',
+    'Green',
+    'Grey',
+}
+
+local SORT_OPTIONS = {
+    'Nearest First',
+    'Farthest First',
+    'Level (High -> Low)',
+    'Level (Low -> High)',
+    'Name (A - Z)',
+}
+
+local COLOR_MODE_OPTIONS = {
+    'Dual (Con Dot + Nav Halo)',
+    'Navmesh Validity (Green/Red)',
+    'Consideration Colors Only',
+}
+
+-- ============================================================================
+-- STRUCTURED STATE TABLES (Prevents hitting Lua 200 local limit)
+-- ============================================================================
+local state = {
+    openGUI             = true,
+    isRunning           = true,
+    activeTab           = 1, -- 1: Map View, 2: NPC Tracker, 3: Settings & Layers
+    currentZoneId       = 0,
+    currentZoneShort    = '',
+    currentZoneName     = 'Unknown Zone',
+    statusMsg           = 'Ready',
+    lastScanTime        = 0,
+    scanIntervalMs      = 250,
+    lastZoneCheckTime   = 0,
+    -- Maps Directory & Subfolder Management
+    baseMapsDirectory   = nil,
+    activeMapsDirectory = nil,
+    mapFolders          = {},   -- list of { name = string, relPath = string, fullPath = string }
+    mapFolderNames      = { '[Root] Default (maps/)' },
+    selectedFolderIndex = 1,
+    customMapsDir       = '',
+
+    -- UI tracking filter controls
+    searchText          = '',
+    conFilterIndex      = 1,
+    minLevel            = 1,
+    maxLevel            = 150,
+    maxDistance         = 5000,
+    sortIndex           = 1,
+    pathableOnly        = false,
+    losOnly             = false,
+
+    -- Tooltip & Mouse Hover State
+    hoveredMobId        = 0,
+    cursorWorldX        = 0,
+    cursorWorldY        = 0,
+    cursorWorldZ        = 0,
+
+    -- Active Navigation Target / Ground Loc
+    activeNavLoc        = nil,
+    activeNavSpawnId    = 0,
+    activeNavCommandTime = 0,
+
+    -- Triune Loadout & Combat / Waypoint Data
+    triuneData = {
+        isLoaded            = false,
+        lastSyncTime        = 0,
+        charName            = '',
+        campLoc             = nil, -- { x = 0, y = 0, z = 0 }
+        campRadius          = 50,
+        combatRadius        = 100,
+        hunterRadius        = 250,
+        pullRadius          = 200,
+        useWaypoints        = false,
+        waypoints           = {},
+        waypointRadius      = 20,
+        waypointScanRadius  = 100,
+        waypointLoop        = false,
+        currentWaypointIdx  = 1,
+        zoneHazards         = {},
+    },
+}
+
+local ctrl = {
+    -- Map Viewport Settings
+    followPlayer        = true,
+    showLabels          = true,
+    showGrid            = true,
+    showNPCs            = true,
+    showPCs             = true,
+    showGroup           = true,
+    showRaid            = true,
+    showPets            = false,
+    showCorpses         = false,
+    showNPCNames        = false,
+    showNavLine         = true,
+    colorModeIndex      = 1, -- 1: Dual, 2: Navmesh Only, 3: Con Only
+
+    -- Triune Combat & Waypoint Overlays
+    showSearchRadius    = true,
+    showCampRadius      = true,
+    showPullRadius      = true,
+    showWaypoints       = true,
+    showHazards         = true,
+    customSearchRadius  = 200,
+
+    -- Layer Visibility Toggles (Layer 0, 1, 2, 3, Labels)
+    layer0              = true,
+    layer1              = true,
+    layer2              = true,
+    layer3              = true,
+    layerLabels         = true,
+
+    -- Z-Height Filtering (for multi-level dungeons)
+    useZFilter          = false,
+    zFilterRange        = 75, -- +/- yards from player Z
+
+    -- Visual Display Scaling
+    lineThickness       = 1.0,
+    npcNodeRadius       = 4.5,
+    playerNodeRadius    = 6.0,
+    labelFontSize       = 12,
+}
+
+local viewport = {
+    centerEqX           = 0,
+    centerEqY           = 0,
+    zoom                = 0.5,   -- Pixels per EQ yard
+    minZoom             = 0.05,
+    maxZoom             = 10.0,
+    isDragging          = false,
+    dragStartMouseX     = 0,
+    dragStartMouseY     = 0,
+    dragStartCenterEqX  = 0,
+    dragStartCenterEqY  = 0,
+}
+
+local mapData = {
+    isLoaded            = false,
+    zoneShort           = '',
+    layers              = { [0] = {}, [1] = {}, [2] = {}, [3] = {} },
+    labels              = {},
+    totalLines          = 0,
+    totalLabels         = 0,
+    bounds              = { minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0 },
+}
+
+local spawns = {
+    allNPCs             = {},
+    filteredNPCs        = {},
+    allPCs              = {},
+    groupMembers        = {},
+    totalCount          = 0,
+}
+
+local navState = {
+    meshLoaded          = false,
+    navActive           = false,
+    cache               = {}, -- [id] = { hasPath = bool, length = num, checkedAt = time }
+    checkQueue          = {}, -- array of IDs needing path checks
+    queueSet            = {}, -- lookup set to prevent queue duplicates
+    batchSize           = 10,
+    lastQueueProcessTime = 0,
+}
+
+local actionQueue = {
+    pendingTargetId     = 0,
+    pendingNavId        = 0,
+    pendingNavLoc       = nil, -- { y = num, x = num, z = num }
+    pendingStopNav      = false,
+    pendingZoneReload   = false,
+}
+
+-- ============================================================================
+-- MAP DIRECTORY DISCOVERY & FILE PARSER
+-- ============================================================================
+local function getBaseMapsDirectory()
+    if state.customMapsDir and state.customMapsDir ~= '' then
+        local testFile = state.customMapsDir .. '/triune_map_test.tmp'
+        local f = io.open(testFile, 'w')
+        if f then
+            f:close()
+            os.remove(testFile)
+            return state.customMapsDir
+        end
+    end
+
+    local candidates = {
+        'maps',
+        '../maps',
+        '../../maps',
+    }
+
+    local okEq, eqPath = pcall(function() return mq.TLO.EverQuest.Path() end)
+    if okEq and eqPath and eqPath ~= '' then
+        candidates[#candidates + 1] = eqPath .. '/maps'
+        candidates[#candidates + 1] = eqPath .. '/Maps'
+    end
+
+    if mq.configDir then
+        candidates[#candidates + 1] = mq.configDir .. '/../maps'
+        candidates[#candidates + 1] = mq.configDir .. '/../../maps'
+    end
+    if mq.luaDir then
+        candidates[#candidates + 1] = mq.luaDir .. '/../maps'
+        candidates[#candidates + 1] = mq.luaDir .. '/../../maps'
+    end
+
+    for _, dir in ipairs(candidates) do
+        local testFile = dir .. '/triune_map_test.tmp'
+        local f = io.open(testFile, 'w')
+        if f then
+            f:close()
+            os.remove(testFile)
+            return dir
+        end
+    end
+
+    return nil
+end
+
+local function scanMapFolders()
+    local baseDir = getBaseMapsDirectory()
+    state.baseMapsDirectory = baseDir
+
+    if not baseDir then
+        state.mapFolders = { { name = '[Root] (Not Found)', relPath = '', fullPath = '' } }
+        state.mapFolderNames = { 'No maps directory found' }
+        state.selectedFolderIndex = 1
+        state.activeMapsDirectory = nil
+        return
+    end
+
+    local folders = {}
+    local names = {}
+    local seen = {}
+
+    -- Always include root maps directory as option 1
+    folders[1] = { name = '[Root] Default (maps/)', relPath = '', fullPath = baseDir }
+    names[1] = '[Root] Default (maps/)'
+    seen[''] = true
+
+    -- Method 1: LuaFileSystem if available
+    local okLfs, lfs = pcall(require, 'lfs')
+    if okLfs and lfs and lfs.dir then
+        pcall(function()
+            for file in lfs.dir(baseDir) do
+                if file ~= '.' and file ~= '..' then
+                    local full = baseDir .. '/' .. file
+                    local mode = lfs.attributes(full, 'mode')
+                    if mode == 'directory' and not seen[file] then
+                        seen[file] = true
+                        folders[#folders + 1] = { name = file, relPath = file, fullPath = full }
+                        names[#names + 1] = file
+                    end
+                end
+            end
+        end)
+    end
+
+    -- Method 2: io.popen directory scanning
+    if #folders == 1 then
+        pcall(function()
+            local cmd = string.format('dir /a:d /b "%s" 2>nul', baseDir)
+            local pipe = io.popen(cmd)
+            if pipe then
+                for line in pipe:lines() do
+                    local trimmed = string.match(line, '^%s*(.-)%s*$')
+                    if trimmed and trimmed ~= '' and trimmed ~= '.' and trimmed ~= '..' and not seen[trimmed] then
+                        seen[trimmed] = true
+                        folders[#folders + 1] = { name = trimmed, relPath = trimmed, fullPath = baseDir .. '/' .. trimmed }
+                        names[#names + 1] = trimmed
+                    end
+                end
+                pipe:close()
+            end
+        end)
+    end
+
+    -- Method 3: Fallback common map pack names check
+    local knownPacks = {
+        'Brewall', 'brewall', 'Goodurden', 'goodurden', 'Goods', 'goods',
+        'MyMaps', 'mymaps', 'custom', 'Custom', 'Default', 'default', 'Atlas', 'Cartography',
+    }
+    for _, pack in ipairs(knownPacks) do
+        if not seen[pack] then
+            local subPath = baseDir .. '/' .. pack
+            local testFile = subPath .. '/triune_test.tmp'
+            local f = io.open(testFile, 'w')
+            if f then
+                f:close()
+                os.remove(testFile)
+                seen[pack] = true
+                folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
+                names[#names + 1] = pack
+            end
+        end
+    end
+
+    state.mapFolders = folders
+    state.mapFolderNames = names
+
+    if state.selectedFolderIndex > #folders or state.selectedFolderIndex < 1 then
+        state.selectedFolderIndex = 1
+    end
+
+    state.activeMapsDirectory = folders[state.selectedFolderIndex] and folders[state.selectedFolderIndex].fullPath or baseDir
+end
+
+local function parseMapFile(filePath, layerId)
+    local f = io.open(filePath, 'r')
+    if not f then return 0, 0 end
+
+    local linesAdded = 0
+    local labelsAdded = 0
+    local targetLines = mapData.layers[layerId] or {}
+    local targetLabels = mapData.labels
+
+    for line in f:lines() do
+        local firstChar = string.sub(line, 1, 1)
+        if firstChar == 'L' or firstChar == 'l' then
+            -- Line format: L x1, y1, z1, x2, y2, z2, r, g, b
+            -- Note: EQ Map coordinates store x = -eqX, y = -eqY, z = eqZ
+            local x1, y1, z1, x2, y2, z2, r, g, b = string.match(line,
+                '^[Ll]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+)')
+
+            if x1 and y1 and z1 and x2 and y2 and z2 then
+                local nx1 = -tonumber(x1)
+                local ny1 = -tonumber(y1)
+                local nz1 = tonumber(z1)
+                local nx2 = -tonumber(x2)
+                local ny2 = -tonumber(y2)
+                local nz2 = tonumber(z2)
+                local nr = tonumber(r or 180) or 180
+                local ng = tonumber(g or 180) or 180
+                local nb = tonumber(b or 180) or 180
+
+                targetLines[#targetLines + 1] = {
+                    x1 = nx1, y1 = ny1, z1 = nz1,
+                    x2 = nx2, y2 = ny2, z2 = nz2,
+                    r = nr / 255.0, g = ng / 255.0, b = nb / 255.0,
+                }
+                linesAdded = linesAdded + 1
+
+                -- Update bounds
+                mapData.bounds.minX = math.min(mapData.bounds.minX, nx1, nx2)
+                mapData.bounds.maxX = math.max(mapData.bounds.maxX, nx1, nx2)
+                mapData.bounds.minY = math.min(mapData.bounds.minY, ny1, ny2)
+                mapData.bounds.maxY = math.max(mapData.bounds.maxY, ny1, ny2)
+                mapData.bounds.minZ = math.min(mapData.bounds.minZ, nz1, nz2)
+                mapData.bounds.maxZ = math.max(mapData.bounds.maxZ, nz1, nz2)
+            end
+        elseif firstChar == 'P' or firstChar == 'p' then
+            -- Label format: P x, y, z, r, g, b, size, label_text
+            local x, y, z, r, g, b, size, text = string.match(line,
+                '^[Pp]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+(.+)')
+
+            if x and y and z and text then
+                local nx = -tonumber(x)
+                local ny = -tonumber(y)
+                local nz = tonumber(z)
+                local nr = tonumber(r or 255) or 255
+                local ng = tonumber(g or 255) or 255
+                local nb = tonumber(b or 255) or 255
+                local cleanText = string.gsub(text, '_', ' ')
+
+                targetLabels[#targetLabels + 1] = {
+                    x = nx, y = ny, z = nz,
+                    r = nr / 255.0, g = ng / 255.0, b = nb / 255.0,
+                    size = tonumber(size or 1) or 1,
+                    text = cleanText,
+                }
+                labelsAdded = labelsAdded + 1
+            end
+        end
+    end
+
+    f:close()
+    mapData.layers[layerId] = targetLines
+    return linesAdded, labelsAdded
+end
+
+local function loadZoneMap(zoneShort)
+    if not zoneShort or zoneShort == '' then return false end
+
+    if not state.mapFolders or #state.mapFolders == 0 or not state.activeMapsDirectory then
+        scanMapFolders()
+    end
+
+    local baseDir = state.activeMapsDirectory or state.baseMapsDirectory or getBaseMapsDirectory()
+    if not baseDir or baseDir == '' then
+        state.statusMsg = 'EverQuest map directory not found.'
+        mapData.isLoaded = false
+        return false
+    end
+
+    mapData.zoneShort = zoneShort
+    mapData.layers = { [0] = {}, [1] = {}, [2] = {}, [3] = {} }
+    mapData.labels = {}
+    mapData.totalLines = 0
+    mapData.totalLabels = 0
+    mapData.bounds = {
+        minX = 999999, maxX = -999999,
+        minY = 999999, maxY = -999999,
+        minZ = 999999, maxZ = -999999,
+    }
+
+    local layerFiles = {
+        [0] = string.format('%s/%s.txt', baseDir, zoneShort),
+        [1] = string.format('%s/%s_1.txt', baseDir, zoneShort),
+        [2] = string.format('%s/%s_2.txt', baseDir, zoneShort),
+        [3] = string.format('%s/%s_3.txt', baseDir, zoneShort),
+    }
+    local labelsFile = string.format('%s/%s_labels.txt', baseDir, zoneShort)
+
+    for lId = 0, 3 do
+        local lCount, lbCount = parseMapFile(layerFiles[lId], lId)
+        mapData.totalLines = mapData.totalLines + lCount
+        mapData.totalLabels = mapData.totalLabels + lbCount
+    end
+
+    local _, lbCount2 = parseMapFile(labelsFile, 0)
+    mapData.totalLabels = mapData.totalLabels + lbCount2
+
+    local folderDisplay = (state.mapFolders[state.selectedFolderIndex] and state.mapFolders[state.selectedFolderIndex].name) or baseDir
+
+    if mapData.totalLines > 0 or mapData.totalLabels > 0 then
+        mapData.isLoaded = true
+        state.statusMsg = string.format('Loaded [%s]: %s (%d lines, %d labels)', folderDisplay, zoneShort, mapData.totalLines, mapData.totalLabels)
+
+        -- Initial auto-center on player position
+        local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+        local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+        if okMeX and okMeY and meX and meY then
+            viewport.centerEqX = meX
+            viewport.centerEqY = meY
+        else
+            viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+            viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+        end
+        return true
+    else
+        mapData.isLoaded = false
+        state.statusMsg = string.format('No map files for "%s" in [%s]', zoneShort, folderDisplay)
+        return false
+    end
+end
+
+-- ============================================================================
+-- TRIUNE LOADOUT & COMBAT RADIUS / WAYPOINTS SYNC
+-- ============================================================================
+local function syncTriuneLoadout()
+    local cfgDir = mq.configDir
+    if not cfgDir then return end
+
+    local fn = loadfile(cfgDir .. '/triune_loadout.lua')
+    if not fn then
+        state.triuneData.isLoaded = false
+        return
+    end
+
+    local ok, allData = pcall(fn)
+    if not ok or type(allData) ~= 'table' then
+        state.triuneData.isLoaded = false
+        return
+    end
+
+    local myName = nil
+    local okName, nameVal = pcall(function() return mq.TLO.Me.CleanName() end)
+    if okName and nameVal and nameVal ~= '' then myName = nameVal end
+
+    local charData = myName and allData[myName]
+    local charCtrl = (type(charData) == 'table' and type(charData.control) == 'table') and charData.control or {}
+
+    local td = state.triuneData
+    td.charName = myName or 'Unknown'
+    td.isLoaded = true
+    td.lastSyncTime = mq.gettime()
+
+    -- Camp & Combat Radii
+    td.campRadius          = tonumber(charCtrl.camp_radius or 50) or 50
+    td.combatRadius        = tonumber(charCtrl.combat_radius or 100) or 100
+    td.hunterRadius        = tonumber(charCtrl.hunter_radius or 250) or 250
+    td.pullRadius          = tonumber(charCtrl.pull_radius or 200) or 200
+    td.waypointScanRadius  = tonumber(charCtrl.waypoint_scan_radius or 100) or 100
+
+    if charCtrl.pull_radius or charCtrl.hunter_radius or charCtrl.combat_radius then
+        ctrl.customSearchRadius = tonumber(charCtrl.pull_radius or charCtrl.hunter_radius or charCtrl.combat_radius) or 200
+    end
+
+    -- Camp Location
+    if type(charCtrl.camp_loc) == 'table' and charCtrl.camp_loc.x and charCtrl.camp_loc.y then
+        td.campLoc = {
+            x = tonumber(charCtrl.camp_loc.x) or 0,
+            y = tonumber(charCtrl.camp_loc.y) or 0,
+            z = tonumber(charCtrl.camp_loc.z) or 0,
+        }
+    else
+        td.campLoc = nil
+    end
+
+    -- Waypoints: Character-level vs Zone-level
+    local wps = {}
+    local zShort = state.currentZoneShort or ''
+    local zoneWpObj = (type(allData.__zoneWaypoints) == 'table') and allData.__zoneWaypoints[zShort]
+
+    if type(charCtrl.waypoints) == 'table' and #charCtrl.waypoints > 0 then
+        for _, wp in ipairs(charCtrl.waypoints) do
+            if type(wp) == 'table' and wp.x and wp.y then
+                wps[#wps + 1] = {
+                    name = tostring(wp.name or string.format('WP %d', #wps + 1)),
+                    x    = tonumber(wp.x) or 0,
+                    y    = tonumber(wp.y) or 0,
+                    z    = tonumber(wp.z) or 0,
+                }
+            end
+        end
+        td.useWaypoints        = (charCtrl.use_waypoints == true)
+        td.waypointRadius      = tonumber(charCtrl.waypoint_radius or 20) or 20
+        td.waypointScanRadius  = tonumber(charCtrl.waypoint_scan_radius or 100) or 100
+        td.waypointLoop        = (charCtrl.waypoint_loop == true)
+        td.currentWaypointIdx  = tonumber(charCtrl.current_waypoint_idx or 1) or 1
+    elseif type(zoneWpObj) == 'table' and type(zoneWpObj.waypoints) == 'table' and #zoneWpObj.waypoints > 0 then
+        for _, wp in ipairs(zoneWpObj.waypoints) do
+            if type(wp) == 'table' and wp.x and wp.y then
+                wps[#wps + 1] = {
+                    name = tostring(wp.name or string.format('WP %d', #wps + 1)),
+                    x    = tonumber(wp.x) or 0,
+                    y    = tonumber(wp.y) or 0,
+                    z    = tonumber(wp.z) or 0,
+                }
+            end
+        end
+        td.useWaypoints        = true
+        td.waypointRadius      = tonumber(zoneWpObj.waypoint_radius or 20) or 20
+        td.waypointScanRadius  = tonumber(zoneWpObj.waypoint_scan_radius or 100) or 100
+        td.waypointLoop        = (zoneWpObj.waypoint_loop == true)
+        td.currentWaypointIdx  = 1
+    end
+    td.waypoints = wps
+
+    -- Zone Hazards (anti-stuck hotspots)
+    local hazards = {}
+    local zoneHazardsObj = (type(allData.__zoneHazards) == 'table') and allData.__zoneHazards[zShort]
+    if type(zoneHazardsObj) == 'table' then
+        for _, hz in ipairs(zoneHazardsObj) do
+            if type(hz) == 'table' and hz.x and hz.y then
+                hazards[#hazards + 1] = {
+                    x    = tonumber(hz.x) or 0,
+                    y    = tonumber(hz.y) or 0,
+                    z    = tonumber(hz.z) or 0,
+                    hits = tonumber(hz.hits or 1) or 1,
+                }
+            end
+        end
+    end
+    td.zoneHazards = hazards
+end
+
+-- ============================================================================
+-- SPAWN SCANNER & FILTER ENGINE
+-- ============================================================================
+local function scanZoneSpawns()
+    local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
+    if okZone and zoneName then state.currentZoneName = zoneName end
+
+    local okMesh, isMesh = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
+    navState.meshLoaded = (okMesh and isMesh) or false
+
+    local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
+    navState.navActive = (okNavAct and isNavAct) or false
+
+    local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
+    if not okCount or not count or count <= 0 then
+        spawns.allNPCs = {}
+        spawns.filteredNPCs = {}
+        spawns.totalCount = 0
+        return
+    end
+
+    spawns.totalCount = count
+    local maxFetch = math.min(count, 650) -- Safety ceiling for giant raid zones
+    local newNpcList = {}
+
+    local myZ = 0
+    local okMeZ, pZ = pcall(function() return mq.TLO.Me.Z() end)
+    if okMeZ and pZ then myZ = pZ end
+
+    for i = 1, maxFetch do
+        local okSpawn, s = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
+        if okSpawn and s and s() then
+            local okId, sId = pcall(function() return s.ID() end)
+            local okDead, isDead = pcall(function() return s.Dead() end)
+
+            if okId and sId and sId > 0 and (not okDead or not isDead) then
+                local _, cleanName   = pcall(function() return s.CleanName() end)
+                local _, level       = pcall(function() return s.Level() end)
+                local _, classShort  = pcall(function() return s.Class.ShortName() end)
+                local _, conColor    = pcall(function() return s.ConColor() end)
+                local _, distance    = pcall(function() return s.Distance3D() end)
+                local _, lineOfSight = pcall(function() return s.LineOfSight() end)
+                local _, x           = pcall(function() return s.X() end)
+                local _, y           = pcall(function() return s.Y() end)
+                local _, z           = pcall(function() return s.Z() end)
+                local _, pctHPs      = pcall(function() return s.PctHPs() end)
+                local _, hate        = pcall(function() return s.Aggressive() end)
+
+                local mobEntry = {
+                    id          = sId,
+                    cleanName   = cleanName or 'Unknown NPC',
+                    level       = level or 0,
+                    class       = classShort or 'WAR',
+                    conColor    = string.upper(tostring(conColor or 'GREY')),
+                    distance    = distance or 99999,
+                    lineOfSight = lineOfSight or false,
+                    x           = x or 0,
+                    y           = y or 0,
+                    z           = z or 0,
+                    pctHPs      = pctHPs or 100,
+                    isAggro     = hate or false,
+                }
+                newNpcList[#newNpcList + 1] = mobEntry
+
+                -- Enqueue for background navmesh validation if not in cache
+                local cached = navState.cache[sId]
+                if not cached or (mq.gettime() - cached.checkedAt) > 6000 then
+                    if not navState.queueSet[sId] then
+                        navState.checkQueue[#navState.checkQueue + 1] = sId
+                        navState.queueSet[sId] = true
+                    end
+                end
+            end
+        end
+    end
+
+    spawns.allNPCs = newNpcList
+
+    -- Apply Filters
+    local filtered = {}
+    local searchLower = string.lower(state.searchText or '')
+    local filterIdx = state.conFilterIndex
+    local zRange = ctrl.zFilterRange
+
+    for _, mob in ipairs(newNpcList) do
+        local keep = true
+
+        -- Search text filter
+        if searchLower ~= '' then
+            local nameMatch = string.lower(mob.cleanName):find(searchLower, 1, true)
+            local idMatch = tostring(mob.id):find(searchLower, 1, true)
+            if not nameMatch and not idMatch then keep = false end
+        end
+
+        -- Consideration filter
+        if keep and filterIdx > 1 then
+            local con = mob.conColor
+            if filterIdx == 2 and con ~= 'RED' and con ~= 'DARK RED' then keep = false
+            elseif filterIdx == 3 and con ~= 'YELLOW' then keep = false
+            elseif filterIdx == 4 and con ~= 'WHITE' then keep = false
+            elseif filterIdx == 5 and con ~= 'BLUE' then keep = false
+            elseif filterIdx == 6 and con ~= 'LIGHT BLUE' then keep = false
+            elseif filterIdx == 7 and con ~= 'GREEN' then keep = false
+            elseif filterIdx == 8 and con ~= 'GREY' and con ~= 'GRAY' then keep = false
+            end
+        end
+
+        -- Level filter
+        if keep and (mob.level < state.minLevel or mob.level > state.maxLevel) then
+            keep = false
+        end
+
+        -- Distance filter
+        if keep and (mob.distance > state.maxDistance) then
+            keep = false
+        end
+
+        -- Line of Sight filter
+        if keep and state.losOnly and not mob.lineOfSight then
+            keep = false
+        end
+
+        -- Z-Height filter
+        if keep and ctrl.useZFilter then
+            local zDiff = math.abs(mob.z - myZ)
+            if zDiff > zRange then keep = false end
+        end
+
+        -- Pathable only filter
+        if keep and state.pathableOnly then
+            local c = navState.cache[mob.id]
+            if not c or not c.hasPath then keep = false end
+        end
+
+        if keep then
+            filtered[#filtered + 1] = mob
+        end
+    end
+
+    -- Sort filtered list
+    local sIdx = state.sortIndex
+    table.sort(filtered, function(a, b)
+        if sIdx == 1 then return a.distance < b.distance
+        elseif sIdx == 2 then return a.distance > b.distance
+        elseif sIdx == 3 then
+            if a.level == b.level then return a.distance < b.distance end
+            return a.level > b.level
+        elseif sIdx == 4 then
+            if a.level == b.level then return a.distance < b.distance end
+            return a.level < b.level
+        elseif sIdx == 5 then
+            return a.cleanName:lower() < b.cleanName:lower()
+        end
+        return a.distance < b.distance
+    end)
+
+    spawns.filteredNPCs = filtered
+
+    -- Scan Group Members
+    local groupList = {}
+    local okGrp, grpCount = pcall(function() return mq.TLO.Group.Members() end)
+    if okGrp and grpCount and grpCount > 0 then
+        for g = 1, grpCount do
+            local okMem, mem = pcall(function() return mq.TLO.Group.Member(g) end)
+            if okMem and mem and mem() then
+                local _, mName = pcall(function() return mem.CleanName() end)
+                local _, mX = pcall(function() return mem.X() end)
+                local _, mY = pcall(function() return mem.Y() end)
+                local _, mZ = pcall(function() return mem.Z() end)
+                local _, mHp = pcall(function() return mem.PctHPs() end)
+                if mX and mY then
+                    groupList[#groupList + 1] = {
+                        name = mName or ('Group ' .. g),
+                        x = mX, y = mY, z = mZ or 0,
+                        pctHPs = mHp or 100,
+                    }
+                end
+            end
+        end
+    end
+    spawns.groupMembers = groupList
+end
+
+-- ============================================================================
+-- NAVMESH PATH ENGINE (Throttled Background Batch Verification)
+-- ============================================================================
+local function processNavBatch()
+    if not navState.meshLoaded then return end
+    if #navState.checkQueue == 0 then return end
+
+    local now = mq.gettime()
+    local count = 0
+    local maxBatch = navState.batchSize
+
+    while #navState.checkQueue > 0 and count < maxBatch do
+        local mobId = table.remove(navState.checkQueue, 1)
+        navState.queueSet[mobId] = nil
+
+        if mobId and mobId > 0 then
+            local okPath, hasPath = pcall(function()
+                return mq.TLO.Navigation.PathExists(string.format('id %d', mobId))()
+            end)
+            local okLen, pathLen = pcall(function()
+                return mq.TLO.Navigation.PathLength(string.format('id %d', mobId))()
+            end)
+
+            navState.cache[mobId] = {
+                hasPath   = (okPath and hasPath) or false,
+                length    = (okLen and pathLen) or 0,
+                checkedAt = now,
+            }
+            count = count + 1
+        end
+    end
+end
+
+-- ============================================================================
+-- 2D COORDINATE TRANSFORMS (World Space <-> Canvas Screen Space)
+-- ============================================================================
+-- In EverQuest:
+--   +Y is North (Screen Up)
+--   -Y is South (Screen Down)
+--   +X is West  (Screen Left)
+--   -X is East  (Screen Right)
+local function worldToScreen(eqX, eqY, canvasOriginX, canvasOriginY, canvasW, canvasH)
+    local cx = canvasOriginX + canvasW * 0.5
+    local cy = canvasOriginY + canvasH * 0.5
+    local z = viewport.zoom
+
+    local sx = cx - (eqX - viewport.centerEqX) * z
+    local sy = cy - (eqY - viewport.centerEqY) * z
+    return sx, sy
+end
+
+local function screenToWorld(sx, sy, canvasOriginX, canvasOriginY, canvasW, canvasH)
+    local cx = canvasOriginX + canvasW * 0.5
+    local cy = canvasOriginY + canvasH * 0.5
+    local z = math.max(viewport.zoom, 0.001)
+
+    local eqX = viewport.centerEqX - (sx - cx) / z
+    local eqY = viewport.centerEqY - (sy - cy) / z
+    return eqX, eqY
+end
+
+-- ============================================================================
+-- 2D MAP CANVAS RENDERING
+-- ============================================================================
+local function DrawMapCanvas(availW, availH)
+    local drawList = ImGui.GetWindowDrawList()
+    local canvasPos = ImGui.GetCursorScreenPosVec()
+    local cX = canvasPos.x
+    local cY = canvasPos.y
+
+    -- Invisible button to capture all mouse inputs over canvas
+    ImGui.InvisibleButton('##MapCanvasHitbox', availW, availH)
+    local isHovered = ImGui.IsItemHovered()
+    local isItemActive = ImGui.IsItemActive()
+
+    -- Coordinate under cursor
+    local mousePos = ImGui.GetMousePosVec()
+    if isHovered then
+        state.cursorWorldX, state.cursorWorldY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
+    end
+
+    -- Safe IO check
+    local hasCtrl = false
+    local wheelVal = 0
+    pcall(function()
+        local io = ImGui.GetIO()
+        if io then
+            if io.KeyCtrl then hasCtrl = true end
+            local okW, w = pcall(function() return io.MouseWheel end)
+            if okW and type(w) == 'number' then wheelVal = w end
+        end
+    end)
+
+    -- Handle Drag Panning
+    if isHovered and ImGui.IsMouseClicked(1) then
+        -- Right click starts pan
+        viewport.isDragging = true
+        viewport.dragStartMouseX = mousePos.x
+        viewport.dragStartMouseY = mousePos.y
+        viewport.dragStartCenterEqX = viewport.centerEqX
+        viewport.dragStartCenterEqY = viewport.centerEqY
+    elseif isItemActive and ImGui.IsMouseDown(0) and not hasCtrl then
+        -- Left click drag also pans if not clicking entity
+        if not viewport.isDragging then
+            viewport.isDragging = true
+            viewport.dragStartMouseX = mousePos.x
+            viewport.dragStartMouseY = mousePos.y
+            viewport.dragStartCenterEqX = viewport.centerEqX
+            viewport.dragStartCenterEqY = viewport.centerEqY
+        end
+    end
+
+    if viewport.isDragging then
+        if ImGui.IsMouseDown(0) or ImGui.IsMouseDown(1) then
+            local dx = mousePos.x - viewport.dragStartMouseX
+            local dy = mousePos.y - viewport.dragStartMouseY
+            local z = math.max(viewport.zoom, 0.001)
+            viewport.centerEqX = viewport.dragStartCenterEqX + (dx / z)
+            viewport.centerEqY = viewport.dragStartCenterEqY + (dy / z)
+            ctrl.followPlayer = false -- Temporarily suspend follow-player while manually panning
+        else
+            viewport.isDragging = false
+        end
+    end
+
+    -- Handle Mouse Wheel Zoom (Centering zoom on mouse cursor)
+    if isHovered and wheelVal ~= 0 then
+        local oldZoom = viewport.zoom
+        local newZoom = oldZoom * (1.0 + wheelVal * 0.15)
+        newZoom = math.max(viewport.minZoom, math.min(viewport.maxZoom, newZoom))
+
+        if newZoom ~= oldZoom then
+            -- Keep world coordinate under mouse fixed during zoom
+            local mWorldX, mWorldY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
+            viewport.zoom = newZoom
+            local cx = cX + availW * 0.5
+            local cy = cY + availH * 0.5
+            viewport.centerEqX = mWorldX + (mousePos.x - cx) / newZoom
+            viewport.centerEqY = mWorldY + (mousePos.y - cy) / newZoom
+        end
+    end
+
+    -- Push Clipping Rectangle to strictly contain map canvas
+    drawList:PushClipRect(canvasPos, ImVec2(cX + availW, cY + availH), true)
+
+    -- Canvas Background (Dark charcoal / navy)
+    local bgCol = ImGui.GetColorU32(0.035, 0.050, 0.075, 1.0)
+    drawList:AddRectFilled(canvasPos, ImVec2(cX + availW, cY + availH), bgCol)
+
+    -- Draw Grid Lines (if enabled)
+    if ctrl.showGrid then
+        local gridSpacing = 500 -- 500 yard grid lines
+        if viewport.zoom > 1.2 then gridSpacing = 100
+        elseif viewport.zoom < 0.25 then gridSpacing = 1000 end
+
+        local gridCol = ImGui.GetColorU32(0.12, 0.18, 0.25, 0.5)
+        local textCol = ImGui.GetColorU32(0.35, 0.45, 0.55, 0.6)
+
+        local minWx, maxWy = screenToWorld(cX, cY, cX, cY, availW, availH)
+        local maxWx, minWy = screenToWorld(cX + availW, cY + availH, cX, cY, availW, availH)
+
+        local startGx = math.floor(math.min(minWx, maxWx) / gridSpacing) * gridSpacing
+        local endGx = math.ceil(math.max(minWx, maxWx) / gridSpacing) * gridSpacing
+        local startGy = math.floor(math.min(minWy, maxWy) / gridSpacing) * gridSpacing
+        local endGy = math.ceil(math.max(minWy, maxWy) / gridSpacing) * gridSpacing
+
+        -- Vertical grid lines (constant X)
+        for gx = startGx, endGx, gridSpacing do
+            local sx, _ = worldToScreen(gx, 0, cX, cY, availW, availH)
+            if sx >= cX and sx <= cX + availW then
+                drawList:AddLine(ImVec2(sx, cY), ImVec2(sx, cY + availH), gridCol, 1.0)
+                drawList:AddText(ImVec2(sx + 3, cY + 3), textCol, string.format('X:%d', gx))
+            end
+        end
+
+        -- Horizontal grid lines (constant Y)
+        for gy = startGy, endGy, gridSpacing do
+            local _, sy = worldToScreen(0, gy, cX, cY, availW, availH)
+            if sy >= cY and sy <= cX + availW then
+                drawList:AddLine(ImVec2(cX, sy), ImVec2(cX + availW, sy), gridCol, 1.0)
+                drawList:AddText(ImVec2(cX + 3, sy + 3), textCol, string.format('Y:%d', gy))
+            end
+        end
+    end
+
+    -- Player altitude for Z-filtering
+    local playerZ = 0
+    local okPZ, pZVal = pcall(function() return mq.TLO.Me.Z() end)
+    if okPZ and pZVal then playerZ = pZVal end
+    local zRange = ctrl.zFilterRange
+
+    -- Draw Map Lines (Layers 0, 1, 2, 3)
+    local layerEnabled = {
+        [0] = ctrl.layer0,
+        [1] = ctrl.layer1,
+        [2] = ctrl.layer2,
+        [3] = ctrl.layer3,
+    }
+
+    for lId = 0, 3 do
+        if layerEnabled[lId] then
+            local lines = mapData.layers[lId] or {}
+            for _, seg in ipairs(lines) do
+                local drawSeg = true
+                if ctrl.useZFilter then
+                    local avgZ = (seg.z1 + seg.z2) * 0.5
+                    if math.abs(avgZ - playerZ) > zRange then
+                        drawSeg = false
+                    end
+                end
+
+                if drawSeg then
+                    local sx1, sy1 = worldToScreen(seg.x1, seg.y1, cX, cY, availW, availH)
+                    local sx2, sy2 = worldToScreen(seg.x2, seg.y2, cX, cY, availW, availH)
+
+                    -- Frustum culling
+                    local minSx = math.min(sx1, sx2)
+                    local maxSx = math.max(sx1, sx2)
+                    local minSy = math.min(sy1, sy2)
+                    local maxSy = math.max(sy1, sy2)
+
+                    if maxSx >= cX and minSx <= cX + availW and maxSy >= cY and minSy <= cY + availH then
+                        local col = ImGui.GetColorU32(seg.r, seg.g, seg.b, 1.0)
+                        drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, ctrl.lineThickness)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Draw Map Labels
+    if ctrl.showLabels and ctrl.layerLabels then
+        local labels = mapData.labels or {}
+        for _, lb in ipairs(labels) do
+            local drawLb = true
+            if ctrl.useZFilter and math.abs(lb.z - playerZ) > zRange then
+                drawLb = false
+            end
+            if drawLb then
+                local sx, sy = worldToScreen(lb.x, lb.y, cX, cY, availW, availH)
+                if sx >= cX - 50 and sx <= cX + availW + 50 and sy >= cY - 20 and sy <= cY + availH + 20 then
+                    local col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.85)
+                    drawList:AddText(ImVec2(sx, sy), col, lb.text)
+                end
+            end
+        end
+    end
+
+    -- Draw Triune Patrol Waypoints & Connecting Paths
+    local td = state.triuneData
+    if ctrl.showWaypoints and td.waypoints and #td.waypoints > 0 then
+        local wps = td.waypoints
+        -- Draw Connecting Path Lines
+        local wpLineCol = ImGui.GetColorU32(0.20, 0.85, 0.95, 0.75)
+        for i = 1, #wps - 1 do
+            local wsx1, wsy1 = worldToScreen(wps[i].x, wps[i].y, cX, cY, availW, availH)
+            local wsx2, wsy2 = worldToScreen(wps[i + 1].x, wps[i + 1].y, cX, cY, availW, availH)
+            drawList:AddLine(ImVec2(wsx1, wsy1), ImVec2(wsx2, wsy2), ImGui.GetColorU32(0, 0, 0, 0.6), 3.0)
+            drawList:AddLine(ImVec2(wsx1, wsy1), ImVec2(wsx2, wsy2), wpLineCol, 1.8)
+        end
+        if td.waypointLoop and #wps > 1 then
+            local wsxN, wsyN = worldToScreen(wps[#wps].x, wps[#wps].y, cX, cY, availW, availH)
+            local wsx1, wsy1 = worldToScreen(wps[1].x, wps[1].y, cX, cY, availW, availH)
+            drawList:AddLine(ImVec2(wsxN, wsyN), ImVec2(wsx1, wsy1), ImGui.GetColorU32(0, 0, 0, 0.6), 2.5)
+            drawList:AddLine(ImVec2(wsxN, wsyN), ImVec2(wsx1, wsy1), ImGui.GetColorU32(0.35, 0.90, 0.75, 0.55), 1.5)
+        end
+
+        -- Draw Waypoint Nodes, Arrival Radius & Scan Radius
+        for i, wp in ipairs(wps) do
+            local wsx, wsy = worldToScreen(wp.x, wp.y, cX, cY, availW, availH)
+            if wsx >= cX - 100 and wsx <= cX + availW + 100 and wsy >= cY - 100 and wsy <= cY + availH + 100 then
+                local isCurrentWp = (i == (td.currentWaypointIdx or 1))
+
+                -- Waypoint Scan / Search Radius (e.g. 100yd)
+                if ctrl.showSearchRadius then
+                    local scanRadScreen = (td.waypointScanRadius or 100) * viewport.zoom
+                    if scanRadScreen > 4.0 then
+                        local scanCol = isCurrentWp and ImGui.GetColorU32(1.0, 0.85, 0.20, 0.30) or ImGui.GetColorU32(0.20, 0.75, 0.90, 0.15)
+                        drawList:AddCircle(ImVec2(wsx, wsy), scanRadScreen, scanCol, 0, 1.2)
+                    end
+                end
+
+                -- Waypoint Arrival Radius Circle (e.g. 20yd)
+                local wpRadScreen = (td.waypointRadius or 20) * viewport.zoom
+                if wpRadScreen > 3.0 then
+                    drawList:AddCircle(ImVec2(wsx, wsy), wpRadScreen, ImGui.GetColorU32(0.2, 0.85, 0.95, 0.35), 0, 1.0)
+                end
+
+                if isCurrentWp then
+                    local wpPulse = math.sin(os.clock() * 5.0) * 2.0
+                    drawList:AddCircle(ImVec2(wsx, wsy), 8.0 + wpPulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.8), 0, 1.8)
+                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 5.5, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0))
+                else
+                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0.15, 0.75, 0.90, 0.9))
+                    drawList:AddCircle(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                end
+
+                -- Label text
+                local wpLabel = string.format('#%d %s', i, wp.name)
+                drawList:AddText(ImVec2(wsx + 7, wsy - 7), ImGui.GetColorU32(0, 0, 0, 0.9), wpLabel)
+                drawList:AddText(ImVec2(wsx + 6, wsy - 8), ImGui.GetColorU32(0.4, 0.9, 1.0, 0.95), wpLabel)
+            end
+        end
+    end
+
+    -- Draw Triune Camp & Combat Radius
+    if ctrl.showCampRadius and td.campLoc and td.campLoc.x and td.campLoc.y then
+        local csx, csy = worldToScreen(td.campLoc.x, td.campLoc.y, cX, cY, availW, availH)
+        local campRadScreen = (td.campRadius or 50) * viewport.zoom
+
+        if campRadScreen > 2.0 then
+            drawList:AddCircleFilled(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.10, 0.70, 0.85, 0.08))
+            drawList:AddCircle(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.20, 0.85, 1.00, 0.60), 0, 1.8)
+
+            -- Camp Anchor center pin
+            drawList:AddCircleFilled(ImVec2(csx, csy), 5.0, ImGui.GetColorU32(0.20, 0.90, 1.00, 1.0))
+            drawList:AddCircle(ImVec2(csx, csy), 8.0, ImGui.GetColorU32(1.0, 1.0, 1.0, 0.8), 0, 1.5)
+
+            local campText = string.format('Camp (Radius: %dyd)', td.campRadius or 50)
+            drawList:AddText(ImVec2(csx + 10, csy - 8), ImGui.GetColorU32(0, 0, 0, 0.9), campText)
+            drawList:AddText(ImVec2(csx + 9, csy - 9), ImGui.GetColorU32(0.3, 0.9, 1.0, 1.0), campText)
+        end
+    end
+
+    -- Draw Search / Pull / Roam Radius Circle (Anchored to Camp if set, otherwise anchored to Player!)
+    if ctrl.showSearchRadius or ctrl.showPullRadius then
+        local anchorX, anchorY = nil, nil
+        local isCampAnchor = false
+
+        if td.campLoc and td.campLoc.x and td.campLoc.y then
+            anchorX, anchorY = td.campLoc.x, td.campLoc.y
+            isCampAnchor = true
+        else
+            local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+            local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+            if okMeX and okMeY and meX and meY then
+                anchorX, anchorY = meX, meY
+            end
+        end
+
+        if anchorX and anchorY then
+            local asx, asy = worldToScreen(anchorX, anchorY, cX, cY, availW, availH)
+            local searchYards = ctrl.customSearchRadius or td.pullRadius or td.hunterRadius or td.combatRadius or 200
+            local searchRadScreen = searchYards * viewport.zoom
+
+            if searchRadScreen > 2.0 then
+                -- Subtle amber fill + ring
+                drawList:AddCircleFilled(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.80, 0.20, 0.03))
+                drawList:AddCircle(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.75, 0.20, 0.65), 0, 1.5)
+
+                local labelText = isCampAnchor and string.format('Pull Radius (%dyd)', searchYards) or string.format('Search / Roam Radius (%dyd)', searchYards)
+                drawList:AddText(ImVec2(asx - 45, asy - searchRadScreen - 14), ImGui.GetColorU32(0, 0, 0, 0.95), labelText)
+                drawList:AddText(ImVec2(asx - 46, asy - searchRadScreen - 15), ImGui.GetColorU32(1.0, 0.85, 0.3, 1.0), labelText)
+            end
+        end
+    end
+
+    -- Draw Triune Hazard Avoidance Hotspots (Stuck Memory)
+    if ctrl.showHazards and td.zoneHazards and #td.zoneHazards > 0 then
+        for _, hz in ipairs(td.zoneHazards) do
+            local hsx, hsy = worldToScreen(hz.x, hz.y, cX, cY, availW, availH)
+            if hsx >= cX - 40 and hsx <= cX + availW + 40 and hsy >= cY - 40 and hsy <= cY + availH + 40 then
+                local hzRadScreen = math.max(12.0 * viewport.zoom, 7.0)
+                drawList:AddCircleFilled(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.20, 0.20, 0.20))
+                drawList:AddCircle(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.25, 0.25, 0.75), 0, 1.5)
+                local hzText = string.format('Hazard (%d hits)', hz.hits or 1)
+                drawList:AddText(ImVec2(hsx + 8, hsy - 6), ImGui.GetColorU32(0, 0, 0, 0.9), hzText)
+                drawList:AddText(ImVec2(hsx + 7, hsy - 7), ImGui.GetColorU32(1.0, 0.4, 0.4, 0.9), hzText)
+            end
+        end
+    end
+
+    -- Draw Group Members
+    if ctrl.showGroup then
+        local grpCol = ImGui.GetColorU32(0.20, 0.90, 0.80, 1.0)
+        for _, gm in ipairs(spawns.groupMembers) do
+            local sx, sy = worldToScreen(gm.x, gm.y, cX, cY, availW, availH)
+            if sx >= cX and sx <= cX + availW and sy >= cY and sy <= cY + availH then
+                drawList:AddCircleFilled(ImVec2(sx, sy), 4.5, grpCol)
+                drawList:AddText(ImVec2(sx + 6, sy - 6), grpCol, gm.name)
+            end
+        end
+    end
+
+    -- Current Target ID
+    local targetId = 0
+    local okTarg, tId = pcall(function() return mq.TLO.Target.ID() end)
+    if okTarg and tId then targetId = tId end
+
+    -- Draw NPCs and Process Click Hit-Testing
+    local hoveredMob = nil
+    local clickedMob = nil
+    local doubleClickedMob = nil
+
+    if ctrl.showNPCs then
+        for _, mob in ipairs(spawns.filteredNPCs) do
+            local sx, sy = worldToScreen(mob.x, mob.y, cX, cY, availW, availH)
+
+            if sx >= cX - 10 and sx <= cX + availW + 10 and sy >= cY - 10 and sy <= cY + availH + 10 then
+                -- Determine Colors
+                local conStyle = getConStyle(mob.conColor)
+                local conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, 1.0)
+
+                local cNav = navState.cache[mob.id]
+                local isPathable = cNav and cNav.hasPath
+                local navColU32 = (isPathable and ImGui.GetColorU32(0.15, 0.95, 0.35, 1.0)) or ImGui.GetColorU32(0.95, 0.20, 0.20, 1.0)
+                if not navState.meshLoaded then
+                    navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8)
+                end
+
+                local nodeRadius = ctrl.npcNodeRadius
+                local isTarget = (mob.id == targetId)
+
+                -- Draw Node by Color Mode
+                if ctrl.colorModeIndex == 1 then
+                    -- Dual Mode: Con fill with Nav halo
+                    drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
+                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
+                elseif ctrl.colorModeIndex == 2 then
+                    -- Navmesh Reachability Only
+                    drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32)
+                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                else
+                    -- Con Colors Only
+                    drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
+                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                end
+
+                -- Target Highlight Ring
+                if isTarget then
+                    local pulseCol = ImGui.GetColorU32(1.0, 0.85, 0.20, 1.0)
+                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 4.0, pulseCol, 0, 2.0)
+                end
+
+                -- Aggro / Hate Indicator
+                if mob.isAggro then
+                    local hateCol = ImGui.GetColorU32(1.0, 0.1, 0.1, 0.9)
+                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 6.0, hateCol, 0, 1.5)
+                end
+
+                -- Optional Name Tag on Map
+                if ctrl.showNPCNames then
+                    drawList:AddText(ImVec2(sx + 6, sy - 6), conColU32, mob.cleanName)
+                end
+
+                -- Hit Testing
+                if isHovered then
+                    local mDist = math.sqrt((mousePos.x - sx)^2 + (mousePos.y - sy)^2)
+                    if mDist <= (nodeRadius + 4.0) then
+                        hoveredMob = mob
+                        drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 5.0, ImGui.GetColorU32(1, 1, 1, 0.9), 0, 2.0)
+
+                        if ImGui.IsMouseClicked(0) then
+                            clickedMob = mob
+                        end
+                        if ImGui.IsMouseDoubleClicked(0) then
+                            doubleClickedMob = mob
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Process Clicked NPC Actions
+    if doubleClickedMob then
+        actionQueue.pendingTargetId = doubleClickedMob.id
+        actionQueue.pendingNavId = doubleClickedMob.id
+        state.activeNavSpawnId = doubleClickedMob.id
+        state.activeNavLoc = nil
+        state.activeNavCommandTime = mq.gettime()
+        state.statusMsg = string.format('Navigating to: %s (ID: %d)', doubleClickedMob.cleanName, doubleClickedMob.id)
+    elseif clickedMob then
+        actionQueue.pendingTargetId = clickedMob.id
+        state.statusMsg = string.format('Selected: %s (ID: %d, Lvl: %d)', clickedMob.cleanName, clickedMob.id, clickedMob.level)
+    end
+
+    -- Ground Click-to-Move Navigation (Double-click or Ctrl+Left click on empty terrain)
+    if isHovered and not hoveredMob then
+        if ImGui.IsMouseDoubleClicked(0) or (ImGui.IsMouseClicked(0) and hasCtrl) then
+            local clickX, clickY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
+            actionQueue.pendingNavLoc = { y = clickY, x = clickX, z = playerZ }
+            state.activeNavLoc = { y = clickY, x = clickX, z = playerZ }
+            state.activeNavSpawnId = 0
+            state.activeNavCommandTime = mq.gettime()
+            state.statusMsg = string.format('Navigating to ground loc: Y:%.1f, X:%.1f, Z:%.1f', clickY, clickX, playerZ)
+        end
+    end
+
+    -- Query Real-Time Navigation Status
+    local isNavActive = false
+    local okNav, act = pcall(function() return mq.TLO.Navigation.Active() end)
+    if okNav and act then isNavActive = true end
+
+    -- Draw Active Destination / Waypoint Marker & Path Line
+    local navRecentlyTriggered = state.activeNavCommandTime and ((mq.gettime() - state.activeNavCommandTime) < 5000)
+    local hasPendingNav = (actionQueue.pendingNavLoc ~= nil) or (actionQueue.pendingNavId > 0)
+    local shouldDrawNav = ctrl.showNavLine and (isNavActive or navRecentlyTriggered or hasPendingNav or state.activeNavLoc ~= nil or (state.activeNavSpawnId and state.activeNavSpawnId > 0))
+
+    if shouldDrawNav then
+        local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+        local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+        if okMeX and okMeY and meX and meY then
+            local pSx, pSy = worldToScreen(meX, meY, cX, cY, availW, availH)
+            local destX, destY = nil, nil
+
+            if state.activeNavLoc and state.activeNavLoc.x and state.activeNavLoc.y then
+                destX = state.activeNavLoc.x
+                destY = state.activeNavLoc.y
+            else
+                local effSpawnId = (state.activeNavSpawnId and state.activeNavSpawnId > 0 and state.activeNavSpawnId) or targetId
+                if effSpawnId and effSpawnId > 0 then
+                    local okSp, sp = pcall(function() return mq.TLO.Spawn(effSpawnId) end)
+                    if okSp and sp and sp() then
+                        local okSx, sX = pcall(function() return sp.X() end)
+                        local okSy, sY = pcall(function() return sp.Y() end)
+                        if okSx and okSy and sX and sY then
+                            destX, destY = sX, sY
+                        end
+                    end
+                end
+            end
+
+            if destX and destY then
+                local pDist = math.sqrt((meX - destX)^2 + (meY - destY)^2)
+                if not isNavActive and pDist < 12 and not hasPendingNav and (mq.gettime() - (state.activeNavCommandTime or 0) > 1500) then
+                    -- Arrived at destination
+                    state.activeNavLoc = nil
+                    state.activeNavSpawnId = 0
+                else
+                    local dSx, dSy = worldToScreen(destX, destY, cX, cY, availW, availH)
+
+                    -- Path Line: Solid Emerald with Dark Shadow for visibility
+                    drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.0, 0.0, 0.0, 0.75), 3.5)
+                    drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.15, 0.95, 0.40, 0.95), 2.0)
+
+                    -- Destination Waypoint Marker (Pulsing Bullseye)
+                    local pulse = math.sin(os.clock() * 5.0) * 2.0
+                    drawList:AddCircle(ImVec2(dSx, dSy), 11.0 + pulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.6), 0, 2.0)
+                    drawList:AddCircleFilled(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0))
+                    drawList:AddCircle(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.2)
+
+                    -- Distance Text Label
+                    local distStr = string.format('%.0fyd', pDist)
+                    drawList:AddText(ImVec2(dSx + 8, dSy - 8), ImGui.GetColorU32(0.0, 0.0, 0.0, 1.0), distStr)
+                    drawList:AddText(ImVec2(dSx + 7, dSy - 9), ImGui.GetColorU32(1.0, 0.9, 0.3, 1.0), distStr)
+                end
+            end
+        end
+    else
+        if not isNavActive and not hasPendingNav and (mq.gettime() - (state.activeNavCommandTime or 0) > 4000) then
+            state.activeNavLoc = nil
+            state.activeNavSpawnId = 0
+        end
+    end
+
+    -- Draw Player Marker (Arrow pointing in Heading direction)
+    local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+    local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+    local _, meHeading = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
+
+    if okMeX and okMeY and meX and meY then
+        local psx, psy = worldToScreen(meX, meY, cX, cY, availW, availH)
+
+        -- Auto-follow player
+        if ctrl.followPlayer and not viewport.isDragging then
+            viewport.centerEqX = meX
+            viewport.centerEqY = meY
+        end
+
+        -- Calculate Heading Triangle
+        local heading = meHeading or 0
+        -- In EverQuest standard compass degrees: 0 = North (Up, -Y screen), 90 = East (Right, +X screen), 180 = South (Down, +Y screen), 270 = West (Left, -X screen)
+        local rad = math.rad(heading)
+        local arrowLen = ctrl.playerNodeRadius + 7.0
+        local baseLen = ctrl.playerNodeRadius + 2.0
+        local wingAngle = math.rad(140)
+
+        -- Direction vector (Clockwise Compass Heading to Screen Space: +X is East/Right, -Y is North/Up)
+        local dirX = math.sin(rad)
+        local dirY = -math.cos(rad)
+
+        local tipX = psx + dirX * arrowLen
+        local tipY = psy + dirY * arrowLen
+
+        local leftRad = rad - wingAngle
+        local rightRad = rad + wingAngle
+
+        local leftX = psx + math.sin(leftRad) * baseLen
+        local leftY = psy + (-math.cos(leftRad)) * baseLen
+
+        local rightX = psx + math.sin(rightRad) * baseLen
+        local rightY = psy + (-math.cos(rightRad)) * baseLen
+
+        local playerCol = ImGui.GetColorU32(0.25, 0.85, 1.00, 1.0)
+        local playerFillCol = ImGui.GetColorU32(0.10, 0.40, 0.85, 0.85)
+
+        drawList:AddTriangleFilled(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerFillCol)
+        drawList:AddTriangle(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerCol, 1.5)
+        drawList:AddCircleFilled(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(1.0, 1.0, 1.0, 1.0))
+        drawList:AddCircle(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.0)
+    end
+
+    -- Pop Clipping Rectangle
+    drawList:PopClipRect()
+
+    -- Hover Tooltip for NPC
+    if hoveredMob then
+        local cNav = navState.cache[hoveredMob.id]
+        local pathStr = 'Unchecked'
+        if not navState.meshLoaded then
+            pathStr = 'Mesh Not Loaded'
+        elseif cNav then
+            pathStr = cNav.hasPath and string.format('Valid Path (%.1f yds)', cNav.length) or 'NO PATH (Unreachable)'
+        end
+
+        local tt = string.format(
+            'Name: %s\n' ..
+            'Level: %d  |  Class: %s  |  Con: %s\n' ..
+            'Distance: %.1f yds  |  LoS: %s  |  Z-Diff: %.1f yds\n' ..
+            'HP: %d%%\n' ..
+            'Navmesh Status: %s\n\n' ..
+            '[Left-Click] Target  |  [Double-Click] Navigate',
+            hoveredMob.cleanName,
+            hoveredMob.level,
+            hoveredMob.class,
+            hoveredMob.conColor,
+            hoveredMob.distance,
+            hoveredMob.lineOfSight and 'YES' or 'NO',
+            math.abs(hoveredMob.z - playerZ),
+            hoveredMob.pctHPs,
+            pathStr
+        )
+        ImGui.SetTooltip('%s', tt)
+    end
+end
+
+-- ============================================================================
+-- NPC TRACKER TAB (Dedicated Search & Interactive Sortable Table)
+-- ============================================================================
+local function DrawNPCTrackerTab()
+    -- Filter Bar
+    ImGui.PushItemWidth(160)
+    local searchVal, searchChanged = ImGui.InputText('Search##TrackSearch', state.searchText)
+    if searchChanged then
+        state.searchText = searchVal
+        scanZoneSpawns()
+    end
+    ImGui.PopItemWidth()
+
+    if state.searchText ~= '' then
+        ImGui.SameLine()
+        if ImGui.Button('X##ClearSearchBtn') then
+            state.searchText = ''
+            scanZoneSpawns()
+        end
+    end
+
+    ImGui.SameLine()
+    ImGui.PushItemWidth(140)
+    local conIdx, conChanged = ImGui.Combo('Con##TrackCon', state.conFilterIndex, CON_OPTIONS)
+    if conChanged then
+        state.conFilterIndex = conIdx
+        scanZoneSpawns()
+    end
+    ImGui.PopItemWidth()
+
+    ImGui.SameLine()
+    ImGui.PushItemWidth(140)
+    local sortIdx, sortChanged = ImGui.Combo('Sort##TrackSort', state.sortIndex, SORT_OPTIONS)
+    if sortChanged then
+        state.sortIndex = sortIdx
+        scanZoneSpawns()
+    end
+    ImGui.PopItemWidth()
+
+    ImGui.SameLine()
+    local pathOnly, pathChanged = ImGui.Checkbox('Pathable Only##PathCheck', state.pathableOnly)
+    if pathChanged then
+        state.pathableOnly = pathOnly
+        scanZoneSpawns()
+    end
+
+    ImGui.SameLine()
+    local losOnly, losChanged = ImGui.Checkbox('LoS Only##LoSCheck', state.losOnly)
+    if losChanged then
+        state.losOnly = losOnly
+        scanZoneSpawns()
+    end
+
+    ImGui.Separator()
+
+    -- Spawn List Table
+    local tableFlags = bit.bor(
+        ImGuiTableFlags.Resizable or 0,
+        ImGuiTableFlags.RowBg or 0,
+        ImGuiTableFlags.BordersOuter or 0,
+        ImGuiTableFlags.BordersV or 0,
+        ImGuiTableFlags.ScrollY or 0,
+        ImGuiTableFlags.SizingFixedFit or 0
+    )
+
+    local availW, availH = ImGui.GetContentRegionAvail()
+    local tableHeight = availH - 10
+
+    if ImGui.BeginTable('##TriuneMapTrackerTable', 8, tableFlags, availW, tableHeight) then
+        ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthStretch, 2.2)
+        ImGui.TableSetupColumn('Lvl', ImGuiTableColumnFlags.WidthFixed, 38)
+        ImGui.TableSetupColumn('Con', ImGuiTableColumnFlags.WidthFixed, 55)
+        ImGui.TableSetupColumn('Dist', ImGuiTableColumnFlags.WidthFixed, 65)
+        ImGui.TableSetupColumn('Nav Path', ImGuiTableColumnFlags.WidthFixed, 90)
+        ImGui.TableSetupColumn('LoS', ImGuiTableColumnFlags.WidthFixed, 40)
+        ImGui.TableSetupColumn('ID', ImGuiTableColumnFlags.WidthFixed, 55)
+        ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 140)
+        ImGui.TableHeadersRow()
+
+        local currentTargetId = 0
+        local okTarg, targId = pcall(function() return mq.TLO.Target.ID() end)
+        if okTarg and targId then currentTargetId = targId end
+
+        for idx, mob in ipairs(spawns.filteredNPCs) do
+            ImGui.TableNextRow()
+            local isSelected = (mob.id == currentTargetId)
+
+            -- Column 1: Clean Name
+            ImGui.TableSetColumnIndex(0)
+            local conStyle = getConStyle(mob.conColor)
+            if isSelected then
+                ImGui.TextColored(0.3, 0.9, 1.0, 1.0, '> ' .. mob.cleanName)
+            else
+                ImGui.TextColored(conStyle.r, conStyle.g, conStyle.b, 1.0, mob.cleanName)
+            end
+
+            -- Double-click row support
+            local rowLabel = string.format('##TrackerRow_%d_%d', mob.id, idx)
+            ImGui.SameLine()
+            if ImGui.Selectable(rowLabel, isSelected, bit.bor(ImGuiSelectableFlags.SpanAllColumns or 0, ImGuiSelectableFlags.AllowDoubleClick or 0)) then
+                if ImGui.IsMouseDoubleClicked(0) then
+                    actionQueue.pendingTargetId = mob.id
+                    actionQueue.pendingNavId = mob.id
+                    state.activeNavSpawnId = mob.id
+                    state.activeNavLoc = nil
+                    state.activeNavCommandTime = mq.gettime()
+                    state.statusMsg = string.format('Navigating to: %s (ID: %d)', mob.cleanName, mob.id)
+                else
+                    actionQueue.pendingTargetId = mob.id
+                end
+            end
+
+            -- Column 2: Level
+            ImGui.TableSetColumnIndex(1)
+            ImGui.Text(tostring(mob.level))
+
+            -- Column 3: Consideration
+            ImGui.TableSetColumnIndex(2)
+            ImGui.TextColored(conStyle.r, conStyle.g, conStyle.b, 1.0, conStyle.badge)
+
+            -- Column 4: Distance
+            ImGui.TableSetColumnIndex(3)
+            ImGui.Text(string.format('%.1fy', mob.distance))
+
+            -- Column 5: Navmesh Status Badge
+            ImGui.TableSetColumnIndex(4)
+            local cNav = navState.cache[mob.id]
+            if not navState.meshLoaded then
+                ImGui.TextDisabled('[NO MESH]')
+            elseif cNav then
+                if cNav.hasPath then
+                    ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '[PATHABLE]')
+                else
+                    ImGui.TextColored(0.95, 0.25, 0.25, 1.0, '[NO PATH]')
+                end
+            else
+                ImGui.TextDisabled('[CHECKING]')
+            end
+
+            -- Column 6: Line of Sight
+            ImGui.TableSetColumnIndex(5)
+            if mob.lineOfSight then
+                ImGui.TextColored(0.2, 0.9, 0.3, 1.0, 'YES')
+            else
+                ImGui.TextDisabled('NO')
+            end
+
+            -- Column 7: Spawn ID
+            ImGui.TableSetColumnIndex(6)
+            ImGui.TextDisabled(tostring(mob.id))
+
+            -- Column 8: Actions ([Target], [Nav], [Map])
+            ImGui.TableSetColumnIndex(7)
+            local targBtnId = string.format('Targ##%d', mob.id)
+            local navBtnId  = string.format('Nav##%d', mob.id)
+            local mapBtnId  = string.format('Map##%d', mob.id)
+
+            if ImGui.SmallButton(targBtnId) then
+                actionQueue.pendingTargetId = mob.id
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton(navBtnId) then
+                actionQueue.pendingTargetId = mob.id
+                actionQueue.pendingNavId = mob.id
+                state.activeNavSpawnId = mob.id
+                state.activeNavLoc = nil
+                state.activeNavCommandTime = mq.gettime()
+                state.statusMsg = string.format('Navigating to: %s (ID: %d)', mob.cleanName, mob.id)
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton(mapBtnId) then
+                viewport.centerEqX = mob.x
+                viewport.centerEqY = mob.y
+                ctrl.followPlayer = false
+                state.activeTab = 1
+            end
+        end
+
+        ImGui.EndTable()
+    end
+end
+
+-- ============================================================================
+-- SETTINGS & LAYERS TAB
+-- ============================================================================
+local function DrawSettingsTab()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Map Folders & Pack Selection')
+    ImGui.Separator()
+
+    -- Active Folder Status Display
+    local activeFolderObj = state.mapFolders[state.selectedFolderIndex]
+    local activeFolderLabel = activeFolderObj and activeFolderObj.name or '[None]'
+    local activeFullPath = activeFolderObj and activeFolderObj.fullPath or (state.activeMapsDirectory or 'NOT FOUND')
+
+    ImGui.Text('Active Map Pack:')
+    ImGui.SameLine()
+    ImGui.TextColored(0.2, 0.95, 0.35, 1.0, activeFolderLabel)
+    ImGui.SameLine()
+    ImGui.TextDisabled(string.format('(%s)', activeFullPath))
+
+    -- Map Pack Folder Dropdown Selector
+    ImGui.PushItemWidth(280)
+    local fIdx, fChanged = ImGui.Combo('Select Map Folder##MapFolderCombo', state.selectedFolderIndex, state.mapFolderNames)
+    if fChanged then
+        state.selectedFolderIndex = fIdx
+        if state.mapFolders[fIdx] then
+            state.activeMapsDirectory = state.mapFolders[fIdx].fullPath
+            loadZoneMap(state.currentZoneShort)
+        end
+    end
+    ImGui.PopItemWidth()
+
+    ImGui.SameLine()
+    if ImGui.Button('Scan / Refresh Folders##ScanFoldersBtn') then
+        scanMapFolders()
+        loadZoneMap(state.currentZoneShort)
+    end
+    ImGui.SameLine()
+    if ImGui.Button('Reload Map##ReloadMapBtn') then
+        loadZoneMap(state.currentZoneShort)
+    end
+
+    -- Loaded Map Metrics for Current Zone
+    if mapData.isLoaded then
+        ImGui.TextColored(0.4, 0.8, 1.0, 1.0, string.format('Zone Map Status: %d lines, %d labels parsed from %s', mapData.totalLines, mapData.totalLabels, activeFolderLabel))
+    else
+        ImGui.TextColored(1.0, 0.7, 0.2, 1.0, string.format('Zone Map Status: No files found for "%s" in %s', state.currentZoneShort, activeFolderLabel))
+    end
+
+    ImGui.Spacing()
+    -- Optional Advanced Custom Base Path
+    if ImGui.TreeNodeEx('Advanced Custom Base Path##AdvPathTree', ImGuiTreeNodeFlags.None or 0) then
+        ImGui.TextDisabled('Override the root directory to search for maps/')
+        ImGui.PushItemWidth(320)
+        local custDir, custChanged = ImGui.InputText('Base Path##CustDirInput', state.customMapsDir)
+        if custChanged then
+            state.customMapsDir = custDir
+            scanMapFolders()
+            loadZoneMap(state.currentZoneShort)
+        end
+        ImGui.PopItemWidth()
+        ImGui.SameLine()
+        if ImGui.Button('Reset to Auto##ResetAutoBaseBtn') then
+            state.customMapsDir = ''
+            scanMapFolders()
+            loadZoneMap(state.currentZoneShort)
+        end
+        ImGui.TreePop()
+    end
+
+    ImGui.Spacing()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Map Layers Visibility')
+    ImGui.Separator()
+
+    local l0, c0 = ImGui.Checkbox('Layer 0 (Base Terrain / Geometry)##L0', ctrl.layer0)
+    if c0 then ctrl.layer0 = l0 end
+    ImGui.SameLine()
+    local l1, c1 = ImGui.Checkbox('Layer 1 (Structures / Buildings)##L1', ctrl.layer1)
+    if c1 then ctrl.layer1 = l1 end
+
+    local l2, c2 = ImGui.Checkbox('Layer 2 (Objects / Details)##L2', ctrl.layer2)
+    if c2 then ctrl.layer2 = l2 end
+    ImGui.SameLine()
+    local l3, c3 = ImGui.Checkbox('Layer 3 (Waypoints / Triune Lines)##L3', ctrl.layer3)
+    if c3 then ctrl.layer3 = l3 end
+
+    local lb, cl = ImGui.Checkbox('Labels (Map Text & POIs)##LabelsCheck', ctrl.layerLabels)
+    if cl then ctrl.layerLabels = lb end
+    ImGui.SameLine()
+    local grid, cg = ImGui.Checkbox('Grid Coordinate Lines##GridCheck', ctrl.showGrid)
+    if cg then ctrl.showGrid = grid end
+
+    ImGui.Spacing()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Entity & Visual Options')
+    ImGui.Separator()
+
+    local sn, csn = ImGui.Checkbox('Show NPCs on Map##ShowNPCCheck', ctrl.showNPCs)
+    if csn then ctrl.showNPCs = sn end
+    ImGui.SameLine()
+    local sg, csg = ImGui.Checkbox('Show Group Members##ShowGrpCheck', ctrl.showGroup)
+    if csg then ctrl.showGroup = sg end
+
+    local snn, csnn = ImGui.Checkbox('Show NPC Name Labels on Map##ShowNpcNamesCheck', ctrl.showNPCNames)
+    if csnn then ctrl.showNPCNames = snn end
+    ImGui.SameLine()
+    local snl, csnl = ImGui.Checkbox('Show Active Nav Path Line##ShowNavLineCheck', ctrl.showNavLine)
+    if csnl then ctrl.showNavLine = snl end
+
+    ImGui.PushItemWidth(220)
+    local cmIdx, cmChanged = ImGui.Combo('Node Color Mode##ColorModeCombo', ctrl.colorModeIndex, COLOR_MODE_OPTIONS)
+    if cmChanged then ctrl.colorModeIndex = cmIdx end
+    ImGui.PopItemWidth()
+
+    ImGui.Spacing()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Triune Combat & Waypoint Overlays')
+    ImGui.Separator()
+
+    local td = state.triuneData
+    if td.isLoaded then
+        ImGui.TextColored(0.2, 0.95, 0.35, 1.0, string.format('Triune Status: Synchronized (%s)', td.charName))
+        ImGui.SameLine()
+        ImGui.TextDisabled(string.format('| WPs: %d | Hazards: %d', #td.waypoints, #td.zoneHazards))
+    else
+        ImGui.TextColored(1.0, 0.7, 0.2, 1.0, 'Triune Status: Loadout not yet detected (triune_loadout.lua)')
+    end
+
+    ImGui.SameLine()
+    if ImGui.Button('Sync Triune Data##SyncTriuneBtn') then
+        syncTriuneLoadout()
+    end
+
+    local ss, css = ImGui.Checkbox('Show Search / Roam Radius##ShowSearchRadiusCheck', ctrl.showSearchRadius)
+    if css then ctrl.showSearchRadius = ss end
+    ImGui.SameLine()
+    local sc, csc = ImGui.Checkbox('Show Camp / Combat Radius##ShowCampRadiusCheck', ctrl.showCampRadius)
+    if csc then ctrl.showCampRadius = sc end
+
+    local sw, csw = ImGui.Checkbox('Show Patrol Waypoints & Paths##ShowWaypointsCheck', ctrl.showWaypoints)
+    if csw then ctrl.showWaypoints = sw end
+    ImGui.SameLine()
+    local sh, csh = ImGui.Checkbox('Show Navigation Hazard Hotspots##ShowHazardsCheck', ctrl.showHazards)
+    if csh then ctrl.showHazards = sh end
+
+    ImGui.PushItemWidth(250)
+    local srVal, srChanged = ImGui.SliderInt('Search / Pull Radius (yards)##SearchRadSlider', ctrl.customSearchRadius, 25, 600)
+    if srChanged then ctrl.customSearchRadius = srVal end
+    ImGui.PopItemWidth()
+
+    ImGui.Spacing()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Multi-Level Z-Height Filtering')
+    ImGui.Separator()
+
+    local uz, cuz = ImGui.Checkbox('Enable Z-Height Filtering (Multi-Floor Dungeons)##UseZFilter', ctrl.useZFilter)
+    if cuz then ctrl.useZFilter = uz end
+
+    if ctrl.useZFilter then
+        ImGui.PushItemWidth(250)
+        local zRangeVal, zChanged = ImGui.SliderInt('Z Altitude Window (+/- yards)##ZRangeSlider', ctrl.zFilterRange, 15, 300)
+        if zChanged then ctrl.zFilterRange = zRangeVal end
+        ImGui.PopItemWidth()
+    end
+
+    ImGui.Spacing()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Display Scaling & Geometry')
+    ImGui.Separator()
+
+    ImGui.PushItemWidth(250)
+    local lt, clt = ImGui.SliderFloat('Map Line Thickness##LineThickSlider', ctrl.lineThickness, 0.5, 3.5, '%.1f')
+    if clt then ctrl.lineThickness = lt end
+
+    local nr, cnr = ImGui.SliderFloat('NPC Node Radius##NodeRadSlider', ctrl.npcNodeRadius, 2.0, 9.0, '%.1f')
+    if cnr then ctrl.npcNodeRadius = nr end
+    ImGui.PopItemWidth()
+end
+
+-- ============================================================================
+-- MAIN IMGUI DRAW CALLBACK
+-- ============================================================================
+local function DrawTriuneMapUI()
+    if not state.openGUI then
+        state.isRunning = false
+        return
+    end
+
+    pushTheme()
+
+    local windowFlags = bit.bor(
+        ImGuiWindowFlags.MenuBar or 0,
+        ImGuiWindowFlags.NoCollapse or 0
+    )
+    -- Omit NoCollapse so WindowRounding token applies rounded corners cleanly
+    windowFlags = bit.band(windowFlags, bit.bnot(ImGuiWindowFlags.NoCollapse or 0))
+
+    local title = string.format('Triune Map v%s — %s###TriuneMapMainWindow', VERSION, state.currentZoneName)
+    local open, draw = ImGui.Begin(title, state.openGUI, windowFlags)
+    state.openGUI = open
+
+    if not open then
+        ImGui.End()
+        popTheme()
+        state.isRunning = false
+        return
+    end
+
+    if draw then
+        -- Top Toolbar & Metrics
+        ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Zone:')
+        ImGui.SameLine()
+        ImGui.Text(string.format('%s (%s)', state.currentZoneName, state.currentZoneShort))
+
+        ImGui.SameLine()
+        ImGui.TextDisabled(string.format('| NPCs: %d (Visible: %d)', spawns.totalCount, #spawns.filteredNPCs))
+
+        ImGui.SameLine()
+        if navState.meshLoaded then
+            ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '| Mesh: LOADED')
+        else
+            ImGui.TextColored(0.95, 0.3, 0.3, 1.0, '| Mesh: NONE')
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button('Stop Nav##NavHaltBtn') then
+            actionQueue.pendingStopNav = true
+            state.activeNavLoc = nil
+            state.activeNavSpawnId = 0
+            state.activeNavCommandTime = 0
+            state.statusMsg = 'Navigation stopped.'
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button('Center on Me##CenterMeBtn') then
+            local okX, meX = pcall(function() return mq.TLO.Me.X() end)
+            local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
+            if okX and okY and meX and meY then
+                viewport.centerEqX = meX
+                viewport.centerEqY = meY
+                ctrl.followPlayer = true
+            end
+        end
+
+        ImGui.SameLine()
+        local fp, cfp = ImGui.Checkbox('Follow##FollowPlayerCheck', ctrl.followPlayer)
+        if cfp then ctrl.followPlayer = fp end
+
+        ImGui.SameLine()
+        if ImGui.Button('Zoom -##ZoomOutBtn') then
+            viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.8)
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Zoom +##ZoomInBtn') then
+            viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
+        end
+
+        ImGui.Separator()
+
+        -- Tab Bar
+        local tabFlags = ImGuiTabBarFlags.None or 0
+        if ImGui.BeginTabBar('##TriuneMapMainTabs', tabFlags) then
+            if ImGui.BeginTabItem('Map View##MapTab') then
+                state.activeTab = 1
+                local availW, availH = ImGui.GetContentRegionAvail()
+                local canvasHeight = availH - 24 -- Leave room for status bar
+                DrawMapCanvas(availW, canvasHeight)
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem('NPC Tracker##TrackerTab') then
+                state.activeTab = 2
+                DrawNPCTrackerTab()
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem('Settings & Layers##SettingsTab') then
+                state.activeTab = 3
+                DrawSettingsTab()
+                ImGui.EndTabItem()
+            end
+
+            ImGui.EndTabBar()
+        end
+
+        ImGui.Separator()
+
+        -- Footer Status Bar
+        local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+        local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+        local _, meZ     = pcall(function() return mq.TLO.Me.Z() end)
+
+        if okMeX and meX and okMeY and meY then
+            ImGui.TextColored(0.4, 0.7, 0.9, 1.0, string.format('Loc: Y:%.1f, X:%.1f, Z:%.1f', meY, meX, meZ or 0))
+            ImGui.SameLine()
+        end
+
+        if state.activeTab == 1 then
+            ImGui.TextDisabled(string.format('| Cursor: Y:%.1f, X:%.1f | Zoom: %.2fx', state.cursorWorldY, state.cursorWorldX, viewport.zoom))
+            ImGui.SameLine()
+        end
+
+        ImGui.TextDisabled('| Status:')
+        ImGui.SameLine()
+        ImGui.Text(state.statusMsg)
+    end
+
+    ImGui.End()
+    popTheme()
+end
+
+-- ============================================================================
+-- INITIALIZATION & MAIN YIELDABLE ENGINE LOOP
+-- ============================================================================
+local okZoneShort, zShort = pcall(function() return mq.TLO.Zone.ShortName() end)
+scanMapFolders()
+if okZoneShort and zShort then
+    state.currentZoneShort = zShort
+    local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
+    state.currentZoneId = (okZId and zId) or 0
+    loadZoneMap(zShort)
+end
+
+syncTriuneLoadout()
+scanZoneSpawns()
+mq.imgui.init('TriuneMapUIWindow', DrawTriuneMapUI)
+
+print(string.format('\ag[Triune Map]\ax v%s Loaded -- In-Game Map & NPC Tracker active. Run with /lua run triune_map', VERSION))
+
+while state.isRunning do
+    mq.doevents()
+
+    local now = mq.gettime()
+
+    -- Zone Change Detector
+    if (now - state.lastZoneCheckTime) >= 1000 then
+        state.lastZoneCheckTime = now
+        local okCurShort, curShort = pcall(function() return mq.TLO.Zone.ShortName() end)
+        if okCurShort and curShort and curShort ~= state.currentZoneShort and curShort ~= '' then
+            state.currentZoneShort = curShort
+            local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
+            state.currentZoneId = (okZId and zId) or 0
+            loadZoneMap(curShort)
+            syncTriuneLoadout()
+            scanZoneSpawns()
+        end
+    end
+
+    -- Periodic Triune Loadout Sync (every 2.5s)
+    if (now - state.triuneData.lastSyncTime) >= 2500 then
+        syncTriuneLoadout()
+    end
+
+    -- Regular Spawn Scanning
+    if (now - state.lastScanTime) >= state.scanIntervalMs then
+        state.lastScanTime = now
+        scanZoneSpawns()
+    end
+
+    -- Process Throttled Background Navmesh Batch
+    if (now - navState.lastQueueProcessTime) >= 40 then
+        navState.lastQueueProcessTime = now
+        processNavBatch()
+    end
+
+    -- Process Queued Actions from UI Callback
+    if actionQueue.pendingTargetId > 0 then
+        local tid = actionQueue.pendingTargetId
+        actionQueue.pendingTargetId = 0
+        pcall(function() mq.cmdf('/target id %d', tid) end)
+    end
+
+    if actionQueue.pendingNavId > 0 then
+        local nid = actionQueue.pendingNavId
+        actionQueue.pendingNavId = 0
+        if navState.meshLoaded then
+            pcall(function() mq.cmdf('/nav id %d', nid) end)
+        else
+            pcall(function() mq.cmdf('/stick 10 hold id %d', nid) end)
+        end
+    end
+
+    if actionQueue.pendingNavLoc then
+        local loc = actionQueue.pendingNavLoc
+        actionQueue.pendingNavLoc = nil
+        if navState.meshLoaded and loc and loc.y and loc.x and loc.z then
+            local ly, lx, lz = loc.y, loc.x, loc.z
+            pcall(function() mq.cmdf('/nav loc %f %f %f', ly, lx, lz) end)
+        end
+    end
+
+    if actionQueue.pendingStopNav then
+        actionQueue.pendingStopNav = false
+        pcall(function() mq.cmd('/nav stop') end)
+        pcall(function() mq.cmd('/stick off') end)
+    end
+
+    mq.delay(40)
+end
+
+print('\ag[Triune Map]\ax Unloaded cleanly.')

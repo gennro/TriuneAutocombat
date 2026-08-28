@@ -3283,11 +3283,11 @@ function UI.drawHeaderBar()
         ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
     end
     ImGui.SameLine()
-    if ImGui.Button('Zone Tracker##hdrTrack') then
-        toggleTool('triune_track')
+    if ImGui.Button('Map##hdrMap') then
+        toggleTool('triune_map')
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Launches or closes the standalone Triune Zone Tracker interface.')
+        ImGui.SetTooltip('Launches or closes the standalone Triune Map & NPC Tracker interface.')
     end
     ImGui.SameLine()
     if ImGui.Button('Compact Mode##hdrCompact') then
@@ -5705,10 +5705,10 @@ local function drawMiniGui()
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Release Updater window') end
 
         ImGui.SameLine()
-        if ImGui.Button('Tracker##miniTrack', 60, 22) then
-            toggleTool('triune_track')
+        if ImGui.Button('Map##miniMap', 48, 22) then
+            toggleTool('triune_map')
         end
-        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Zone Tracker window') end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Map & NPC Tracker window') end
     end
 
     ImGui.End()
@@ -10296,11 +10296,11 @@ local function triuneCommand(...)
         clearCursor()
     elseif cmd == 'update' or cmd == 'updater' or cmd == 'checkupdate' then
         mq.cmd('/lua run triune_updater')
-    elseif cmd == 'track' or cmd == 'tracker' or cmd == 'trackui' or cmd == 'zone' then
-        if toggleTool('triune_track') == 'started' then
-            print('\ag[Triune]\ax launching zone tracker window...')
+    elseif cmd == 'map' or cmd == 'mapui' or cmd == 'triunemap' or cmd == 'track' or cmd == 'tracker' or cmd == 'trackui' or cmd == 'zone' then
+        if toggleTool('triune_map') == 'started' then
+            print('\ag[Triune]\ax launching map & tracker window...')
         else
-            print('\ag[Triune]\ax stopping zone tracker window...')
+            print('\ag[Triune]\ax stopping map & tracker window...')
         end
     elseif cmd == 'compact' or cmd == 'mini' or cmd == 'hud' then
         ctrl.compact = not ctrl.compact
