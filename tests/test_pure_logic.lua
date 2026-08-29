@@ -568,22 +568,120 @@ assert_eq(dc.mode, 'Manual', 'defaultCtrl: mode=Manual')
 assert_eq(dc.submode, 'Hunt', 'defaultCtrl: submode=Hunt')
 
 -- ============================================================================
--- 9.  isSpecialSkill(name)
+-- 9.  isActionSkill(name) & defaultActionEntry
 -- ============================================================================
-print('--- isSpecialSkill ---')
--- SPECIAL_SKILLS is module-level (used as an upvalue by isSpecialSkill AND
--- by UI.drawDiscTab's Special Skills section), so it must be supplied via
--- env here -- same pattern as MQSHORT above.
-local SPECIAL_SKILLS = {
-    Mnk = { 'Mend' },
+print('--- isActionSkill / isSpecialSkill ---')
+local CLASS_ACTIONS = {
+    Mnk = { 'Kick', 'Round Kick', 'Tiger Claw', 'Eagle Strike', 'Dragon Punch', 'Tail Rake', 'Flying Kick', 'Mend', 'Feign Death', 'Sneak', 'Intimidation', 'Disarm' },
+    Rog = { 'Backstab', 'Hide', 'Sneak', 'Pick Pockets', 'Sense Traps', 'Disarm Traps', 'Disarm', 'Intimidation' },
+    War = { 'Kick', 'Bash', 'Taunt', 'Disarm', 'Intimidation' },
+    Pal = { 'Bash', 'Taunt', 'Disarm' },
+    SK  = { 'Bash', 'Taunt', 'Disarm' },
+    Rng = { 'Kick', 'Taunt', 'Disarm', 'Hide', 'Sneak', 'Forage', 'Track' },
+    Ber = { 'Frenzy', 'Kick', 'Disarm', 'Intimidation', 'Volley' },
+    Bst = { 'Kick', 'Disarm' },
+    Brd = { 'Disarm', 'Hide', 'Sneak', 'Pick Pockets', 'Track' },
+    Clr = { 'Bash' },
+    Dru = { 'Forage', 'Track' },
+    Shm = {},
+    Nec = {},
+    Wiz = {},
+    Mag = {},
+    Enc = {},
 }
-local isSpecialSkill = loadFunc(src, 'isSpecialSkill', { SPECIAL_SKILLS = SPECIAL_SKILLS })
+local RACIAL_ACTIONS = { 'Slam', 'Hide', 'Sneak', 'Forage' }
+local UNIVERSAL_ACTIONS = { 'Begging', 'Bind Wound', 'Sense Heading' }
+local isActionSkill = loadFunc(src, 'isActionSkill', { CLASS_ACTIONS = CLASS_ACTIONS, RACIAL_ACTIONS = RACIAL_ACTIONS, UNIVERSAL_ACTIONS = UNIVERSAL_ACTIONS })
+local defaultActionEntry = loadFunc(src, 'defaultActionEntry', {})
 
-assert_true(isSpecialSkill('Mend'), 'special: Mend')
-assert_eq(isSpecialSkill('Feign Death'), false, 'special: Feign Death is not yet exposed')
-assert_eq(isSpecialSkill('Kick'), false, 'special: Kick is not special')
-assert_eq(isSpecialSkill(nil), false, 'special: nil')
-assert_eq(isSpecialSkill(''), false, 'special: empty')
+assert_true(isActionSkill('Mend'), 'action: Mend')
+assert_true(isActionSkill('Flying Kick'), 'action: Flying Kick')
+assert_true(isActionSkill('Dragon Punch'), 'action: Dragon Punch')
+assert_true(isActionSkill('Backstab'), 'action: Backstab')
+assert_true(isActionSkill('Kick'), 'action: Kick')
+assert_true(isActionSkill('Bash'), 'action: Bash')
+assert_true(isActionSkill('Slam'), 'action: Slam')
+assert_true(isActionSkill('Frenzy'), 'action: Frenzy')
+assert_true(isActionSkill('Feign Death'), 'action: Feign Death')
+assert_true(isActionSkill('Taunt'), 'action: Taunt')
+assert_true(isActionSkill('Disarm'), 'action: Disarm')
+assert_true(isActionSkill('Forage'), 'action: Forage')
+assert_true(isActionSkill('Begging'), 'action: Begging')
+assert_true(isActionSkill('Bind Wound'), 'action: Bind Wound')
+assert_true(isActionSkill('Sense Heading'), 'action: Sense Heading')
+assert_eq(isActionSkill('NotARealSkill'), false, 'action: NotARealSkill')
+assert_eq(isActionSkill(nil), false, 'action: nil')
+assert_eq(isActionSkill(''), false, 'action: empty')
+
+local kickDef = defaultActionEntry('Kick', 'War')
+assert_eq(kickDef.autoskill, true, 'defaultActionEntry: Kick autoskill=true')
+assert_eq(kickDef.kind, 'dd', 'defaultActionEntry: Kick kind=dd')
+local mendDef = defaultActionEntry('Mend', 'Mnk')
+assert_eq(mendDef.autoskill, false, 'defaultActionEntry: Mend autoskill=false')
+assert_eq(mendDef.kind, 'heal', 'defaultActionEntry: Mend kind=heal')
+assert_eq(mendDef.pct, 75, 'defaultActionEntry: Mend pct=75')
+
+local actionClassInfo = loadFunc(src, 'actionClassInfo', { CLASS_ACTIONS = CLASS_ACTIONS, myClasses = { 'Mnk', 'War', 'Clr' } })
+assert_eq(actionClassInfo('Flying Kick'), 'Mnk', 'actionClassInfo: Flying Kick -> Mnk')
+assert_eq(actionClassInfo('Taunt'), 'War', 'actionClassInfo: Taunt -> War')
+assert_eq(actionClassInfo('Backstab'), 'Rog', 'actionClassInfo: Backstab -> Rog')
+
+-- Test getClientAbilities with simulated mq.TLO.Skill
+local mockSkillData = {
+    [0] = { Name = function() return '1H Blunt' end, Activated = function() return false end },
+    [1] = { Name = function() return 'Kick' end, Activated = function() return true end, SkillCap = function() return 200 end, MinLevel = function() return 1 end },
+    [2] = { Name = function() return 'Flying Kick' end, Activated = function() return true end, SkillCap = function() return 225 end, MinLevel = function() return 30 end },
+    [3] = { Name = function() return 'Mend' end, Activated = function() return true end, SkillCap = function() return 200 end, MinLevel = function() return 1 end },
+}
+local mockMq = {
+    TLO = {
+        Skill = function(id)
+            local d = mockSkillData[id]
+            if not d then return nil end
+            return setmetatable(d, { __call = function() return true end })
+        end,
+        Me = {
+            Skill = function(name)
+                if name == 'Kick' or name == 'Mend' or name == 'Begging' or name == 'Forage' then return function() return 150 end end
+                return function() return 0 end
+            end,
+            SkillCap = function(name)
+                if name == 'Kick' or name == 'Flying Kick' or name == 'Mend' or name == 'Begging' or name == 'Forage' then return function() return 200 end end
+                return function() return 0 end
+            end,
+            Ability = function(_) return function() return nil end end,
+        },
+    }
+}
+local hasActionSkill = loadFunc(src, 'hasActionSkill', { mq = mockMq })
+local getClientAbilities = loadFunc(src, 'getClientAbilities', {
+    mq = mockMq,
+    CLASS_ACTIONS = CLASS_ACTIONS,
+    RACIAL_ACTIONS = RACIAL_ACTIONS,
+    UNIVERSAL_ACTIONS = UNIVERSAL_ACTIONS,
+    hasActionSkill = hasActionSkill,
+    actionClassInfo = actionClassInfo,
+    myClasses = { 'Mnk', 'War', 'Clr' },
+    ctrl = { action_trained_only = true },
+})
+
+local clientAbilities = getClientAbilities()
+assert_true(#clientAbilities >= 3, 'getClientAbilities: returned abilities from client')
+local hasKick, hasFK, hasMend, hasBackstab, hasBegging, hasForage = false, false, false, false, false, false
+for _, ab in ipairs(clientAbilities) do
+    if ab.name == 'Kick' then hasKick = true; assert_true(ab.isTrained, 'Kick is trained') end
+    if ab.name == 'Flying Kick' then hasFK = true; assert_eq(ab.isTrained, false, 'Flying Kick not trained yet') end
+    if ab.name == 'Mend' then hasMend = true; assert_eq(ab.cls, 'Mnk', 'Mend class is Mnk') end
+    if ab.name == 'Begging' then hasBegging = true; assert_true(ab.isTrained, 'Begging is trained') end
+    if ab.name == 'Forage' then hasForage = true; assert_true(ab.isTrained, 'Forage is trained') end
+    if ab.name == 'Backstab' then hasBackstab = true end
+end
+assert_true(hasKick, 'trio has Kick')
+assert_true(hasFK, 'trio has Flying Kick')
+assert_true(hasMend, 'trio has Mend')
+assert_true(hasBegging, 'character has Begging')
+assert_true(hasForage, 'character has Forage')
+assert_eq(hasBackstab, false, 'trio without Rogue does NOT have Backstab')
 
 -- ============================================================================
 -- 10. aaTier(sec)
@@ -1341,7 +1439,53 @@ local remRes2 = removeIgnoredPlayer('NonExistent')
 assert_eq(remRes2, false, 'ignore: removing non-existent player returns false')
 
 -- ============================================================================
--- 29. triune_data.lua — structural validation
+-- 29. isSameGuild / guild helpers (buffbot)
+-- ============================================================================
+print('--- isSameGuild (buffbot) ---')
+local mockMyGuild = 'Knights of Norrath'
+local mockMq = {
+    TLO = {
+        Me = {
+            Guild = function() return mockMyGuild end
+        }
+    }
+}
+local getMyGuild = loadFunc(bbSrc, 'getMyGuild', { mq = mockMq })
+local getSpawnGuild = loadFunc(bbSrc, 'getSpawnGuild', {})
+local isSameGuild = loadFunc(bbSrc, 'isSameGuild', {
+    getMyGuild = getMyGuild,
+    getSpawnGuild = getSpawnGuild
+})
+
+-- Create mock spawn helper
+local function makeSpawn(guildName)
+    local s = setmetatable({
+        Guild = function() return guildName end
+    }, {
+        __call = function() return true end
+    })
+    return s
+end
+
+-- Test matching guild
+assert_true(isSameGuild(makeSpawn('Knights of Norrath')), 'guild: exact match returns true')
+assert_true(isSameGuild(makeSpawn('knights of norrath')), 'guild: case-insensitive match returns true')
+assert_true(isSameGuild(makeSpawn('KNIGHTS OF NORRATH')), 'guild: uppercase match returns true')
+
+-- Test non-matching guild
+assert_eq(isSameGuild(makeSpawn('Other Guild')), false, 'guild: different guild returns false')
+assert_eq(isSameGuild(makeSpawn(nil)), false, 'guild: unguilded player returns false')
+assert_eq(isSameGuild(makeSpawn('')), false, 'guild: empty guild player returns false')
+assert_eq(isSameGuild(nil), false, 'guild: nil spawn returns false')
+
+-- Test unguilded bot
+mockMyGuild = nil
+assert_eq(isSameGuild(makeSpawn('Knights of Norrath')), false, 'guild: unguilded bot returns false')
+mockMyGuild = ''
+assert_eq(isSameGuild(makeSpawn('Knights of Norrath')), false, 'guild: empty guild bot returns false')
+
+-- ============================================================================
+-- 30. triune_data.lua — structural validation
 -- ============================================================================
 print('--- triune_data.lua validation ---')
 local dataFile = assert(loadfile('TAC/config/triune_data.lua'))

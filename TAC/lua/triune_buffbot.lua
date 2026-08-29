@@ -1,6 +1,6 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- Triune Buffbot v1.2 (Standalone MacroQuest ImGui Script)
+-- Triune Buffbot v1.6 (Standalone MacroQuest ImGui Script)
 -- ----------------------------------------------------------------------------
 -- Compatible with MQ LuaJIT (Lua 5.1 syntax safe)
 -- Run with:  /lua run triune_buffbot
@@ -12,6 +12,8 @@
 -- - Flexible Requester Selection: Requesters reply with specific spell numbers
 --   for themselves (e.g. '1 3'), for their pet ('pet 1 3', '1 3 pet', 'p 1 2'),
 --   or both ('both 1 3', '1 3 both', 'b 1 2').
+-- - Guild-Only Restriction: Optional toggle to restrict buff offers and casting
+--   strictly to members of the same guild as the buffbot.
 -- - Direct Memorized Spell Gem Casting: Casts selected buffs directly from the
 --   active spell bar without gem-swapping or book scanning overhead.
 -- - Pet Presence & Range Validation: Checks if summoned pet exists and is alive
@@ -29,7 +31,7 @@ local bit          = require('bit') -- LuaJIT bitwise library
 local scriptDir    = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path       = scriptDir .. "?.lua;" .. package.path
 
-local VERSION      = '1.5'
+local VERSION      = '1.6'
 local cfg          = mq.configDir
 
 -- ============================================================================
@@ -141,6 +143,7 @@ local ctrl = {
     allowPets     = true,
     autoMed       = true,
     antiAfk       = true,
+    guildOnly     = false,
     maxRange      = 100,
     timeoutSec    = 30,
     cooldownSec   = 3,
@@ -148,6 +151,7 @@ local ctrl = {
     minManaPct    = 15,
     completionMsg = "All buffs cast! Enjoy!",
     banMsg        = "You are banned from getting buffs.",
+    guildOnlyMsg  = "Buffing is currently restricted to guild members only.",
     allowLowLevel = {}, -- [spellName] = true/false (true = can cast on level <= 46 players)
     ignoreList    = {}  -- array of ignored/banned player names
 }
@@ -321,6 +325,7 @@ local function saveConfig(silent)
         allowPets     = ctrl.allowPets,
         autoMed       = ctrl.autoMed,
         antiAfk       = ctrl.antiAfk,
+        guildOnly     = ctrl.guildOnly or false,
         maxRange      = ctrl.maxRange,
         timeoutSec    = ctrl.timeoutSec,
         cooldownSec   = ctrl.cooldownSec,
@@ -328,6 +333,7 @@ local function saveConfig(silent)
         minManaPct    = ctrl.minManaPct,
         completionMsg = ctrl.completionMsg,
         banMsg        = ctrl.banMsg,
+        guildOnlyMsg  = ctrl.guildOnlyMsg,
         allowLowLevel = ctrl.allowLowLevel or {},
         ignoreList    = ctrl.ignoreList or {}
     }
@@ -359,6 +365,7 @@ local function loadConfig()
         if charData.allowPets ~= nil then ctrl.allowPets = charData.allowPets end
         if charData.autoMed ~= nil then ctrl.autoMed = charData.autoMed end
         if charData.antiAfk ~= nil then ctrl.antiAfk = charData.antiAfk end
+        if charData.guildOnly ~= nil then ctrl.guildOnly = charData.guildOnly end
         if charData.maxRange then ctrl.maxRange = charData.maxRange end
         if charData.timeoutSec then ctrl.timeoutSec = charData.timeoutSec end
         if charData.cooldownSec then ctrl.cooldownSec = charData.cooldownSec else ctrl.cooldownSec = 3 end
@@ -366,6 +373,7 @@ local function loadConfig()
         if charData.minManaPct then ctrl.minManaPct = charData.minManaPct end
         if charData.completionMsg then ctrl.completionMsg = charData.completionMsg end
         if charData.banMsg then ctrl.banMsg = charData.banMsg else ctrl.banMsg = "You are banned from getting buffs." end
+        if charData.guildOnlyMsg then ctrl.guildOnlyMsg = charData.guildOnlyMsg else ctrl.guildOnlyMsg = "Buffing is currently restricted to guild members only." end
         if charData.allowLowLevel and type(charData.allowLowLevel) == 'table' then
             ctrl.allowLowLevel = charData.allowLowLevel
         else
@@ -433,6 +441,40 @@ local function removeIgnoredPlayer(name)
         saveConfig(true)
     end
     return found
+end
+
+-- ============================================================================
+-- Guild Verification Helpers
+-- ============================================================================
+local function getMyGuild()
+    local myGuild = nil
+    pcall(function()
+        local g = mq.TLO.Me.Guild
+        if g and g() and g() ~= '' then
+            myGuild = g()
+        end
+    end)
+    return myGuild
+end
+
+local function getSpawnGuild(spawn)
+    if not spawn or not spawn() then return nil end
+    local gName = nil
+    pcall(function()
+        local g = spawn.Guild
+        if g and g() and g() ~= '' then
+            gName = g()
+        end
+    end)
+    return gName
+end
+
+local function isSameGuild(spawn)
+    local myGuild = getMyGuild()
+    if not myGuild or myGuild == '' then return false end
+    local theirGuild = getSpawnGuild(spawn)
+    if not theirGuild or theirGuild == '' then return false end
+    return myGuild:lower() == theirGuild:lower()
 end
 
 -- ============================================================================
@@ -721,6 +763,19 @@ local function onTellReceived(line, sender, msg)
                 myLocStr))
         logMsg(string.format("Unable to locate spawn for '%s' in zone (My Loc: %s).", cleanSender, myLocStr), true, false)
         return
+    end
+
+    -- Check Guild-Only restriction if enabled
+    if ctrl.guildOnly then
+        if not isSameGuild(spawn) then
+            local guildMsg = (ctrl.guildOnlyMsg and ctrl.guildOnlyMsg ~= '') and ctrl.guildOnlyMsg or "Buffing is currently restricted to guild members only."
+            queueTell(cleanSender, guildMsg)
+            local myGuild = getMyGuild() or "Unguilded"
+            local requesterGuild = getSpawnGuild(spawn) or "None"
+            logMsg(string.format("Blocked request from non-guild player '%s' (Guild: '%s', Bot Guild: '%s'). Sent guild notice.", cleanSender, requesterGuild, myGuild), true, false)
+            print(string.format('\ay[Triune Buffbot]\ax Blocked tell from non-guild player \aw%s\ax (Guild: %s, Bot: %s): \ar"%s"\ax', cleanSender, requesterGuild, myGuild, guildMsg))
+            return
+        end
     end
 
     local dist = 9999
@@ -1058,6 +1113,18 @@ local function onHailReceived(line, sender, targetName)
     -- Silently ignore hails from banned players
     if isPlayerIgnored(cleanSender) then
         return
+    end
+
+    -- Silently ignore hails from non-guild players if guild-only is enabled
+    if ctrl.guildOnly then
+        local hSpawn = nil
+        pcall(function() hSpawn = mq.TLO.Spawn(string.format('pc =%s', cleanSender)) end)
+        if not hSpawn or not hSpawn() or (hSpawn.ID() or 0) <= 0 then
+            pcall(function() hSpawn = mq.TLO.Spawn(string.format('pc %s', cleanSender)) end)
+        end
+        if not isSameGuild(hSpawn) then
+            return
+        end
     end
 
     -- If target was specified, verify it was directed at this buffbot
@@ -1436,16 +1503,26 @@ local function drawControlTab()
     ImGui.Separator()
 
     -- Status Indicator
+    local myGuild = getMyGuild()
+    local guildStatusTag = ""
+    if ctrl.guildOnly then
+        if myGuild and myGuild ~= '' then
+            guildStatusTag = string.format(" [GUILD ONLY: %s]", myGuild)
+        else
+            guildStatusTag = " [GUILD ONLY: UNGUILDED!]"
+        end
+    end
+
     if runtime.state == 'IDLE' then
-        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "Status: LISTENING FOR TELLS")
+        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "Status: LISTENING FOR TELLS" .. guildStatusTag)
     elseif runtime.state == 'CASTING' then
         ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4],
-            string.format("Status: BUFFING %s...", runtime.currentRequester or ''))
+            string.format("Status: BUFFING %s...%s", runtime.currentRequester or '', guildStatusTag))
     elseif runtime.state == 'MEDDING' then
         ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4],
-            string.format("Status: MEDITATING (%d%% / 100%%)", getMyPctMana()))
+            string.format("Status: MEDITATING (%d%% / 100%%)%s", getMyPctMana(), guildStatusTag))
     else
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format("Status: %s", runtime.state))
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format("Status: %s%s", runtime.state, guildStatusTag))
     end
 
     ImGui.Spacing()
@@ -1502,6 +1579,21 @@ local function drawControlTab()
         saveConfig(true)
     end
 
+    ImGui.SameLine()
+    local guildOnlyVal, guildOnlyChanged = ImGui.Checkbox("Guild Members Only", ctrl.guildOnly)
+    if guildOnlyChanged then
+        ctrl.guildOnly = guildOnlyVal
+        saveConfig(true)
+    end
+    if ctrl.guildOnly then
+        ImGui.SameLine()
+        if myGuild and myGuild ~= '' then
+            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("(Guild: %s)", myGuild))
+        else
+            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "(Unguilded - No one will match!)")
+        end
+    end
+
     local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", ctrl.maxRange, 20, 300)
     if rangeChanged then
         ctrl.maxRange = rangeVal; saveConfig(true)
@@ -1527,6 +1619,13 @@ local function drawControlTab()
     local newComp, compChanged = ImGui.InputText("##completionMsg", ctrl.completionMsg, 256)
     if compChanged then
         ctrl.completionMsg = newComp; saveConfig(true)
+    end
+
+    ImGui.Spacing()
+    ImGui.Text("Guild Restriction Tell (Sent when non-guild member requests buffs):")
+    local newGuildMsg, guildMsgChanged = ImGui.InputText("##guildOnlyMsg", ctrl.guildOnlyMsg or "Buffing is currently restricted to guild members only.", 256)
+    if guildMsgChanged then
+        ctrl.guildOnlyMsg = newGuildMsg; saveConfig(true)
     end
 
     ImGui.Spacing()

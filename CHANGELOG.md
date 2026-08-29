@@ -1,5 +1,31 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-29
+
+- **Guild-Only Buffing Restriction (`triune_buffbot.lua`, v1.6).**
+  - **Guild Member Gating (`ctrl.guildOnly`)**: Added an optional `Guild Members Only` toggle to restrict buffing services strictly to characters belonging to the same guild as the buffbot (`isSameGuild()`).
+  - **Tell & Hail Handling**:
+    - Unauthorized tell requests receive an immediate configurable rejection notice (`ctrl.guildOnlyMsg`), logged to the activity feed and console with rate-limit protection.
+    - Hails from non-guild characters are silently ignored, preventing public advertisement when the bot is in private guild mode.
+  - **Character Config Persistence**: Guild-only restriction state (`ctrl.guildOnly`) and custom tell message (`ctrl.guildOnlyMsg`) are persisted per character/server across sessions in `triune_buffbot_config.lua`.
+  - **UI & Live Status Integration**: Real-time display of current guild name and dynamic warning badge if unguilded (`[GUILD ONLY: <GuildName>]` / `[GUILD ONLY: UNGUILDED!]`), with inline checkbox and custom rejection message input box in the Controls tab.
+  - **Unit Tests**: Added test suite in `tests/test_pure_logic.lua` covering case-insensitive guild matching, unguilded characters, and cross-guild rejection scenarios.
+
+- **Separated Abilities & AAs Tabs with Full Combat Actions & Autoskill (`triune.lua`).**
+  - **Dedicated Abilities Tab**: Split the previously combined "Abilities & AAs" page into two distinct, dedicated tabs: **Abilities** (`UI.drawAbilitiesTab()`) for innate class combat actions and **AAs** (`UI.drawAATab()`) for Alternate Advancements.
+  - **Gestalt Trio Class Mapping & Live Skill Queries (`getClientAbilities`)**:
+    - Strictly populates abilities for the character's active 3 Gestalt classes (`myClasses`), guaranteeing that skills for classes you don't have are excluded while all abilities for your 3 classes are included.
+    - Queries `mq.TLO.Me.Skill(name)`, `mq.TLO.Me.SkillCap(name)`, and `mq.TLO.Me.AbilityReady(name)` in real time to fetch live trained skill levels and ability status.
+    - Includes race-specific abilities (such as `Slam` on large races) when trained on the character.
+  - **Full Innate Class Combat Actions**: Comprehensive class action support across all 16 EverQuest classes for innate abilities executed via `/doability` (Monk strikes, Mend, Backstab, Kick, Bash, Slam, Frenzy, Taunt, Disarm, Intimidation, Feign Death, etc.).
+  - **Autoskill Toggle (`entry.autoskill`)**: Added an **Auto** checkbox to each combat ability. When enabled, the combat engine automatically fires the ability continuously on cooldown during melee combat against engaged hostile targets without blocking spell gems or disciplines.
+  - **Conditional & Priority Execution**: Non-autoskill abilities (e.g. Mend, Feign Death, Taunt, Disarm) support full Target condition, Trigger When rule, HP % threshold, Min XTarget count, Burn Mode gate, and numeric Priority order.
+  - **Trained Only Filtering**: Added `Trained Only` (`ctrl.action_trained_only`) toggle verifying live skill levels (`mq.TLO.Me.Skill` / `mq.TLO.Me.Ability`).
+  - **Persistence & Migration**: Fully serialized `loadout.actions` with automatic legacy migration of special skills (such as Mend) from `loadout.discs`.
+  - **Unit Tests**: Updated `tests/test_pure_logic.lua` with test cases for `actionClassInfo`, `getClientAbilities`, `isActionSkill`, `isSpecialSkill`, and `defaultActionEntry`.
+
+---
+
 ## 2026-08-28
 
 - **Target-Aware Spell Failure, Immunity & Lockout System (`triune.lua`).**

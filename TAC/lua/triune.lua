@@ -115,11 +115,11 @@ local NUM_GEMS       = 12
 local lvlMin, lvlMax = 1, 65
 
 -- loadout.gems[i] = { cls=, spell=, target=, when=, pct= }  (or nil)
--- loadout.aas and loadout.discs are maps: name -> { cls=, target=, when=, enabled=, pct= }
--- (discs = disciplines, e.g. Mend/Lay on Hands/Hand of Piety -- fired via
--- /disc, not /alt act; kept separate from aas since they're a different
--- activation command and data source, but use the identical entry shape)
-local loadout        = { gems = {}, aas = {}, discs = {}, clickies = {} }
+-- loadout.aas, loadout.discs, loadout.actions are maps: name -> { cls=, target=, when=, enabled=, pct=, ... }
+-- (actions = innate combat abilities, e.g. Kick/Bash/Mend/Backstab/Flying Kick -- fired via /doability)
+-- (discs = disciplines, e.g. Defensive/Stonewall/Trueshot -- fired via /disc)
+-- (aas = alternate advancements -- fired via /alt act)
+local loadout        = { gems = {}, aas = {}, discs = {}, actions = {}, clickies = {} }
 
 -- combat control state (Control tab). NOTE: this is the control surface; wiring it
 -- into the actual casting/movement engine is phase 2.
@@ -308,6 +308,7 @@ local function defaultCtrl()
         zone_hazards             = {},
         debug_mode               = false,
         scribed_only             = true,
+        action_trained_only      = true,
         aa_purchased_only        = true,
         disc_trained_only        = true,
         medbreak_enabled         = false,
@@ -2150,20 +2151,240 @@ end
 -- of Wolf=buff). Shown in the picker so a low-level player isn't left
 -- guessing what an unfamiliar spell name actually does.
 
--- Base SKILLS (not spells/discs/AAs -- fired via /doability, no cooldown
--- data). Keyed by class. Rendered as "Special Skills" on the Disciplines tab
--- and fired through the same eligible-ability pipeline as real Disciplines
--- (see isSpecialSkill()/runtime.fireSkill()). Feign Death deliberately
--- omitted -- needs its own design pass before an automated trigger drops a
--- character to the floor.
-local SPECIAL_SKILLS = {
-    Mnk = { 'Mend' },
+-- Base Actions & Combat Skills (not spells/discs/AAs -- fired via /doability).
+-- Keyed by class. Rendered on the dedicated Abilities tab and executed via
+-- runtime.fireSkill() either as continuous Autoskills or priority-ordered conditions.
+local CLASS_ACTIONS = {
+    Mnk = { 'Kick', 'Round Kick', 'Tiger Claw', 'Eagle Strike', 'Dragon Punch', 'Tail Rake', 'Flying Kick', 'Mend', 'Feign Death', 'Sneak', 'Intimidation', 'Disarm' },
+    Rog = { 'Backstab', 'Hide', 'Sneak', 'Pick Pockets', 'Sense Traps', 'Disarm Traps', 'Disarm', 'Intimidation' },
+    War = { 'Kick', 'Bash', 'Taunt', 'Disarm', 'Intimidation' },
+    Pal = { 'Bash', 'Taunt', 'Disarm' },
+    SK  = { 'Bash', 'Taunt', 'Disarm' },
+    Rng = { 'Kick', 'Taunt', 'Disarm', 'Hide', 'Sneak', 'Forage', 'Track' },
+    Ber = { 'Frenzy', 'Kick', 'Disarm', 'Intimidation', 'Volley' },
+    Bst = { 'Kick', 'Disarm' },
+    Brd = { 'Disarm', 'Hide', 'Sneak', 'Pick Pockets', 'Track' },
+    Clr = { 'Bash' },
+    Dru = { 'Forage', 'Track' },
+    Shm = {},
+    Nec = {},
+    Wiz = {},
+    Mag = {},
+    Enc = {},
 }
+local RACIAL_ACTIONS = { 'Slam', 'Hide', 'Sneak', 'Forage' }
+local UNIVERSAL_ACTIONS = { 'Begging', 'Bind Wound', 'Sense Heading' }
+local SPECIAL_SKILLS = CLASS_ACTIONS -- backward compatibility alias
+
+local function isActionSkill(name)
+    if not name or type(name) ~= 'string' or name == '' then return false end
+    for _, list in pairs(CLASS_ACTIONS) do
+        for _, n in ipairs(list) do if n == name then return true end end
+    end
+    for _, n in ipairs(RACIAL_ACTIONS) do
+        if n == name then return true end
+    end
+    for _, n in ipairs(UNIVERSAL_ACTIONS) do
+        if n == name then return true end
+    end
+    return false
+end
+
 local function isSpecialSkill(name)
+    if not name or type(name) ~= 'string' or name == '' then return false end
     for _, list in pairs(SPECIAL_SKILLS) do
         for _, n in ipairs(list) do if n == name then return true end end
     end
     return false
+end
+
+local function hasActionSkill(name)
+    if not name or type(name) ~= 'string' or name == '' or name == 'NULL' or name == 'false' then return false end
+    -- 1. Check if character has trained skill points (> 0) in this skill
+    local ok, val = pcall(function()
+        local s = mq.TLO.Me.Skill(name)
+        if s and s() then return tonumber(s()) or 0 end
+        if name == 'Track' then
+            local st = mq.TLO.Me.Skill('Tracking')
+            if st and st() then return tonumber(st()) or 0 end
+        end
+        return 0
+    end)
+    if ok and val and val > 0 then return true end
+
+    -- 2. Check if the ability is mapped to an ability button (1..10)
+    local aOk, aVal = pcall(function()
+        local ab = mq.TLO.Me.Ability(name)
+        if ab and ab() then return tonumber(ab()) or 0 end
+        return 0
+    end)
+    if aOk and aVal and aVal > 0 then return true end
+
+    -- 3. Check if the ability is ready to fire right now
+    local rOk, rVal = pcall(function()
+        return mq.TLO.Me.AbilityReady(name)()
+    end)
+    if rOk and rVal == true then return true end
+
+    return false
+end
+
+local function actionClassInfo(name)
+    if not name or type(name) ~= 'string' or name == '' then return (myClasses and myClasses[1]) or 'War' end
+    for _, cls in ipairs(myClasses or {}) do
+        local list = CLASS_ACTIONS[cls]
+        if list then
+            for _, actName in ipairs(list) do
+                if actName == name then return cls end
+            end
+        end
+    end
+    for cls, list in pairs(CLASS_ACTIONS) do
+        for _, actName in ipairs(list) do
+            if actName == name then return cls end
+        end
+    end
+    return (myClasses and myClasses[1]) or 'War'
+end
+
+-- Retrieves all combat abilities and skills for the character's Gestalt Trio classes
+local function getClientAbilities()
+    local clientList = {}
+    local seen = {}
+
+    -- 1. Populate abilities belonging strictly to the character's Gestalt Trio classes
+    for _, cls in ipairs(myClasses or {}) do
+        local list = CLASS_ACTIONS[cls]
+        if list then
+            for _, nm in ipairs(list) do
+                if type(nm) == 'string' and nm ~= '' and not seen[nm] then
+                    seen[nm] = true
+                    local curVal = 0
+                    local myCap = 0
+                    pcall(function()
+                        local s = mq.TLO.Me.Skill(nm)
+                        if s and s() then curVal = tonumber(s()) or 0 end
+                        if nm == 'Track' and curVal == 0 then
+                            local st = mq.TLO.Me.Skill('Tracking')
+                            if st and st() then curVal = tonumber(st()) or 0 end
+                        end
+                        local sc = mq.TLO.Me.SkillCap(nm)
+                        if sc and sc() then myCap = tonumber(sc()) or 0 end
+                    end)
+                    local isTrained = (curVal > 0) or hasActionSkill(nm)
+                    clientList[#clientList + 1] = {
+                        name = nm,
+                        cls = cls,
+                        skillCap = myCap,
+                        currentSkill = curVal,
+                        isTrained = isTrained,
+                    }
+                end
+            end
+        end
+    end
+
+    -- 2. Race-specific or trained abilities (Slam on large races, Forage on Iksar/Wood Elf, Hide/Sneak)
+    for _, nm in ipairs(RACIAL_ACTIONS) do
+        if type(nm) == 'string' and nm ~= '' and not seen[nm] then
+            local curVal = 0
+            local myCap = 0
+            pcall(function()
+                local s = mq.TLO.Me.Skill(nm)
+                if s and s() then curVal = tonumber(s()) or 0 end
+                local sc = mq.TLO.Me.SkillCap(nm)
+                if sc and sc() then myCap = tonumber(sc()) or 0 end
+            end)
+            local isTrained = (curVal > 0) or hasActionSkill(nm)
+            if isTrained or myCap > 0 then
+                seen[nm] = true
+                clientList[#clientList + 1] = {
+                    name = nm,
+                    cls = (myClasses and myClasses[1]) or 'War',
+                    skillCap = myCap,
+                    currentSkill = curVal,
+                    isTrained = isTrained,
+                }
+            end
+        end
+    end
+
+    -- 3. Universal innate abilities (Begging, Bind Wound, Sense Heading)
+    for _, nm in ipairs(UNIVERSAL_ACTIONS) do
+        if type(nm) == 'string' and nm ~= '' and not seen[nm] then
+            local curVal = 0
+            local myCap = 0
+            pcall(function()
+                local s = mq.TLO.Me.Skill(nm)
+                if s and s() then curVal = tonumber(s()) or 0 end
+                local sc = mq.TLO.Me.SkillCap(nm)
+                if sc and sc() then myCap = tonumber(sc()) or 0 end
+            end)
+            local isTrained = (curVal > 0) or hasActionSkill(nm)
+            if isTrained or not ctrl.action_trained_only then
+                seen[nm] = true
+                clientList[#clientList + 1] = {
+                    name = nm,
+                    cls = (myClasses and myClasses[1]) or 'War',
+                    skillCap = myCap,
+                    currentSkill = curVal,
+                    isTrained = isTrained,
+                }
+            end
+        end
+    end
+
+    -- 4. Active abilities on client hotbars/ActionsWnd (mq.TLO.Me.Ability 1..10)
+    for i = 1, 10 do
+        pcall(function()
+            local ab = mq.TLO.Me.Ability(i)
+            if ab then
+                local rawVal = (type(ab) == 'function' and ab()) or (type(ab) == 'table' and type(ab.Name) == 'function' and ab.Name()) or ab
+                if type(rawVal) == 'table' and type(rawVal.Name) == 'function' then rawVal = rawVal.Name() end
+                local nm = (type(rawVal) == 'string' and rawVal) or nil
+                if type(nm) == 'string' and nm ~= '' and nm ~= 'NULL' and nm ~= 'false' and not seen[nm] then
+                    local curVal = 0
+                    local s = mq.TLO.Me.Skill(nm)
+                    if s and s() then curVal = tonumber(s()) or 0 end
+                    seen[nm] = true
+                    clientList[#clientList + 1] = {
+                        name = nm,
+                        cls = actionClassInfo(nm),
+                        skillCap = 0,
+                        currentSkill = curVal,
+                        isTrained = true,
+                    }
+                end
+            end
+        end)
+    end
+
+    return clientList
+end
+
+local function defaultActionEntry(name, cls)
+    if name == 'Mend' then
+        return { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 75, autoskill = false, boss_only = false, burn_only = false, priority = 20, kind = 'heal' }
+    elseif name == 'Feign Death' then
+        return { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 25, autoskill = false, boss_only = false, burn_only = false, priority = 10, kind = 'heal' }
+    elseif name == 'Hide' or name == 'Sneak' then
+        return { cls = cls, target = 'F: Myself', when = 'always', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 70, kind = 'buff' }
+    elseif name == 'Sense Traps' or name == 'Disarm Traps' or name == 'Forage' or name == 'Track' or name == 'Sense Heading' then
+        return { cls = cls, target = 'F: Myself', when = 'always', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 80, kind = 'util' }
+    elseif name == 'Bind Wound' then
+        return { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 50, autoskill = false, boss_only = false, burn_only = false, priority = 60, kind = 'heal' }
+    elseif name == 'Taunt' then
+        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 40, kind = 'dd' }
+    elseif name == 'Disarm' then
+        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 60, kind = 'dd' }
+    elseif name == 'Intimidation' then
+        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 65, kind = 'dd' }
+    elseif name == 'Begging' or name == 'Pick Pockets' then
+        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 80, kind = 'util' }
+    else
+        -- High-frequency combat melee attacks (Kick, Flying Kick, Dragon Punch, Tail Rake, Eagle Strike, Tiger Claw, Round Kick, Backstab, Bash, Slam, Frenzy, Volley)
+        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = true, boss_only = false, burn_only = false, priority = 50, kind = 'dd' }
+    end
 end
 
 local function aaTier(sec)
@@ -2293,6 +2514,7 @@ local function collectEntry()
         gems = loadout.gems,
         aas = loadout.aas,
         discs = loadout.discs,
+        actions = loadout.actions,
         clickies = loadout.clickies,
         control = ctrl
     }
@@ -2312,13 +2534,32 @@ local function applyEntry(e)
         end
     end
     loadout.discs = e.discs or {}
-    -- Backfill entry.kind on persisted Special Skill entries (e.g. Mend)
-    -- saved before isDetrimentalAction() needed it -- see UI.drawDiscTab.
-    -- Covers characters that never reopen the Disciplines tab after upgrading.
-    for _, list in pairs(SPECIAL_SKILLS) do
-        for _, nm in ipairs(list) do
-            local d = loadout.discs[nm]
-            if type(d) == 'table' and not d.kind then d.kind = 'heal' end
+    loadout.actions = {}
+    if type(e.actions) == 'table' then
+        for k, v in pairs(e.actions) do
+            if not tonumber(k) and type(v) == 'table' then
+                loadout.actions[k] = v
+            end
+        end
+    end
+    -- Migrate legacy special skills (e.g. Mend) saved in e.discs into loadout.actions
+    if type(e.discs) == 'table' then
+        for k, v in pairs(e.discs) do
+            if isActionSkill(k) and type(v) == 'table' then
+                if not loadout.actions[k] then
+                    loadout.actions[k] = v
+                end
+            end
+        end
+    end
+    -- Backfill entry.kind and autoskill on persisted Action entries
+    if type(loadout.actions) == 'table' then
+        for nm, act in pairs(loadout.actions) do
+            if type(act) == 'table' then
+                local def = defaultActionEntry(nm, act.cls or (myClasses and myClasses[1]) or 'War')
+                if not act.kind then act.kind = def.kind end
+                if act.autoskill == nil then act.autoskill = def.autoskill end
+            end
         end
     end
     loadout.clickies = {}
@@ -2341,6 +2582,7 @@ local function applyEntry(e)
         if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
         if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
         if ctrl.pull_min_hp_pct == nil then ctrl.pull_min_hp_pct = 0 end
+        if ctrl.action_trained_only == nil then ctrl.action_trained_only = true end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -3127,6 +3369,18 @@ local function loadoutSig()
                 .. '~' .. tostring(d.boss_only) .. '~' .. tostring(d.burn_only) .. '~' .. tostring(d.priority)
         end
     end
+    local actkeys = {}
+    if loadout.actions then for k in pairs(loadout.actions) do actkeys[#actkeys + 1] = k end end
+    table.sort(actkeys)
+    for _, nm in ipairs(actkeys) do
+        local act = loadout.actions and loadout.actions[nm]
+        if type(act) == 'table' then
+            p[#p + 1] = nm ..
+                '~' ..
+                tostring(act.enabled) .. '~' .. tostring(act.autoskill) .. '~' .. tostring(act.target) .. '~' .. tostring(act.when) .. '~' .. tostring(act.pct)
+                .. '~' .. tostring(act.boss_only) .. '~' .. tostring(act.burn_only) .. '~' .. tostring(act.priority)
+        end
+    end
     local ckeys = {}
     if ctrl then for k in pairs(ctrl) do ckeys[#ckeys + 1] = k end end
     table.sort(ckeys)
@@ -3174,7 +3428,7 @@ end
 -- Called when the logged-in character changes: load that toon's saved setup, or
 -- detect classes fresh if it's new.
 local function onCharacterChanged()
-    loadout = { gems = {}, aas = {}, discs = {}, clickies = {} }
+    loadout = { gems = {}, aas = {}, discs = {}, actions = {}, clickies = {} }
     ctrl = defaultCtrl()
     runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
     lvlMin, lvlMax = 1, 65
@@ -4133,11 +4387,160 @@ end
 
 local TIER_ORDER = { 'short', 'mid', 'burn' }
 
+-- UI: Innate Combat Abilities & Skills tab
+function UI.drawAbilitiesTab()
+    if not ImGui.BeginTabItem('Abilities') then return end
+    ImGui.Dummy(0, 4)
+    ImGui.TextWrapped('Innate Combat Abilities & Skills (/doability) -- Kick, Bash, Slam, Mend, Backstab, Monk strikes, Taunt, Disarm, Frenzy, etc.')
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Innate class actions and combat abilities operate independently of spell gems and fire automatically when ready or when conditions are met.')
+    end
+    ctrl.action_trained_only = ImGui.Checkbox('Trained Only##act', ctrl.action_trained_only)
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Only show abilities you\'ve actually trained/unlocked in your skill list. Turn off to browse/plan ahead.')
+    end
+    ImGui.Separator()
+
+    if ImGui.BeginChild('abilitieslist', 0, 0) then
+        local clientAbilities = getClientAbilities()
+        local anyAction = false
+        for _, item in ipairs(clientAbilities) do
+            local nm = item.name
+            local cls = item.cls or (myClasses and myClasses[1]) or 'War'
+            if type(nm) == 'string' and nm ~= '' and nm ~= 'NULL' and nm ~= 'false' then
+                local isTrained = item.isTrained or hasActionSkill(nm)
+                if not ctrl.action_trained_only or isTrained then
+                    anyAction = true
+                    ImGui.PushID('act_' .. tostring(cls) .. '_' .. tostring(nm))
+                local entry = loadout.actions[nm] or defaultActionEntry(nm, cls)
+                entry.cls = entry.cls or cls
+                entry.kind = entry.kind or (defaultActionEntry(nm, cls).kind)
+                if entry.autoskill == nil then
+                    entry.autoskill = defaultActionEntry(nm, cls).autoskill
+                end
+
+                entry.enabled = ImGui.Checkbox('##en', entry.enabled)
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip(string.format('Enable or disable %s.', nm))
+                end
+                ImGui.SameLine()
+                local r, gc, b, a = classColor(cls)
+                ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip(string.format('Class: %s', cls))
+                end
+                ImGui.SameLine()
+                ImGui.Text(nm)
+                if ImGui.IsItemHovered() then
+                    local capStr = (item.skillCap and item.skillCap > 0) and string.format(' (Cap: %d, Skill: %d)', item.skillCap, item.currentSkill or 0) or ''
+                    ImGui.SetTooltip(string.format('Combat Ability / Skill: %s%s', nm, capStr))
+                end
+
+                ImGui.SameLine()
+                local asVal = ImGui.Checkbox('Auto##as', entry.autoskill or false)
+                entry.autoskill = asVal
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Autoskill: Automatically fire this ability continuously on cooldown during combat against hostile targets in melee range.')
+                end
+
+                if entry.enabled then
+                    if entry.autoskill then
+                        ImGui.SameLine()
+                        ImGui.TextDisabled('[Auto on Cooldown]')
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Autoskill active: Fires whenever ready during melee combat without condition checks.')
+                        end
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                        local curXt = tonumber(entry.min_xtar) or 1
+                        if curXt < 1 then curXt = 1 end
+                        if curXt > 10 then curXt = 10 end
+                        local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                        local xti = ImGui.Combo('##actmxt', curXt, xtOpts)
+                        entry.min_xtar = xti
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this ability to fire.')
+                        end
+                        ImGui.SameLine()
+                        local aboVal = ImGui.Checkbox('Burn##actbo', entry.burn_only or false)
+                        entry.burn_only = aboVal
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Only fire when Burn Mode is ON.')
+                        end
+                    else
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                        local ti = ImGui.Combo('##actt', idxOf(TARGETS, entry.target), TARGETS)
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Target condition: who or what to use this ability on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
+                        end
+                        entry.target = TARGETS[ti]
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                        local wi = ImGui.Combo('##actw', idxOf(WHENS, entry.when), WHENS)
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Trigger condition: when this ability should be used (e.g. in combat, my HP <=, always).')
+                        end
+                        entry.when = WHENS[wi]
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                        local curPct = tonumber(entry.pct)
+                        if curPct == nil then curPct = 100 end
+                        local isDis = (curPct == 0)
+                        local pCount = 0
+                        if isDis then pCount = UI.pushDisabledSliderStyle() end
+                        local spVal = ImGui.SliderInt('##actp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                        local isHov = ImGui.IsItemHovered()
+                        if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
+                        entry.pct = spVal
+                        if isHov then
+                            if spVal == 0 then
+                                UI.setTooltip('Ability is Disabled (0%). Drag slider above 0% to enable.')
+                            else
+                                UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this ability).', spVal))
+                            end
+                        end
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                        local curXt = tonumber(entry.min_xtar) or 1
+                        if curXt < 1 then curXt = 1 end
+                        if curXt > 10 then curXt = 10 end
+                        local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                        local xti = ImGui.Combo('##actmxt', curXt, xtOpts)
+                        entry.min_xtar = xti
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Minimum number of active NPCs on XTarget required for this ability to fire.')
+                        end
+                        ImGui.SameLine()
+                        local sbrnVal = ImGui.Checkbox('Burn##actbrn', entry.burn_only or false)
+                        entry.burn_only = sbrnVal
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Only fires when Burn Mode is ON.')
+                        end
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(80)
+                        local priVal = ImGui.SliderInt('##actpri', entry.priority or 50, 1, 99, 'Pri %d')
+                        entry.priority = priVal
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Lower = tried first when more than one eligible ability is ready at the same time.')
+                        end
+                    end
+                end
+                loadout.actions[nm] = entry
+                ImGui.PopID()
+            end
+        end
+    end
+        if not anyAction then
+            ImGui.TextDisabled('  (no combat abilities found for your classes)')
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('No combat abilities found for your current character classes.')
+            end
+        end
+    end
+    ImGui.EndChild()
+    ImGui.EndTabItem()
+end
+
 -- UI: activated AAs tab
 function UI.drawAATab()
-    if not ImGui.BeginTabItem('Abilities & AAs') then return end
+    if not ImGui.BeginTabItem('AAs') then return end
     ImGui.Dummy(0, 4)
-    ImGui.TextWrapped('Activated AAs (each has its own timer -- all fire when ready). Grouped by cooldown.')
+    ImGui.TextWrapped('Activated Alternate Advancements (each has its own timer -- all fire when ready). Grouped by cooldown.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.')
     end
@@ -4250,11 +4653,9 @@ function UI.drawDiscTab()
         ..
         'a survival disc like Whirlwind can stay on for regular grinding). Priority: when multiple discs are eligible at once, '
         .. 'lower numbers are tried first -- if the top one is still on cooldown, the next one down the list fires instead. '
-        ..
-        'Special Skills (below, if your trio has any) are innate class abilities like Mend -- fired via /doability rather '
-        .. 'than /disc, but otherwise configured and prioritized exactly like a Discipline.')
+        .. 'Innate combat abilities (Kick, Bash, Mend, Monk abilities, etc.) are configured on the Abilities tab.')
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Combat disciplines and special skills share timer groups and are evaluated in order of assigned priority.')
+        ImGui.SetTooltip('Combat disciplines share timer groups and are evaluated in order of assigned priority.')
     end
     ctrl.disc_trained_only = ImGui.Checkbox('Trained Only', ctrl.disc_trained_only)
     if ImGui.IsItemHovered() then
@@ -4263,97 +4664,6 @@ function UI.drawDiscTab()
     end
     ImGui.Separator()
     if ImGui.BeginChild('disclist', 0, 0) then
-        -- Special Skills: innate class abilities (just Mend, today) that
-        -- aren't real Disciplines -- fired via /doability, no level data --
-        -- but run through the same priority-ordered eligible-ability
-        -- pipeline as the Disciplines below (isSpecialSkill()/fireSkill()).
-        -- Own section so it doesn't blend into the leveled disc list.
-        local anySpecial = false
-        for _, cls in ipairs(myClasses) do
-            for _, nm in ipairs(SPECIAL_SKILLS[cls] or {}) do
-                anySpecial = true
-                ImGui.PushID('special_' .. cls .. '_' .. nm)
-                local entry = loadout.discs[nm] or
-                    { cls = cls, target = 'F: Myself', when = 'my HP <=', enabled = false, pct = 75, boss_only = false, burn_only = false, priority = 50, kind = 'heal' }
-                -- kind='heal' short-circuits isDetrimentalAction(), which
-                -- can't classify a bare skill like Mend and otherwise
-                -- defaults to detrimental (requiring a hostile self -- never
-                -- true). Backfilled unconditionally so pre-fix saves recover.
-                entry.kind = entry.kind or 'heal'
-                entry.enabled = ImGui.Checkbox('##en', entry.enabled)
-                if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip(string.format('Enable or disable %s.', nm))
-                end
-                ImGui.SameLine(); local r, gc, b, a = classColor(cls); ImGui.TextColored(r, gc, b, a, cls) ---@diagnostic disable-line: param-type-mismatch
-                if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip(string.format('Class: %s', cls))
-                end
-                ImGui.SameLine(); ImGui.Text(nm)
-                if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip(string.format('Innate skill: %s (not an AA or Discipline -- fired via /doability, no level data to show).', nm))
-                end
-                if entry.enabled then
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(150)
-                    local ti = ImGui.Combo('##st', idxOf(TARGETS, entry.target), TARGETS)
-                    if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('Target condition: who or what to use this skill on (Mend only ever affects yourself -- leave this on Myself).')
-                    end
-                    entry.target = TARGETS[ti]
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                    local wi = ImGui.Combo('##sw', idxOf(WHENS, entry.when), WHENS)
-                    if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('Trigger condition: when this skill should be used (e.g. my HP <=, always).')
-                    end
-                    entry.when = WHENS[wi]
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(90)
-                    local curPct = tonumber(entry.pct)
-                    if curPct == nil then curPct = 75 end
-                    local isDis = (curPct == 0)
-                    local pCount = 0
-                    if isDis then pCount = UI.pushDisabledSliderStyle() end
-                    local spVal = ImGui.SliderInt('##sp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
-                    local isHov = ImGui.IsItemHovered()
-                    if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
-                    entry.pct = spVal
-                    if isHov then
-                        if spVal == 0 then
-                            UI.setTooltip('Skill is Disabled (0%). Drag slider above 0% to enable.')
-                        else
-                            UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this skill).', spVal))
-                        end
-                    end
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(45)
-                    local curXt = tonumber(entry.min_xtar) or 1
-                    if curXt < 1 then curXt = 1 end
-                    if curXt > 10 then curXt = 10 end
-                    local xtOpts = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
-                    local xti = ImGui.Combo('##smxt', curXt, xtOpts)
-                    entry.min_xtar = xti
-                    if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip(
-                            'Minimum number of active NPCs on XTarget required for this skill to fire.')
-                    end
-                    ImGui.SameLine()
-                    local sbrnVal = ImGui.Checkbox('Burn##sbrn', entry.burn_only or false)
-                    entry.burn_only = sbrnVal
-                    if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip(
-                            'Only fires when Burn Mode is ON.')
-                    end
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                    local priVal = ImGui.SliderInt('##spri', entry.priority or 50, 1, 99, 'Pri %d')
-                    entry.priority = priVal
-                    if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip(
-                            'Lower = tried first when more than one eligible\ndisc/skill is ready at the same time.')
-                    end
-                end
-                loadout.discs[nm] = entry
-                ImGui.PopID()
-            end
-        end
-        if anySpecial then ImGui.Separator() end
-
         local anyDisc = false
         for _, cls in ipairs(myClasses) do
             for _, row in ipairs(DATA.discs[cls] or {}) do
@@ -4373,7 +4683,7 @@ function UI.drawDiscTab()
                     end
                     ImGui.SameLine(); ImGui.Text(nm)
                     if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip(string.format('Discipline/Skill: %s', nm))
+                        ImGui.SetTooltip(string.format('Discipline: %s', nm))
                     end
                     ImGui.SameLine(); ImGui.TextDisabled('(L' .. lv .. ')')
                     if ImGui.IsItemHovered() then
@@ -6737,9 +7047,10 @@ local function drawFullGui()
         UI.drawControlTab()
         UI.drawSettingsTab()
         UI.drawGemTab()
-        UI.drawClickieTab()
+        UI.drawAbilitiesTab()
         UI.drawAATab()
         UI.drawDiscTab()
+        UI.drawClickieTab()
         UI.drawHelpTab()
         ImGui.EndTabBar()
     end
@@ -7905,21 +8216,23 @@ runtime.fireDisc = function(name, a, id)
 end
 
 runtime.fireSkill = function(name, a, id)
+    if not name or name == '' then return false end
     if isSitting() or isDucking() then
         mq.cmd('/stand')
     end
     if not runtime.isSkillReady(name) then return false end
 
+    id = id or (a and runtime.resolveTargetId(a.target, a.cls, a.when, name, tonumber(a.pct) or 100)) or mq.TLO.Target.ID() or mq.TLO.Me.ID()
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    if not selfCast and not runtime.setTarget(id) then return false end
+    if not selfCast and id and id > 0 and not runtime.setTarget(id) then return false end
     clearCursor()
     mq.cmdf('/doability "%s"', name)
 
     local now = os.clock()
     local key = 's' .. name
-    local cd = 5.0
+    local cd = 1.0
     pcall(function()
         local t = mq.TLO.Me.AbilityTimer(name)
         if t and t() then
@@ -7937,9 +8250,9 @@ runtime.fireSkill = function(name, a, id)
     runtime.lastCast[key] = now + cd
 
     print('\ag[Triune]\ax skill fired: ' .. name)
-    if not selfCast and orig ~= id then
+    if not selfCast and orig > 0 and orig ~= id then
         mq.delay(60)
-        if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+        if mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
     if (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
         mq.cmd('/attack on')
@@ -10108,6 +10421,12 @@ runtime.checkGemMemSync = checkGemMemSync
 runtime.baseTok = baseTok
 runtime.sungKey = sungKey
 runtime.isSpecialSkill = isSpecialSkill
+runtime.isActionSkill = isActionSkill
+runtime.CLASS_ACTIONS = CLASS_ACTIONS
+runtime.defaultActionEntry = defaultActionEntry
+runtime.hasActionSkill = hasActionSkill
+runtime.actionClassInfo = actionClassInfo
+runtime.getClientAbilities = getClientAbilities
 runtime.clearCursor = clearCursor
 runtime.desiredRange = desiredRange
 runtime.maxMeleeDistance = maxMeleeDistance
@@ -10157,7 +10476,6 @@ local function combatTick()
     local conditionMet = runtime.conditionMet
     local baseTok = runtime.baseTok
     local sungKey = runtime.sungKey
-    local isSpecialSkill = runtime.isSpecialSkill
     local clearCursor = runtime.clearCursor
     local markUnreachable = runtime.markUnreachable
     local moveToward = runtime.moveToward
@@ -10971,14 +11289,63 @@ local function combatTick()
             end
         end
     end
-    -- Gather every enabled disc/skill whose condition (and Boss Only gate, if
-    -- set) is currently satisfied, then try them in priority order (lowest
-    -- first) and stop at the first one that actually fires. fireDisc/fireSkill
-    -- return false if the ability's own cooldown isn't up, so this is what
-    -- lets "try the next disc down the list if the top one is still on
-    -- cooldown" work -- exactly the same pattern gems already use (try slot
-    -- 1..12 in order, break on success).
-    if combatReady then
+    -- Innate Combat Abilities (/doability): Autoskill (continuous on cooldown) and Priority Conditions
+    if combatReady and loadout.actions then
+        -- 1. Autoskill: continuously fire high-frequency combat attacks on cooldown when ready
+        for name, act in pairs(loadout.actions) do
+            if act.enabled and act.autoskill and (not act.burn_only or ctrl.burn) and (numXtar >= (tonumber(act.min_xtar) or 1)) then
+                local actPct = tonumber(act.pct)
+                if actPct == nil then actPct = 100 end
+                local id = resolveTargetId(act.target, act.cls, act.when, name, actPct)
+                if id and id > 0 then
+                    local isDet = isDetrimentalAction(name, act.target, act)
+                    if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
+                        if isSkillReady(name) then
+                            fireSkill(name, act, id)
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 2. Priority Conditional Actions (e.g. Mend on low HP, Feign Death, Taunt, Disarm, Intimidation)
+        local eligibleActions = {}
+        for name, act in pairs(loadout.actions) do
+            if act.enabled and not act.autoskill then
+                local actPct = tonumber(act.pct)
+                if actPct == nil then actPct = 100 end
+                if (actPct > 0) and (not act.burn_only or ctrl.burn) and (numXtar >= (tonumber(act.min_xtar) or 1)) then
+                    local id = resolveTargetId(act.target, act.cls, act.when, name, actPct)
+                    if id and conditionMet(act.when, actPct, name, id, act.cls) then
+                        local bossOk = true
+                        if act.boss_only then
+                            local s = mq.TLO.Spawn(id)
+                            bossOk = not not (s() and s.Named())
+                        end
+                        if bossOk then
+                            local isDet = isDetrimentalAction(name, act.target, act)
+                            if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
+                                if isSkillReady(name) then
+                                    eligibleActions[#eligibleActions + 1] = { name = name, entry = act, id = id }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if #eligibleActions > 0 then
+            table.sort(eligibleActions, function(a, b) return (tonumber(a.entry.priority) or 50) < (tonumber(b.entry.priority) or 50) end)
+            for _, e in ipairs(eligibleActions) do
+                if fireSkill(e.name, e.entry, e.id) then
+                    break
+                end
+            end
+        end
+    end
+
+    -- Disciplines (/disc): Gather every enabled disc whose condition is met, try in priority order
+    if combatReady and loadout.discs then
         local eligibleDiscs = {}
         for name, d in pairs(loadout.discs) do
             local dPct = tonumber(d.pct)
@@ -10994,7 +11361,7 @@ local function combatTick()
                     if bossOk then
                         local isDet = isDetrimentalAction(name, d.target, d)
                         if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
-                            local ready = isSpecialSkill(name) and isSkillReady(name) or isDiscReady(name)
+                            local ready = isDiscReady(name)
                             if ready then
                                 eligibleDiscs[#eligibleDiscs + 1] = { name = name, entry = d, id = id }
                             end
@@ -11005,13 +11372,7 @@ local function combatTick()
         end
         table.sort(eligibleDiscs, function(a, b) return (tonumber(a.entry.priority) or 50) < (tonumber(b.entry.priority) or 50) end)
         for _, e in ipairs(eligibleDiscs) do
-            local fired
-            if isSpecialSkill(e.name) then
-                fired = fireSkill(e.name, e.entry, e.id)
-            else
-                fired = fireDisc(e.name, e.entry, e.id)
-            end
-            if fired then break end
+            if fireDisc(e.name, e.entry, e.id) then break end
         end
     end
     -- one spell cast per tick, only when not already casting/singing AND not
