@@ -161,6 +161,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac spellbook` | `/ac book` | Open the Spellbook Browser |
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
+| `/ac clear lockouts` | `/ac clearlockouts`, `/ac unlock` | Clear active spell lockouts, non-stacking buff backoffs, and mob immunities |
 | `/ac style [melee\|ranged\|spell]` | | Set combat style |
 | `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (5-200) distance |
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |

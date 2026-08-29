@@ -2,6 +2,19 @@
 
 ## 2026-08-28
 
+- **Target-Aware Spell Failure, Immunity & Lockout System (`triune.lua`).**
+  - **Categorized Failure Policies**: Replaced the legacy uniform 2-try/30s lockout with specialized policies tailored to EverQuest combat mechanics:
+    - **Mob Immunities**: Instant target-specific immunity registration (`targetImmunities[targetId][spell] = true`) with 0 retries wasted; permanently disables casting that debuff on that mob spawn without blocking other targets.
+    - **Non-Stacking Buff Conflicts ("Did Not Take Hold")**: Applies a 120-second target-specific backoff (`targetLockouts[targetId][spell]`) while leaving the buff active for other party members.
+    - **Detrimental Resists vs. DD Nukes**: Direct damage spells (DD / DoT) never lock out on resists. Debuffs and CC spells retry up to `cast_max_retries` before applying a temporary target-specific backoff on that target.
+    - **Transient Combat Mechanics**: Fizzles and interrupts retry immediately on gem refresh, with a 15-second TTL decay preventing unrelated failures minutes apart from triggering accidental lockouts.
+    - **Positional & State Events**: Line-of-sight, out-of-range, and dead target events incur zero lockout penalties.
+  - **Target-Scoped Execution**: `castTracker.isLockedOut(spell, targetId)` checks target immunities, target backoffs, and global lockouts, allowing multi-target debuffing and healing without global rotation stalls.
+  - **Clickie & AA Integration**: Integrated `isLockedOut` checks into `runtime.useClickie` and `runtime.fireAA` to prevent ability spam on immune or blocked targets.
+  - **Accurate Event Attribution & Cast Guard**: Refined event patterns (`Your spell fizzles!`, `#1# resisted your #2#!`, `Your target is immune to #1#`) and added active cast time-window guards to eliminate false positives from group/raid chat.
+  - **Zone Lifecycle & Manual Overrides**: Automatically clears mob immunities and target lockouts on zone changes (`onZoned()`), added `/ac clear lockouts` (and `/triune clear lockouts`) slash command, and added a **Clear Lockouts (N)** button to the Settings UI.
+  - **Unit Tests**: Updated `tests/test_pure_logic.lua` with test assertions validating target-scoped immunities, non-stacking buff backoff, DD resist resilience, debuff retries, failure count TTL decay, and clearing.
+
 - **Live Status & Engine Diagnostics Tab (`triune.lua`).**
   - **New Primary Status Tab**: Added a dedicated **Status** tab positioned to the left of the Control tab (`UI.drawStatusTab()`), providing a real-time tactical overview of combat engine state and active subsystems.
   - **Live Engine & Mode Banner**: Displays live engine running/paused state, active primary combat mode (Manual, Puller, Assist) and submode (Hunt, Camp, Chase, Backline), combat & attack style (Melee vs Ranged with server attack mode sync), burn state, medbreak/resting state, and active spell casting info.

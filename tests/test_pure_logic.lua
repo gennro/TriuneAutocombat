@@ -786,64 +786,252 @@ print('--- createCastTracker ---')
 -- test the algorithm.
 
 local function testCastTracker()
-    local failureCount = {}
-    local lockouts = {}
-    local mockClock = 100 -- fake os.clock()
+    local failureCount     = {}
+    local lockouts         = {}
+    local targetLockouts   = {}
+    local targetImmunities = {}
+    local mockClock        = 100 -- fake os.clock()
 
-    local function recordFailure(spellName, maxRetries, lockoutSec)
-        if not spellName then return end
-        local mRetries = tonumber(maxRetries) or 2
-        local lSec = tonumber(lockoutSec) or 30
-        failureCount[spellName] = (tonumber(failureCount[spellName]) or 0) + 1
-        if failureCount[spellName] >= mRetries then
-            lockouts[spellName] = mockClock + lSec
-            failureCount[spellName] = 0
+    local function getFailCount(spellName)
+        if not spellName then return 0 end
+        local entry = failureCount[spellName]
+        if not entry then return 0 end
+        if (mockClock - (tonumber(entry.lastFail) or 0)) > 15.0 then
+            failureCount[spellName] = nil
+            return 0
         end
+        return tonumber(entry.count) or 0
     end
 
-    local function isLockedOut(spellName)
-        if not spellName then return false end
-        local untilTime = tonumber(lockouts[spellName])
-        if not untilTime then return false end
-        if mockClock < untilTime then return true end
-        lockouts[spellName] = nil
+    local function incFailCount(spellName)
+        if not spellName then return 1 end
+        local count = getFailCount(spellName) + 1
+        failureCount[spellName] = { count = count, lastFail = mockClock }
+        return count
+    end
+
+    local function resetFailCount(spellName)
+        if spellName then failureCount[spellName] = nil end
+    end
+
+    local function isLockedOut(spellName, targetId)
+        if not spellName or spellName == '' then return false end
+        local tid = tonumber(targetId)
+
+        if tid and tid > 0 and targetImmunities[tid] and targetImmunities[tid][spellName] then
+            return true, 'Immune', 9999
+        end
+
+        if tid and tid > 0 and targetLockouts[tid] then
+            local untilTime = tonumber(targetLockouts[tid][spellName])
+            if untilTime then
+                if mockClock < untilTime then
+                    return true, 'TargetLock', math.ceil(untilTime - mockClock)
+                else
+                    targetLockouts[tid][spellName] = nil
+                end
+            end
+        end
+
+        local gUntil = tonumber(lockouts[spellName])
+        if gUntil then
+            if mockClock < gUntil then
+                return true, 'GlobalLock', math.ceil(gUntil - mockClock)
+            else
+                lockouts[spellName] = nil
+            end
+        end
+
         return false
     end
 
-    local function recordSuccess(spellName)
-        if not spellName then return end
-        failureCount[spellName] = 0
-        lockouts[spellName] = nil
+    local function recordFailure(spellName, targetId, reason, maxRetries, lockoutSec, kind)
+        if not spellName or spellName == '' then return end
+        local tid = nil
+        local r = 'generic'
+        local mRetries = 2
+        local lSec = 30
+        local k = kind
+
+        if type(targetId) == 'number' and (type(reason) == 'string' or reason == nil) then
+            tid = targetId
+            r = reason or 'generic'
+            mRetries = tonumber(maxRetries) or 2
+            lSec = tonumber(lockoutSec) or 30
+        elseif type(targetId) == 'string' then
+            r = targetId
+            mRetries = tonumber(reason) or 2
+            lSec = tonumber(maxRetries) or 30
+            k = lockoutSec
+        elseif type(targetId) == 'number' and type(reason) == 'number' then
+            mRetries = targetId
+            lSec = tonumber(reason) or 30
+            r = 'generic'
+        else
+            mRetries = tonumber(maxRetries) or 2
+            lSec = tonumber(lockoutSec) or 30
+        end
+
+        local rLow = tostring(r):lower()
+
+        if rLow == 'target immune' or rLow == 'immune' then
+            if tid and tid > 0 then
+                targetImmunities[tid] = targetImmunities[tid] or {}
+                targetImmunities[tid][spellName] = true
+                resetFailCount(spellName)
+            else
+                lockouts[spellName] = mockClock + lSec
+                resetFailCount(spellName)
+            end
+
+        elseif rLow == 'did not take hold' then
+            local backoff = math.max(lSec, 120)
+            if tid and tid > 0 then
+                targetLockouts[tid] = targetLockouts[tid] or {}
+                targetLockouts[tid][spellName] = mockClock + backoff
+                resetFailCount(spellName)
+            else
+                lockouts[spellName] = mockClock + lSec
+                resetFailCount(spellName)
+            end
+
+        elseif rLow == 'resisted' then
+            if k == 'dd' or k == 'dot' then
+                resetFailCount(spellName)
+                return
+            end
+            local fails = incFailCount(spellName)
+            if fails >= mRetries then
+                if tid and tid > 0 then
+                    targetLockouts[tid] = targetLockouts[tid] or {}
+                    targetLockouts[tid][spellName] = mockClock + lSec
+                    resetFailCount(spellName)
+                else
+                    lockouts[spellName] = mockClock + lSec
+                    resetFailCount(spellName)
+                end
+            end
+
+        elseif rLow == 'fizzled' or rLow == 'interrupted' then
+            local threshold = math.max(mRetries * 2, 4)
+            local fails = incFailCount(spellName)
+            if fails >= threshold then
+                local shortLock = math.min(lSec, 8)
+                lockouts[spellName] = mockClock + shortLock
+                resetFailCount(spellName)
+            end
+
+        elseif rLow == 'cannot see target' or rLow == 'out of range' or rLow == 'dead target'
+            or rLow == 'cannot cast' or rLow == 'insufficient mana' or rLow == 'not ready' then
+            return
+
+        else
+            local fails = incFailCount(spellName)
+            if fails >= mRetries then
+                lockouts[spellName] = mockClock + lSec
+                resetFailCount(spellName)
+            end
+        end
     end
 
-    -- Test: not locked out initially
+    local function recordSuccess(spellName, targetId)
+        if not spellName then return end
+        resetFailCount(spellName)
+        lockouts[spellName] = nil
+        local tid = tonumber(targetId)
+        if tid and tid > 0 and targetLockouts[tid] then
+            targetLockouts[tid][spellName] = nil
+        end
+    end
+
+    local function clear(targetId)
+        local tid = tonumber(targetId)
+        if tid and tid > 0 then
+            targetLockouts[tid] = nil
+            targetImmunities[tid] = nil
+        else
+            failureCount     = {}
+            lockouts         = {}
+            targetLockouts   = {}
+            targetImmunities = {}
+        end
+    end
+
+    -- 1. Test: not locked out initially
     assert_eq(isLockedOut('Heal'), false, 'tracker: not locked initially')
 
-    -- Test: single failure doesn't lock out (default max_retries=2)
+    -- 2. Test: legacy generic failure
     recordFailure('Heal', 2, 30)
     assert_eq(isLockedOut('Heal'), false, 'tracker: 1 failure, not locked')
-
-    -- Test: second failure triggers lockout
     recordFailure('Heal', 2, 30)
     assert_eq(isLockedOut('Heal'), true, 'tracker: 2 failures, locked out')
 
-    -- Test: lockout expires after time passes
+    -- 3. Test: lockout expires after time passes
     mockClock = 131 -- 100 + 30 + 1
     assert_eq(isLockedOut('Heal'), false, 'tracker: lockout expired')
 
-    -- Test: recordSuccess clears everything
+    -- 4. Test: recordSuccess clears failure count
     recordFailure('Nuke', 3, 60)
     recordFailure('Nuke', 3, 60)
     recordSuccess('Nuke')
     recordFailure('Nuke', 3, 60)
     recordFailure('Nuke', 3, 60)
-    -- Only 2 failures after reset, need 3 for lockout
     assert_eq(isLockedOut('Nuke'), false, 'tracker: success resets count')
 
-    -- Test: custom max_retries
+    -- 5. Test: Target-Scoped Immunity
     mockClock = 200
-    recordFailure('Dot', 1, 10) -- 1 retry = lock on first fail
-    assert_eq(isLockedOut('Dot'), true, 'tracker: max_retries=1 locks immediately')
+    recordFailure('Slow', 101, 'target immune', 2, 30, 'debuff')
+    assert_eq(isLockedOut('Slow', 101), true, 'tracker: target 101 is immune to Slow')
+    assert_eq(isLockedOut('Slow', 102), false, 'tracker: target 102 is NOT immune to Slow')
+    assert_eq(isLockedOut('Slow'), false, 'tracker: Slow is NOT locked out globally')
+
+    -- 6. Test: Target-Scoped "Did Not Take Hold" (Non-stacking buff backoff)
+    mockClock = 300
+    recordFailure('Focus', 55, 'did not take hold', 2, 30, 'buff')
+    assert_eq(isLockedOut('Focus', 55), true, 'tracker: Focus backed off on target 55')
+    assert_eq(isLockedOut('Focus', 56), false, 'tracker: Focus available for target 56')
+    mockClock = 421 -- 300 + 120 + 1
+    assert_eq(isLockedOut('Focus', 55), false, 'tracker: Focus backoff expired on target 55')
+
+    -- 7. Test: Direct Damage Resists do NOT trigger lockouts
+    mockClock = 500
+    recordFailure('Ice Comet', 101, 'resisted', 2, 30, 'dd')
+    recordFailure('Ice Comet', 101, 'resisted', 2, 30, 'dd')
+    recordFailure('Ice Comet', 101, 'resisted', 2, 30, 'dd')
+    assert_eq(isLockedOut('Ice Comet', 101), false, 'tracker: DD nukes never lock out on resists')
+
+    -- 8. Test: Debuff Resists back off only on specific target after maxRetries
+    mockClock = 600
+    recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
+    assert_eq(isLockedOut('Tash', 201), false, 'tracker: 1 debuff resist does not lock')
+    recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
+    assert_eq(isLockedOut('Tash', 201), true, 'tracker: 2 debuff resists lock out on target 201')
+    assert_eq(isLockedOut('Tash', 202), false, 'tracker: Tash remains usable on target 202')
+
+    -- 9. Test: Failure count TTL decay (15s)
+    mockClock = 700
+    recordFailure('Root', 301, 'resisted', 2, 30, 'debuff')
+    mockClock = 720 -- 20 seconds later (> 15s decay)
+    recordFailure('Root', 301, 'resisted', 2, 30, 'debuff')
+    assert_eq(isLockedOut('Root', 301), false, 'tracker: failure count decayed after 20s')
+
+    -- 10. Test: Dead target / Positional events have 0 penalty
+    mockClock = 800
+    recordFailure('Heal', 10, 'dead target', 1, 10, 'heal')
+    recordFailure('Heal', 10, 'out of range', 1, 10, 'heal')
+    recordFailure('Heal', 10, 'cannot see target', 1, 10, 'heal')
+    assert_eq(isLockedOut('Heal', 10), false, 'tracker: positional/dead target events incur 0 penalty')
+
+    -- 11. Test: Targeted clear vs global clear
+    mockClock = 850
+    recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
+    recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
+    assert_eq(isLockedOut('Tash', 201), true, 'tracker: target 201 locked out')
+    clear(101)
+    assert_eq(isLockedOut('Slow', 101), false, 'tracker: clear(101) cleared immunity for 101')
+    assert_eq(isLockedOut('Tash', 201), true, 'tracker: clear(101) did not clear 201')
+    clear()
+    assert_eq(isLockedOut('Tash', 201), false, 'tracker: global clear() cleared all lockouts')
 end
 testCastTracker()
 

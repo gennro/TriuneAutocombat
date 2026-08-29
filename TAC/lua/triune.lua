@@ -1467,64 +1467,273 @@ local function findMaPcId(maName)
 end
 
 local function createCastTracker()
-    local failureCount = {}
-    local lockouts = {}
+    local failureCount     = {} -- [spellName] = { count = N, lastFail = timestamp }
+    local lockouts         = {} -- [spellName] = untilTimestamp (global lockouts)
+    local targetLockouts   = {} -- [targetId] = { [spellName] = untilTimestamp } (target-specific backoffs)
+    local targetImmunities = {} -- [targetId] = { [spellName] = true } (permanent target immunities)
 
     local tracker = {}
 
-    local function recordFailure(spellName, maxRetries, lockoutSec)
-        if not spellName then return end
-        local mRetries = tonumber(maxRetries) or 2
-        local lSec = tonumber(lockoutSec) or 30
-        failureCount[spellName] = (tonumber(failureCount[spellName]) or 0) + 1
-        if failureCount[spellName] >= mRetries then
-            lockouts[spellName] = os.clock() + lSec
-            failureCount[spellName] = 0
-            print(string.format('\ar[Triune]\ax Lockout applied for "%s" (%ds)', spellName, lSec))
+    local function getFailCount(spellName)
+        if not spellName then return 0 end
+        local entry = failureCount[spellName]
+        if not entry then return 0 end
+        -- 15-second TTL decay for accumulated transient failure count
+        if (os.clock() - (tonumber(entry.lastFail) or 0)) > 15.0 then
+            failureCount[spellName] = nil
+            return 0
         end
+        return tonumber(entry.count) or 0
     end
 
-    local function isLockedOut(spellName)
-        if not spellName then return false end
-        local untilTime = tonumber(lockouts[spellName])
-        if not untilTime then return false end
-        if os.clock() < untilTime then return true end
-        lockouts[spellName] = nil
+    local function incFailCount(spellName)
+        if not spellName then return 1 end
+        local count = getFailCount(spellName) + 1
+        failureCount[spellName] = { count = count, lastFail = os.clock() }
+        return count
+    end
+
+    local function resetFailCount(spellName)
+        if spellName then failureCount[spellName] = nil end
+    end
+
+    local function isLockedOut(spellName, targetId)
+        if not spellName or spellName == '' then return false end
+        local tid = tonumber(targetId)
+
+        -- 1. Target Immunity check (permanent for this spawn ID)
+        if tid and tid > 0 and targetImmunities[tid] and targetImmunities[tid][spellName] then
+            return true, 'Immune', 9999
+        end
+
+        -- 2. Target-specific lockout check (e.g. non-stacking buff backoff, resisted debuff backoff)
+        if tid and tid > 0 and targetLockouts[tid] then
+            local untilTime = tonumber(targetLockouts[tid][spellName])
+            if untilTime then
+                if os.clock() < untilTime then
+                    return true, 'TargetLock', math.ceil(untilTime - os.clock())
+                else
+                    targetLockouts[tid][spellName] = nil
+                end
+            end
+        end
+
+        -- 3. Global lockout check
+        local gUntil = tonumber(lockouts[spellName])
+        if gUntil then
+            if os.clock() < gUntil then
+                return true, 'GlobalLock', math.ceil(gUntil - os.clock())
+            else
+                lockouts[spellName] = nil
+            end
+        end
+
         return false
     end
 
-    local function onFailureEvent(reason, maxRetries, lockoutSec)
-        local castingName = nil
-        pcall(function() castingName = mq.TLO.Me.Casting.Name() end)
-        if not castingName or castingName == '' then
-            castingName = tracker.activeSpell or tracker.lastSpell
+    local function recordFailure(spellName, targetId, reason, maxRetries, lockoutSec, kind)
+        if not spellName or spellName == '' then return end
+        local tid
+        local r = 'generic'
+        local mRetries
+        local lSec
+        local k = kind
+
+        if type(targetId) == 'number' and (type(reason) == 'string' or reason == nil) then
+            tid = targetId
+            r = reason or 'generic'
+            mRetries = tonumber(maxRetries) or 2
+            lSec = tonumber(lockoutSec) or 30
+        elseif type(targetId) == 'string' then
+            r = targetId
+            mRetries = tonumber(reason) or 2
+            lSec = tonumber(maxRetries) or 30
+            k = lockoutSec
+        elseif type(targetId) == 'number' and type(reason) == 'number' then
+            mRetries = targetId
+            lSec = tonumber(reason) or 30
+            r = 'generic'
+        else
+            mRetries = tonumber(maxRetries) or 2
+            lSec = tonumber(lockoutSec) or 30
         end
+
+        local rLow = tostring(r):lower()
+
+        if rLow == 'target immune' or rLow == 'immune' then
+            -- Mob Immunity: Record permanently for this target ID (0 retries wasted). Does NOT lock globally.
+            if tid and tid > 0 then
+                targetImmunities[tid] = targetImmunities[tid] or {}
+                targetImmunities[tid][spellName] = true
+                resetFailCount(spellName)
+                local tName = 'Target'
+                pcall(function()
+                    local s = mq.TLO.Spawn(tid)
+                    if s and s() then tName = s.CleanName() or s.Name() or 'Target' end
+                end)
+                print(string.format('\ar[Triune]\ax Immunity registered for "%s" on %s (ID %d) -- skipping further casts on this mob.', spellName, tName, tid))
+            else
+                lockouts[spellName] = os.clock() + lSec
+                resetFailCount(spellName)
+                print(string.format('\ar[Triune]\ax Global lockout applied for "%s" (%ds) due to immunity.', spellName, lSec))
+            end
+
+        elseif rLow == 'did not take hold' then
+            -- Non-stacking buff / debuff conflict: back off on this target for 120s (or custom lockoutSec), do NOT block other targets.
+            local backoff = math.max(lSec, 120)
+            if tid and tid > 0 then
+                targetLockouts[tid] = targetLockouts[tid] or {}
+                targetLockouts[tid][spellName] = os.clock() + backoff
+                resetFailCount(spellName)
+                print(string.format('\ay[Triune]\ax Spell "%s" did not take hold on target #%d -- backing off on this target (%ds).', spellName, tid, backoff))
+            else
+                lockouts[spellName] = os.clock() + lSec
+                resetFailCount(spellName)
+            end
+
+        elseif rLow == 'resisted' then
+            -- Resists:
+            -- If kind is direct damage ('dd') or damage over time ('dot'), NEVER lock out on resists!
+            if k == 'dd' or k == 'dot' then
+                resetFailCount(spellName)
+                return
+            end
+            -- For debuffs, CC, and util: retry up to maxRetries, then back off on this target
+            local fails = incFailCount(spellName)
+            if fails >= mRetries then
+                if tid and tid > 0 then
+                    targetLockouts[tid] = targetLockouts[tid] or {}
+                    targetLockouts[tid][spellName] = os.clock() + lSec
+                    resetFailCount(spellName)
+                    print(string.format('\ar[Triune]\ax Debuff "%s" resisted %d times by target #%d -- backing off on this target (%ds).', spellName, fails, tid, lSec))
+                else
+                    lockouts[spellName] = os.clock() + lSec
+                    resetFailCount(spellName)
+                    print(string.format('\ar[Triune]\ax Lockout applied for "%s" (%ds) after %d resists.', spellName, lSec, fails))
+                end
+            end
+
+        elseif rLow == 'fizzled' or rLow == 'interrupted' then
+            -- Transient combat mechanics: retry on gem refresh.
+            -- Only back off if severely repeating (e.g. 4+ consecutive failures within 15s)
+            local threshold = math.max(mRetries * 2, 4)
+            local fails = incFailCount(spellName)
+            if fails >= threshold then
+                local shortLock = math.min(lSec, 8)
+                lockouts[spellName] = os.clock() + shortLock
+                resetFailCount(spellName)
+                print(string.format('\ay[Triune]\ax "%s" %s %d times consecutively -- brief pause applied (%ds).', spellName, rLow, fails, shortLock))
+            end
+
+        elseif rLow == 'cannot see target' or rLow == 'out of range' or rLow == 'dead target'
+            or rLow == 'cannot cast' or rLow == 'insufficient mana' or rLow == 'not ready' then
+            -- Positional, dead target, or timing states: Zero failure penalty / zero lockout
+            return
+
+        else
+            -- Generic failure fallback
+            local fails = incFailCount(spellName)
+            if fails >= mRetries then
+                lockouts[spellName] = os.clock() + lSec
+                resetFailCount(spellName)
+                print(string.format('\ar[Triune]\ax Lockout applied for "%s" (%ds) [%s].', spellName, lSec, rLow))
+            end
+        end
+    end
+
+    local function recordSuccess(spellName, targetId)
+        if not spellName then return end
+        resetFailCount(spellName)
+        lockouts[spellName] = nil
+        local tid = tonumber(targetId)
+        if tid and tid > 0 and targetLockouts[tid] then
+            targetLockouts[tid][spellName] = nil
+        end
+    end
+
+    local function onFailureEvent(reason, maxRetries, lockoutSec, eventSpell, eventTargetId)
+        local now = os.clock()
+        local isCastRecent = (now - (tonumber(tracker.castStartTime) or 0)) <= 1.5
+        local castingId = nil
+        pcall(function() castingId = mq.TLO.Me.Casting.ID() end)
+        local isActivelyCasting = (castingId ~= nil and castingId > 0)
+        if not tracker.wasCasting and not isCastRecent and not isActivelyCasting then
+            return
+        end
+
+        local castingName = eventSpell
+        if not castingName or castingName == '' then
+            pcall(function() castingName = mq.TLO.Me.Casting.Name() end)
+        end
+        if not castingName or castingName == '' then
+            castingName = tracker.activeSpell
+        end
+        if not castingName or castingName == '' then
+            if isCastRecent then
+                castingName = tracker.lastSpell
+            end
+        end
+
         if castingName and castingName ~= '' then
             tracker.failed = true
-            recordFailure(castingName, maxRetries, lockoutSec)
+            local tid = eventTargetId or tracker.activeTargetId
+            if not tid or tid <= 0 then
+                pcall(function() tid = mq.TLO.Target.ID() end)
+            end
+            recordFailure(castingName, tid, reason, maxRetries, lockoutSec, tracker.activeKind)
         end
     end
 
-    local function recordSuccess(spellName)
-        if not spellName then return end
-        failureCount[spellName] = 0
-        lockouts[spellName] = nil
+    local function clear(targetId)
+        local tid = tonumber(targetId)
+        if tid and tid > 0 then
+            targetLockouts[tid] = nil
+            targetImmunities[tid] = nil
+        else
+            failureCount     = {}
+            lockouts         = {}
+            targetLockouts   = {}
+            targetImmunities = {}
+        end
     end
 
-    tracker.recordFailure = recordFailure
-    tracker.recordSuccess = recordSuccess
-    tracker.isLockedOut = isLockedOut
-    tracker.onFailureEvent = onFailureEvent
-    tracker.clear = function()
-        failureCount = {}; lockouts = {}
+    local function getActiveCount()
+        local count = 0
+        local now = os.clock()
+        for _, t in pairs(lockouts) do
+            if now < (tonumber(t) or 0) then count = count + 1 end
+        end
+        for _, tMap in pairs(targetLockouts) do
+            for _, t in pairs(tMap) do
+                if now < (tonumber(t) or 0) then count = count + 1 end
+            end
+        end
+        for _, immMap in pairs(targetImmunities) do
+            for _, _ in pairs(immMap) do count = count + 1 end
+        end
+        return count
     end
-    tracker.failed = false
-    tracker.activeSpell = nil
-    tracker.lastSpell = nil
-    tracker.wasCasting = false
+
+    tracker.recordFailure  = recordFailure
+    tracker.recordSuccess  = recordSuccess
+    tracker.isLockedOut    = isLockedOut
+    tracker.onFailureEvent = onFailureEvent
+    tracker.clear          = clear
+    tracker.getActiveCount = getActiveCount
+    tracker.getFailCount   = getFailCount
+    tracker.resetFailCount = resetFailCount
+    tracker.failed         = false
+    tracker.activeSpell    = nil
+    tracker.activeTargetId = nil
+    tracker.activeKind     = nil
+    tracker.castStartTime  = 0
+    tracker.lastSpell      = nil
+    tracker.wasCasting     = false
 
     return tracker
 end
+
+local castTracker = createCastTracker()
 
 local function clearCursor()
     local item = mq.TLO.Cursor
@@ -3388,6 +3597,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac spellbook',                      desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
                 { cmd = '/ac cursorui',                       desc = 'Toggle the standalone cursor item manager window' },
                 { cmd = '/ac clearcursor',                    desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
+                { cmd = '/ac clear lockouts',                 desc = 'Clear all active spell lockouts, non-stacking buff backoffs, and mob immunities' },
                 { cmd = '/ac buffbot / /ac buff',             desc = 'Toggle the standalone Interactive Buffbot window' },
                 { cmd = '/ac track / /ac zone',               desc = 'Toggle the standalone Zone NPC Tracker window for live targeting & navigation' },
                 { cmd = '/ac update',                         desc = 'Check for GitHub updates and launch the Triune Release Updater' },
@@ -5909,7 +6119,7 @@ function UI.drawSettingsTab()
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Consecutive failed cast attempts allowed before temporarily locking out a spell.\nDefault: 2 tries.')
+                'Consecutive failed debuff/ability attempts before temporarily backing off on that target.\nDefault: 2 tries.')
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(160)
@@ -5919,7 +6129,19 @@ function UI.drawSettingsTab()
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('How many seconds to wait before trying a locked-out spell again.\nDefault: 30 seconds.')
+            ImGui.SetTooltip('Seconds to back off before retrying a resisted debuff or locked spell.\nDefault: 30 seconds.')
+        end
+        ImGui.SameLine()
+        local activeLocks = castTracker and castTracker.getActiveCount and castTracker.getActiveCount() or 0
+        local clearLabel = (activeLocks > 0) and string.format('Clear Lockouts (%d)##clearLocksBtn', activeLocks) or 'Clear Lockouts##clearLocksBtn'
+        if ImGui.Button(clearLabel) then
+            if castTracker and castTracker.clear then
+                castTracker.clear()
+                print('\ag[Triune]\ax Cleared all active spell lockouts, target backoffs, and mob immunities.')
+            end
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Instantly clear all active spell lockouts, non-stacking buff backoffs, and mob immunities.')
         end
         ImGui.Dummy(0, 2)
     end
@@ -7319,12 +7541,10 @@ local function isCasting()
 end
 
 -- ============================================================================
--- Spell Fail-Count & Lockout System (2-try limit -> 30s lockout)
+-- Spell Fail-Count & Lockout System (Target-aware, categorized failure policies)
 -- ============================================================================
-local castTracker = createCastTracker()
-
-local function onFailureEvent(reason)
-    castTracker.onFailureEvent(reason, ctrl and ctrl.cast_max_retries or 2, ctrl and ctrl.cast_lockout_sec or 30)
+local function onFailureEvent(reason, evSpell, evTarget)
+    castTracker.onFailureEvent(reason, ctrl and ctrl.cast_max_retries or 2, ctrl and ctrl.cast_lockout_sec or 30, evSpell, evTarget)
 end
 
 local function onCannotSeeEvent()
@@ -7334,16 +7554,21 @@ local function onCannotSeeEvent()
     end
 end
 
-mq.event('TriuneFizzle', '#*#fizzle#*#', function() onFailureEvent('fizzled') end)
-mq.event('TriuneInterrupt', '#*#interrupted#*#', function() onFailureEvent('interrupted') end)
-mq.event('TriuneOutOfRangeSpell', '#*#out of range#*#', function() onFailureEvent('out of range') end)
-mq.event('TriuneCannotSee', '#*#see your target#*#', onCannotSeeEvent)
-mq.event('TriuneNoTakeHold', '#*#take hold#*#', function() onFailureEvent('did not take hold') end)
-mq.event('TriuneImmuneSpell', '#*#immune#*#', function() onFailureEvent('target immune') end)
+mq.event('TriuneFizzle', '#*#Your spell fizzles!#*#', function() onFailureEvent('fizzled') end)
+mq.event('TriuneInterrupt1', '#*#Your spell is interrupted#*#', function() onFailureEvent('interrupted') end)
+mq.event('TriuneInterrupt2', '#*#Your casting has been interrupted!#*#', function() onFailureEvent('interrupted') end)
+mq.event('TriuneOutOfRangeSpell', '#*#target is out of range#*#', function() onFailureEvent('out of range') end)
+mq.event('TriuneCannotSee1', '#*#cannot see your target#*#', onCannotSeeEvent)
+mq.event('TriuneCannotSee2', '#*#can\'t see your target#*#', onCannotSeeEvent)
+mq.event('TriuneNoTakeHold1', 'Your #1# spell did not take hold#*#', function(_, sp) onFailureEvent('did not take hold', sp) end)
+mq.event('TriuneNoTakeHold2', '#*#Your spell did not take hold#*#', function() onFailureEvent('did not take hold') end)
+mq.event('TriuneNoTakeHold3', '#*#Your spell would not have taken hold#*#', function() onFailureEvent('did not take hold') end)
+mq.event('TriuneImmuneSpell1', 'Your target is immune to #1#', function() onFailureEvent('target immune') end)
+mq.event('TriuneImmuneSpell2', '#*#Your target cannot be mezzed#*#', function() onFailureEvent('target immune') end)
 mq.event('TriuneDeadTargetSpell', '#*#dead target#*#', function() onFailureEvent('dead target') end)
 mq.event('TriuneCantCast', '#*#cast spells while#*#', function() onFailureEvent('cannot cast') end)
-mq.event('TriuneResisted1', '#*#resisted your#*#', function() onFailureEvent('resisted') end)
-mq.event('TriuneResisted2', '#*#resisted the#*#', function() onFailureEvent('resisted') end)
+mq.event('TriuneResisted1', '#1# resisted your #2#!', function(_, tgt, sp) onFailureEvent('resisted', sp) end)
+mq.event('TriuneResisted2', 'Your target resisted the #1# spell.#*#', function(_, sp) onFailureEvent('resisted', sp) end)
 mq.event('TriuneNotReady', '#*#not ready#*#', function() onFailureEvent('not ready') end)
 mq.event('TriuneNoMana', '#*#enough mana#*#', function() onFailureEvent('insufficient mana') end)
 
@@ -7352,7 +7577,7 @@ function runtime.castGem(i, g, id)
         mq.cmd('/stand')
         mq.delay(50)
     end
-    if castTracker.isLockedOut(g.spell) then return false end
+    if castTracker.isLockedOut(g.spell, id) then return false end
     local key = 'g' .. i
     if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.2 then return false end
     local sp = mq.TLO.Spell(g.spell)
@@ -7382,10 +7607,13 @@ function runtime.castGem(i, g, id)
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not runtime.setTarget(id) then return false end
 
-    castTracker.lastSpell   = g.spell
-    castTracker.lastTime    = os.clock()
-    castTracker.failed      = false
-    castTracker.activeSpell = g.spell
+    castTracker.lastSpell      = g.spell
+    castTracker.lastTime       = os.clock()
+    castTracker.failed         = false
+    castTracker.activeSpell    = g.spell
+    castTracker.activeTargetId = id
+    castTracker.activeKind     = g.kind
+    castTracker.castStartTime  = os.clock()
     clearCursor()
     if ctrl.debug_mode then
         print(string.format('\ao[DEBUG cast]\ax Gem %d "%s" on target #%d (dist=%.1f, Me.Combat=%s)',
@@ -7442,6 +7670,7 @@ function runtime.fireAA(name, a, id)
     if isSitting() or isDucking() then
         mq.cmd('/stand')
     end
+    if castTracker.isLockedOut(name, id) then return false end
     local key = 'a' .. name
     if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.5 then return false end
     local aa = mq.TLO.Me.AltAbility(name)
@@ -7720,6 +7949,8 @@ end
 
 runtime.useClickie = function(c, id)
     if not c or not c.name or c.name == '' then return false end
+    local effName = (c.spell and c.spell ~= '') and c.spell or c.name
+    if castTracker.isLockedOut(effName, id) then return false end
     if isSitting() or isDucking() then
         mq.cmd('/stand')
         mq.delay(50)
@@ -7759,6 +7990,14 @@ runtime.useClickie = function(c, id)
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not runtime.setTarget(id) then return false end
+
+    castTracker.lastSpell      = effName
+    castTracker.lastTime       = os.clock()
+    castTracker.failed         = false
+    castTracker.activeSpell    = effName
+    castTracker.activeTargetId = id
+    castTracker.activeKind     = c.kind
+    castTracker.castStartTime  = os.clock()
 
     clearCursor()
     if ctrl.debug_mode then
@@ -9801,6 +10040,9 @@ onZoned = function()
         fullStop()
         print('\ay[Triune]\ax zoned -- pausing autocombat.')
     end
+    if castTracker and castTracker.clear then
+        castTracker.clear()
+    end
     pursuit.unreachableIds = {}
     pursuit.id = 0
     pursuit.wanderLoc = nil
@@ -10792,9 +11034,11 @@ local function combatTick()
             end)
         end
         if not castTracker.failed then
-            castTracker.recordSuccess(castTracker.activeSpell or castTracker.lastSpell)
+            castTracker.recordSuccess(castTracker.activeSpell or castTracker.lastSpell, castTracker.activeTargetId)
         end
-        castTracker.activeSpell = nil
+        castTracker.activeSpell    = nil
+        castTracker.activeTargetId = nil
+        castTracker.activeKind     = nil
         clearCursor()
         local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
         tid = mq.TLO.Target.ID() or 0
@@ -10822,17 +11066,20 @@ local function combatTick()
             if isEnabled and burnOk and xtOk then
                 local effName = (c.spell and c.spell ~= '') and c.spell or c.name
                 local id = resolveTargetId(c.target, 'ALL', c.when, effName, cPct)
-                local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL')
-                if condOk then
-                    local isDet = isDetrimentalAction(effName, c.target, c)
-                    local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(effName, id))
-                    if targetValid and runtime.useClickie(c, id) then
-                        if c.when == 'missing buff' and c.spell and c.spell ~= '' then
-                            local bene = false
-                            pcall(function() bene = mq.TLO.Spell(c.spell).Beneficial() end)
-                            if bene then runtime.sungBuffs[sungKey(c.spell, id)] = true end
+                local lockedOut = id and castTracker.isLockedOut(effName, id)
+                if not lockedOut then
+                    local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL')
+                    if condOk then
+                        local isDet = isDetrimentalAction(effName, c.target, c)
+                        local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(effName, id))
+                        if targetValid and runtime.useClickie(c, id) then
+                            if c.when == 'missing buff' and c.spell and c.spell ~= '' then
+                                local bene = false
+                                pcall(function() bene = mq.TLO.Spell(c.spell).Beneficial() end)
+                                if bene then runtime.sungBuffs[sungKey(c.spell, id)] = true end
+                            end
+                            break
                         end
-                        break
                     end
                 end
             end
@@ -10849,37 +11096,40 @@ local function combatTick()
                 local minXt = tonumber(g.min_xtar) or 1
                 local xtOk = (numXtar >= minXt)
                 local burnOk = (not g.burn_only or ctrl.burn)
-                local lockedOut = castTracker.isLockedOut(g.spell)
-                if isEnabled and burnOk and xtOk and not lockedOut then
+                if isEnabled and burnOk and xtOk then
                     local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal)
-                    local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
-                    if condOk then
-                        local isDet = isDetrimentalAction(g.spell, g.target, g)
-                        local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
-                        if targetValid and castGem(i, g, id) then
-                            if g.when == 'missing buff' then
-                                local bene = false
-                                pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
-                                if bene then runtime.sungBuffs[sungKey(g.spell, id)] = true end
+                    local lockedOut = id and castTracker.isLockedOut(g.spell, id)
+                    if not lockedOut then
+                        local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
+                        if condOk then
+                            local isDet = isDetrimentalAction(g.spell, g.target, g)
+                            local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
+                            if targetValid and castGem(i, g, id) then
+                                if g.when == 'missing buff' then
+                                    local bene = false
+                                    pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
+                                    if bene then runtime.sungBuffs[sungKey(g.spell, id)] = true end
+                                end
+                                break
                             end
-                            break
+                        elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
+                            runtime.lastGemDiagAt = os.clock()
+                            tid = mq.TLO.Target.ID() or 0
+                            local ts = mq.TLO.Spawn(tid)
+                            local ttype = (ts() and ts.Type()) or 'nil'
+                            local thp = (ts() and ts.PctHPs()) or -1
+                            print(string.format(
+                                '\ao[Triune debug]\ax gem %d "%s" skipped -- tgtTok="%s"(base="%s") id=%s (rawTgt=%d type=%s hp=%d) condOk=%s xtOk=%s(%d>=%d)',
+                                i, g.spell, tostring(g.target), tostring(baseTok(g.target)), tostring(id), tid, ttype, thp,
+                                tostring(condOk), tostring(xtOk), numXtar, minXt))
                         end
-                    elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
-                        runtime.lastGemDiagAt = os.clock()
-                        tid = mq.TLO.Target.ID() or 0
-                        local ts = mq.TLO.Spawn(tid)
-                        local ttype = (ts() and ts.Type()) or 'nil'
-                        local thp = (ts() and ts.PctHPs()) or -1
-                        print(string.format(
-                            '\ao[Triune debug]\ax gem %d "%s" skipped -- tgtTok="%s"(base="%s") id=%s (rawTgt=%d type=%s hp=%d) condOk=%s xtOk=%s(%d>=%d)',
-                            i, g.spell, tostring(g.target), tostring(baseTok(g.target)), tostring(id), tid, ttype, thp,
-                            tostring(condOk), tostring(xtOk), numXtar, minXt))
                     end
                 elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
                     runtime.lastGemDiagAt = os.clock()
+                    local gLocked = castTracker.isLockedOut(g.spell)
                     print(string.format(
                         '\ao[Triune debug]\ax gem %d "%s" gate failed -- isEnabled=%s(%d%%) xtOk=%s(%d>=%d) burnOk=%s lockedOut=%s',
-                        i, g.spell, tostring(isEnabled), pctVal, tostring(xtOk), numXtar, minXt, tostring(burnOk), tostring(lockedOut)))
+                        i, g.spell, tostring(isEnabled), pctVal, tostring(xtOk), numXtar, minXt, tostring(burnOk), tostring(gLocked)))
                 end
             end
         end
@@ -11048,6 +11298,7 @@ local function triuneCommand(...)
         print('  \ag/ac pullcon [con]\ax - Configure faction consideration filter')
         print('  \ag/ac wp [add|clear|del|on|off|list]\ax - Configure & toggle Puller Waypoint Patrol')
         print('  \ag/ac pullhp [0-95]\ax - Set minimum HP % threshold before pausing pulling to rest')
+        print('  \ag/ac clear lockouts\ax - Clear all active spell lockouts & mob immunities')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
@@ -11074,6 +11325,11 @@ local function triuneCommand(...)
             print('\ag[Triune]\ax launching DPS parser window...')
         else
             print('\ag[Triune]\ax toggling DPS parser window...')
+        end
+    elseif cmd == 'clearlockouts' or cmd == 'unlock' or (cmd == 'clear' and (arg == 'lockouts' or arg == 'locks' or arg == 'all')) then
+        if castTracker and castTracker.clear then
+            castTracker.clear()
+            print('\ag[Triune]\ax Cleared all active spell lockouts, target backoffs, and mob immunities.')
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()
