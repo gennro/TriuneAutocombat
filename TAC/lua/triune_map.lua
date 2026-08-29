@@ -2085,10 +2085,7 @@ local function DrawTriuneMapUI()
 
     pushTheme()
 
-    local windowFlags = bit.bor(
-        ImGuiWindowFlags.MenuBar or 0,
-        ImGuiWindowFlags.NoCollapse or 0
-    )
+    local windowFlags = ImGuiWindowFlags.None or 0
     -- Omit NoCollapse so WindowRounding token applies rounded corners cleanly
     windowFlags = bit.band(windowFlags, bit.bnot(ImGuiWindowFlags.NoCollapse or 0))
 

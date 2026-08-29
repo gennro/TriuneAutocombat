@@ -22,6 +22,7 @@
   - **Map Pack Subfolder Discovery & Dropdown Selector (`triune_map.lua`)**: Automatically scans for all map subfolders under `maps/` (e.g. `Brewall`, `Goodurden`, `MyMaps`, `Custom`), provides a dropdown selector under Settings, highlights the currently active map pack with a bright badge and file status metrics, and allows on-the-fly switching between map packs.
   - **Triune Combat Radii, Waypoints & Hazard Hotspot Overlays (`triune_map.lua`)**: Automatically syncs character loadout and zone data from `triune_loadout.lua`. Renders Camp/Combat tether radius circles, dynamic Search / Roam / Pull perimeter radii (anchored to Camp if set or centered dynamically on the Player character), waypoint scan radii and connected patrol routes with pulsing active target pins, and anti-stuck hazard danger rings on the 2D map canvas with independent visibility toggles and a real-time radius slider.
   - **Full Settings & Viewport Zoom Persistence (`triune_map_config.lua`)**: Automatically persists all UI configuration, layer toggles, visual geometry, active map pack selection, search/pull radius settings, and mouse-wheel viewport zoom level per character to `mq.configDir/triune_map_config.lua` with debounced auto-saves on change and on clean script exit.
+  - **Window Frame Cleanup (`triune_map.lua`)**: Removed unused `ImGuiWindowFlags.MenuBar` flag to eliminate the blank grey menu bar at the top of the map window.
 
 ---
 
