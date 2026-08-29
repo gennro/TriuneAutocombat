@@ -246,224 +246,237 @@ local WP_US = WP.US
 -- 1.  idxOf(tbl, val)
 -- ============================================================================
 print('--- idxOf ---')
-local idxOf = loadFunc(src, 'idxOf', {})
+do
+    local idxOf = loadFunc(src, 'idxOf', {})
 
-assert_eq(idxOf({ 'a', 'b', 'c' }, 'b'), 2, 'idxOf: find middle element')
-assert_eq(idxOf({ 'a', 'b', 'c' }, 'a'), 1, 'idxOf: find first element')
-assert_eq(idxOf({ 'a', 'b', 'c' }, 'c'), 3, 'idxOf: find last element')
-assert_eq(idxOf({ 'a', 'b', 'c' }, 'z'), 1, 'idxOf: not found returns 1')
-assert_eq(idxOf(nil, 'x'), 1, 'idxOf: nil table returns 1')
-assert_eq(idxOf({}, 'x'), 1, 'idxOf: empty table returns 1')
+    assert_eq(idxOf({ 'a', 'b', 'c' }, 'b'), 2, 'idxOf: find middle element')
+    assert_eq(idxOf({ 'a', 'b', 'c' }, 'a'), 1, 'idxOf: find first element')
+    assert_eq(idxOf({ 'a', 'b', 'c' }, 'c'), 3, 'idxOf: find last element')
+    assert_eq(idxOf({ 'a', 'b', 'c' }, 'z'), 1, 'idxOf: not found returns 1')
+    assert_eq(idxOf(nil, 'x'), 1, 'idxOf: nil table returns 1')
+    assert_eq(idxOf({}, 'x'), 1, 'idxOf: empty table returns 1')
+end
 
 -- ============================================================================
 -- 2.  toCanonicalClassAbbr(str)
 -- ============================================================================
 print('--- toCanonicalClassAbbr ---')
-local toCanonicalClassAbbr = loadFunc(src, 'toCanonicalClassAbbr',
-    { ALL_ABBR = ALL_ABBR, MQSHORT = MQSHORT, idxOf = idxOf })
+do
+    local idxOf = loadFunc(src, 'idxOf', {})
+    local toCanonicalClassAbbr = loadFunc(src, 'toCanonicalClassAbbr',
+        { ALL_ABBR = ALL_ABBR, MQSHORT = MQSHORT, idxOf = idxOf })
 
--- Full names (case-insensitive)
-assert_eq(toCanonicalClassAbbr('warrior'), 'War', 'canon: lowercase warrior')
-assert_eq(toCanonicalClassAbbr('WARRIOR'), 'War', 'canon: uppercase WARRIOR')
-assert_eq(toCanonicalClassAbbr('Warrior'), 'War', 'canon: mixed Warrior')
-assert_eq(toCanonicalClassAbbr('Shadow Knight'), 'SK', 'canon: Shadow Knight (space)')
-assert_eq(toCanonicalClassAbbr('shadowknight'), 'SK', 'canon: shadowknight')
-assert_eq(toCanonicalClassAbbr('Necromancer'), 'Nec', 'canon: Necromancer')
-assert_eq(toCanonicalClassAbbr('Beastlord'), 'Bst', 'canon: Beastlord')
-assert_eq(toCanonicalClassAbbr('Berserker'), 'Ber', 'canon: Berserker')
+    -- Full names (case-insensitive)
+    assert_eq(toCanonicalClassAbbr('warrior'), 'War', 'canon: lowercase warrior')
+    assert_eq(toCanonicalClassAbbr('WARRIOR'), 'War', 'canon: uppercase WARRIOR')
+    assert_eq(toCanonicalClassAbbr('Warrior'), 'War', 'canon: mixed Warrior')
+    assert_eq(toCanonicalClassAbbr('Shadow Knight'), 'SK', 'canon: Shadow Knight (space)')
+    assert_eq(toCanonicalClassAbbr('shadowknight'), 'SK', 'canon: shadowknight')
+    assert_eq(toCanonicalClassAbbr('Necromancer'), 'Nec', 'canon: Necromancer')
+    assert_eq(toCanonicalClassAbbr('Beastlord'), 'Bst', 'canon: Beastlord')
+    assert_eq(toCanonicalClassAbbr('Berserker'), 'Ber', 'canon: Berserker')
 
--- MQ-style 3-letter abbreviations
-assert_eq(toCanonicalClassAbbr('WAR'), 'War', 'canon: WAR')
-assert_eq(toCanonicalClassAbbr('CLR'), 'Clr', 'canon: CLR')
-assert_eq(toCanonicalClassAbbr('PAL'), 'Pal', 'canon: PAL')
-assert_eq(toCanonicalClassAbbr('RNG'), 'Rng', 'canon: RNG')
-assert_eq(toCanonicalClassAbbr('SHD'), 'SK', 'canon: SHD → SK')
-assert_eq(toCanonicalClassAbbr('DRU'), 'Dru', 'canon: DRU')
-assert_eq(toCanonicalClassAbbr('MNK'), 'Mnk', 'canon: MNK')
-assert_eq(toCanonicalClassAbbr('BRD'), 'Brd', 'canon: BRD')
-assert_eq(toCanonicalClassAbbr('ROG'), 'Rog', 'canon: ROG')
-assert_eq(toCanonicalClassAbbr('SHM'), 'Shm', 'canon: SHM')
-assert_eq(toCanonicalClassAbbr('NEC'), 'Nec', 'canon: NEC')
-assert_eq(toCanonicalClassAbbr('WIZ'), 'Wiz', 'canon: WIZ')
-assert_eq(toCanonicalClassAbbr('MAG'), 'Mag', 'canon: MAG')
-assert_eq(toCanonicalClassAbbr('ENC'), 'Enc', 'canon: ENC')
-assert_eq(toCanonicalClassAbbr('BST'), 'Bst', 'canon: BST')
-assert_eq(toCanonicalClassAbbr('BER'), 'Ber', 'canon: BER')
-assert_eq(toCanonicalClassAbbr('SK'), 'SK', 'canon: SK')
+    -- MQ-style 3-letter abbreviations
+    assert_eq(toCanonicalClassAbbr('WAR'), 'War', 'canon: WAR')
+    assert_eq(toCanonicalClassAbbr('CLR'), 'Clr', 'canon: CLR')
+    assert_eq(toCanonicalClassAbbr('PAL'), 'Pal', 'canon: PAL')
+    assert_eq(toCanonicalClassAbbr('RNG'), 'Rng', 'canon: RNG')
+    assert_eq(toCanonicalClassAbbr('SHD'), 'SK', 'canon: SHD → SK')
+    assert_eq(toCanonicalClassAbbr('DRU'), 'Dru', 'canon: DRU')
+    assert_eq(toCanonicalClassAbbr('MNK'), 'Mnk', 'canon: MNK')
+    assert_eq(toCanonicalClassAbbr('BRD'), 'Brd', 'canon: BRD')
+    assert_eq(toCanonicalClassAbbr('ROG'), 'Rog', 'canon: ROG')
+    assert_eq(toCanonicalClassAbbr('SHM'), 'Shm', 'canon: SHM')
+    assert_eq(toCanonicalClassAbbr('NEC'), 'Nec', 'canon: NEC')
+    assert_eq(toCanonicalClassAbbr('WIZ'), 'Wiz', 'canon: WIZ')
+    assert_eq(toCanonicalClassAbbr('MAG'), 'Mag', 'canon: MAG')
+    assert_eq(toCanonicalClassAbbr('ENC'), 'Enc', 'canon: ENC')
+    assert_eq(toCanonicalClassAbbr('BST'), 'Bst', 'canon: BST')
+    assert_eq(toCanonicalClassAbbr('BER'), 'Ber', 'canon: BER')
+    assert_eq(toCanonicalClassAbbr('SK'), 'SK', 'canon: SK')
 
--- Mixed-case canonical form (should pass through if in ALL_ABBR)
-assert_eq(toCanonicalClassAbbr('War'), 'War', 'canon: War pass-through')
-assert_eq(toCanonicalClassAbbr('Clr'), 'Clr', 'canon: Clr pass-through')
+    -- Mixed-case canonical form (should pass through if in ALL_ABBR)
+    assert_eq(toCanonicalClassAbbr('War'), 'War', 'canon: War pass-through')
+    assert_eq(toCanonicalClassAbbr('Clr'), 'Clr', 'canon: Clr pass-through')
 
--- Plurals
-assert_eq(toCanonicalClassAbbr('Warriors'), 'War', 'canon: Warriors plural')
-assert_eq(toCanonicalClassAbbr('Clerics'), 'Clr', 'canon: Clerics plural')
+    -- Plurals
+    assert_eq(toCanonicalClassAbbr('Warriors'), 'War', 'canon: Warriors plural')
+    assert_eq(toCanonicalClassAbbr('Clerics'), 'Clr', 'canon: Clerics plural')
 
--- Edge cases
-assert_nil(toCanonicalClassAbbr(nil), 'canon: nil input')
-assert_nil(toCanonicalClassAbbr(''), 'canon: empty string')
-assert_nil(toCanonicalClassAbbr('NULL'), 'canon: NULL string')
-assert_nil(toCanonicalClassAbbr('nil'), 'canon: "nil" string')
+    -- Edge cases
+    assert_nil(toCanonicalClassAbbr(nil), 'canon: nil input')
+    assert_nil(toCanonicalClassAbbr(''), 'canon: empty string')
+    assert_nil(toCanonicalClassAbbr('NULL'), 'canon: NULL string')
+    assert_nil(toCanonicalClassAbbr('nil'), 'canon: "nil" string')
+end
 
 -- ============================================================================
 -- 3.  cleanSpellName(name)
 -- ============================================================================
 print('--- cleanSpellName ---')
-local cleanSpellName = loadFunc(src, 'cleanSpellName', {})
+do
+    local cleanSpellName = loadFunc(src, 'cleanSpellName', {})
 
-assert_eq(cleanSpellName('Complete Heal'), 'Complete Heal', 'clean: no parens')
-assert_eq(cleanSpellName('Chloroplast (Group)'), 'Chloroplast', 'clean: strip (Group)')
-assert_eq(cleanSpellName('Spirit of Wolf (Spell)'), 'Spirit of Wolf', 'clean: strip (Spell)')
-assert_eq(cleanSpellName('  Heal  '), 'Heal', 'clean: trim whitespace')
-assert_eq(cleanSpellName(nil), '', 'clean: nil → empty')
-assert_eq(cleanSpellName(42), '', 'clean: number → empty')
-assert_eq(cleanSpellName(''), '', 'clean: empty → empty')
+    assert_eq(cleanSpellName('Complete Heal'), 'Complete Heal', 'clean: no parens')
+    assert_eq(cleanSpellName('Chloroplast (Group)'), 'Chloroplast', 'clean: strip (Group)')
+    assert_eq(cleanSpellName('Spirit of Wolf (Spell)'), 'Spirit of Wolf', 'clean: strip (Spell)')
+    assert_eq(cleanSpellName('  Heal  '), 'Heal', 'clean: trim whitespace')
+    assert_eq(cleanSpellName(nil), '', 'clean: nil → empty')
+    assert_eq(cleanSpellName(42), '', 'clean: number → empty')
+    assert_eq(cleanSpellName(''), '', 'clean: empty → empty')
+end
 
 -- ============================================================================
 -- 4.  normalizeSpellName(name)
 -- ============================================================================
 print('--- normalizeSpellName ---')
-local normalizeSpellName = loadFunc(src, 'normalizeSpellName', {})
+do
+    local normalizeSpellName = loadFunc(src, 'normalizeSpellName', {})
 
-assert_eq(normalizeSpellName('Complete Heal'), 'completeheal', 'norm: basic')
-assert_eq(normalizeSpellName('Complete Heal Rk. II'), 'completeheal', 'norm: strip Rk. II')
-assert_eq(normalizeSpellName('Chloroplast (Group)'), 'chloroplast', 'norm: strip parens')
-assert_eq(normalizeSpellName('Spirit of Wolf'), 'spiritofwolf', 'norm: spaces removed')
-assert_eq(normalizeSpellName('Nuke Rk.III'), 'nuke', 'norm: Rk.III variant')
-assert_eq(normalizeSpellName('Heal (Rk II)'), 'heal', 'norm: (Rk II) in parens')
-assert_eq(normalizeSpellName(nil), '', 'norm: nil → empty')
-assert_eq(normalizeSpellName(42), '', 'norm: number → empty')
-assert_eq(normalizeSpellName(''), '', 'norm: empty → empty')
+    assert_eq(normalizeSpellName('Complete Heal'), 'completeheal', 'norm: basic')
+    assert_eq(normalizeSpellName('Complete Heal Rk. II'), 'completeheal', 'norm: strip Rk. II')
+    assert_eq(normalizeSpellName('Chloroplast (Group)'), 'chloroplast', 'norm: strip parens')
+    assert_eq(normalizeSpellName('Spirit of Wolf'), 'spiritofwolf', 'norm: spaces removed')
+    assert_eq(normalizeSpellName('Nuke Rk.III'), 'nuke', 'norm: Rk.III variant')
+    assert_eq(normalizeSpellName('Heal (Rk II)'), 'heal', 'norm: (Rk II) in parens')
+    assert_eq(normalizeSpellName(nil), '', 'norm: nil → empty')
+    assert_eq(normalizeSpellName(42), '', 'norm: number → empty')
+    assert_eq(normalizeSpellName(''), '', 'norm: empty → empty')
+end
 
 -- ============================================================================
 -- 5.  defaultsForKind(kind, bene)
 -- ============================================================================
 print('--- defaultsForKind ---')
-local defaultsForKind = loadFunc(src, 'defaultsForKind', {})
+do
+    local defaultsForKind = loadFunc(src, 'defaultsForKind', {})
 
-local function check_defaults(kind, bene, expTarget, expWhen, expPct, label)
-    local t, w, p = defaultsForKind(kind, bene)
-    assert_eq(t, expTarget, label .. ' target')
-    assert_eq(w, expWhen, label .. ' when')
-    assert_eq(p, expPct, label .. ' pct')
+    local function check_defaults(kind, bene, expTarget, expWhen, expPct, label)
+        local t, w, p = defaultsForKind(kind, bene)
+        assert_eq(t, expTarget, label .. ' target')
+        assert_eq(w, expWhen, label .. ' when')
+        assert_eq(p, expPct, label .. ' pct')
+    end
+
+    check_defaults('heal', nil, 'F: Myself', 'my HP <=', 75, 'defaults: heal')
+    check_defaults('buff', nil, 'F: Myself', 'missing buff', 100, 'defaults: buff')
+    check_defaults('pet_buff', nil, 'F: Pet', 'missing buff', 100, 'defaults: pet_buff')
+    check_defaults('pet', nil, 'F: Myself', 'missing pet', 100, 'defaults: pet')
+    check_defaults('util', nil, 'F: Myself', 'always', 100, 'defaults: util')
+    check_defaults('debuff', nil, 'E: Current Target', 'target HP <=', 98, 'defaults: debuff')
+    check_defaults('dot', nil, 'E: Current Target', 'target HP <=', 98, 'defaults: dot')
+    check_defaults('dd', nil, 'E: Current Target', 'target HP <=', 95, 'defaults: dd')
+    check_defaults(nil, true, 'F: Myself', 'missing buff', 100, 'defaults: bene=true')
+    check_defaults(nil, nil, 'E: Current Target', 'target HP <=', 95, 'defaults: unknown')
+    check_defaults('bogus', nil, 'E: Current Target', 'target HP <=', 95, 'defaults: bogus kind')
 end
-
-check_defaults('heal', nil, 'F: Myself', 'my HP <=', 75, 'defaults: heal')
-check_defaults('buff', nil, 'F: Myself', 'missing buff', 100, 'defaults: buff')
-check_defaults('pet_buff', nil, 'F: Pet', 'missing buff', 100, 'defaults: pet_buff')
-check_defaults('pet', nil, 'F: Myself', 'missing pet', 100, 'defaults: pet')
-check_defaults('util', nil, 'F: Myself', 'always', 100, 'defaults: util')
-check_defaults('debuff', nil, 'E: Current Target', 'target HP <=', 98, 'defaults: debuff')
-check_defaults('dot', nil, 'E: Current Target', 'target HP <=', 98, 'defaults: dot')
-check_defaults('dd', nil, 'E: Current Target', 'target HP <=', 95, 'defaults: dd')
-check_defaults(nil, true, 'F: Myself', 'missing buff', 100, 'defaults: bene=true')
-check_defaults(nil, nil, 'E: Current Target', 'target HP <=', 95, 'defaults: unknown')
-check_defaults('bogus', nil, 'E: Current Target', 'target HP <=', 95, 'defaults: bogus kind')
 
 -- ============================================================================
 -- 6.  sanitizeModeConfig(c)
 -- ============================================================================
 print('--- sanitizeModeConfig ---')
-local sanitizeModeConfig = loadFunc(src, 'sanitizeModeConfig',
-    { MODES = MODES, ctrl = nil })
+do
+    local sanitizeModeConfig = loadFunc(src, 'sanitizeModeConfig',
+        { MODES = MODES, ctrl = nil })
 
--- Legacy mode migration
-local function smc(mode, submode)
-    local c = { mode = mode, submode = submode }
+    -- Legacy mode migration
+    local function smc(mode, submode)
+        local c = { mode = mode, submode = submode }
+        sanitizeModeConfig(c)
+        return c.mode, c.submode
+    end
+
+    local m, s
+
+    -- Hunter → Puller/Hunt
+    m, s = smc('Hunter', nil)
+    assert_eq(m, 'Puller', 'sanitize: Hunter → Puller')
+    assert_eq(s, 'Hunt', 'sanitize: Hunter → Hunt')
+
+    -- Manual Hunter → Manual/Hunt
+    m, s = smc('Manual Hunter', nil)
+    assert_eq(m, 'Manual', 'sanitize: Manual Hunter → Manual')
+    assert_eq(s, 'Hunt', 'sanitize: Manual Hunter → Hunt')
+
+    -- Pet Tank → Puller/Hunt
+    m, s = smc('Pet Tank', nil)
+    assert_eq(m, 'Puller', 'sanitize: Pet Tank → Puller')
+    assert_eq(s, 'Hunt', 'sanitize: Pet Tank → Hunt')
+
+    -- Pull & Assist → Puller/Camp
+    m, s = smc('Pull & Assist', nil)
+    assert_eq(m, 'Puller', 'sanitize: Pull & Assist → Puller')
+    assert_eq(s, 'Camp', 'sanitize: Pull & Assist → Camp')
+
+    -- Chase Assist → Assist/Chase
+    m, s = smc('Chase Assist', nil)
+    assert_eq(m, 'Assist', 'sanitize: Chase Assist → Assist')
+    assert_eq(s, 'Chase', 'sanitize: Chase Assist → Chase')
+
+    -- Garrison → Assist/Camp
+    m, s = smc('Garrison', nil)
+    assert_eq(m, 'Assist', 'sanitize: Garrison → Assist')
+    assert_eq(s, 'Camp', 'sanitize: Garrison → Camp')
+
+    -- Tank → Assist/Camp
+    m, s = smc('Tank', nil)
+    assert_eq(m, 'Assist', 'sanitize: Tank → Assist')
+    assert_eq(s, 'Camp', 'sanitize: Tank → Camp')
+
+    -- Unknown mode → Manual
+    m, s = smc('BogusMode', nil)
+    assert_eq(m, 'Manual', 'sanitize: unknown → Manual')
+    assert_eq(s, 'Hunt', 'sanitize: unknown → default submode Hunt')
+
+    -- Valid modes pass through
+    m, s = smc('Manual', 'Hunt')
+    assert_eq(m, 'Manual', 'sanitize: Manual stays')
+
+    m, s = smc('Puller', 'Hunt')
+    assert_eq(m, 'Puller', 'sanitize: Puller stays')
+    assert_eq(s, 'Hunt', 'sanitize: Puller/Hunt stays')
+
+    m, s = smc('Puller', 'Camp')
+    assert_eq(m, 'Puller', 'sanitize: Puller/Camp stays')
+    assert_eq(s, 'Camp', 'sanitize: Puller/Camp submode stays')
+
+    m, s = smc('Assist', 'Chase')
+    assert_eq(m, 'Assist', 'sanitize: Assist stays')
+    assert_eq(s, 'Chase', 'sanitize: Assist/Chase stays')
+
+    m, s = smc('Assist', 'Backline')
+    assert_eq(m, 'Assist', 'sanitize: Assist/Backline stays')
+    assert_eq(s, 'Backline', 'sanitize: Backline submode stays')
+
+    -- Invalid submode for Puller → default
+    m, s = smc('Puller', 'Backline')
+    assert_eq(s, 'Hunt', 'sanitize: Puller bad submode → Hunt')
+
+    -- Invalid submode for Assist → default
+    m, s = smc('Assist', 'Hunt')
+    assert_eq(s, 'Chase', 'sanitize: Assist bad submode → Chase')
+
+    -- pull_con_filter initialization
+    local c = { mode = 'Manual' }
     sanitizeModeConfig(c)
-    return c.mode, c.submode
+    assert_type(c.pull_con_filter, 'table', 'sanitize: pull_con_filter is table')
+    for _, con in ipairs(PULL_CON_LIST) do
+        assert_eq(c.pull_con_filter[con], true,
+            'sanitize: pull_con_filter.' .. con .. ' defaults to true')
+    end
+
+    -- hunter_z / hunter_z_plane defaults
+    local c2 = { mode = 'Manual' }
+    sanitizeModeConfig(c2)
+    assert_eq(c2.hunter_z, 75, 'sanitize: hunter_z default')
+    assert_eq(c2.hunter_z_plane, 15, 'sanitize: hunter_z_plane default')
+
+    -- Existing values preserved
+    local c3 = { mode = 'Manual', hunter_z = 200, hunter_z_plane = 50 }
+    sanitizeModeConfig(c3)
+    assert_eq(c3.hunter_z, 200, 'sanitize: hunter_z preserved')
+    assert_eq(c3.hunter_z_plane, 50, 'sanitize: hunter_z_plane preserved')
 end
-
-local m, s
-
--- Hunter → Puller/Hunt
-m, s = smc('Hunter', nil)
-assert_eq(m, 'Puller', 'sanitize: Hunter → Puller')
-assert_eq(s, 'Hunt', 'sanitize: Hunter → Hunt')
-
--- Manual Hunter → Manual/Hunt
-m, s = smc('Manual Hunter', nil)
-assert_eq(m, 'Manual', 'sanitize: Manual Hunter → Manual')
-assert_eq(s, 'Hunt', 'sanitize: Manual Hunter → Hunt')
-
--- Pet Tank → Puller/Hunt
-m, s = smc('Pet Tank', nil)
-assert_eq(m, 'Puller', 'sanitize: Pet Tank → Puller')
-assert_eq(s, 'Hunt', 'sanitize: Pet Tank → Hunt')
-
--- Pull & Assist → Puller/Camp
-m, s = smc('Pull & Assist', nil)
-assert_eq(m, 'Puller', 'sanitize: Pull & Assist → Puller')
-assert_eq(s, 'Camp', 'sanitize: Pull & Assist → Camp')
-
--- Chase Assist → Assist/Chase
-m, s = smc('Chase Assist', nil)
-assert_eq(m, 'Assist', 'sanitize: Chase Assist → Assist')
-assert_eq(s, 'Chase', 'sanitize: Chase Assist → Chase')
-
--- Garrison → Assist/Camp
-m, s = smc('Garrison', nil)
-assert_eq(m, 'Assist', 'sanitize: Garrison → Assist')
-assert_eq(s, 'Camp', 'sanitize: Garrison → Camp')
-
--- Tank → Assist/Camp
-m, s = smc('Tank', nil)
-assert_eq(m, 'Assist', 'sanitize: Tank → Assist')
-assert_eq(s, 'Camp', 'sanitize: Tank → Camp')
-
--- Unknown mode → Manual
-m, s = smc('BogusMode', nil)
-assert_eq(m, 'Manual', 'sanitize: unknown → Manual')
-assert_eq(s, 'Hunt', 'sanitize: unknown → default submode Hunt')
-
--- Valid modes pass through
-m, s = smc('Manual', 'Hunt')
-assert_eq(m, 'Manual', 'sanitize: Manual stays')
-
-m, s = smc('Puller', 'Hunt')
-assert_eq(m, 'Puller', 'sanitize: Puller stays')
-assert_eq(s, 'Hunt', 'sanitize: Puller/Hunt stays')
-
-m, s = smc('Puller', 'Camp')
-assert_eq(m, 'Puller', 'sanitize: Puller/Camp stays')
-assert_eq(s, 'Camp', 'sanitize: Puller/Camp submode stays')
-
-m, s = smc('Assist', 'Chase')
-assert_eq(m, 'Assist', 'sanitize: Assist stays')
-assert_eq(s, 'Chase', 'sanitize: Assist/Chase stays')
-
-m, s = smc('Assist', 'Backline')
-assert_eq(m, 'Assist', 'sanitize: Assist/Backline stays')
-assert_eq(s, 'Backline', 'sanitize: Backline submode stays')
-
--- Invalid submode for Puller → default
-m, s = smc('Puller', 'Backline')
-assert_eq(s, 'Hunt', 'sanitize: Puller bad submode → Hunt')
-
--- Invalid submode for Assist → default
-m, s = smc('Assist', 'Hunt')
-assert_eq(s, 'Chase', 'sanitize: Assist bad submode → Chase')
-
--- pull_con_filter initialization
-local c = { mode = 'Manual' }
-sanitizeModeConfig(c)
-assert_type(c.pull_con_filter, 'table', 'sanitize: pull_con_filter is table')
-for _, con in ipairs(PULL_CON_LIST) do
-    assert_eq(c.pull_con_filter[con], true,
-        'sanitize: pull_con_filter.' .. con .. ' defaults to true')
-end
-
--- hunter_z / hunter_z_plane defaults
-local c2 = { mode = 'Manual' }
-sanitizeModeConfig(c2)
-assert_eq(c2.hunter_z, 75, 'sanitize: hunter_z default')
-assert_eq(c2.hunter_z_plane, 15, 'sanitize: hunter_z_plane default')
-
--- Existing values preserved
-local c3 = { mode = 'Manual', hunter_z = 200, hunter_z_plane = 50 }
-sanitizeModeConfig(c3)
-assert_eq(c3.hunter_z, 200, 'sanitize: hunter_z preserved')
-assert_eq(c3.hunter_z_plane, 50, 'sanitize: hunter_z_plane preserved')
 
 -- ============================================================================
 -- 7.  parseClassLine(text)  — loaded with MQSHORT in scope
@@ -2300,39 +2313,41 @@ end
 -- Suite 41: triune_updater release parsing & JSON tokenizer
 -- ============================================================================
 print('--- triune_updater release parsing & JSON tokenizer ---')
-local updSrc = readFile('TAC/lua/triune_updater.lua')
-local cleanTag = loadFunc(updSrc, 'cleanTag', {})
-local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
+do
+    local updSrc = readFile('TAC/lua/triune_updater.lua')
+    local cleanTag = loadFunc(updSrc, 'cleanTag', {})
+    local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
 
-assert_eq(cleanTag('v1.7.2'), '1.7.2', 'cleanTag: lowercase v')
-assert_eq(cleanTag('V1.7.2'), '1.7.2', 'cleanTag: uppercase V')
-assert_eq(cleanTag('1.7.2'), '1.7.2', 'cleanTag: no v prefix')
-assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
-assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
-assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
+    assert_eq(cleanTag('v1.7.2'), '1.7.2', 'cleanTag: lowercase v')
+    assert_eq(cleanTag('V1.7.2'), '1.7.2', 'cleanTag: uppercase V')
+    assert_eq(cleanTag('1.7.2'), '1.7.2', 'cleanTag: no v prefix')
+    assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
+    assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
+    assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
 
-assert_eq(extractJsonString('{"tag_name": "v1.7.2"}', 'tag_name'), 'v1.7.2', 'extractJsonString: simple tag_name')
-assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
-    'extractJsonString: handles escaped quotes without truncation')
-assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
-    'extractJsonString: handles newlines and tabs')
-assert_eq(extractJsonString('{"path": "TAC\\\\lua\\\\triune.lua"}', 'path'), 'TAC\\lua\\triune.lua',
-    'extractJsonString: handles backslashes')
-assert_eq(extractJsonString('{"url": "https:\\/\\/github.com"}', 'url'), 'https://github.com',
-    'extractJsonString: handles escaped slashes')
-assert_nil(extractJsonString('{"other": 123}', 'body'), 'extractJsonString: missing key returns nil')
-assert_nil(extractJsonString(nil, 'body'), 'extractJsonString: nil json returns nil')
+    assert_eq(extractJsonString('{"tag_name": "v1.7.2"}', 'tag_name'), 'v1.7.2', 'extractJsonString: simple tag_name')
+    assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
+        'extractJsonString: handles escaped quotes without truncation')
+    assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
+        'extractJsonString: handles newlines and tabs')
+    assert_eq(extractJsonString('{"path": "TAC\\\\lua\\\\triune.lua"}', 'path'), 'TAC\\lua\\triune.lua',
+        'extractJsonString: handles backslashes')
+    assert_eq(extractJsonString('{"url": "https:\\/\\/github.com"}', 'url'), 'https://github.com',
+        'extractJsonString: handles escaped slashes')
+    assert_nil(extractJsonString('{"other": 123}', 'body'), 'extractJsonString: missing key returns nil')
+    assert_nil(extractJsonString(nil, 'body'), 'extractJsonString: nil json returns nil')
 
-local apiErrSample =
-'{"message": "API rate limit exceeded for 127.0.0.1", "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}'
-assert_eq(extractJsonString(apiErrSample, 'message'), 'API rate limit exceeded for 127.0.0.1',
-    'extractJsonString: extracts GitHub API rate limit error message')
+    local apiErrSample =
+    '{"message": "API rate limit exceeded for 127.0.0.1", "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}'
+    assert_eq(extractJsonString(apiErrSample, 'message'), 'API rate limit exceeded for 127.0.0.1',
+        'extractJsonString: extracts GitHub API rate limit error message')
 
-local fullReleaseJson =
-'{\n  "tag_name": "v1.7.2",\n  "body": "## 2026-08-28\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
-assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.2', 'extractJsonString: full payload tag_name')
-assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
-    'extractJsonString: full payload preserves markdown and quotes in body')
+    local fullReleaseJson =
+    '{\n  "tag_name": "v1.7.2",\n  "body": "## 2026-08-28\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
+    assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.2', 'extractJsonString: full payload tag_name')
+    assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
+        'extractJsonString: full payload preserves markdown and quotes in body')
+end
 
 -- ============================================================================
 -- Suite 42: triune_map Smart Auto-Z & Depth Fading
@@ -2391,6 +2406,269 @@ do
     local a5, vis5 = getZAlphaMultiplier(-500, 40, 65, 3, true)
     assert_true(vis5, 'disabled mode: always visible')
     assert_eq(a5, 1.0, 'disabled mode: 100% alpha')
+end
+
+-- ============================================================================
+-- Suite 43: triune_map Norrath Zone Atlas & Navigation Logic
+-- ============================================================================
+print('--- triune_map Norrath Zone Atlas & Navigation Logic ---')
+do
+    local mapSrc = readFile('TAC/lua/triune_map.lua')
+    assert_true(mapSrc ~= nil and #mapSrc > 0, 'triune_map.lua read successfully')
+
+    -- Verify version is 1.1
+    local versionMatch = mapSrc:match("local VERSION%s*=%s*'([^']+)'")
+    assert_eq(versionMatch, '1.1', 'triune_map version is 1.1')
+
+    -- Test Atlas History Navigation State Stack
+    local history = {}
+    local historyIdx = 0
+
+    local function navTo(zShort, pushHistory)
+        if pushHistory ~= false then
+            if historyIdx < #history then
+                for i = #history, historyIdx + 1, -1 do
+                    history[i] = nil
+                end
+            end
+            history[#history + 1] = zShort
+            historyIdx = #history
+        end
+    end
+
+    local function histBack()
+        if historyIdx > 1 then
+            historyIdx = historyIdx - 1
+            return history[historyIdx]
+        end
+        return nil
+    end
+
+    local function histFwd()
+        if historyIdx < #history then
+            historyIdx = historyIdx + 1
+            return history[historyIdx]
+        end
+        return nil
+    end
+
+    navTo('poknowledge')
+    navTo('bazaar')
+    navTo('shadowhaven')
+    assert_eq(#history, 3, 'atlas history: 3 zones added')
+    assert_eq(historyIdx, 3, 'atlas history: index is at top')
+
+    local back1 = histBack()
+    assert_eq(back1, 'bazaar', 'atlas history back: bazaar')
+    assert_eq(historyIdx, 2, 'atlas history index: 2')
+
+    local back2 = histBack()
+    assert_eq(back2, 'poknowledge', 'atlas history back: poknowledge')
+    assert_eq(historyIdx, 1, 'atlas history index: 1')
+
+    local back3 = histBack()
+    assert_nil(back3, 'atlas history back at start: nil')
+
+    local fwd1 = histFwd()
+    assert_eq(fwd1, 'bazaar', 'atlas history forward: bazaar')
+    assert_eq(historyIdx, 2, 'atlas history index: 2')
+
+    -- Navigating to a new zone from middle truncates forward history
+    navTo('nexus')
+    assert_eq(#history, 3, 'atlas history: truncated forward stack and added nexus')
+    assert_eq(history[3], 'nexus', 'atlas history: entry 3 is nexus')
+    assert_eq(historyIdx, 3, 'atlas history index: 3')
+
+    -- Test Filter Logic
+    local testZones = {
+        { short = 'qeynos', name = 'South Qeynos', era = 'Classic', type = 'City', continent = 'Antonica', connections = {'qeynos2'} },
+        { short = 'blackburrow', name = 'Blackburrow', era = 'Classic', type = 'Dungeon', continent = 'Antonica', connections = {'qeytoqrg', 'everfrost'} },
+        { short = 'dreadlands', name = 'Dreadlands', era = 'Kunark', type = 'Outdoor', continent = 'Kunark', connections = {'firiona'} },
+        { short = 'poknowledge', name = 'Plane of Knowledge', era = 'Planes of Power', type = 'City', continent = 'Planes', connections = {'potranquility'} },
+    }
+
+    local function filterZones(zones, query, eraFilter, typeFilter)
+        local q = (query or ''):lower():match('^%s*(.-)%s*$')
+        local out = {}
+        for _, z in ipairs(zones) do
+            local matchQ = true
+            if q ~= '' then
+                local inName = (z.name:lower():find(q, 1, true) ~= nil)
+                local inShort = (z.short:lower():find(q, 1, true) ~= nil)
+                local inEra = (z.era:lower():find(q, 1, true) ~= nil)
+                local inCont = (z.continent:lower():find(q, 1, true) ~= nil)
+                matchQ = (inName or inShort or inEra or inCont)
+            end
+            local matchEra = (eraFilter == 'All Expansions' or z.era == eraFilter)
+            local matchType = true
+            if typeFilter == 'Cities & Hubs' then matchType = (z.type == 'City')
+            elseif typeFilter == 'Outdoor & Wilderness' then matchType = (z.type == 'Outdoor')
+            elseif typeFilter == 'Dungeons' then matchType = (z.type == 'Dungeon')
+            end
+
+            if matchQ and matchEra and matchType then
+                out[#out + 1] = z
+            end
+        end
+        return out
+    end
+
+    local f1 = filterZones(testZones, 'qey', 'All Expansions', 'All Zone Types')
+    assert_eq(#f1, 1, 'filter: "qey" matches South Qeynos')
+
+    local f2 = filterZones(testZones, '', 'Classic', 'All Zone Types')
+    assert_eq(#f2, 2, 'filter: Classic era returns 2 zones')
+
+    local f3 = filterZones(testZones, '', 'All Expansions', 'Dungeons')
+    assert_eq(#f3, 1, 'filter: Dungeons returns Blackburrow')
+    assert_eq(f3[1].short, 'blackburrow', 'filter: Dungeon zone is blackburrow')
+
+    local f4 = filterZones(testZones, 'planes', 'All Expansions', 'All Zone Types')
+    assert_eq(#f4, 1, 'filter: continent/era query matches PoK')
+    assert_eq(f4[1].short, 'poknowledge', 'filter: PoK returned')
+
+    -- Test BFS Route Finder logic
+    local routeZones = {
+        { short = 'qeynos',       name = 'South Qeynos',              era = 'Classic',          type = 'City',    connections = {'qeynos2'} },
+        { short = 'qeynos2',      name = 'North Qeynos',              era = 'Classic',          type = 'City',    connections = {'qeynos', 'qeytoqrg', 'poknowledge'} },
+        { short = 'qeytoqrg',     name = 'Qeynos Hills',              era = 'Classic',          type = 'Outdoor', connections = {'qeynos2', 'blackburrow', 'northkarana'} },
+        { short = 'blackburrow',  name = 'Blackburrow',               era = 'Classic',          type = 'Dungeon', connections = {'qeytoqrg', 'everfrost'} },
+        { short = 'everfrost',    name = 'Everfrost Peaks',           era = 'Classic',          type = 'Outdoor', connections = {'blackburrow', 'halas'} },
+        { short = 'halas',        name = 'Halas',                     era = 'Classic',          type = 'City',    connections = {'everfrost', 'poknowledge'} },
+        { short = 'poknowledge',  name = 'Plane of Knowledge',        era = 'Planes of Power',  type = 'City',    connections = {'potranquility', 'qeynos2', 'halas'} },
+        { short = 'potranquility',name = 'Plane of Tranquility',      era = 'Planes of Power',  type = 'City',    connections = {'poknowledge', 'povalor'} },
+        { short = 'povalor',      name = 'Plane of Valor',            era = 'Planes of Power',  type = 'Outdoor', connections = {'potranquility', 'hohonora'} },
+        { short = 'hohonora',     name = 'Halls of Honor',            era = 'Planes of Power',  type = 'Dungeon', connections = {'povalor'} },
+    }
+
+    local function testFindZoneRoute(startShort, targetShort, allZones)
+        if not startShort or startShort == '' or not targetShort or targetShort == '' then
+            return nil, 0
+        end
+        local sStart = startShort:lower():match('^%s*(.-)%s*$')
+        local sTarget = targetShort:lower():match('^%s*(.-)%s*$')
+        if sStart == '' or sTarget == '' then return nil, 0 end
+
+        local zoneLookup = {}
+        for _, z in ipairs(allZones or {}) do
+            if z.short then zoneLookup[z.short:lower()] = z end
+        end
+
+        local startEntry = zoneLookup[sStart] or { short = sStart, name = sStart, era = 'Unknown', type = 'Zone' }
+        local targetEntry = zoneLookup[sTarget] or { short = sTarget, name = sTarget, era = 'Unknown', type = 'Zone' }
+
+        if sStart == sTarget then
+            return { startEntry }, 0
+        end
+
+        local adj = {}
+        local function addEdge(u, v)
+            if not u or not v or u == '' or v == '' then return end
+            u = u:lower()
+            v = v:lower()
+            if not adj[u] then adj[u] = {} end
+            if not adj[v] then adj[v] = {} end
+            adj[u][v] = true
+            adj[v][u] = true
+        end
+
+        for _, z in ipairs(allZones or {}) do
+            local u = z.short:lower()
+            for _, c in ipairs(z.connections or {}) do
+                addEdge(u, c)
+            end
+        end
+
+        local queue = { sStart }
+        local visited = { [sStart] = true }
+        local parent = {}
+
+        local found = false
+        local qHead = 1
+        while qHead <= #queue do
+            local curr = queue[qHead]
+            qHead = qHead + 1
+
+            if curr == sTarget then
+                found = true
+                break
+            end
+
+            local neighbors = adj[curr] or {}
+            for nbr, _ in pairs(neighbors) do
+                if not visited[nbr] then
+                    visited[nbr] = true
+                    parent[nbr] = curr
+                    queue[#queue + 1] = nbr
+                end
+            end
+        end
+
+        if not found then return nil, 0 end
+
+        local path = {}
+        local curr = sTarget
+        while curr do
+            local zInfo = zoneLookup[curr] or { short = curr, name = curr, era = 'Unknown', type = 'Zone' }
+            table.insert(path, 1, zInfo)
+            curr = parent[curr]
+        end
+
+        local hops = math.max(0, #path - 1)
+        return path, hops
+    end
+
+    -- Same zone test
+    local pSame, hSame = testFindZoneRoute('poknowledge', 'poknowledge', routeZones)
+    assert_neq(pSame, nil, 'route same zone: path is not nil')
+    if pSame then
+        assert_eq(#pSame, 1, 'route same zone: path length is 1')
+        assert_eq(hSame, 0, 'route same zone: 0 hops')
+        assert_eq(pSame[1].short, 'poknowledge', 'route same zone: starts/ends at poknowledge')
+    end
+
+    -- Adjacent zone test
+    local pAdj, hAdj = testFindZoneRoute('qeynos', 'qeynos2', routeZones)
+    assert_neq(pAdj, nil, 'route adjacent: path is not nil')
+    if pAdj then
+        assert_eq(#pAdj, 2, 'route adjacent: path length 2')
+        assert_eq(hAdj, 1, 'route adjacent: 1 hop')
+        assert_eq(pAdj[1].short, 'qeynos', 'route adjacent: step 1 is qeynos')
+        assert_eq(pAdj[2].short, 'qeynos2', 'route adjacent: step 2 is qeynos2')
+    end
+
+    -- Multi-hop overland route test
+    local pOverland, hOverland = testFindZoneRoute('qeynos', 'blackburrow', routeZones)
+    assert_neq(pOverland, nil, 'route overland: path is not nil')
+    if pOverland then
+        assert_eq(#pOverland, 4, 'route overland: path length 4 (qeynos -> qeynos2 -> qeytoqrg -> blackburrow)')
+        assert_eq(hOverland, 3, 'route overland: 3 hops')
+        assert_eq(pOverland[1].short, 'qeynos', 'route overland: step 1 qeynos')
+        assert_eq(pOverland[2].short, 'qeynos2', 'route overland: step 2 qeynos2')
+        assert_eq(pOverland[3].short, 'qeytoqrg', 'route overland: step 3 qeytoqrg')
+        assert_eq(pOverland[4].short, 'blackburrow', 'route overland: step 4 blackburrow')
+    end
+
+    -- PoK cross-planar route test
+    local pPlanar, hPlanar = testFindZoneRoute('qeynos', 'hohonora', routeZones)
+    assert_neq(pPlanar, nil, 'route planar: path is not nil')
+    if pPlanar then
+        assert_eq(#pPlanar, 6, 'route planar: 6 zones in path (qeynos -> qeynos2 -> poknowledge -> potranquility -> povalor -> hohonora)')
+        assert_eq(hPlanar, 5, 'route planar: 5 hops')
+        assert_eq(pPlanar[1].short, 'qeynos', 'route planar: step 1 qeynos')
+        assert_eq(pPlanar[3].short, 'poknowledge', 'route planar: step 3 poknowledge')
+        assert_eq(pPlanar[6].short, 'hohonora', 'route planar: step 6 hohonora')
+    end
+
+    -- Unreachable / invalid zone test
+    local pInvalid, hInvalid = testFindZoneRoute('qeynos', 'nonexistent_zone', routeZones)
+    assert_nil(pInvalid, 'route invalid zone: returns nil')
+    assert_eq(hInvalid, 0, 'route invalid zone: 0 hops')
+
+    -- Nil / empty test
+    local pNil, hNil = testFindZoneRoute(nil, 'qeynos', routeZones)
+    assert_nil(pNil, 'route nil start: returns nil')
+    assert_eq(hNil, 0, 'route nil start: 0 hops')
 end
 
 -- ============================================================================

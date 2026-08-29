@@ -19,7 +19,7 @@ local mq    = require('mq')
 local ImGui = require('ImGui')
 local bit   = require('bit') -- LuaJIT bitwise library
 
-local VERSION = '1.0'
+local VERSION = '1.1'
 
 -- ============================================================================
 -- THEME & STYLE HELPERS (Unified Dark Cyan/Blue Theme)
@@ -147,13 +147,37 @@ local COLOR_MODE_OPTIONS = {
     'Consideration Colors Only',
 }
 
+local ATLAS_ERA_OPTIONS = {
+    'All Expansions',
+    'Classic',
+    'Kunark',
+    'Velious',
+    'Luclin',
+    'Planes of Power',
+    'Legacy of Ykesha',
+    'Gates of Discord',
+    'Omens of War',
+    'The Serpent\'s Spine',
+    'Hubs & Special',
+    'Custom / Other',
+}
+
+local ATLAS_TYPE_OPTIONS = {
+    'All Zone Types',
+    'Cities & Hubs',
+    'Outdoor & Wilderness',
+    'Dungeons',
+    'Planes',
+    'Raid Zones',
+}
+
 -- ============================================================================
 -- STRUCTURED STATE TABLES (Prevents hitting Lua 200 local limit)
 -- ============================================================================
 local state = {
     openGUI             = true,
     isRunning           = true,
-    activeTab           = 1, -- 1: Map View, 2: NPC Tracker, 3: Settings & Layers
+    activeTab           = 1, -- 1: Map View, 2: Zone Atlas, 3: NPC Tracker, 4: Settings & Layers
     currentZoneId       = 0,
     currentZoneShort    = '',
     currentZoneName     = 'Unknown Zone',
@@ -168,6 +192,22 @@ local state = {
     mapFolderNames      = { '[Root] Default (maps/)' },
     selectedFolderIndex = 1,
     customMapsDir       = '',
+
+    -- Atlas Explorer & POI Navigator State
+    viewMode            = 'LIVE', -- 'LIVE' or 'ATLAS'
+    atlasZoneShort      = '',
+    atlasZoneName       = '',
+    atlasHistory        = {},     -- list of zoneShort strings
+    atlasHistoryIdx     = 0,
+    atlasSearchText     = '',
+    atlasEraFilterIdx   = 1,      -- Index into ATLAS_ERA_OPTIONS
+    atlasTypeFilterIdx  = 1,      -- Index into ATLAS_TYPE_OPTIONS
+    atlasSelectedZone   = nil,    -- table pointer to current selected zone in atlas catalog
+    atlasZoneList       = {},     -- filtered list of zones for UI table
+    atlasAllZones       = {},     -- master registry of built-in + discovered zones
+    poiSearchText       = '',
+    showPoiDrawer       = false,
+    highlightedPoi      = nil,    -- { x = num, y = num, z = num, text = string, time = num }
 
     -- UI tracking filter controls
     searchText          = '',
@@ -415,12 +455,15 @@ local function saveConfig(silent)
         npcNodeRadius       = ctrl.npcNodeRadius,
         playerNodeRadius    = ctrl.playerNodeRadius,
 
-        -- Tracker Filters & Sorting
+        -- Tracker & Atlas Filters
         conFilterIndex      = state.conFilterIndex,
         sortColumn          = state.sortColumn,
         sortAsc             = state.sortAsc,
         pathableOnly        = state.pathableOnly,
         losOnly             = state.losOnly,
+        atlasEraFilterIdx   = state.atlasEraFilterIdx,
+        atlasTypeFilterIdx  = state.atlasTypeFilterIdx,
+        showPoiDrawer       = state.showPoiDrawer,
         activeMapFolder     = activeFolder,
     }
 
@@ -503,6 +546,9 @@ local function loadConfig()
         if cData.sortAsc ~= nil then state.sortAsc = (cData.sortAsc == true) end
         if cData.pathableOnly ~= nil then state.pathableOnly = (cData.pathableOnly == true) end
         if cData.losOnly ~= nil then state.losOnly = (cData.losOnly == true) end
+        if cData.atlasEraFilterIdx ~= nil then state.atlasEraFilterIdx = tonumber(cData.atlasEraFilterIdx) or 1 end
+        if cData.atlasTypeFilterIdx ~= nil then state.atlasTypeFilterIdx = tonumber(cData.atlasTypeFilterIdx) or 1 end
+        if cData.showPoiDrawer ~= nil then state.showPoiDrawer = (cData.showPoiDrawer == true) end
 
         local savedFolder = cData.activeMapFolder or (allData.__global and allData.__global.selectedMapFolder)
         if savedFolder and savedFolder ~= '' then
@@ -514,6 +560,252 @@ local function loadConfig()
                 end
             end
         end
+    end
+end
+
+-- ============================================================================
+-- NORRATH ZONE REGISTRY & ATLAS DATABASE
+-- ============================================================================
+local NORRATH_ZONE_REGISTRY = {
+    -- CLASSIC: ANTONICA
+    { short = 'qeynos',       name = 'South Qeynos',                   era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'qeynos2', 'qrg', 'erudsxing'} },
+    { short = 'qeynos2',      name = 'North Qeynos',                   era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'qeynos', 'qeytoqrg'} },
+    { short = 'qeytoqrg',     name = 'Qeynos Hills',                   era = 'Classic',          continent = 'Antonica',             level = '1-15',  type = 'Outdoor', connections = {'qeynos2', 'blackburrow', 'qrg', 'northkarana'} },
+    { short = 'qrg',          name = 'Surefall Glade',                 era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'qeytoqrg'} },
+    { short = 'blackburrow',  name = 'Blackburrow',                    era = 'Classic',          continent = 'Antonica',             level = '5-20',  type = 'Dungeon', connections = {'qeytoqrg', 'everfrost'} },
+    { short = 'everfrost',    name = 'Everfrost Peaks',                era = 'Classic',          continent = 'Antonica',             level = '1-25',  type = 'Outdoor', connections = {'blackburrow', 'halas', 'permafrost'} },
+    { short = 'halas',        name = 'Halas',                          era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'everfrost'} },
+    { short = 'permafrost',   name = 'Permafrost Keep',                era = 'Classic',          continent = 'Antonica',             level = '20-50', type = 'Dungeon', connections = {'everfrost'} },
+    { short = 'northkarana',  name = 'Northern Plains of Karana',      era = 'Classic',          continent = 'Antonica',             level = '10-30', type = 'Outdoor', connections = {'qeytoqrg', 'southkarana', 'eastkarana'} },
+    { short = 'southkarana',  name = 'Southern Plains of Karana',      era = 'Classic',          continent = 'Antonica',             level = '20-35', type = 'Outdoor', connections = {'northkarana', 'lakerathe', 'paw'} },
+    { short = 'eastkarana',   name = 'Eastern Plains of Karana',       era = 'Classic',          continent = 'Antonica',             level = '15-30', type = 'Outdoor', connections = {'northkarana', 'beholder', 'highpass'} },
+    { short = 'beholder',     name = 'Gorge of King Xorbb',            era = 'Classic',          continent = 'Antonica',             level = '15-25', type = 'Outdoor', connections = {'eastkarana', 'runnyeye'} },
+    { short = 'runnyeye',     name = 'Clan RunnyEye',                  era = 'Classic',          continent = 'Antonica',             level = '15-30', type = 'Dungeon', connections = {'beholder', 'misty'} },
+    { short = 'highpass',     name = 'Highpass Hold',                  era = 'Classic',          continent = 'Antonica',             level = '15-25', type = 'Outdoor', connections = {'eastkarana', 'highkeep', 'kithicor'} },
+    { short = 'highkeep',     name = 'High Keep',                      era = 'Classic',          continent = 'Antonica',             level = '20-40', type = 'Dungeon', connections = {'highpass'} },
+    { short = 'kithicor',     name = 'Kithicor Forest',                era = 'Classic',          continent = 'Antonica',             level = '20-50', type = 'Outdoor', connections = {'highpass', 'wcommons', 'rivervale'} },
+    { short = 'wcommons',     name = 'West Commonlands',               era = 'Classic',          continent = 'Antonica',             level = '5-20',  type = 'Outdoor', connections = {'ecommons', 'kithicor', 'befallen'} },
+    { short = 'ecommons',     name = 'East Commonlands',               era = 'Classic',          continent = 'Antonica',             level = '1-15',  type = 'Outdoor', connections = {'nektulos', 'nro', 'wcommons', 'freportw'} },
+    { short = 'freportw',     name = 'West Freeport',                  era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'ecommons', 'freporte', 'freportn'} },
+    { short = 'freporte',     name = 'East Freeport',                  era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'freportw', 'freportn', 'nro', 'oceanoftears'} },
+    { short = 'freportn',     name = 'North Freeport',                 era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'freporte', 'freportw'} },
+    { short = 'befallen',     name = 'Befallen',                       era = 'Classic',          continent = 'Antonica',             level = '10-25', type = 'Dungeon', connections = {'wcommons'} },
+    { short = 'nro',          name = 'Northern Desert of Ro',          era = 'Classic',          continent = 'Antonica',             level = '10-25', type = 'Outdoor', connections = {'freporte', 'ecommons', 'oasis'} },
+    { short = 'oasis',        name = 'Oasis of Marr',                  era = 'Classic',          continent = 'Antonica',             level = '10-35', type = 'Outdoor', connections = {'nro', 'sro', 'timorous'} },
+    { short = 'sro',          name = 'Southern Desert of Ro',          era = 'Classic',          continent = 'Antonica',             level = '20-35', type = 'Outdoor', connections = {'oasis', 'innothule', 'guktop'} },
+    { short = 'innothule',    name = 'Innothule Swamp',                era = 'Classic',          continent = 'Antonica',             level = '1-15',  type = 'Outdoor', connections = {'sro', 'grobb', 'feerrott', 'guktop'} },
+    { short = 'grobb',        name = 'Grobb',                          era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'innothule'} },
+    { short = 'feerrott',     name = 'The Feerrott',                   era = 'Classic',          continent = 'Antonica',             level = '1-25',  type = 'Outdoor', connections = {'innothule', 'oggok', 'cazicthule', 'rathemtn'} },
+    { short = 'oggok',        name = 'Oggok',                          era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'feerrott'} },
+    { short = 'cazicthule',   name = 'Lost Temple of Cazic-Thule',     era = 'Classic',          continent = 'Antonica',             level = '45-60', type = 'Dungeon', connections = {'feerrott'} },
+    { short = 'rathemtn',     name = 'Mountains of Rathe',             era = 'Classic',          continent = 'Antonica',             level = '10-35', type = 'Outdoor', connections = {'feerrott', 'lakerathe'} },
+    { short = 'lakerathe',    name = 'Lake Rathetear',                 era = 'Classic',          continent = 'Antonica',             level = '10-30', type = 'Outdoor', connections = {'rathemtn', 'southkarana', 'arena'} },
+    { short = 'arena',        name = 'The Arena',                      era = 'Classic',          continent = 'Antonica',             level = '1-65',  type = 'City',    connections = {'lakerathe'} },
+    { short = 'paw',          name = 'Infected Paw',                   era = 'Classic',          continent = 'Antonica',             level = '25-50', type = 'Dungeon', connections = {'southkarana'} },
+    { short = 'guktop',       name = 'Upper Guk',                      era = 'Classic',          continent = 'Antonica',             level = '10-30', type = 'Dungeon', connections = {'innothule', 'gukbottom'} },
+    { short = 'gukbottom',    name = 'The Ruins of Old Guk',           era = 'Classic',          continent = 'Antonica',             level = '30-50', type = 'Dungeon', connections = {'guktop'} },
+    { short = 'lavastorm',    name = 'Lavastorm Mountains',            era = 'Classic',          continent = 'Antonica',             level = '10-35', type = 'Outdoor', connections = {'nektulos', 'soldunga', 'soldungb', 'soltemple', 'najena'} },
+    { short = 'soldunga',     name = 'Solusek\'s Eye (Sol A)',         era = 'Classic',          continent = 'Antonica',             level = '20-40', type = 'Dungeon', connections = {'lavastorm', 'soldungb'} },
+    { short = 'soldungb',     name = 'Nagafen\'s Lair (Sol B)',        era = 'Classic',          continent = 'Antonica',             level = '35-55', type = 'Dungeon', connections = {'lavastorm', 'soldunga'} },
+    { short = 'soltemple',    name = 'Temple of Solusek Ro',           era = 'Classic',          continent = 'Antonica',             level = '1-65',  type = 'Dungeon', connections = {'lavastorm'} },
+    { short = 'najena',       name = 'Najena',                         era = 'Classic',          continent = 'Antonica',             level = '15-35', type = 'Dungeon', connections = {'lavastorm'} },
+    { short = 'nektulos',     name = 'Nektulos Forest',                era = 'Classic',          continent = 'Antonica',             level = '1-20',  type = 'Outdoor', connections = {'lavastorm', 'neriakb', 'ecommons'} },
+    { short = 'neriaka',      name = 'Neriak - Foreign Quarter',       era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'nektulos', 'neriakb'} },
+    { short = 'neriakb',      name = 'Neriak - Commons',               era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'neriaka', 'neriakc'} },
+    { short = 'neriakc',      name = 'Neriak - Third Gate',            era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'neriakb'} },
+    { short = 'rivervale',    name = 'Rivervale',                      era = 'Classic',          continent = 'Antonica',             level = '1-10',  type = 'City',    connections = {'kithicor', 'misty'} },
+    { short = 'misty',        name = 'Misty Thicket',                  era = 'Classic',          continent = 'Antonica',             level = '1-15',  type = 'Outdoor', connections = {'rivervale', 'runnyeye'} },
+    -- CLASSIC: FAYDWER & ODUS
+    { short = 'gfaydark',     name = 'Greater Faydark',                era = 'Classic',          continent = 'Faydwer',              level = '1-15',  type = 'Outdoor', connections = {'felwithea', 'crushbone', 'kelethin', 'lfaydark', 'butcher'} },
+    { short = 'felwithea',    name = 'Northern Felwithe',              era = 'Classic',          continent = 'Faydwer',              level = '1-10',  type = 'City',    connections = {'gfaydark', 'felwitheb'} },
+    { short = 'felwitheb',    name = 'Southern Felwithe',              era = 'Classic',          continent = 'Faydwer',              level = '1-10',  type = 'City',    connections = {'felwithea'} },
+    { short = 'kelethin',     name = 'Kelethin',                       era = 'Classic',          continent = 'Faydwer',              level = '1-10',  type = 'City',    connections = {'gfaydark'} },
+    { short = 'crushbone',    name = 'Crushbone',                      era = 'Classic',          continent = 'Faydwer',              level = '5-20',  type = 'Dungeon', connections = {'gfaydark'} },
+    { short = 'lfaydark',     name = 'Lesser Faydark',                 era = 'Classic',          continent = 'Faydwer',              level = '10-30', type = 'Outdoor', connections = {'gfaydark', 'steamfont', 'mistmoore'} },
+    { short = 'mistmoore',    name = 'Castle Mistmoore',               era = 'Classic',          continent = 'Faydwer',              level = '20-45', type = 'Dungeon', connections = {'lfaydark'} },
+    { short = 'steamfont',    name = 'Steamfont Mountains',            era = 'Classic',          continent = 'Faydwer',              level = '1-20',  type = 'Outdoor', connections = {'lfaydark', 'akanon'} },
+    { short = 'akanon',       name = 'Ak\'Anon',                       era = 'Classic',          continent = 'Faydwer',              level = '1-10',  type = 'City',    connections = {'steamfont'} },
+    { short = 'butcher',      name = 'Butcherblock Mountains',         era = 'Classic',          continent = 'Faydwer',              level = '1-20',  type = 'Outdoor', connections = {'gfaydark', 'kaladima', 'dagnor', 'oceanoftears'} },
+    { short = 'kaladima',     name = 'South Kaladim',                  era = 'Classic',          continent = 'Faydwer',              level = '1-10',  type = 'City',    connections = {'butcher', 'kaladimb'} },
+    { short = 'kaladimb',     name = 'North Kaladim',                  era = 'Classic',          continent = 'Faydwer',              level = '1-10',  type = 'City',    connections = {'kaladima'} },
+    { short = 'dagnor',       name = 'Dagnor\'s Cauldron',             era = 'Classic',          continent = 'Faydwer',              level = '15-35', type = 'Outdoor', connections = {'butcher', 'unrest', 'kedge'} },
+    { short = 'unrest',       name = 'Estate of Unrest',               era = 'Classic',          continent = 'Faydwer',              level = '15-35', type = 'Dungeon', connections = {'dagnor'} },
+    { short = 'kedge',        name = 'Kedge Keep',                     era = 'Classic',          continent = 'Faydwer',              level = '30-50', type = 'Dungeon', connections = {'dagnor'} },
+    { short = 'oceanoftears', name = 'Ocean of Tears',                 era = 'Classic',          continent = 'Antonica',             level = '10-40', type = 'Outdoor', connections = {'freporte', 'butcher'} },
+    { short = 'erudin',       name = 'Erudin',                         era = 'Classic',          continent = 'Odus',                 level = '1-10',  type = 'City',    connections = {'tox', 'erudnext'} },
+    { short = 'erudnext',     name = 'Erudin Palace',                  era = 'Classic',          continent = 'Odus',                 level = '1-10',  type = 'City',    connections = {'erudin'} },
+    { short = 'tox',          name = 'Toxxulia Forest',                era = 'Classic',          continent = 'Odus',                 level = '1-15',  type = 'Outdoor', connections = {'erudin', 'kerra', 'hole'} },
+    { short = 'kerra',        name = 'Kerra Isle',                     era = 'Classic',          continent = 'Odus',                 level = '10-25', type = 'Outdoor', connections = {'tox'} },
+    { short = 'hole',         name = 'The Hole',                       era = 'Classic',          continent = 'Odus',                 level = '40-60', type = 'Dungeon', connections = {'tox', 'erudsxing'} },
+    { short = 'erudsxing',    name = 'Erud\'s Crossing',               era = 'Classic',          continent = 'Odus',                 level = '5-20',  type = 'Outdoor', connections = {'erudin', 'qeynos'} },
+    -- CLASSIC PLANES
+    { short = 'hateplane',    name = 'The Plane of Hate',              era = 'Classic',          continent = 'Planes',               level = '50-60', type = 'Raid',    connections = {'poknowledge', 'potranquility'} },
+    { short = 'fearplane',    name = 'The Plane of Fear',              era = 'Classic',          continent = 'Planes',               level = '50-60', type = 'Raid',    connections = {'feerrott', 'potranquility'} },
+    { short = 'sky',          name = 'The Plane of Sky (Air)',         era = 'Classic',          continent = 'Planes',               level = '50-60', type = 'Raid',    connections = {'freporte', 'potranquility'} },
+    -- KUNARK
+    { short = 'dreadlands',   name = 'Dreadlands',                     era = 'Kunark',           continent = 'Kunark',               level = '35-50', type = 'Outdoor', connections = {'firiona', 'burningwood', 'karnor', 'frontiermtns', 'lakeofillomen'} },
+    { short = 'karnor',       name = 'Karnor\'s Castle',               era = 'Kunark',           continent = 'Kunark',               level = '45-55', type = 'Dungeon', connections = {'dreadlands'} },
+    { short = 'firiona',      name = 'Firiona Vie',                    era = 'Kunark',           continent = 'Kunark',               level = '1-35',  type = 'City',    connections = {'dreadlands', 'lakeofillomen', 'swampofnohope', 'timorous'} },
+    { short = 'lakeofillomen',name = 'Lake of Ill Omen',               era = 'Kunark',           continent = 'Kunark',               level = '1-30',  type = 'Outdoor', connections = {'cabilisw', 'firiona', 'dreadlands', 'overthere', 'droga', 'veksar'} },
+    { short = 'cabilisw',     name = 'West Cabilis',                   era = 'Kunark',           continent = 'Kunark',               level = '1-10',  type = 'City',    connections = {'lakeofillomen', 'cabilise', 'warslikswood'} },
+    { short = 'cabilise',     name = 'East Cabilis',                   era = 'Kunark',           continent = 'Kunark',               level = '1-10',  type = 'City',    connections = {'lakeofillomen', 'cabilisw', 'swampofnohope', 'fieldofbone'} },
+    { short = 'fieldofbone',  name = 'The Field of Bone',              era = 'Kunark',           continent = 'Kunark',               level = '1-15',  type = 'Outdoor', connections = {'cabilise', 'kurn', 'kaesora', 'emeraldjungle', 'swampofnohope'} },
+    { short = 'kurn',         name = 'Kurn\'s Tower',                  era = 'Kunark',           continent = 'Kunark',               level = '10-25', type = 'Dungeon', connections = {'fieldofbone'} },
+    { short = 'kaesora',      name = 'Kaesora',                        era = 'Kunark',           continent = 'Kunark',               level = '30-45', type = 'Dungeon', connections = {'fieldofbone'} },
+    { short = 'swampofnohope',name = 'Swamp of No Hope',               era = 'Kunark',           continent = 'Kunark',               level = '1-30',  type = 'Outdoor', connections = {'cabilise', 'fieldofbone', 'firiona', 'trakanon'} },
+    { short = 'trakanon',     name = 'Trakanon\'s Teeth',              era = 'Kunark',           continent = 'Kunark',               level = '40-55', type = 'Outdoor', connections = {'swampofnohope', 'emeraldjungle', 'sebilis'} },
+    { short = 'sebilis',      name = 'The Ruins of Sebilis',           era = 'Kunark',           continent = 'Kunark',               level = '45-60', type = 'Dungeon', connections = {'trakanon'} },
+    { short = 'emeraldjungle',name = 'The Emerald Jungle',             era = 'Kunark',           continent = 'Kunark',               level = '35-50', type = 'Outdoor', connections = {'fieldofbone', 'trakanon', 'citymist'} },
+    { short = 'citymist',     name = 'City of Mist',                   era = 'Kunark',           continent = 'Kunark',               level = '40-55', type = 'Dungeon', connections = {'emeraldjungle'} },
+    { short = 'skyfire',      name = 'Skyfire Mountains',              era = 'Kunark',           continent = 'Kunark',               level = '40-55', type = 'Outdoor', connections = {'burningwood', 'overthere', 'veeshan'} },
+    { short = 'veeshan',      name = 'Veeshan\'s Peak',                era = 'Kunark',           continent = 'Kunark',               level = '55-60', type = 'Raid',    connections = {'skyfire'} },
+    { short = 'burningwood',  name = 'The Burning Wood',               era = 'Kunark',           continent = 'Kunark',               level = '35-50', type = 'Outdoor', connections = {'dreadlands', 'skyfire', 'frontiermtns', 'chardok'} },
+    { short = 'chardok',      name = 'Chardok',                        era = 'Kunark',           continent = 'Kunark',               level = '45-60', type = 'Dungeon', connections = {'burningwood'} },
+    { short = 'frontiermtns', name = 'Frontier Mountains',             era = 'Kunark',           continent = 'Kunark',               level = '25-40', type = 'Outdoor', connections = {'dreadlands', 'burningwood', 'overthere', 'droga'} },
+    { short = 'overthere',    name = 'The Overthere',                  era = 'Kunark',           continent = 'Kunark',               level = '15-40', type = 'Outdoor', connections = {'frontiermtns', 'skyfire', 'warslikswood', 'timorous', 'charasis'} },
+    { short = 'charasis',     name = 'Howling Stones (Charasis)',      era = 'Kunark',           continent = 'Kunark',               level = '45-60', type = 'Dungeon', connections = {'overthere'} },
+    { short = 'warslikswood', name = 'Warsliks Wood',                  era = 'Kunark',           continent = 'Kunark',               level = '1-30',  type = 'Outdoor', connections = {'cabilisw', 'overthere', 'dalnir'} },
+    { short = 'dalnir',       name = 'Crypt of Dalnir',                era = 'Kunark',           continent = 'Kunark',               level = '25-40', type = 'Dungeon', connections = {'warslikswood'} },
+    { short = 'droga',        name = 'Temple of Droga',                era = 'Kunark',           continent = 'Kunark',               level = '35-50', type = 'Dungeon', connections = {'frontiermtns', 'nurga'} },
+    { short = 'nurga',        name = 'Mines of Nurga',                 era = 'Kunark',           continent = 'Kunark',               level = '35-50', type = 'Dungeon', connections = {'droga'} },
+    { short = 'timorous',     name = 'Timorous Deep',                  era = 'Kunark',           continent = 'Kunark',               level = '1-45',  type = 'Outdoor', connections = {'firiona', 'overthere', 'oasis', 'butcher'} },
+    { short = 'veksar',       name = 'Veksar',                         era = 'Kunark',           continent = 'Kunark',               level = '45-60', type = 'Dungeon', connections = {'lakeofillomen'} },
+    -- VELIOUS
+    { short = 'iceclad',      name = 'Iceclad Ocean',                  era = 'Velious',          continent = 'Velious',              level = '30-45', type = 'Outdoor', connections = {'eastwastes'} },
+    { short = 'eastwastes',   name = 'Eastern Wastes',                 era = 'Velious',          continent = 'Velious',              level = '35-50', type = 'Outdoor', connections = {'iceclad', 'greatdivide', 'crystal', 'sleeper', 'kael'} },
+    { short = 'greatdivide',  name = 'Great Divide',                   era = 'Velious',          continent = 'Velious',              level = '35-50', type = 'Outdoor', connections = {'eastwastes', 'thurgadina', 'velketor', 'sirens'} },
+    { short = 'thurgadina',   name = 'Thurgadin',                      era = 'Velious',          continent = 'Velious',              level = '1-60',  type = 'City',    connections = {'greatdivide', 'thurgadinb'} },
+    { short = 'thurgadinb',   name = 'Icewell Keep',                   era = 'Velious',          continent = 'Velious',              level = '50-60', type = 'Dungeon', connections = {'thurgadina'} },
+    { short = 'kael',         name = 'Kael Drakkel',                   era = 'Velious',          continent = 'Velious',              level = '45-60', type = 'Dungeon', connections = {'eastwastes', 'wakening'} },
+    { short = 'wakening',     name = 'The Wakening Land',              era = 'Velious',          continent = 'Velious',              level = '40-55', type = 'Outdoor', connections = {'kael', 'skyshrine', 'growthplane'} },
+    { short = 'skyshrine',    name = 'Skyshrine',                      era = 'Velious',          continent = 'Velious',              level = '45-60', type = 'Dungeon', connections = {'wakening', 'cobaltscar'} },
+    { short = 'cobaltscar',   name = 'Cobalt Scar',                    era = 'Velious',          continent = 'Velious',              level = '40-55', type = 'Outdoor', connections = {'skyshrine', 'sirens', 'mischiefplane'} },
+    { short = 'sirens',       name = 'Siren\'s Grotto',                era = 'Velious',          continent = 'Velious',              level = '50-60', type = 'Dungeon', connections = {'cobaltscar', 'westernwastes'} },
+    { short = 'westernwastes',name = 'Western Wastes',                 era = 'Velious',          continent = 'Velious',              level = '45-60', type = 'Outdoor', connections = {'sirens', 'necropolis', 'templeveeshan'} },
+    { short = 'necropolis',   name = 'Dragon Necropolis',              era = 'Velious',          continent = 'Velious',              level = '50-60', type = 'Dungeon', connections = {'westernwastes'} },
+    { short = 'templeveeshan',name = 'Temple of Veeshan',              era = 'Velious',          continent = 'Velious',              level = '55-60', type = 'Raid',    connections = {'westernwastes'} },
+    { short = 'velketor',     name = 'Velketor\'s Labyrinth',          era = 'Velious',          continent = 'Velious',              level = '45-60', type = 'Dungeon', connections = {'greatdivide'} },
+    { short = 'crystal',      name = 'Crystal Caverns',                era = 'Velious',          continent = 'Velious',              level = '30-45', type = 'Dungeon', connections = {'eastwastes'} },
+    { short = 'sleeper',      name = 'Sleeper\'s Tomb',                era = 'Velious',          continent = 'Velious',              level = '60',    type = 'Raid',    connections = {'eastwastes'} },
+    { short = 'growthplane',  name = 'Plane of Growth',                era = 'Velious',          continent = 'Planes',               level = '55-60', type = 'Raid',    connections = {'wakening'} },
+    { short = 'mischiefplane',name = 'Plane of Mischief',              era = 'Velious',          continent = 'Planes',               level = '50-60', type = 'Dungeon', connections = {'cobaltscar'} },
+    -- LUCLIN
+    { short = 'shadowhaven',  name = 'Shadow Haven',                   era = 'Luclin',           continent = 'Luclin',               level = '1-60',  type = 'City',    connections = {'nexus', 'bazaar', 'paludal', 'sharvahl', 'echo'} },
+    { short = 'bazaar',       name = 'The Bazaar',                     era = 'Luclin',           continent = 'Luclin',               level = '1-65',  type = 'City',    connections = {'nexus', 'shadowhaven', 'poknowledge'} },
+    { short = 'nexus',        name = 'The Nexus',                      era = 'Luclin',           continent = 'Luclin',               level = '1-65',  type = 'City',    connections = {'bazaar', 'shadowhaven', 'netherbian'} },
+    { short = 'netherbian',   name = 'Netherbian Lair',                era = 'Luclin',           continent = 'Luclin',               level = '10-25', type = 'Dungeon', connections = {'nexus', 'dawnshroud', 'marus'} },
+    { short = 'paludal',      name = 'Paludal Caverns',                era = 'Luclin',           continent = 'Luclin',               level = '5-25',  type = 'Dungeon', connections = {'shadowhaven', 'shadeweaver', 'hollowshade'} },
+    { short = 'sharvahl',     name = 'Shar Vahl',                      era = 'Luclin',           continent = 'Luclin',               level = '1-15',  type = 'City',    connections = {'shadeweaver'} },
+    { short = 'shadeweaver',  name = 'Shadeweaver\'s Thicket',         era = 'Luclin',           continent = 'Luclin',               level = '1-20',  type = 'Outdoor', connections = {'sharvahl', 'paludal'} },
+    { short = 'hollowshade',  name = 'Hollowshade Moor',               era = 'Luclin',           continent = 'Luclin',               level = '15-35', type = 'Outdoor', connections = {'paludal', 'grimling'} },
+    { short = 'grimling',     name = 'Grimling Forest',                era = 'Luclin',           continent = 'Luclin',               level = '25-45', type = 'Outdoor', connections = {'hollowshade', 'tenebrous', 'acrylia'} },
+    { short = 'tenebrous',    name = 'Tenebrous Mountains',            era = 'Luclin',           continent = 'Luclin',               level = '35-50', type = 'Outdoor', connections = {'grimling', 'katta'} },
+    { short = 'katta',        name = 'Katta Castellum',                era = 'Luclin',           continent = 'Luclin',               level = '40-60', type = 'City',    connections = {'tenebrous', 'twilight'} },
+    { short = 'twilight',     name = 'The Twilight Sea',               era = 'Luclin',           continent = 'Luclin',               level = '25-45', type = 'Outdoor', connections = {'katta', 'fungusgrove', 'thedeep'} },
+    { short = 'fungusgrove',  name = 'Fungus Grove',                   era = 'Luclin',           continent = 'Luclin',               level = '35-55', type = 'Dungeon', connections = {'twilight', 'echo'} },
+    { short = 'echo',         name = 'Echo Caverns',                   era = 'Luclin',           continent = 'Luclin',               level = '20-40', type = 'Dungeon', connections = {'fungusgrove', 'shadowhaven'} },
+    { short = 'dawnshroud',   name = 'Dawnshroud Peaks',               era = 'Luclin',           continent = 'Luclin',               level = '25-45', type = 'Outdoor', connections = {'netherbian', 'griegsend', 'themaiden'} },
+    { short = 'griegsend',    name = 'Grieg\'s End',                   era = 'Luclin',           continent = 'Luclin',               level = '45-60', type = 'Dungeon', connections = {'dawnshroud'} },
+    { short = 'sseru',        name = 'Sanctus Seru',                   era = 'Luclin',           continent = 'Luclin',               level = '35-60', type = 'City',    connections = {'marus'} },
+    { short = 'marus',        name = 'Marus Seru',                     era = 'Luclin',           continent = 'Luclin',               level = '20-35', type = 'Outdoor', connections = {'netherbian', 'sseru', 'monsletalis'} },
+    { short = 'monsletalis',  name = 'Mons Letalis',                   era = 'Luclin',           continent = 'Luclin',               level = '35-50', type = 'Outdoor', connections = {'marus', 'thegrey'} },
+    { short = 'thegrey',      name = 'The Grey',                       era = 'Luclin',           continent = 'Luclin',               level = '40-55', type = 'Outdoor', connections = {'monsletalis', 'ssratemple'} },
+    { short = 'ssratemple',   name = 'Ssraeshirhian Temple',           era = 'Luclin',           continent = 'Luclin',               level = '50-60', type = 'Dungeon', connections = {'thegrey'} },
+    { short = 'thedeep',      name = 'The Deep',                       era = 'Luclin',           continent = 'Luclin',               level = '45-60', type = 'Dungeon', connections = {'twilight', 'ssratemple'} },
+    { short = 'acrylia',      name = 'Acrylia Caverns',                era = 'Luclin',           continent = 'Luclin',               level = '40-55', type = 'Dungeon', connections = {'grimling'} },
+    { short = 'themaiden',    name = 'The Maiden\'s Eye',              era = 'Luclin',           continent = 'Luclin',               level = '45-60', type = 'Outdoor', connections = {'dawnshroud', 'akheva', 'umbral'} },
+    { short = 'akheva',       name = 'Akheva Ruins',                   era = 'Luclin',           continent = 'Luclin',               level = '50-60', type = 'Dungeon', connections = {'themaiden'} },
+    { short = 'umbral',       name = 'Umbral Plains',                  era = 'Luclin',           continent = 'Luclin',               level = '50-60', type = 'Outdoor', connections = {'themaiden', 'vexthal'} },
+    { short = 'vexthal',      name = 'Vex Thal',                       era = 'Luclin',           continent = 'Luclin',               level = '60',    type = 'Raid',    connections = {'umbral'} },
+    -- PLANES OF POWER
+    { short = 'poknowledge',  name = 'Plane of Knowledge',             era = 'Planes of Power',  continent = 'Planes',               level = '1-125', type = 'City',    connections = {'potranquility', 'bazaar', 'guildlobby', 'freportw', 'qeynos2', 'halas', 'rivervale', 'erudnext', 'gfaydark', 'felwithea', 'akanon', 'kaladima', 'neriakb', 'grobb', 'oggok', 'cabilisw', 'firiona', 'overthere', 'thurgadina', 'greatdivide', 'sharvahl', 'shadeweaver', 'nexus', 'dranik', 'natimbi', 'crescent', 'tox', 'nedaria'} },
+    { short = 'potranquility',name = 'Plane of Tranquility',           era = 'Planes of Power',  continent = 'Planes',               level = '45-65', type = 'City',    connections = {'poknowledge', 'pojustice', 'ponightmare', 'podisease', 'poinnovation', 'postorms', 'povalor', 'potorment', 'potactics', 'solrotower', 'pofire', 'powater', 'poearthA', 'poair', 'potimeA', 'hateplane', 'fearplane', 'sky'} },
+    { short = 'pojustice',    name = 'Plane of Justice',               era = 'Planes of Power',  continent = 'Planes',               level = '45-60', type = 'Dungeon', connections = {'potranquility'} },
+    { short = 'ponightmare',  name = 'Plane of Nightmare',             era = 'Planes of Power',  continent = 'Planes',               level = '45-60', type = 'Outdoor', connections = {'potranquility', 'nightmareb'} },
+    { short = 'nightmareb',   name = 'Lair of Terris Thule',           era = 'Planes of Power',  continent = 'Planes',               level = '55-65', type = 'Raid',    connections = {'ponightmare'} },
+    { short = 'podisease',    name = 'Plane of Disease',               era = 'Planes of Power',  continent = 'Planes',               level = '45-60', type = 'Outdoor', connections = {'potranquility', 'codecay'} },
+    { short = 'codecay',      name = 'Crypt of Decay',                 era = 'Planes of Power',  continent = 'Planes',               level = '55-65', type = 'Dungeon', connections = {'podisease'} },
+    { short = 'poinnovation', name = 'Plane of Innovation',            era = 'Planes of Power',  continent = 'Planes',               level = '45-60', type = 'Dungeon', connections = {'potranquility'} },
+    { short = 'postorms',     name = 'Plane of Storms',                era = 'Planes of Power',  continent = 'Planes',               level = '55-65', type = 'Outdoor', connections = {'potranquility', 'bastion'} },
+    { short = 'bastion',      name = 'Bastion of Thunder',             era = 'Planes of Power',  continent = 'Planes',               level = '60-65', type = 'Dungeon', connections = {'postorms'} },
+    { short = 'povalor',      name = 'Plane of Valor',                 era = 'Planes of Power',  continent = 'Planes',               level = '55-65', type = 'Outdoor', connections = {'potranquility', 'hohonora'} },
+    { short = 'hohonora',     name = 'Halls of Honor',                 era = 'Planes of Power',  continent = 'Planes',               level = '60-65', type = 'Dungeon', connections = {'povalor', 'hohonorb'} },
+    { short = 'hohonorb',     name = 'Temple of Marr',                 era = 'Planes of Power',  continent = 'Planes',               level = '62-65', type = 'Raid',    connections = {'hohonora'} },
+    { short = 'potorment',    name = 'Plane of Torment',               era = 'Planes of Power',  continent = 'Planes',               level = '55-65', type = 'Dungeon', connections = {'potranquility'} },
+    { short = 'potactics',    name = 'Drunder, Fortress of Zek',       era = 'Planes of Power',  continent = 'Planes',               level = '60-65', type = 'Dungeon', connections = {'potranquility'} },
+    { short = 'solrotower',   name = 'Tower of Solusek Ro',            era = 'Planes of Power',  continent = 'Planes',               level = '62-65', type = 'Dungeon', connections = {'potranquility'} },
+    { short = 'pofire',       name = 'Doomfire, the Burning Lands',    era = 'Planes of Power',  continent = 'Planes',               level = '60-65', type = 'Outdoor', connections = {'potranquility'} },
+    { short = 'powater',      name = 'Reef of Trials (Water)',         era = 'Planes of Power',  continent = 'Planes',               level = '60-65', type = 'Outdoor', connections = {'potranquility'} },
+    { short = 'poearthA',     name = 'Vegarlson, Earthen Badlands',    era = 'Planes of Power',  continent = 'Planes',               level = '60-65', type = 'Outdoor', connections = {'potranquility', 'poearthB'} },
+    { short = 'poearthB',     name = 'Stronghold of Heights',          era = 'Planes of Power',  continent = 'Planes',               level = '62-65', type = 'Raid',    connections = {'poearthA'} },
+    { short = 'poair',        name = 'Eryslai, Kingdom of Wind',       era = 'Planes of Power',  continent = 'Planes',               level = '62-65', type = 'Outdoor', connections = {'potranquility'} },
+    { short = 'potimeA',      name = 'Plane of Time (A)',              era = 'Planes of Power',  continent = 'Planes',               level = '65',    type = 'Raid',    connections = {'potranquility', 'potimeB'} },
+    { short = 'potimeB',      name = 'Plane of Time (B)',              era = 'Planes of Power',  continent = 'Planes',               level = '65',    type = 'Raid',    connections = {'potimeA'} },
+    -- LEGACY OF YKESHA & LDON
+    { short = 'gunthak',      name = 'Gulf of Gunthak',                era = 'Legacy of Ykesha', continent = 'Broken Skull Rock',     level = '35-50', type = 'Outdoor', connections = {'dulak', 'torgiran', 'hatefury', 'nadox'} },
+    { short = 'dulak',        name = 'Dulak\'s Harbor',                era = 'Legacy of Ykesha', continent = 'Broken Skull Rock',     level = '40-55', type = 'Outdoor', connections = {'gunthak'} },
+    { short = 'torgiran',     name = 'Torgiran Mines',                 era = 'Legacy of Ykesha', continent = 'Broken Skull Rock',     level = '45-60', type = 'Dungeon', connections = {'gunthak', 'nadox'} },
+    { short = 'nadox',        name = 'Crypt of Nadox',                 era = 'Legacy of Ykesha', continent = 'Broken Skull Rock',     level = '50-65', type = 'Dungeon', connections = {'gunthak', 'torgiran', 'hatefury'} },
+    { short = 'hatefury',     name = 'Hate\'s Fury',                   era = 'Legacy of Ykesha', continent = 'Broken Skull Rock',     level = '55-65', type = 'Dungeon', connections = {'gunthak', 'nadox'} },
+    { short = 'nedaria',      name = 'Nedaria\'s Landing',             era = 'Legacy of Ykesha', continent = 'Antonica',             level = '20-40', type = 'Outdoor', connections = {'jaggedpine', 'nro', 'butcher', 'natimbi'} },
+    { short = 'jaggedpine',   name = 'Jaggedpine Forest',              era = 'Legacy of Ykesha', continent = 'Antonica',             level = '20-45', type = 'Outdoor', connections = {'nedaria', 'qeytoqrg', 'blackburrow'} },
+    -- GATES OF DISCORD
+    { short = 'natimbi',      name = 'Natimbi, The Broken Shores',     era = 'Gates of Discord', continent = 'Taelosia',             level = '50-65', type = 'Outdoor', connections = {'nedaria', 'barindu', 'qinimi', 'ferubi'} },
+    { short = 'barindu',      name = 'Barindu, Hanging Gardens',       era = 'Gates of Discord', continent = 'Taelosia',             level = '55-65', type = 'Outdoor', connections = {'natimbi', 'riwwi', 'ferubi'} },
+    { short = 'riwwi',        name = 'Riwwi, Coliseum of Games',       era = 'Gates of Discord', continent = 'Taelosia',             level = '55-65', type = 'Outdoor', connections = {'barindu'} },
+    { short = 'qinimi',       name = 'Qinimi, Court of Nihilia',       era = 'Gates of Discord', continent = 'Taelosia',             level = '55-65', type = 'Outdoor', connections = {'natimbi', 'kodtaz'} },
+    { short = 'ferubi',       name = 'Ferubi, Sanctuary of Tshill',    era = 'Gates of Discord', continent = 'Taelosia',             level = '55-65', type = 'Dungeon', connections = {'natimbi', 'barindu'} },
+    { short = 'kodtaz',       name = 'Kod\'Taz, Broken Trial Grounds', era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Outdoor', connections = {'qinimi', 'yxtta', 'ikkinz'} },
+    { short = 'yxtta',        name = 'Yxtta, Pulpit of Yxunxtei',      era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Dungeon', connections = {'kodtaz', 'uqua', 'qvic'} },
+    { short = 'uqua',         name = 'Uqua, Ocean God Chantry',        era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Raid',    connections = {'yxtta', 'qvic'} },
+    { short = 'qvic',         name = 'Qvic, Grounds of Calling',       era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Outdoor', connections = {'yxtta', 'uqua', 'inktuta', 'txevu'} },
+    { short = 'inktuta',      name = 'Inktuta, Refracted Reach',       era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Raid',    connections = {'qvic'} },
+    { short = 'txevu',        name = 'Txevu, Lair of the Elite',       era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Dungeon', connections = {'qvic', 'tacvi'} },
+    { short = 'tacvi',        name = 'Tacvi, Broken Amphitheater',     era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Raid',    connections = {'txevu'} },
+    { short = 'ikkinz',       name = 'Ikkinz, Chambers of Destruction',era = 'Gates of Discord', continent = 'Taelosia',             level = '65',    type = 'Raid',    connections = {'kodtaz'} },
+    -- OMENS OF WAR
+    { short = 'dranik',       name = 'Dranik\'s Scar',                 era = 'Omens of War',     continent = 'Kuua',                 level = '55-65', type = 'Outdoor', connections = {'poknowledge', 'bloodfields', 'nobles', 'wallofslaughter'} },
+    { short = 'bloodfields',  name = 'The Bloodfields',                era = 'Omens of War',     continent = 'Kuua',                 level = '60-70', type = 'Outdoor', connections = {'dranik'} },
+    { short = 'nobles',       name = 'Nobles\' Causeway',              era = 'Omens of War',     continent = 'Kuua',                 level = '60-70', type = 'Outdoor', connections = {'dranik', 'wallofslaughter', 'harbingers'} },
+    { short = 'wallofslaughter', name = 'Wall of Slaughter',           era = 'Omens of War',     continent = 'Kuua',                 level = '65-70', type = 'Outdoor', connections = {'nobles', 'dranik', 'riftseekers', 'anguish'} },
+    { short = 'riftseekers',  name = 'Riftseekers\' Sanctum',          era = 'Omens of War',     continent = 'Kuua',                 level = '68-70', type = 'Dungeon', connections = {'wallofslaughter'} },
+    { short = 'harbingers',   name = 'Harbingers\' Spire',             era = 'Omens of War',     continent = 'Kuua',                 level = '65-70', type = 'Dungeon', connections = {'nobles'} },
+    { short = 'anguish',      name = 'Anguish, the Fallen Palace',     era = 'Omens of War',     continent = 'Kuua',                 level = '70',    type = 'Raid',    connections = {'wallofslaughter'} },
+    -- THE SERPENT'S SPINE & HUBS
+    { short = 'crescent',     name = 'Crescent Reach',                 era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '1-20', type = 'City',    connections = {'moors', 'poknowledge'} },
+    { short = 'moors',        name = 'Blightfire Moors',               era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '15-35', type = 'Outdoor', connections = {'crescent', 'stonehive', 'gorukar'} },
+    { short = 'stonehive',    name = 'Stone Hive',                     era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '20-40', type = 'Dungeon', connections = {'moors'} },
+    { short = 'gorukar',      name = 'Goru`kar Mesa',                  era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '30-50', type = 'Outdoor', connections = {'moors', 'blackfeather', 'steppes'} },
+    { short = 'blackfeather', name = 'Blackfeather Roost',             era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '45-60', type = 'Dungeon', connections = {'gorukar'} },
+    { short = 'steppes',      name = 'The Steppes',                    era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '45-65', type = 'Outdoor', connections = {'gorukar', 'icefall', 'sunderock'} },
+    { short = 'icefall',      name = 'Icefall Glacier',                era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '55-70', type = 'Outdoor', connections = {'steppes', 'valdeholm'} },
+    { short = 'valdeholm',    name = 'Valdeholm',                      era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '65-75', type = 'Dungeon', connections = {'icefall', 'frostcrypt'} },
+    { short = 'frostcrypt',   name = 'Frostcrypt, Shade King',         era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '70-75', type = 'Raid',    connections = {'valdeholm'} },
+    { short = 'sunderock',    name = 'Sunderock Springs',              era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '55-70', type = 'Outdoor', connections = {'steppes', 'vergalid', 'direwind'} },
+    { short = 'vergalid',     name = 'Vergalid Mines',                 era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '65-75', type = 'Dungeon', connections = {'sunderock'} },
+    { short = 'direwind',     name = 'Direwind Cliffs',                era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '65-75', type = 'Outdoor', connections = {'sunderock', 'ashengate'} },
+    { short = 'ashengate',    name = 'Ashengate, Reliquary of Scale',  era = 'The Serpent\'s Spine', continent = 'The Serpent\'s Spine', level = '70-75', type = 'Raid',    connections = {'direwind'} },
+    { short = 'guildlobby',   name = 'Guild Lobby',                    era = 'Hubs & Special',   continent = 'Hubs',                 level = '1-125', type = 'City',    connections = {'poknowledge', 'guildhall'} },
+    { short = 'guildhall',    name = 'Guild Hall',                     era = 'Hubs & Special',   continent = 'Hubs',                 level = '1-125', type = 'City',    connections = {'guildlobby'} },
+}
+
+local function initAtlasRegistry()
+    state.atlasAllZones = {}
+    for _, z in ipairs(NORRATH_ZONE_REGISTRY) do
+        local entry = {
+            short       = z.short,
+            name        = z.name,
+            era         = z.era,
+            continent   = z.continent,
+            level       = z.level or '1-65',
+            type        = z.type or 'Outdoor',
+            connections = z.connections or {},
+            hasMap      = false,
+            lineCount   = 0,
+            labelCount  = 0,
+            isCustom    = false,
+        }
+        state.atlasAllZones[#state.atlasAllZones + 1] = entry
     end
 end
 
@@ -692,6 +984,157 @@ local function scanMapFolders()
     state.activeMapsDirectory = folders[state.selectedFolderIndex] and folders[state.selectedFolderIndex].fullPath or baseDir
 end
 
+local function scanMapFiles()
+    local baseDir = state.activeMapsDirectory or state.baseMapsDirectory or getBaseMapsDirectory()
+    if not baseDir or baseDir == '' then return end
+
+    if not state.atlasAllZones or #state.atlasAllZones == 0 then
+        initAtlasRegistry()
+    end
+
+    local zoneLookup = {}
+    for _, z in ipairs(state.atlasAllZones) do
+        zoneLookup[z.short:lower()] = z
+    end
+
+    local discoveredShorts = {}
+
+    -- Method 1: lfs
+    local okLfs, lfs = pcall(require, 'lfs')
+    if okLfs and lfs and lfs.dir then
+        pcall(function()
+            for file in lfs.dir(baseDir) do
+                local zShort = file:match('^([%w_]+)%.txt$')
+                if zShort and not zShort:match('_%d$') and not zShort:match('_labels$') then
+                    discoveredShorts[zShort:lower()] = true
+                end
+            end
+        end)
+    end
+
+    -- Method 2: Windows cmd dir /b *.txt
+    if io.popen and not next(discoveredShorts) then
+        pcall(function()
+            local winPath = baseDir:gsub('/', '\\')
+            local pipe = io.popen('cmd /c dir /b "' .. winPath .. '\\*.txt" 2>nul')
+            if pipe then
+                for line in pipe:lines() do
+                    local zShort = line:match('^([%w_]+)%.txt$')
+                    if zShort and not zShort:match('_%d$') and not zShort:match('_labels$') then
+                        discoveredShorts[zShort:lower()] = true
+                    end
+                end
+                pipe:close()
+            end
+        end)
+    end
+
+    -- Method 3: POSIX find
+    if io.popen and not next(discoveredShorts) then
+        pcall(function()
+            local pipe = io.popen('find "' .. baseDir .. '" -maxdepth 1 -name "*.txt" -exec basename {} \\; 2>/dev/null')
+            if pipe then
+                for line in pipe:lines() do
+                    local zShort = line:match('^([%w_]+)%.txt$')
+                    if zShort and not zShort:match('_%d$') and not zShort:match('_labels$') then
+                        discoveredShorts[zShort:lower()] = true
+                    end
+                end
+                pipe:close()
+            end
+        end)
+    end
+
+    -- Probe check for registered zones if dir listing was empty or partial
+    for _, z in ipairs(state.atlasAllZones) do
+        local f = io.open(baseDir .. '/' .. z.short .. '.txt', 'r')
+        if f then
+            f:close()
+            z.hasMap = true
+            discoveredShorts[z.short:lower()] = true
+        else
+            z.hasMap = (discoveredShorts[z.short:lower()] == true)
+        end
+    end
+
+    -- Add any custom on-disk zones not in the built-in registry
+    for s, _ in pairs(discoveredShorts) do
+        if not zoneLookup[s] then
+            local cleanName = s:gsub('^%l', string.upper)
+            local okZ, zName = pcall(function() return mq.TLO.Zone(s).Name() end)
+            if okZ and zName and zName ~= '' then cleanName = zName end
+
+            local entry = {
+                short       = s,
+                name        = cleanName,
+                era         = 'Custom / Other',
+                continent   = 'Custom / Other',
+                level       = 'Unknown',
+                type        = 'Outdoor',
+                connections = {},
+                hasMap      = true,
+                isCustom    = true,
+            }
+            state.atlasAllZones[#state.atlasAllZones + 1] = entry
+            zoneLookup[s] = entry
+        end
+    end
+end
+
+local function filterAtlasZones()
+    local q = (state.atlasSearchText or ''):lower():match('^%s*(.-)%s*$')
+    local eraFilter = ATLAS_ERA_OPTIONS[state.atlasEraFilterIdx] or 'All Expansions'
+    local typeFilter = ATLAS_TYPE_OPTIONS[state.atlasTypeFilterIdx] or 'All Zone Types'
+
+    local out = {}
+    for _, z in ipairs(state.atlasAllZones) do
+        local matchQuery = true
+        if q ~= '' then
+            local inName  = (z.name:lower():find(q, 1, true) ~= nil)
+            local inShort = (z.short:lower():find(q, 1, true) ~= nil)
+            local inEra   = (z.era:lower():find(q, 1, true) ~= nil)
+            local inCont  = (z.continent:lower():find(q, 1, true) ~= nil)
+            matchQuery    = (inName or inShort or inEra or inCont)
+        end
+
+        local matchEra = true
+        if eraFilter ~= 'All Expansions' then
+            matchEra = (z.era == eraFilter)
+        end
+
+        local matchType = true
+        if typeFilter ~= 'All Zone Types' then
+            if typeFilter == 'Cities & Hubs' then
+                matchType = (z.type == 'City')
+            elseif typeFilter == 'Outdoor & Wilderness' then
+                matchType = (z.type == 'Outdoor')
+            elseif typeFilter == 'Dungeons' then
+                matchType = (z.type == 'Dungeon')
+            elseif typeFilter == 'Planes' then
+                matchType = (z.type == 'Planar' or z.type == 'Planes' or z.era == 'Planes of Power')
+            elseif typeFilter == 'Raid Zones' then
+                matchType = (z.type == 'Raid')
+            end
+        end
+
+        if matchQuery and matchEra and matchType then
+            out[#out + 1] = z
+        end
+    end
+
+    table.sort(out, function(a, b)
+        if a.hasMap ~= b.hasMap then
+            return a.hasMap == true
+        end
+        return a.name < b.name
+    end)
+
+    state.atlasZoneList = out
+    if not state.atlasSelectedZone and #out > 0 then
+        state.atlasSelectedZone = out[1]
+    end
+end
+
 local function parseMapFile(filePath, layerId)
     local f = io.open(filePath, 'r')
     if not f then return 0, 0 end
@@ -776,7 +1219,7 @@ local function parseMapFile(filePath, layerId)
     return linesAdded, labelsAdded
 end
 
-local function loadZoneMap(zoneShort)
+local function loadZoneMap(zoneShort, isAtlas)
     if not zoneShort or zoneShort == '' then return false end
 
     if not state.mapFolders or #state.mapFolders == 0 or not state.activeMapsDirectory then
@@ -822,17 +1265,30 @@ local function loadZoneMap(zoneShort)
 
     if mapData.totalLines > 0 or mapData.totalLabels > 0 then
         mapData.isLoaded = true
-        state.statusMsg = string.format('Loaded [%s]: %s (%d lines, %d labels)', folderDisplay, zoneShort, mapData.totalLines, mapData.totalLabels)
+        local modeStr = isAtlas and 'Atlas' or 'Live'
+        state.statusMsg = string.format('[%s] Loaded [%s]: %s (%d lines, %d labels)', modeStr, folderDisplay, zoneShort, mapData.totalLines, mapData.totalLabels)
 
-        -- Initial auto-center on player position
-        local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
-        local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
-        if okMeX and okMeY and meX and meY then
-            viewport.centerEqX = meX
-            viewport.centerEqY = meY
+        if not isAtlas then
+            -- Live mode auto-center on player position
+            local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+            local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+            if okMeX and okMeY and meX and meY then
+                viewport.centerEqX = meX
+                viewport.centerEqY = meY
+            else
+                viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+                viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+            end
         else
+            -- Atlas mode center on map bounding box center & adjust zoom comfortably
             viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
             viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+            local spanX = math.abs(mapData.bounds.maxX - mapData.bounds.minX)
+            local spanY = math.abs(mapData.bounds.maxY - mapData.bounds.minY)
+            local maxSpan = math.max(spanX, spanY)
+            if maxSpan > 50 then
+                viewport.zoom = math.max(viewport.minZoom, math.min(1.2, 700 / maxSpan))
+            end
         end
         return true
     else
@@ -840,6 +1296,168 @@ local function loadZoneMap(zoneShort)
         state.statusMsg = string.format('No map files for "%s" in [%s]', zoneShort, folderDisplay)
         return false
     end
+end
+
+local function navigateToAtlasZone(zoneShort, pushHistory)
+    if not zoneShort or zoneShort == '' then return end
+
+    if pushHistory ~= false then
+        if state.atlasHistoryIdx < #state.atlasHistory then
+            for i = #state.atlasHistory, state.atlasHistoryIdx + 1, -1 do
+                state.atlasHistory[i] = nil
+            end
+        end
+        state.atlasHistory[#state.atlasHistory + 1] = zoneShort
+        state.atlasHistoryIdx = #state.atlasHistory
+    end
+
+    state.viewMode = 'ATLAS'
+    state.atlasZoneShort = zoneShort
+    ctrl.followPlayer = false
+
+    local found = nil
+    for _, z in ipairs(state.atlasAllZones) do
+        if z.short:lower() == zoneShort:lower() then
+            found = z
+            break
+        end
+    end
+    if not found then
+        found = { short = zoneShort, name = zoneShort, era = 'Custom / Other', continent = 'Unknown', level = '?', type = 'Outdoor', connections = {}, hasMap = true }
+    end
+    state.atlasSelectedZone = found
+    state.atlasZoneName = found.name
+
+    loadZoneMap(zoneShort, true)
+end
+
+local function returnToLiveZone()
+    state.viewMode = 'LIVE'
+    state.atlasZoneShort = ''
+    state.atlasZoneName = ''
+    ctrl.followPlayer = true
+    loadZoneMap(state.currentZoneShort, false)
+    state.statusMsg = string.format('Returned to Live View: %s (%s)', state.currentZoneName, state.currentZoneShort)
+end
+
+local function atlasHistoryBack()
+    if state.atlasHistoryIdx > 1 then
+        state.atlasHistoryIdx = state.atlasHistoryIdx - 1
+        local prevShort = state.atlasHistory[state.atlasHistoryIdx]
+        navigateToAtlasZone(prevShort, false)
+    end
+end
+
+local function atlasHistoryForward()
+    if state.atlasHistoryIdx < #state.atlasHistory then
+        state.atlasHistoryIdx = state.atlasHistoryIdx + 1
+        local nextShort = state.atlasHistory[state.atlasHistoryIdx]
+        navigateToAtlasZone(nextShort, false)
+    end
+end
+
+local function focusPoi(poi)
+    if not poi then return end
+    viewport.centerEqX = poi.x
+    viewport.centerEqY = poi.y
+    ctrl.followPlayer = false
+    state.highlightedPoi = {
+        x = poi.x,
+        y = poi.y,
+        z = poi.z or 0,
+        text = poi.text or 'Point of Interest',
+        time = mq.gettime(),
+    }
+    state.activeTab = 1
+    state.statusMsg = string.format('Focused on POI: %s (Y:%.1f, X:%.1f, Z:%.1f)', poi.text, poi.y, poi.x, poi.z or 0)
+end
+
+-- ============================================================================
+-- NORRATH SHORTEST TRAVEL ROUTE FINDER (BFS Graph Search)
+-- ============================================================================
+local function findZoneRoute(startShort, targetShort)
+    if not startShort or startShort == '' or not targetShort or targetShort == '' then
+        return nil, 0
+    end
+    local sStart = startShort:lower():match('^%s*(.-)%s*$')
+    local sTarget = targetShort:lower():match('^%s*(.-)%s*$')
+    if sStart == '' or sTarget == '' then return nil, 0 end
+
+    -- Build zone lookup map for rich metadata
+    local zoneLookup = {}
+    for _, z in ipairs(state.atlasAllZones or {}) do
+        if z.short then
+            zoneLookup[z.short:lower()] = z
+        end
+    end
+
+    local startEntry = zoneLookup[sStart] or { short = sStart, name = sStart, era = 'Unknown', type = 'Zone', level = '?' }
+    local targetEntry = zoneLookup[sTarget] or { short = sTarget, name = sTarget, era = 'Unknown', type = 'Zone', level = '?' }
+
+    if sStart == sTarget then
+        return { startEntry }, 0
+    end
+
+    -- Build symmetric bidirectional adjacency graph
+    local adj = {}
+    local function addEdge(u, v)
+        if not u or not v or u == '' or v == '' then return end
+        u = u:lower()
+        v = v:lower()
+        if not adj[u] then adj[u] = {} end
+        if not adj[v] then adj[v] = {} end
+        adj[u][v] = true
+        adj[v][u] = true
+    end
+
+    for _, z in ipairs(state.atlasAllZones or {}) do
+        local u = z.short:lower()
+        for _, c in ipairs(z.connections or {}) do
+            addEdge(u, c)
+        end
+    end
+
+    -- Breadth-First Search (guaranteed shortest unweighted hop path)
+    local queue = { sStart }
+    local visited = { [sStart] = true }
+    local parent = {}
+
+    local found = false
+    local qHead = 1
+    while qHead <= #queue do
+        local curr = queue[qHead]
+        qHead = qHead + 1
+
+        if curr == sTarget then
+            found = true
+            break
+        end
+
+        local neighbors = adj[curr] or {}
+        for nbr, _ in pairs(neighbors) do
+            if not visited[nbr] then
+                visited[nbr] = true
+                parent[nbr] = curr
+                queue[#queue + 1] = nbr
+            end
+        end
+    end
+
+    if not found then
+        return nil, 0
+    end
+
+    -- Reconstruct path by backtracking from target to start
+    local path = {}
+    local curr = sTarget
+    while curr do
+        local zInfo = zoneLookup[curr] or { short = curr, name = curr, era = 'Unknown', type = 'Zone', level = '?' }
+        table.insert(path, 1, zInfo)
+        curr = parent[curr]
+    end
+
+    local hops = math.max(0, #path - 1)
+    return path, hops
 end
 
 -- ============================================================================
@@ -1693,239 +2311,268 @@ local function DrawMapCanvas(availW, availH)
         end
     end
 
-    -- Draw Group Members
-    if ctrl.showGroup then
-        local grpCol = ImGui.GetColorU32(0.20, 0.90, 0.80, 1.0)
-        for _, gm in ipairs(spawns.groupMembers) do
-            local sx, sy = worldToScreen(gm.x, gm.y, cX, cY, availW, availH)
-            if sx >= cX and sx <= cX + availW and sy >= cY and sy <= cY + availH then
-                drawList:AddCircleFilled(ImVec2(sx, sy), 4.5, grpCol)
-                drawList:AddText(ImVec2(sx + 6, sy - 6), grpCol, gm.name)
+    -- Draw Highlighted POI Marker (if active)
+    if state.highlightedPoi then
+        local poi = state.highlightedPoi
+        local now = mq.gettime()
+        if (now - poi.time) < 20000 then
+            local psx, psy = worldToScreen(poi.x, poi.y, cX, cY, availW, availH)
+            if psx >= cX - 50 and psx <= cX + availW + 50 and psy >= cY - 50 and psy <= cY + availH + 50 then
+                local pulse = math.sin((now - poi.time) * 0.008) * 5.0
+                local rRad = math.max(10.0, 16.0 + pulse)
+                drawList:AddCircle(ImVec2(psx, psy), rRad, ImGui.GetColorU32(1.0, 0.85, 0.2, 0.9), 0, 2.5)
+                drawList:AddCircleFilled(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.2, 1.0))
+                drawList:AddCircle(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(0, 0, 0, 0.9), 0, 1.5)
+                drawList:AddLine(ImVec2(psx - rRad - 4, psy), ImVec2(psx + rRad + 4, psy), ImGui.GetColorU32(1.0, 0.85, 0.2, 0.7), 1.5)
+                drawList:AddLine(ImVec2(psx, psy - rRad - 4), ImVec2(psx, psy + rRad + 4), ImGui.GetColorU32(1.0, 0.85, 0.2, 0.7), 1.5)
+                local pLabel = string.format('[POI] %s', poi.text)
+                drawList:AddText(ImVec2(psx + 8, psy - 14), ImGui.GetColorU32(0, 0, 0, 0.95), pLabel)
+                drawList:AddText(ImVec2(psx + 7, psy - 15), ImGui.GetColorU32(1.0, 0.9, 0.3, 1.0), pLabel)
             end
+        else
+            state.highlightedPoi = nil
         end
     end
 
-    -- Current Target ID
-    local targetId = 0
-    local okTarg, tId = pcall(function() return mq.TLO.Target.ID() end)
-    if okTarg and tId then targetId = tId end
+    local isAtlasRemote = (state.viewMode == 'ATLAS' and state.atlasZoneShort ~= '' and state.atlasZoneShort:lower() ~= state.currentZoneShort:lower())
 
-    -- Draw NPCs and Process Click Hit-Testing
-    local hoveredMob = nil
-    local clickedMob = nil
-    local doubleClickedMob = nil
-
-    if ctrl.showNPCs then
-        for _, mob in ipairs(spawns.filteredNPCs) do
-            local alphaMult, isVis = getZAlphaMultiplier(mob.z, sf.minZ, sf.maxZ)
-
-            if isVis and alphaMult > 0.01 then
-                local sx, sy = worldToScreen(mob.x, mob.y, cX, cY, availW, availH)
-
-                if sx >= cX - 10 and sx <= cX + availW + 10 and sy >= cY - 10 and sy <= cY + availH + 10 then
-                    -- Determine Colors
-                    local conStyle = getConStyle(mob.conColor)
-                    local conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, alphaMult)
-
-                    local cNav = navState.cache[mob.id]
-                    local isPathable = cNav and cNav.hasPath
-                    local navColU32 = (isPathable and ImGui.GetColorU32(0.15, 0.95, 0.35, alphaMult)) or ImGui.GetColorU32(0.95, 0.20, 0.20, alphaMult)
-                    if not navState.meshLoaded then
-                        navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
-                    end
-
-                    local nodeRadius = ctrl.npcNodeRadius
-                local isTarget = (mob.id == targetId)
-
-                -- Draw Node by Color Mode
-                if ctrl.colorModeIndex == 1 then
-                    -- Dual Mode: Con fill with Nav halo
-                    drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
-                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
-                elseif ctrl.colorModeIndex == 2 then
-                    -- Navmesh Reachability Only
-                    drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32)
-                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
-                else
-                    -- Con Colors Only
-                    drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
-                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+    if isAtlasRemote then
+        local aName = (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort
+        drawList:AddText(ImVec2(cX + 12, cY + 12), ImGui.GetColorU32(1.0, 0.8, 0.25, 0.95), string.format('[ATLAS VIEW] %s (%s)', aName, state.atlasZoneShort))
+        drawList:AddText(ImVec2(cX + 12, cY + 28), ImGui.GetColorU32(0.65, 0.72, 0.82, 0.8), 'Entity tracking inactive for remote zone. Click "Return to Live" on toolbar to track character.')
+    else
+        -- Draw Group Members
+        if ctrl.showGroup then
+            local grpCol = ImGui.GetColorU32(0.20, 0.90, 0.80, 1.0)
+            for _, gm in ipairs(spawns.groupMembers) do
+                local sx, sy = worldToScreen(gm.x, gm.y, cX, cY, availW, availH)
+                if sx >= cX and sx <= cX + availW and sy >= cY and sy <= cY + availH then
+                    drawList:AddCircleFilled(ImVec2(sx, sy), 4.5, grpCol)
+                    drawList:AddText(ImVec2(sx + 6, sy - 6), grpCol, gm.name)
                 end
+            end
+        end
 
-                -- Target Highlight Ring
-                if isTarget then
-                    local pulseCol = ImGui.GetColorU32(1.0, 0.85, 0.20, 1.0)
-                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 4.0, pulseCol, 0, 2.0)
-                end
+        -- Current Target ID
+        local targetId = 0
+        local okTarg, tId = pcall(function() return mq.TLO.Target.ID() end)
+        if okTarg and tId then targetId = tId end
 
-                -- Aggro / Hate Indicator
-                if mob.isAggro then
-                    local hateCol = ImGui.GetColorU32(1.0, 0.1, 0.1, 0.9)
-                    drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 6.0, hateCol, 0, 1.5)
-                end
+        -- Draw NPCs and Process Click Hit-Testing
+        local hoveredMob = nil
+        local clickedMob = nil
+        local doubleClickedMob = nil
 
-                -- Optional Name Tag on Map
-                if ctrl.showNPCNames then
-                    drawList:AddText(ImVec2(sx + 6, sy - 6), conColU32, mob.cleanName)
-                end
+        if ctrl.showNPCs then
+            for _, mob in ipairs(spawns.filteredNPCs) do
+                local alphaMult, isVis = getZAlphaMultiplier(mob.z, sf.minZ, sf.maxZ)
 
-                -- Hit Testing
-                if isHovered then
-                    local mDist = math.sqrt((mousePos.x - sx)^2 + (mousePos.y - sy)^2)
-                    if mDist <= (nodeRadius + 4.0) then
-                        hoveredMob = mob
-                        drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 5.0, ImGui.GetColorU32(1, 1, 1, 0.9), 0, 2.0)
+                if isVis and alphaMult > 0.01 then
+                    local sx, sy = worldToScreen(mob.x, mob.y, cX, cY, availW, availH)
 
-                        if ImGui.IsMouseClicked(0) then
-                            clickedMob = mob
+                    if sx >= cX - 10 and sx <= cX + availW + 10 and sy >= cY - 10 and sy <= cY + availH + 10 then
+                        -- Determine Colors
+                        local conStyle = getConStyle(mob.conColor)
+                        local conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, alphaMult)
+
+                        local cNav = navState.cache[mob.id]
+                        local isPathable = cNav and cNav.hasPath
+                        local navColU32 = (isPathable and ImGui.GetColorU32(0.15, 0.95, 0.35, alphaMult)) or ImGui.GetColorU32(0.95, 0.20, 0.20, alphaMult)
+                        if not navState.meshLoaded then
+                            navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
                         end
-                        if ImGui.IsMouseDoubleClicked(0) then
-                            doubleClickedMob = mob
+
+                        local nodeRadius = ctrl.npcNodeRadius
+                        local isTarget = (mob.id == targetId)
+
+                        -- Draw Node by Color Mode
+                        if ctrl.colorModeIndex == 1 then
+                            -- Dual Mode: Con fill with Nav halo
+                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
+                        elseif ctrl.colorModeIndex == 2 then
+                            -- Navmesh Reachability Only
+                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                        else
+                            -- Con Colors Only
+                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                        end
+
+                        -- Target Highlight Ring
+                        if isTarget then
+                            local pulseCol = ImGui.GetColorU32(1.0, 0.85, 0.20, 1.0)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 4.0, pulseCol, 0, 2.0)
+                        end
+
+                        -- Aggro / Hate Indicator
+                        if mob.isAggro then
+                            local hateCol = ImGui.GetColorU32(1.0, 0.1, 0.1, 0.9)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 6.0, hateCol, 0, 1.5)
+                        end
+
+                        -- Optional Name Tag on Map
+                        if ctrl.showNPCNames then
+                            drawList:AddText(ImVec2(sx + 6, sy - 6), conColU32, mob.cleanName)
+                        end
+
+                        -- Hit Testing
+                        if isHovered then
+                            local mDist = math.sqrt((mousePos.x - sx)^2 + (mousePos.y - sy)^2)
+                            if mDist <= (nodeRadius + 4.0) then
+                                hoveredMob = mob
+                                drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 5.0, ImGui.GetColorU32(1, 1, 1, 0.9), 0, 2.0)
+
+                                if ImGui.IsMouseClicked(0) then
+                                    clickedMob = mob
+                                end
+                                if ImGui.IsMouseDoubleClicked(0) then
+                                    doubleClickedMob = mob
+                                end
+                            end
                         end
                     end
                 end
             end
         end
-    end
-end
 
-    -- Process Clicked NPC Actions
-    if doubleClickedMob then
-        actionQueue.pendingTargetId = doubleClickedMob.id
-        actionQueue.pendingNavId = doubleClickedMob.id
-        state.activeNavSpawnId = doubleClickedMob.id
-        state.activeNavLoc = nil
-        state.activeNavCommandTime = mq.gettime()
-        state.statusMsg = string.format('Navigating to: %s (ID: %d)', doubleClickedMob.cleanName, doubleClickedMob.id)
-    elseif clickedMob then
-        actionQueue.pendingTargetId = clickedMob.id
-        state.statusMsg = string.format('Selected: %s (ID: %d, Lvl: %d)', clickedMob.cleanName, clickedMob.id, clickedMob.level)
-    end
-
-    -- Ground Click-to-Move Navigation (Double-click or Ctrl+Left click on empty terrain)
-    if isHovered and not hoveredMob then
-        if ImGui.IsMouseDoubleClicked(0) or (ImGui.IsMouseClicked(0) and hasCtrl) then
-            local clickX, clickY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
-            actionQueue.pendingNavLoc = { y = clickY, x = clickX, z = playerZ }
-            state.activeNavLoc = { y = clickY, x = clickX, z = playerZ }
-            state.activeNavSpawnId = 0
+        -- Process Clicked NPC Actions
+        if doubleClickedMob then
+            actionQueue.pendingTargetId = doubleClickedMob.id
+            actionQueue.pendingNavId = doubleClickedMob.id
+            state.activeNavSpawnId = doubleClickedMob.id
+            state.activeNavLoc = nil
             state.activeNavCommandTime = mq.gettime()
-            state.statusMsg = string.format('Navigating to ground loc: Y:%.1f, X:%.1f, Z:%.1f', clickY, clickX, playerZ)
+            state.statusMsg = string.format('Navigating to: %s (ID: %d)', doubleClickedMob.cleanName, doubleClickedMob.id)
+        elseif clickedMob then
+            actionQueue.pendingTargetId = clickedMob.id
+            state.statusMsg = string.format('Selected: %s (ID: %d, Lvl: %d)', clickedMob.cleanName, clickedMob.id, clickedMob.level)
         end
-    end
 
-    -- Query Real-Time Navigation Status
-    local isNavActive = false
-    local okNav, act = pcall(function() return mq.TLO.Navigation.Active() end)
-    if okNav and act then isNavActive = true end
+        -- Ground Click-to-Move Navigation (Double-click or Ctrl+Left click on empty terrain)
+        if isHovered and not hoveredMob then
+            if ImGui.IsMouseDoubleClicked(0) or (ImGui.IsMouseClicked(0) and hasCtrl) then
+                local clickX, clickY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
+                actionQueue.pendingNavLoc = { y = clickY, x = clickX, z = playerZ }
+                state.activeNavLoc = { y = clickY, x = clickX, z = playerZ }
+                state.activeNavSpawnId = 0
+                state.activeNavCommandTime = mq.gettime()
+                state.statusMsg = string.format('Navigating to ground loc: Y:%.1f, X:%.1f, Z:%.1f', clickY, clickX, playerZ)
+            end
+        end
 
-    -- Draw Active Destination / Waypoint Marker & Path Line
-    local navRecentlyTriggered = state.activeNavCommandTime and ((mq.gettime() - state.activeNavCommandTime) < 5000)
-    local hasPendingNav = (actionQueue.pendingNavLoc ~= nil) or (actionQueue.pendingNavId > 0)
-    local shouldDrawNav = ctrl.showNavLine and (isNavActive or navRecentlyTriggered or hasPendingNav or state.activeNavLoc ~= nil or (state.activeNavSpawnId and state.activeNavSpawnId > 0))
+        -- Query Real-Time Navigation Status
+        local isNavActive = false
+        local okNav, act = pcall(function() return mq.TLO.Navigation.Active() end)
+        if okNav and act then isNavActive = true end
 
-    if shouldDrawNav then
+        -- Draw Active Destination / Waypoint Marker & Path Line
+        local navRecentlyTriggered = state.activeNavCommandTime and ((mq.gettime() - state.activeNavCommandTime) < 5000)
+        local hasPendingNav = (actionQueue.pendingNavLoc ~= nil) or (actionQueue.pendingNavId > 0)
+        local shouldDrawNav = ctrl.showNavLine and (isNavActive or navRecentlyTriggered or hasPendingNav or state.activeNavLoc ~= nil or (state.activeNavSpawnId and state.activeNavSpawnId > 0))
+
+        if shouldDrawNav then
+            local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+            local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+            if okMeX and okMeY and meX and meY then
+                local pSx, pSy = worldToScreen(meX, meY, cX, cY, availW, availH)
+                local destX, destY = nil, nil
+
+                if state.activeNavLoc and state.activeNavLoc.x and state.activeNavLoc.y then
+                    destX = state.activeNavLoc.x
+                    destY = state.activeNavLoc.y
+                else
+                    local effSpawnId = (state.activeNavSpawnId and state.activeNavSpawnId > 0 and state.activeNavSpawnId) or targetId
+                    if effSpawnId and effSpawnId > 0 then
+                        local okSp, sp = pcall(function() return mq.TLO.Spawn(effSpawnId) end)
+                        if okSp and sp and sp() then
+                            local okSx, sX = pcall(function() return sp.X() end)
+                            local okSy, sY = pcall(function() return sp.Y() end)
+                            if okSx and okSy and sX and sY then
+                                destX, destY = sX, sY
+                            end
+                        end
+                    end
+                end
+
+                if destX and destY then
+                    local pDist = math.sqrt((meX - destX)^2 + (meY - destY)^2)
+                    if not isNavActive and pDist < 12 and not hasPendingNav and (mq.gettime() - (state.activeNavCommandTime or 0) > 1500) then
+                        -- Arrived at destination
+                        state.activeNavLoc = nil
+                        state.activeNavSpawnId = 0
+                    else
+                        local dSx, dSy = worldToScreen(destX, destY, cX, cY, availW, availH)
+
+                        -- Path Line: Solid Emerald with Dark Shadow for visibility
+                        drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.0, 0.0, 0.0, 0.75), 3.5)
+                        drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.15, 0.95, 0.40, 0.95), 2.0)
+
+                        -- Destination Waypoint Marker (Pulsing Bullseye)
+                        local pulse = math.sin(os.clock() * 5.0) * 2.0
+                        drawList:AddCircle(ImVec2(dSx, dSy), 11.0 + pulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.6), 0, 2.0)
+                        drawList:AddCircleFilled(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0))
+                        drawList:AddCircle(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.2)
+
+                        -- Distance Text Label
+                        local distStr = string.format('%.0fyd', pDist)
+                        drawList:AddText(ImVec2(dSx + 8, dSy - 8), ImGui.GetColorU32(0.0, 0.0, 0.0, 1.0), distStr)
+                        drawList:AddText(ImVec2(dSx + 7, dSy - 9), ImGui.GetColorU32(1.0, 0.9, 0.3, 1.0), distStr)
+                    end
+                end
+            end
+        else
+            if not isNavActive and not hasPendingNav and (mq.gettime() - (state.activeNavCommandTime or 0) > 4000) then
+                state.activeNavLoc = nil
+                state.activeNavSpawnId = 0
+            end
+        end
+
+        -- Draw Player Marker (Arrow pointing in Heading direction)
         local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
         local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+        local _, meHeading = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
+
         if okMeX and okMeY and meX and meY then
-            local pSx, pSy = worldToScreen(meX, meY, cX, cY, availW, availH)
-            local destX, destY = nil, nil
+            local psx, psy = worldToScreen(meX, meY, cX, cY, availW, availH)
 
-            if state.activeNavLoc and state.activeNavLoc.x and state.activeNavLoc.y then
-                destX = state.activeNavLoc.x
-                destY = state.activeNavLoc.y
-            else
-                local effSpawnId = (state.activeNavSpawnId and state.activeNavSpawnId > 0 and state.activeNavSpawnId) or targetId
-                if effSpawnId and effSpawnId > 0 then
-                    local okSp, sp = pcall(function() return mq.TLO.Spawn(effSpawnId) end)
-                    if okSp and sp and sp() then
-                        local okSx, sX = pcall(function() return sp.X() end)
-                        local okSy, sY = pcall(function() return sp.Y() end)
-                        if okSx and okSy and sX and sY then
-                            destX, destY = sX, sY
-                        end
-                    end
-                end
+            -- Auto-follow player
+            if ctrl.followPlayer and not viewport.isDragging then
+                viewport.centerEqX = meX
+                viewport.centerEqY = meY
             end
 
-            if destX and destY then
-                local pDist = math.sqrt((meX - destX)^2 + (meY - destY)^2)
-                if not isNavActive and pDist < 12 and not hasPendingNav and (mq.gettime() - (state.activeNavCommandTime or 0) > 1500) then
-                    -- Arrived at destination
-                    state.activeNavLoc = nil
-                    state.activeNavSpawnId = 0
-                else
-                    local dSx, dSy = worldToScreen(destX, destY, cX, cY, availW, availH)
+            -- Calculate Heading Triangle
+            local heading = meHeading or 0
+            local rad = math.rad(heading)
+            local arrowLen = ctrl.playerNodeRadius + 7.0
+            local baseLen = ctrl.playerNodeRadius + 2.0
+            local wingAngle = math.rad(140)
 
-                    -- Path Line: Solid Emerald with Dark Shadow for visibility
-                    drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.0, 0.0, 0.0, 0.75), 3.5)
-                    drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.15, 0.95, 0.40, 0.95), 2.0)
+            local dirX = math.sin(rad)
+            local dirY = -math.cos(rad)
 
-                    -- Destination Waypoint Marker (Pulsing Bullseye)
-                    local pulse = math.sin(os.clock() * 5.0) * 2.0
-                    drawList:AddCircle(ImVec2(dSx, dSy), 11.0 + pulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.6), 0, 2.0)
-                    drawList:AddCircleFilled(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0))
-                    drawList:AddCircle(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.2)
+            local tipX = psx + dirX * arrowLen
+            local tipY = psy + dirY * arrowLen
 
-                    -- Distance Text Label
-                    local distStr = string.format('%.0fyd', pDist)
-                    drawList:AddText(ImVec2(dSx + 8, dSy - 8), ImGui.GetColorU32(0.0, 0.0, 0.0, 1.0), distStr)
-                    drawList:AddText(ImVec2(dSx + 7, dSy - 9), ImGui.GetColorU32(1.0, 0.9, 0.3, 1.0), distStr)
-                end
-            end
+            local leftRad = rad - wingAngle
+            local rightRad = rad + wingAngle
+
+            local leftX = psx + math.sin(leftRad) * baseLen
+            local leftY = psy + (-math.cos(leftRad)) * baseLen
+
+            local rightX = psx + math.sin(rightRad) * baseLen
+            local rightY = psy + (-math.cos(rightRad)) * baseLen
+
+            local playerCol = ImGui.GetColorU32(0.25, 0.85, 1.00, 1.0)
+            local playerFillCol = ImGui.GetColorU32(0.10, 0.40, 0.85, 0.85)
+
+            drawList:AddTriangleFilled(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerFillCol)
+            drawList:AddTriangle(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerCol, 1.5)
+            drawList:AddCircleFilled(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(1.0, 1.0, 1.0, 1.0))
+            drawList:AddCircle(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.0)
         end
-    else
-        if not isNavActive and not hasPendingNav and (mq.gettime() - (state.activeNavCommandTime or 0) > 4000) then
-            state.activeNavLoc = nil
-            state.activeNavSpawnId = 0
-        end
-    end
-
-    -- Draw Player Marker (Arrow pointing in Heading direction)
-    local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
-    local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
-    local _, meHeading = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
-
-    if okMeX and okMeY and meX and meY then
-        local psx, psy = worldToScreen(meX, meY, cX, cY, availW, availH)
-
-        -- Auto-follow player
-        if ctrl.followPlayer and not viewport.isDragging then
-            viewport.centerEqX = meX
-            viewport.centerEqY = meY
-        end
-
-        -- Calculate Heading Triangle
-        local heading = meHeading or 0
-        -- In EverQuest standard compass degrees: 0 = North (Up, -Y screen), 90 = East (Right, +X screen), 180 = South (Down, +Y screen), 270 = West (Left, -X screen)
-        local rad = math.rad(heading)
-        local arrowLen = ctrl.playerNodeRadius + 7.0
-        local baseLen = ctrl.playerNodeRadius + 2.0
-        local wingAngle = math.rad(140)
-
-        -- Direction vector (Clockwise Compass Heading to Screen Space: +X is East/Right, -Y is North/Up)
-        local dirX = math.sin(rad)
-        local dirY = -math.cos(rad)
-
-        local tipX = psx + dirX * arrowLen
-        local tipY = psy + dirY * arrowLen
-
-        local leftRad = rad - wingAngle
-        local rightRad = rad + wingAngle
-
-        local leftX = psx + math.sin(leftRad) * baseLen
-        local leftY = psy + (-math.cos(leftRad)) * baseLen
-
-        local rightX = psx + math.sin(rightRad) * baseLen
-        local rightY = psy + (-math.cos(rightRad)) * baseLen
-
-        local playerCol = ImGui.GetColorU32(0.25, 0.85, 1.00, 1.0)
-        local playerFillCol = ImGui.GetColorU32(0.10, 0.40, 0.85, 0.85)
-
-        drawList:AddTriangleFilled(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerFillCol)
-        drawList:AddTriangle(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerCol, 1.5)
-        drawList:AddCircleFilled(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(1.0, 1.0, 1.0, 1.0))
-        drawList:AddCircle(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.0)
     end
 
     -- Pop Clipping Rectangle
@@ -2001,6 +2648,458 @@ end
         )
         ImGui.SetTooltip('%s', tt)
     end
+end
+
+-- ============================================================================
+-- POI SIDE DRAWER (Map Canvas Overlay)
+-- ============================================================================
+local function DrawPoiDrawer(availW, availH)
+    ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
+    if ImGui.BeginChild('##PoiDrawerPanel', ImVec2(availW, availH), true, ImGuiWindowFlags.MenuBar or 0) then
+        if ImGui.BeginMenuBar() then
+            ImGui.TextColored(0.3, 0.9, 1.0, 1.0, 'Points of Interest')
+            ImGui.SameLine()
+            local closeX = availW - 32
+            if closeX > 100 then
+                ImGui.SetCursorPosX(closeX)
+            end
+            if ImGui.SmallButton('X##ClosePoiDrawer') then
+                state.showPoiDrawer = false
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Close POI Drawer') end
+            ImGui.EndMenuBar()
+        end
+
+        -- Search Bar
+        ImGui.PushItemWidth(availW - 36)
+        local pSearch, pChanged = ImGui.InputTextWithHint('##PoiSearchFilter', 'Filter labels/POIs...', state.poiSearchText or '')
+        if pChanged then
+            state.poiSearchText = pSearch
+        end
+        ImGui.PopItemWidth()
+        if (state.poiSearchText or '') ~= '' then
+            ImGui.SameLine()
+            if ImGui.SmallButton('X##ClearPoiFilter') then
+                state.poiSearchText = ''
+            end
+        end
+
+        ImGui.Separator()
+
+        -- Filter POIs from mapData.labels
+        local q = (state.poiSearchText or ''):lower():match('^%s*(.-)%s*$')
+        local labels = mapData.labels or {}
+        local matching = {}
+
+        for _, lb in ipairs(labels) do
+            if q == '' or lb.text:lower():find(q, 1, true) ~= nil then
+                matching[#matching + 1] = lb
+            end
+        end
+
+        ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('Matches: %d of %d labels', #matching, #labels))
+
+        local listH = availH - 72
+        if ImGui.BeginChild('##PoiListScroll', ImVec2(0, listH), true) then
+            if #matching == 0 then
+                ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'No points of interest match.')
+            else
+                local tableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0)
+                if ImGui.BeginTable('##PoiDrawerTable', 2, tableFlags) then
+                    ImGui.TableSetupColumn('Label / Location', ImGuiTableColumnFlags.WidthStretch or 0)
+                    ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, 56)
+                    ImGui.TableHeadersRow()
+
+                    for idx, poi in ipairs(matching) do
+                        ImGui.TableNextRow()
+                        ImGui.TableNextColumn()
+                        local isHighlighted = (state.highlightedPoi and state.highlightedPoi.text == poi.text and state.highlightedPoi.x == poi.x and state.highlightedPoi.y == poi.y)
+                        if isHighlighted then
+                            ImGui.TextColored(1.0, 0.85, 0.2, 1.0, string.format('★ %s', poi.text))
+                        else
+                            ImGui.TextColored(poi.r, poi.g, poi.b, 1.0, poi.text)
+                        end
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('Y: %.1f, X: %.1f, Z: %.1f\nClick "Focus" to center map and pulse locator pin.', poi.y, poi.x, poi.z)
+                        end
+
+                        ImGui.TableNextColumn()
+                        if ImGui.SmallButton(string.format('Focus##PoiF_%d', idx)) then
+                            focusPoi(poi)
+                        end
+                        if ImGui.IsItemHovered() then
+                            ImGui.SetTooltip('%s', 'Center map on this POI and highlight with animated pin')
+                        end
+                    end
+                    ImGui.EndTable()
+                end
+            end
+        end
+        ImGui.EndChild()
+    end
+    ImGui.EndChild()
+    ImGui.PopStyleVar()
+end
+
+-- ============================================================================
+-- ZONE ATLAS TAB (Interactive Norrath Map Browser & Travel Explorer)
+-- ============================================================================
+local function DrawAtlasTab()
+    local availW, availH = ImGui.GetContentRegionAvail()
+    local leftW = math.max(340, math.min(480, availW * 0.40))
+    local rightW = availW - leftW - 12
+
+    -- Left Pane: Zone Catalog & Filter Surface
+    if ImGui.BeginChild('##AtlasCatalogPane', ImVec2(leftW, availH), true) then
+        -- Search Bar
+        ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Norrath Zone Catalog')
+        ImGui.PushItemWidth(leftW - 50)
+        local sVal, sChanged = ImGui.InputTextWithHint('##AtlasSearchInput', 'Search zone, era, continent...', state.atlasSearchText or '')
+        if sChanged then
+            state.atlasSearchText = sVal
+            filterAtlasZones()
+        end
+        ImGui.PopItemWidth()
+        if (state.atlasSearchText or '') ~= '' then
+            ImGui.SameLine()
+            if ImGui.SmallButton('X##ClearAtlasSearch') then
+                state.atlasSearchText = ''
+                filterAtlasZones()
+            end
+        end
+
+        -- Era Combo Filter
+        ImGui.PushItemWidth(leftW - 20)
+        local curEra = ATLAS_ERA_OPTIONS[state.atlasEraFilterIdx] or ATLAS_ERA_OPTIONS[1]
+        if ImGui.BeginCombo('##AtlasEraCombo', curEra) then
+            for idx, opt in ipairs(ATLAS_ERA_OPTIONS) do
+                local isSel = (idx == state.atlasEraFilterIdx)
+                if ImGui.Selectable(opt, isSel) then
+                    state.atlasEraFilterIdx = idx
+                    filterAtlasZones()
+                end
+                if isSel then ImGui.SetItemDefaultFocus() end
+            end
+            ImGui.EndCombo()
+        end
+
+        -- Type Combo Filter
+        local curType = ATLAS_TYPE_OPTIONS[state.atlasTypeFilterIdx] or ATLAS_TYPE_OPTIONS[1]
+        if ImGui.BeginCombo('##AtlasTypeCombo', curType) then
+            for idx, opt in ipairs(ATLAS_TYPE_OPTIONS) do
+                local isSel = (idx == state.atlasTypeFilterIdx)
+                if ImGui.Selectable(opt, isSel) then
+                    state.atlasTypeFilterIdx = idx
+                    filterAtlasZones()
+                end
+                if isSel then ImGui.SetItemDefaultFocus() end
+            end
+            ImGui.EndCombo()
+        end
+        ImGui.PopItemWidth()
+
+        ImGui.Separator()
+
+        -- Scan / Reload Buttons
+        if ImGui.SmallButton('Rescan Map Files##RescanBtn') then
+            scanMapFiles()
+            filterAtlasZones()
+        end
+        ImGui.SameLine()
+        ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('%d zones (%d shown)', #state.atlasAllZones, #state.atlasZoneList))
+
+        -- Zone List Table
+        local listHeight = availH - 125
+        if ImGui.BeginChild('##AtlasZoneListTableScroll', ImVec2(0, listHeight), true) then
+            local tableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0, ImGuiTableFlags.SelectionHighlight or 0)
+            if ImGui.BeginTable('##AtlasZoneListTable', 3, tableFlags) then
+                ImGui.TableSetupColumn('Zone Name', ImGuiTableColumnFlags.WidthStretch or 0)
+                ImGui.TableSetupColumn('Era / Type', ImGuiTableColumnFlags.WidthFixed or 0, 100)
+                ImGui.TableSetupColumn('Map', ImGuiTableColumnFlags.WidthFixed or 0, 42)
+                ImGui.TableHeadersRow()
+
+                for _, z in ipairs(state.atlasZoneList) do
+                    ImGui.TableNextRow()
+                    local isSelected = (state.atlasSelectedZone and state.atlasSelectedZone.short == z.short)
+                    local isCurrent = (state.currentZoneShort:lower() == z.short:lower())
+
+                    ImGui.TableNextColumn()
+                    local prefix = isCurrent and '▶ ' or ''
+                    local label = string.format('%s%s##z_%s', prefix, z.name, z.short)
+                    if ImGui.Selectable(label, isSelected, ImGuiSelectableFlags.SpanAllColumns or 0) then
+                        state.atlasSelectedZone = z
+                    end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Short: %s\nContinent: %s\nLevels: %s\nConnections: %d\n[Click] Select Zone Details', z.short, z.continent, z.level, #(z.connections or {}))
+                    end
+
+                    ImGui.TableNextColumn()
+                    local typeBadge = z.era
+                    if z.era == 'Classic' or z.era == 'Kunark' or z.era == 'Velious' then
+                        ImGui.TextColored(0.4, 0.8, 0.9, 0.9, typeBadge)
+                    elseif z.era == 'Luclin' or z.era == 'Planes of Power' then
+                        ImGui.TextColored(0.8, 0.6, 1.0, 0.9, typeBadge)
+                    else
+                        ImGui.TextColored(0.7, 0.7, 0.7, 0.85, typeBadge)
+                    end
+
+                    ImGui.TableNextColumn()
+                    if z.hasMap then
+                        ImGui.TextColored(0.2, 0.9, 0.35, 1.0, 'OK')
+                    else
+                        ImGui.TextColored(0.5, 0.5, 0.5, 0.5, '—')
+                    end
+                end
+                ImGui.EndTable()
+            end
+        end
+        ImGui.EndChild()
+    end
+    ImGui.EndChild()
+
+    ImGui.SameLine()
+
+    -- Right Pane: Selected Zone Detail, Quick View & Travel Graph
+    if ImGui.BeginChild('##AtlasDetailPane', ImVec2(rightW, availH), true) then
+        local z = state.atlasSelectedZone
+        if not z then
+            ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'Select a zone from the catalog on the left.')
+        else
+            -- Zone Header Banner
+            local isCurrent = (state.currentZoneShort:lower() == z.short:lower())
+            local isViewedInAtlas = (state.viewMode == 'ATLAS' and state.atlasZoneShort:lower() == z.short:lower())
+
+            ImGui.TextColored(0.25, 0.85, 1.0, 1.0, string.format('%s', z.name))
+            if isCurrent then
+                ImGui.SameLine()
+                ImGui.TextColored(0.2, 0.95, 0.4, 1.0, '(Current Zone)')
+            end
+            ImGui.TextColored(0.65, 0.72, 0.82, 0.85, string.format('Shortname: %s  |  Era: %s  |  Continent: %s  |  Level: %s  |  Type: %s', z.short, z.era, z.continent, z.level, z.type))
+
+            ImGui.Separator()
+
+            -- Actions Toolbar
+            if isViewedInAtlas then
+                ImGui.TextColored(1.0, 0.85, 0.2, 1.0, '★ Currently Active in Map View (Atlas Mode)')
+                ImGui.SameLine()
+                if ImGui.Button('Switch to Map Tab##GoMapTab') then
+                    state.activeTab = 1
+                end
+            else
+                if ImGui.Button(string.format('Open Map in Atlas View: %s##OpenAtlasBtn', z.name)) then
+                    navigateToAtlasZone(z.short, true)
+                    state.activeTab = 1
+                end
+            end
+
+            if state.viewMode == 'ATLAS' then
+                ImGui.SameLine()
+                if ImGui.Button('Return to Live View##AtlasRetLive') then
+                    returnToLiveZone()
+                    state.activeTab = 1
+                end
+            end
+
+            ImGui.Spacing()
+            ImGui.Separator()
+
+            -- Travel Route from Current Zone
+            ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Travel Route from Current Zone')
+
+            local curShort = (state.currentZoneShort or ''):lower():match('^%s*(.-)%s*$')
+            local targetShort = z.short:lower():match('^%s*(.-)%s*$')
+
+            if curShort == '' or curShort == 'unknown' then
+                ImGui.TextColored(0.7, 0.7, 0.7, 0.8, 'Current zone not detected in game.')
+            elseif curShort == targetShort then
+                ImGui.TextColored(0.2, 0.95, 0.4, 1.0, string.format('✓ You are already in this zone (%s).', z.name))
+            else
+                local curZoneInfo = nil
+                for _, cz in ipairs(state.atlasAllZones) do
+                    if cz.short:lower() == curShort then curZoneInfo = cz break end
+                end
+                local curName = curZoneInfo and curZoneInfo.name or (state.currentZoneName ~= '' and state.currentZoneName) or curShort
+
+                local path, hops = findZoneRoute(curShort, targetShort)
+                if not path or #path == 0 then
+                    ImGui.TextColored(0.9, 0.7, 0.3, 1.0, string.format('No connected route found between %s and %s.', curName, z.name))
+                    ImGui.TextColored(0.6, 0.6, 0.6, 0.8, '(May require Teleportation, Druid/Wizard Spire, planar translocator, or Call of the Hero).')
+                else
+                    ImGui.TextColored(0.2, 0.95, 0.4, 1.0, string.format('Shortest Path: %d zone transition%s (%d zones total)', hops, (hops == 1 and '' or 's'), #path))
+                    ImGui.Spacing()
+
+                    -- Visual Step-by-Step Pathway Table
+                    local routeTableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0)
+                    if ImGui.BeginTable('##AtlasRouteStepsTable', 4, routeTableFlags) then
+                        ImGui.TableSetupColumn('Step', ImGuiTableColumnFlags.WidthFixed or 0, 52)
+                        ImGui.TableSetupColumn('Zone Name', ImGuiTableColumnFlags.WidthStretch or 0)
+                        ImGui.TableSetupColumn('Era / Type', ImGuiTableColumnFlags.WidthFixed or 0, 120)
+                        ImGui.TableSetupColumn('Map View', ImGuiTableColumnFlags.WidthFixed or 0, 65)
+                        ImGui.TableHeadersRow()
+
+                        for stepIdx, stepZone in ipairs(path) do
+                            ImGui.TableNextRow()
+
+                            local isStepStart = (stepIdx == 1)
+                            local isStepDest = (stepIdx == #path)
+
+                            ImGui.TableNextColumn()
+                            if isStepStart then
+                                ImGui.TextColored(0.4, 0.9, 0.5, 1.0, 'START')
+                            elseif isStepDest then
+                                ImGui.TextColored(1.0, 0.85, 0.2, 1.0, 'DEST')
+                            else
+                                ImGui.TextColored(0.7, 0.8, 0.9, 0.9, string.format('Step %d', stepIdx))
+                            end
+
+                            ImGui.TableNextColumn()
+                            local stepLabel = string.format('%s (%s)', stepZone.name, stepZone.short)
+                            if isStepStart then
+                                ImGui.TextColored(0.4, 0.9, 0.5, 1.0, stepLabel .. ' [Current Zone]')
+                            elseif isStepDest then
+                                ImGui.TextColored(1.0, 0.85, 0.2, 1.0, stepLabel .. ' [Target]')
+                            else
+                                ImGui.TextColored(0.9, 0.9, 0.9, 1.0, '➔ ' .. stepLabel)
+                            end
+
+                            ImGui.TableNextColumn()
+                            ImGui.TextColored(0.65, 0.75, 0.85, 0.85, string.format('%s / %s', stepZone.type or 'Zone', stepZone.era or 'Classic'))
+
+                            ImGui.TableNextColumn()
+                            if ImGui.SmallButton(string.format('View##RStep_%d', stepIdx)) then
+                                for _, az in ipairs(state.atlasAllZones) do
+                                    if az.short:lower() == stepZone.short:lower() then
+                                        state.atlasSelectedZone = az
+                                        break
+                                    end
+                                end
+                                navigateToAtlasZone(stepZone.short, true)
+                                state.activeTab = 1
+                            end
+                            if ImGui.IsItemHovered() then
+                                ImGui.SetTooltip('Switch to Map View to inspect %s (%s)', stepZone.name, stepZone.short)
+                            end
+                        end
+                        ImGui.EndTable()
+                    end
+                end
+            end
+
+            ImGui.Spacing()
+            ImGui.Separator()
+
+            -- Travel & Connected Zones Section
+            ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Connected Zones & Travel Routes')
+            local conns = z.connections or {}
+            if #conns == 0 then
+                ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'No direct connected zone links recorded in registry.')
+            else
+                ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('Directly connected to %d zones (Click to inspect / view map):', #conns))
+                ImGui.Spacing()
+
+                for idx, cShort in ipairs(conns) do
+                    local cZone = nil
+                    for _, cz in ipairs(state.atlasAllZones) do
+                        if cz.short:lower() == cShort:lower() then
+                            cZone = cz
+                            break
+                        end
+                    end
+
+                    local cName = cZone and cZone.name or cShort
+                    local cEra = cZone and cZone.era or 'Classic'
+                    local cHasMap = cZone and cZone.hasMap
+
+                    ImGui.Bullet()
+                    if ImGui.SmallButton(string.format('%s (%s)##Conn_%d', cName, cShort, idx)) then
+                        if cZone then
+                            state.atlasSelectedZone = cZone
+                        end
+                        navigateToAtlasZone(cShort, true)
+                        state.activeTab = 1
+                    end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Click to navigate to %s in Atlas Map View\nEra: %s', cName, cEra)
+                    end
+
+                    ImGui.SameLine()
+                    ImGui.TextColored(0.5, 0.75, 0.85, 0.75, string.format('[%s]', cEra))
+                    if cHasMap then
+                        ImGui.SameLine()
+                        ImGui.TextColored(0.2, 0.85, 0.35, 0.8, '(Map Available)')
+                    end
+                end
+            end
+
+            ImGui.Spacing()
+            ImGui.Separator()
+
+            -- Zone Points of Interest (if currently loaded or active)
+            ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Zone Points of Interest & Key Labels')
+            local currentViewingThis = (mapData.zoneShort:lower() == z.short:lower() and mapData.isLoaded)
+
+            if not currentViewingThis then
+                ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'Open this zone\'s map to inspect its points of interest and labels.')
+                if ImGui.SmallButton('Load Zone Map for POI Inspection##LoadPoiBtn') then
+                    navigateToAtlasZone(z.short, true)
+                end
+            else
+                local labels = mapData.labels or {}
+                ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('Loaded: %d map labels & landmarks in %s', #labels, z.name))
+
+                -- POI Search
+                ImGui.PushItemWidth(math.min(260, rightW - 40))
+                local pSearch, pChanged = ImGui.InputTextWithHint('##AtlasPoiSearch', 'Filter landmarks...', state.poiSearchText or '')
+                if pChanged then
+                    state.poiSearchText = pSearch
+                end
+                ImGui.PopItemWidth()
+
+                local q = (state.poiSearchText or ''):lower():match('^%s*(.-)%s*$')
+                local matching = {}
+                for _, lb in ipairs(labels) do
+                    if q == '' or lb.text:lower():find(q, 1, true) ~= nil then
+                        matching[#matching + 1] = lb
+                    end
+                end
+
+                if #matching > 0 then
+                    local poiTableH = math.max(120, availH - 330)
+                    if ImGui.BeginChild('##AtlasPoiSubScroll', ImVec2(0, poiTableH), true) then
+                        local pTableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0)
+                        if ImGui.BeginTable('##AtlasPoiTable', 3, pTableFlags) then
+                            ImGui.TableSetupColumn('Landmark / Label', ImGuiTableColumnFlags.WidthStretch or 0)
+                            ImGui.TableSetupColumn('Location (Y, X, Z)', ImGuiTableColumnFlags.WidthFixed or 0, 160)
+                            ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, 56)
+                            ImGui.TableHeadersRow()
+
+                            for pIdx, poi in ipairs(matching) do
+                                ImGui.TableNextRow()
+                                ImGui.TableNextColumn()
+                                ImGui.TextColored(poi.r, poi.g, poi.b, 1.0, poi.text)
+
+                                ImGui.TableNextColumn()
+                                ImGui.TextColored(0.7, 0.7, 0.7, 0.8, string.format('%.1f, %.1f, %.1f', poi.y, poi.x, poi.z))
+
+                                ImGui.TableNextColumn()
+                                if ImGui.SmallButton(string.format('Focus##APoi_%d', pIdx)) then
+                                    focusPoi(poi)
+                                end
+                                if ImGui.IsItemHovered() then
+                                    ImGui.SetTooltip('%s', 'Switch to Map Tab, center viewport on this POI and highlight with animated pin')
+                                end
+                            end
+                            ImGui.EndTable()
+                        end
+                    end
+                    ImGui.EndChild()
+                else
+                    ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'No landmarks match filter.')
+                end
+            end
+        end
+    end
+    ImGui.EndChild()
 end
 
 -- ============================================================================
@@ -2444,7 +3543,8 @@ local function DrawTriuneMapUI()
     -- Omit NoCollapse so WindowRounding token applies rounded corners cleanly
     windowFlags = bit.band(windowFlags, bit.bnot(ImGuiWindowFlags.NoCollapse or 0))
 
-    local title = string.format('Triune Map v%s — %s###TriuneMapMainWindow', VERSION, state.currentZoneName)
+    local zoneDisplay = (state.viewMode == 'ATLAS') and string.format('Atlas: %s', (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort) or state.currentZoneName
+    local title = string.format('Triune Map v%s — %s###TriuneMapMainWindow', VERSION, zoneDisplay)
     local open, draw = ImGui.Begin(title, state.openGUI, windowFlags)
     state.openGUI = open
 
@@ -2456,44 +3556,100 @@ local function DrawTriuneMapUI()
     end
 
     if draw then
-        -- Top Toolbar & Metrics
-        ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Zone:')
-        ImGui.SameLine()
-        ImGui.Text(string.format('%s (%s)', state.currentZoneName, state.currentZoneShort))
+        -- Top Toolbar & Navigation Bar
+        if state.viewMode == 'ATLAS' then
+            ImGui.TextColored(1.0, 0.85, 0.20, 1.0, '[ATLAS MODE]')
+            ImGui.SameLine()
+            local canBack = (state.atlasHistoryIdx > 1)
+            if not canBack then ImGui.BeginDisabled() end
+            if ImGui.SmallButton('<##AtlasBackBtn') then
+                atlasHistoryBack()
+            end
+            if not canBack then ImGui.EndDisabled() end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Previous zone in Atlas history') end
 
-        ImGui.SameLine()
-        ImGui.TextDisabled(string.format('| NPCs: %d (Visible: %d)', spawns.totalCount, #spawns.filteredNPCs))
+            ImGui.SameLine()
+            local canFwd = (state.atlasHistoryIdx < #state.atlasHistory)
+            if not canFwd then ImGui.BeginDisabled() end
+            if ImGui.SmallButton('>##AtlasFwdBtn') then
+                atlasHistoryForward()
+            end
+            if not canFwd then ImGui.EndDisabled() end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Next zone in Atlas history') end
 
-        ImGui.SameLine()
-        if navState.meshLoaded then
-            ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '| Mesh: LOADED')
+            ImGui.SameLine()
+            ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Zone:')
+            ImGui.SameLine()
+            local aName = (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort
+            ImGui.Text(string.format('%s (%s)', aName, state.atlasZoneShort))
+
+            ImGui.SameLine()
+            if ImGui.Button('Return to Live##ReturnLiveBtn') then
+                returnToLiveZone()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Return to active zone and resume live player tracking') end
+
+            local rPath, rHops = findZoneRoute(state.currentZoneShort, state.atlasZoneShort)
+            if rHops and rHops > 0 then
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Route: %d hops##AtlasRouteHopsBtn', rHops)) then
+                    state.activeTab = 2
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('Click to view full step-by-step travel route in Atlas Tab\nFrom %s to %s (%d zone transitions)', state.currentZoneName, aName, rHops)
+                end
+            end
         else
-            ImGui.TextColored(0.95, 0.3, 0.3, 1.0, '| Mesh: NONE')
+            ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Zone:')
+            ImGui.SameLine()
+            ImGui.Text(string.format('%s (%s)', state.currentZoneName, state.currentZoneShort))
         end
 
         ImGui.SameLine()
-        if ImGui.Button('Stop Nav##NavHaltBtn') then
-            actionQueue.pendingStopNav = true
-            state.activeNavLoc = nil
-            state.activeNavSpawnId = 0
-            state.activeNavCommandTime = 0
-            state.statusMsg = 'Navigation stopped.'
-        end
-
-        ImGui.SameLine()
-        if ImGui.Button('Center on Me##CenterMeBtn') then
-            local okX, meX = pcall(function() return mq.TLO.Me.X() end)
-            local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
-            if okX and okY and meX and meY then
-                viewport.centerEqX = meX
-                viewport.centerEqY = meY
-                ctrl.followPlayer = true
+        if state.viewMode == 'LIVE' then
+            ImGui.TextDisabled(string.format('| NPCs: %d (Visible: %d)', spawns.totalCount, #spawns.filteredNPCs))
+            ImGui.SameLine()
+            if navState.meshLoaded then
+                ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '| Mesh: LOADED')
+            else
+                ImGui.TextColored(0.95, 0.3, 0.3, 1.0, '| Mesh: NONE')
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Stop Nav##NavHaltBtn') then
+                actionQueue.pendingStopNav = true
+                state.activeNavLoc = nil
+                state.activeNavSpawnId = 0
+                state.activeNavCommandTime = 0
+                state.statusMsg = 'Navigation stopped.'
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Center on Me##CenterMeBtn') then
+                local okX, meX = pcall(function() return mq.TLO.Me.X() end)
+                local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
+                if okX and okY and meX and meY then
+                    viewport.centerEqX = meX
+                    viewport.centerEqY = meY
+                    ctrl.followPlayer = true
+                end
+            end
+            ImGui.SameLine()
+            local fp, cfp = ImGui.Checkbox('Follow##FollowPlayerCheck', ctrl.followPlayer)
+            if cfp then ctrl.followPlayer = fp end
+        else
+            if ImGui.Button('Center Map##CenterAtlasBtn') then
+                viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+                viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
             end
         end
 
         ImGui.SameLine()
-        local fp, cfp = ImGui.Checkbox('Follow##FollowPlayerCheck', ctrl.followPlayer)
-        if cfp then ctrl.followPlayer = fp end
+        local poiBtnText = state.showPoiDrawer and 'POIs [ON]##TogglePoiDrawer' or 'POIs##TogglePoiDrawer'
+        if ImGui.Button(poiBtnText) then
+            state.showPoiDrawer = not state.showPoiDrawer
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle side drawer for searching Points of Interest & Map Labels') end
 
         ImGui.SameLine()
         if ImGui.Button('Zoom -##ZoomOutBtn') then
@@ -2513,18 +3669,32 @@ local function DrawTriuneMapUI()
                 state.activeTab = 1
                 local availW, availH = ImGui.GetContentRegionAvail()
                 local canvasHeight = math.max(80, availH - 26)
-                DrawMapCanvas(availW, canvasHeight)
+                if state.showPoiDrawer then
+                    local drawerW = math.min(320, availW * 0.35)
+                    local canvasW = availW - drawerW - 8
+                    DrawMapCanvas(canvasW, canvasHeight)
+                    ImGui.SameLine()
+                    DrawPoiDrawer(drawerW, canvasHeight)
+                else
+                    DrawMapCanvas(availW, canvasHeight)
+                end
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem('Zone Atlas##AtlasTab') then
+                state.activeTab = 2
+                DrawAtlasTab()
                 ImGui.EndTabItem()
             end
 
             if ImGui.BeginTabItem('NPC Tracker##TrackerTab') then
-                state.activeTab = 2
+                state.activeTab = 3
                 DrawNPCTrackerTab()
                 ImGui.EndTabItem()
             end
 
             if ImGui.BeginTabItem('Settings & Layers##SettingsTab') then
-                state.activeTab = 3
+                state.activeTab = 4
                 DrawSettingsTab()
                 ImGui.EndTabItem()
             end
@@ -2561,22 +3731,27 @@ end
 -- ============================================================================
 -- INITIALIZATION & MAIN YIELDABLE ENGINE LOOP
 -- ============================================================================
+initAtlasRegistry()
 scanMapFolders()
 loadConfig()
+scanMapFiles()
+filterAtlasZones()
 
 local okZoneShort, zShort = pcall(function() return mq.TLO.Zone.ShortName() end)
 if okZoneShort and zShort then
     state.currentZoneShort = zShort
     local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
     state.currentZoneId = (okZId and zId) or 0
-    loadZoneMap(zShort)
+    local okZName, zName = pcall(function() return mq.TLO.Zone.Name() end)
+    state.currentZoneName = (okZName and zName) or zShort
+    loadZoneMap(zShort, false)
 end
 
 syncTriuneLoadout()
 scanZoneSpawns()
 mq.imgui.init('TriuneMapUIWindow', DrawTriuneMapUI)
 
-print(string.format('\ag[Triune Map]\ax v%s Loaded -- In-Game Map & NPC Tracker active. Run with /lua run triune_map', VERSION))
+print(string.format('\ag[Triune Map]\ax v%s Loaded -- In-Game Map, Norrath Atlas & NPC Tracker active. Run with /lua run triune_map', VERSION))
 
 while state.isRunning do
     mq.doevents()
@@ -2591,7 +3766,11 @@ while state.isRunning do
             state.currentZoneShort = curShort
             local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
             state.currentZoneId = (okZId and zId) or 0
-            loadZoneMap(curShort)
+            local okZName, zName = pcall(function() return mq.TLO.Zone.Name() end)
+            state.currentZoneName = (okZName and zName) or curShort
+            if state.viewMode == 'LIVE' then
+                loadZoneMap(curShort, false)
+            end
             syncTriuneLoadout()
             scanZoneSpawns()
         end

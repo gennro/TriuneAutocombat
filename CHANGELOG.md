@@ -2,6 +2,28 @@
 
 ## 2026-08-29
 
+- **Norrath Zone Atlas & Travel Explorer (`triune_map.lua`, v1.1).**
+  - **Replicated & Enhanced Stock In-Game Map Atlas**: Added full offline and remote zone map browsing to `triune_map`, enabling players to preview and search any zone in EverQuest without traveling or zoning.
+  - **Zone Route Finder & Travel Itinerary (`findZoneRoute`)**:
+    - Built-in Breadth-First Search (BFS) graph pathfinding engine traversing the entire interconnected Norrathian zone network.
+    - Calculates the shortest zone hop route from your current zone to any destination in Norrath, including city stones, planar connections, and overland zone lines.
+    - **Step-by-Step Travel Pathway Table**: Displays each zone transition step with zone type/era badges and 1-click `[View]` buttons to inspect the map of any waypoint zone on the journey.
+    - **Toolbar Route Badge**: In Atlas Mode, the top navigation toolbar displays an interactive `[Route: N hops]` button that immediately jumps to the step-by-step travel itinerary.
+  - **Comprehensive Norrath Zone Registry (`NORRATH_ZONE_REGISTRY`)**: Built-in era-categorized database of ~135 Norrathian zones spanning Classic (Antonica, Faydwer, Odus), Kunark, Velious, Luclin, Planes of Power, Legacy of Ykesha, Gates of Discord, Omens of War, The Serpent's Spine, and Hubs/Special, complete with recommended level ranges and direct connected zone travel links.
+  - **Dynamic Map Pack Scanner (`scanMapFiles()`)**: Automatically scans the active map directory (`maps/`, `maps/Brewall/`, `maps/Goodurden/`, etc.) to index available `.txt` map files and detects custom or uncataloged expansion zones on disk.
+  - **Zone Atlas Tab (`DrawAtlasTab()`)**:
+    - **Fuzzy Search & Filters**: Search zones by name, shortname, era, or continent, with Era combo filter and Type filter (Cities & Hubs, Outdoor & Wilderness, Dungeons, Planes, Raid Zones).
+    - **Connected Zone Routing Graph**: Interactive list of adjacent connected zones with 1-click navigation buttons to inspect neighboring zone maps.
+    - **Zone POI & Landmark Inspector**: Searchable table of all landmarks and points of interest in the selected zone.
+  - **Seamless Live vs. Atlas Mode Switching (`state.viewMode`)**:
+    - Full bidirectional history stack (`<` Back and `>` Forward buttons) for traversing explored maps.
+    - **1-Click "Return to Live"**: Automatically restores camera follow on the player and re-engages real-time entity tracking.
+    - Remote zone viewing safety: Watermark banner and automatic suppression of live entity rendering when viewing non-current zones.
+  - **Searchable POI Side Drawer (`DrawPoiDrawer`) & Animated Highlight Pin**:
+    - Slide-out POI drawer on the Map View tab with instant filter search across all map labels and points of interest.
+    - **1-Click "Focus"**: Automatically centers the viewport on the selected landmark and spawns an animated pulsing locator pin.
+  - **Unit Tests**: Added Suite 43 to `tests/test_pure_logic.lua` covering Atlas history stack navigation, expansion/type filtering, BFS shortest route pathfinding, and version consistency.
+
 - **Guild-Only Buffing Restriction (`triune_buffbot.lua`, v1.6).**
   - **Guild Member Gating (`ctrl.guildOnly`)**: Added an optional `Guild Members Only` toggle to restrict buffing services strictly to characters belonging to the same guild as the buffbot (`isSameGuild()`).
   - **Tell & Hail Handling**:

@@ -133,6 +133,7 @@ Triune comes packed with handy standalone tools you can open right from the main
 
 | Tool | Chat Command | What It Does |
 |---|---|---|
+| 🗺️ **2D Map & Norrath Atlas** | `/ac map` | Interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, and Point of Interest locator. |
 | 🧙 **Spellbook Browser** | `/ac spellbook` | Browse and search all spells across all 3 of your character's classes, filter by level or type, and assign them to your loadout with one click. |
 | 🖱️ **Cursor Manager** | `/ac cursorui` | Displays what's on your cursor and can automatically dump items into your bags (`/ac clearcursor`). |
 | 🛡️ **Interactive Buffbot** | `/ac buffbot` | Run an automated buffing station! Listens for `/tell` requests from nearby players, hands out buffs, and sends a reply when done. |
@@ -185,7 +186,7 @@ TriuneAutocombat/
 │   ├── update.sh            # Linux updater launcher
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
-│   │   ├── triune_map.lua       # Standalone 2D in-game map & NPC tracker
+│   │   ├── triune_map.lua       # Standalone 2D in-game map, Norrath Zone Atlas & NPC tracker
 │   │   ├── triune_track.lua     # Zone NPC tracker & navigation tool
 │   │   ├── triune_updater.lua   # In-game updater window
 │   │   ├── triune_spellbook.lua # Spellbook browser & loadout helper
