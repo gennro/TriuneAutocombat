@@ -122,53 +122,33 @@ local lvlMin, lvlMax = 1, 65
 local loadout        = { gems = {}, aas = {}, discs = {}, actions = {}, clickies = {} }
 
 -- combat control state (Control tab). NOTE: this is the control surface; wiring it
--- into the actual casting/movement engine is phase 2.
 -- Primary Combat Modes & Submodes
-local PRIMARY_MODES  = { 'Manual', 'Puller', 'Assist' }
-local SUBMODES       = {
-    Puller = { 'Hunt', 'Camp' },
-    Assist = { 'Chase', 'Camp', 'Backline' }
-}
-local PULL_STYLES    = { 'Melee', 'Spell', 'Pet', 'Ranged' }
-local PULL_CON_LIST  = {
-    'Scowling',
-    'Threateningly',
-    'Dubious',
-    'Apprehensive',
-    'Indifferent',
-    'Amiably',
-    'Kindly',
-    'Warmly',
-    'Ally',
-}
-
-local MODE_DESC      = {
-    Manual = 'Fights your current or acquired target automatically. Does not roam.',
-    Puller = 'Pulling & hunting engine. Hunt roams and solo-kills; Camp pulls mobs back to set camp.',
-    Assist = 'Assists the Main Assist. Chase follows MA; Camp holds camp spot; Backline is ranged/caster support.'
-}
-
-local SUBMODE_DESC   = {
-    ['Puller:Hunt']     = 'Roams within search radius looking for valid mobs and kills them on the spot.',
-    ['Puller:Camp']     = 'Pulls mobs within radius back to set camp location and tanks/fights them at camp.',
-    ['Assist:Chase']    = 'Follows Main Assist everywhere and assists on MA target.',
-    ['Assist:Camp']     = 'Holds set camp position and assists MA on MA target, returning to camp when idle.',
-    ['Assist:Backline'] = 'Ranged/caster support; assists MA without moving to melee range.'
+local MODES = {
+    PRIMARY       = { 'Manual', 'Puller', 'Assist' },
+    SUBMODES      = {
+        Puller = { 'Hunt', 'Camp' },
+        Assist = { 'Chase', 'Camp', 'Backline' },
+    },
+    PULL_STYLES   = { 'Melee', 'Spell', 'Pet', 'Ranged' },
+    PULL_CON_LIST = {
+        'Scowling', 'Threateningly', 'Dubious', 'Apprehensive', 'Indifferent',
+        'Amiably', 'Kindly', 'Warmly', 'Ally',
+    },
+    DESC          = {
+        Manual = 'Fights your current or acquired target automatically. Does not roam.',
+        Puller = 'Pulling & hunting engine. Hunt roams and solo-kills; Camp pulls mobs back to set camp.',
+        Assist = 'Assists the Main Assist. Chase follows MA; Camp holds camp spot; Backline is ranged/caster support.',
+    },
+    SUB_DESC      = {
+        ['Puller:Hunt']     = 'Roams within search radius looking for valid mobs and kills them on the spot.',
+        ['Puller:Camp']     = 'Pulls mobs within radius back to set camp location and tanks/fights them at camp.',
+        ['Assist:Chase']    = 'Follows Main Assist everywhere and assists on MA target.',
+        ['Assist:Camp']     = 'Holds set camp position and assists MA on MA target, returning to camp when idle.',
+        ['Assist:Backline'] = 'Ranged/caster support; assists MA without moving to melee range.',
+    },
 }
 
 local ctrl                   -- forward declaration for lexical scoping in helpers
-local isXTargetId            -- forward declaration for lexical scoping in helpers
-local isGroupOrRaidMember    -- forward declaration for lexical scoping in helpers
-local isSpawnPetOrPlayer     -- forward declaration for lexical scoping in helpers
-local isAnyPet               -- forward declaration for lexical scoping in helpers
-local isHostileTarget        -- forward declaration for lexical scoping in helpers
-local isCombat               -- forward declaration for lexical scoping in helpers
-local buffActive             -- forward declaration for lexical scoping in helpers
-local updateMapRadiusVisuals -- forward declaration for lexical scoping in UI & helpers
-local clearMapRadiusVisuals  -- forward declaration for lexical scoping in UI & helpers
-local isPoisonedOrDiseased   -- forward declaration for lexical scoping in helpers
-local getAllMyPets           -- forward declaration for lexical scoping in helpers
-local resolvePetTargetId     -- forward declaration for lexical scoping in helpers
 
 local function isDucking()
     local d = false
@@ -238,7 +218,7 @@ local function sanitizeModeConfig(c)
     if type(c.pull_con_filter) ~= 'table' then
         c.pull_con_filter = {}
     end
-    for _, conName in ipairs(PULL_CON_LIST) do
+    for _, conName in ipairs(MODES.PULL_CON_LIST) do
         if c.pull_con_filter[conName] == nil then
             c.pull_con_filter[conName] = true
         end
@@ -366,6 +346,7 @@ local runtime = {
     -- equivalent of Me.AutoFire for combat_style == 'Ranged'. Assumed Melee
     -- until the server tells us otherwise (a fresh login/zone-in defaults
     -- to melee attack mode).
+    PURE_MELEE = { War = true, WAR = true, Mnk = true, MNK = true, Rog = true, ROG = true, Ber = true, BER = true },
     serverAttackMode = 'Melee',
     lastAttackModeCmdAt = 0,
     -- Under server Ranged attack mode, /attack behaves as a pure on/off
@@ -424,7 +405,8 @@ local petState = {
     lastCmdAt = 0,
     manualHunterHold = nil,
     petHoldActive = false, -- true when we issued /pet hold waiting for HP threshold
-    holdIssuedForId = 0    -- target ID for which a hold was issued
+    holdIssuedForId = 0,   -- target ID for which a hold was issued
+    PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true }
 }
 
 local pursuit = {
@@ -483,30 +465,21 @@ local stuckState = {
     cannotSeeAttempts = 0
 }
 
--- Full-stop and onZoned: reset every movement/combat command and stale state.
--- Used by STOP, a mode switch, and the death guard.
-local fullStop, onZoned, hasActivePet, handleCannotSeeTarget, revertAttackModeToMelee
-local PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true }
 local function trioHasPetClass()
-    for _, c in ipairs(myClasses) do if PET_CLASSES[c] then return true end end
+    for _, c in ipairs(myClasses) do if petState.PET_CLASSES[c] then return true end end
     return false
 end
 
--- Returns true if any character in the trio owns the Advanced Pet Discipline AA
--- Ignore list: names Hunter/Puller must never auto-target (e.g. a friendly NPC
--- it tried to attack by mistake). Shared across ALL your characters (stored at
--- ALLDATA.__ignore, not per-character), since a friendly name is friendly no
--- matter which toon is playing. Never filters Assist or a target you pick yourself.
-
-
-local FRIENDLY = { 'Myself', 'Main Assist', 'Tank', 'Lowest-HP Ally', 'Whole Group', 'Pet' }
-local ENEMY    = { 'Current Target', 'Assist Target', 'Nearest Add', 'Unmezzed Add', 'All Enemies' }
-local TARGETS  = {}
-for _, t in ipairs(FRIENDLY) do TARGETS[#TARGETS + 1] = 'F: ' .. t end
-for _, t in ipairs(ENEMY) do TARGETS[#TARGETS + 1] = 'E: ' .. t end
-local WHENS = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff', 'missing pet', 'has Poison/Disease',
-    'ally is Dead', 'add is loose', 'twist while fighting', 'in combat',
-    'always' }
+local COMBO_OPTIONS = {
+    FRIENDLY = { 'Myself', 'Main Assist', 'Tank', 'Lowest-HP Ally', 'Whole Group', 'Pet' },
+    ENEMY    = { 'Current Target', 'Assist Target', 'Nearest Add', 'Unmezzed Add', 'All Enemies' },
+    TARGETS  = {},
+    WHENS    = { 'HP <=', 'target HP <=', 'my HP <=', 'my Mana <=', 'missing buff', 'missing pet', 'has Poison/Disease',
+        'ally is Dead', 'add is loose', 'twist while fighting', 'in combat',
+        'always' }
+}
+for _, t in ipairs(COMBO_OPTIONS.FRIENDLY) do COMBO_OPTIONS.TARGETS[#COMBO_OPTIONS.TARGETS + 1] = 'F: ' .. t end
+for _, t in ipairs(COMBO_OPTIONS.ENEMY) do COMBO_OPTIONS.TARGETS[#COMBO_OPTIONS.TARGETS + 1] = 'E: ' .. t end
 
 -- ============================================================================
 -- Local Theme & Common Helpers (Self-Contained Module)
@@ -527,16 +500,15 @@ local function toCanonicalClassAbbr(str)
     return MQSHORT[up] or (ALL_ABBR and idxOf(ALL_ABBR, s) > 0 and s) or nil
 end
 
-local SLOT_COLORS = {
-    { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
-    { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
-    { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
-}
-
 local function classColor(abbr)
+    local pal = {
+        { 0.30, 0.70, 1.00 }, -- slot 1: Arcane Blue
+        { 1.00, 0.55, 0.30 }, -- slot 2: Ember Gold
+        { 0.37, 0.88, 0.64 }, -- slot 3: Jade Green
+    }
     for i, c in ipairs(myClasses) do
         if c == abbr then
-            local col = SLOT_COLORS[i] or { 0.49, 0.56, 0.65 }
+            local col = pal[i] or { 0.49, 0.56, 0.65 }
             return col[1], col[2], col[3], col[4] or 1.0
         end
     end
@@ -1040,7 +1012,7 @@ local function isSpawnMyPet(s_or_id)
 end
 
 -- Collects and returns all living spawn IDs belonging to the player (multi-pet support for trio classes)
-getAllMyPets = function()
+local function getAllMyPets()
     local pets = {}
     local seen = {}
     local function addPet(id)
@@ -1081,7 +1053,7 @@ getAllMyPets = function()
 end
 
 -- Returns true if the player currently has an active living pet (or any live trio pet in petState.myPets)
-hasActivePet = function()
+local function hasActivePet()
     local pets = getAllMyPets()
     return #pets > 0
 end
@@ -1108,20 +1080,22 @@ end
 -- it purely from movement: climbing moves Z steadily while X/Y barely change
 -- (the opposite of being genuinely stuck, where NOTHING moves, and of normal
 -- ground travel, where X/Y change steadily and Z stays flat). Re-samples at
--- most once per LADDER_CLIMB_SAMPLE_SEC so a single tick's jitter can't
+-- most once per LADDER_CLIMB.SAMPLE_SEC so a single tick's jitter can't
 -- trigger it, and once a real climb is detected, stays "true" for a short
 -- grace period afterward so a momentary pause between rungs (or a slow
 -- server tick) doesn't immediately flip callers back to "not climbing" mid-
 -- climb. Used by checkStuck() (skip false-positive stuck detection) and
 -- moveToward() (skip false-positive pursuit-stall/unreachable marking) --
 -- see comments at each call site.
-local LADDER_CLIMB_Z_DELTA = 3      -- minimum Z moved per sample to count as climbing
-local LADDER_CLIMB_XY_DELTA = 3     -- maximum X/Y moved per sample to still count as climbing (not just running)
-local LADDER_CLIMB_SAMPLE_SEC = 1.0 -- resample cadence
-local LADDER_CLIMB_GRACE_SEC = 3.0  -- keep reporting "climbing" this long after the last positive sample
+local LADDER_CLIMB = {
+    Z_DELTA    = 3,      -- minimum Z moved per sample to count as climbing
+    XY_DELTA   = 3,      -- maximum X/Y moved per sample to still count as climbing (not just running)
+    SAMPLE_SEC = 1.0,    -- resample cadence
+    GRACE_SEC  = 3.0,    -- keep reporting "climbing" this long after the last positive sample
+}
 local function isClimbingLadder()
     local now = os.clock()
-    if (now - (pursuit.climbSampleAt or 0)) >= LADDER_CLIMB_SAMPLE_SEC then
+    if (now - (pursuit.climbSampleAt or 0)) >= LADDER_CLIMB.SAMPLE_SEC then
         local x, y, z = 0, 0, 0
         pcall(function() x = mq.TLO.Me.X() or 0 end)
         pcall(function() y = mq.TLO.Me.Y() or 0 end)
@@ -1129,8 +1103,8 @@ local function isClimbingLadder()
         if pursuit.climbLastX then
             local dxy = math.sqrt((x - pursuit.climbLastX) ^ 2 + (y - pursuit.climbLastY) ^ 2)
             local dz = math.abs(z - pursuit.climbLastZ)
-            if dz >= LADDER_CLIMB_Z_DELTA and dxy <= LADDER_CLIMB_XY_DELTA then
-                pursuit.climbingUntil = now + LADDER_CLIMB_GRACE_SEC
+            if dz >= LADDER_CLIMB.Z_DELTA and dxy <= LADDER_CLIMB.XY_DELTA then
+                pursuit.climbingUntil = now + LADDER_CLIMB.GRACE_SEC
             end
         end
         pursuit.climbLastX, pursuit.climbLastY, pursuit.climbLastZ = x, y, z
@@ -1254,9 +1228,40 @@ local function stopMoving()
     pursuit.detourExpiresAt = 0
 end
 
+-- Spawn ids MQ2Nav has told us have no path to. Cleared after 60s in case terrain
+-- state changes (a door opens, etc). findRoamTarget skips these when picking a
+-- fresh target; Hunter/Puller drop their current target the moment it lands here
+-- rather than continuing to sit on something they can never reach.
+function runtime.markUnreachable(id)
+    pursuit.unreachableIds[id] = os.clock()
+    if runtime.clearDetour then runtime.clearDetour() end
+end
+
+local function isUnreachable(id)
+    local t = pursuit.unreachableIds[id]
+    if not t then return false end
+    if (os.clock() - t) > 60 then
+        pursuit.unreachableIds[id] = nil; return false
+    end
+    return true
+end
+
+-- ignore-list helpers: applies only to Hunter/Puller AUTO-targeting (see findRoamTarget
+-- below); Assist and anything you target yourself are never filtered.
+local function isIgnored(name)
+    if not name then return false end
+    local cleanName = tostring(name)
+    if cleanName == '' then return false end
+    if not runtime.ignoreList then return false end
+    for _, n in ipairs(runtime.ignoreList) do
+        if tostring(n) == cleanName then return true end
+    end
+    return false
+end
+
 -- Returns true if the spawn ID belongs to the player, their pet, any group member,
 -- any group member pet, or any raid member.
-isGroupOrRaidMember = function(id)
+local function isGroupOrRaidMember(id)
     if not id or id <= 0 then return false end
     if id == mq.TLO.Me.ID() then return true end
     local myPetId = 0
@@ -1296,7 +1301,7 @@ end
 -- Returns true if a spawn (or spawn ID) is ANY pet (player pet, group pet, mercenary,
 -- charmed minion, familiar, warder, or NPC pet). Used when finding new roam/pull/hunt targets
 -- so the bot never initiates combat on pets.
-isAnyPet = function(s_or_id)
+local function isAnyPet(s_or_id)
     if not s_or_id then return false end
     local s = (type(s_or_id) == 'number') and mq.TLO.Spawn(s_or_id) or s_or_id
     if not s or not s() then return false end
@@ -1333,7 +1338,7 @@ isAnyPet = function(s_or_id)
 end
 
 -- Returns true if spawn ID is self, player pet, group member pet, player character, or pet of a player/mercenary
-isSpawnPetOrPlayer = function(id)
+local function isSpawnPetOrPlayer(id)
     if not id or id <= 0 then return false end
     if id == mq.TLO.Me.ID() then return true end
     local myPetId = 0
@@ -1398,7 +1403,7 @@ end
 -- should receive offensive actions (spells, AAs, discs, auto-attack).
 -- Prevents the engine from accidentally casting on friendly NPCs (merchants,
 -- quest givers, guards, bankers) or pets that happen to be targeted.
-isHostileTarget = function(id)
+local function isHostileTarget(id)
     if not id or id <= 0 then return false end
     if isSpawnPetOrPlayer(id) then return false end
 
@@ -1413,7 +1418,24 @@ isHostileTarget = function(id)
     return true
 end
 
-local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ)
+local function isXTargetId(id)
+    if not id or id <= 0 then return false end
+    if isGroupOrRaidMember(id) or isSpawnPetOrPlayer(id) then return false end
+    for i = 1, 13 do
+        local xt = mq.TLO.Me.XTarget(i)
+        if xt() and (xt.ID() or 0) == id
+            and not xt.Dead() and (xt.Type() or '') ~= 'Corpse'
+            and not (isIgnored and isIgnored(xt.CleanName())) then
+            local stype = xt.Type() or ''
+            if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ, isBuffActiveFn)
     maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
     local myZ = mq.TLO.Me.Z() or 0
     local chosenId, lowestHp = nil, 101
@@ -1441,7 +1463,7 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
                             and zOk
                             and (not isIgnoredFn or not isIgnoredFn(cname))
                             and (not isUnreachableFn or not isUnreachableFn(id)) then
-                            if not unmezzedOnly or not buffActive(id, 'Mez') then
+                            if not unmezzedOnly or not (isBuffActiveFn and isBuffActiveFn(id, 'Mez')) then
                                 local hp = s.PctHPs() or 100
                                 if hp < lowestHp then
                                     lowestHp = hp
@@ -1865,15 +1887,13 @@ local function lookupSpells(abbr)
     return {}
 end
 
-local PURE_MELEE_CLASSES = { War = true, WAR = true, Mnk = true, MNK = true, Rog = true, ROG = true, Ber = true, BER = true }
-
 local function clearFilteredSpellsCache()
     runtime.filteredSpellsCache = {}
 end
 
 local function isDisciplineSpell(abbr, spellName)
     if not abbr or not spellName or spellName == "" then return false end
-    if PURE_MELEE_CLASSES[abbr] or PURE_MELEE_CLASSES[abbr:upper()] then return true end
+    if runtime.PURE_MELEE[abbr] or runtime.PURE_MELEE[abbr:upper()] then return true end
 
     if DATA and DATA.discs then
         local alt = ALIAS_CLASS_MAP[abbr:upper()] or abbr
@@ -2133,7 +2153,7 @@ local function filteredSpells(abbr)
 end
 
 local function classHasSpells(abbr)
-    if not abbr or PURE_MELEE_CLASSES[abbr] or PURE_MELEE_CLASSES[abbr:upper()] then
+    if not abbr or runtime.PURE_MELEE[abbr] or runtime.PURE_MELEE[abbr:upper()] then
         return false
     end
     local names, _ = filteredSpells(abbr)
@@ -2171,28 +2191,21 @@ local CLASS_ACTIONS = {
     Wiz = {},
     Mag = {},
     Enc = {},
+    racial = { 'Slam', 'Hide', 'Sneak', 'Forage' },
+    universal = { 'Begging', 'Bind Wound', 'Sense Heading' },
 }
-local RACIAL_ACTIONS = { 'Slam', 'Hide', 'Sneak', 'Forage' }
-local UNIVERSAL_ACTIONS = { 'Begging', 'Bind Wound', 'Sense Heading' }
-local SPECIAL_SKILLS = CLASS_ACTIONS -- backward compatibility alias
 
 local function isActionSkill(name)
     if not name or type(name) ~= 'string' or name == '' then return false end
     for _, list in pairs(CLASS_ACTIONS) do
         for _, n in ipairs(list) do if n == name then return true end end
     end
-    for _, n in ipairs(RACIAL_ACTIONS) do
-        if n == name then return true end
-    end
-    for _, n in ipairs(UNIVERSAL_ACTIONS) do
-        if n == name then return true end
-    end
     return false
 end
 
 local function isSpecialSkill(name)
     if not name or type(name) ~= 'string' or name == '' then return false end
-    for _, list in pairs(SPECIAL_SKILLS) do
+    for _, list in pairs(CLASS_ACTIONS) do
         for _, n in ipairs(list) do if n == name then return true end end
     end
     return false
@@ -2290,7 +2303,7 @@ local function getClientAbilities()
     end
 
     -- 2. Race-specific or trained abilities (Slam on large races, Forage on Iksar/Wood Elf, Hide/Sneak)
-    for _, nm in ipairs(RACIAL_ACTIONS) do
+    for _, nm in ipairs(CLASS_ACTIONS.racial) do
         if type(nm) == 'string' and nm ~= '' and not seen[nm] then
             local curVal = 0
             local myCap = 0
@@ -2315,7 +2328,7 @@ local function getClientAbilities()
     end
 
     -- 3. Universal innate abilities (Begging, Bind Wound, Sense Heading)
-    for _, nm in ipairs(UNIVERSAL_ACTIONS) do
+    for _, nm in ipairs(CLASS_ACTIONS.universal) do
         if type(nm) == 'string' and nm ~= '' and not seen[nm] then
             local curVal = 0
             local myCap = 0
@@ -2438,7 +2451,7 @@ local ALLDATA = {} -- character name -> saved entry
 -- its kind tag (dd/dot/heal/buff) -- all three feed defaultsForKind.
 local function spellClassInfo(name)
     for _, abbr in ipairs(myClasses) do
-        if not PURE_MELEE_CLASSES[abbr] and not PURE_MELEE_CLASSES[abbr:upper()] then
+        if not runtime.PURE_MELEE[abbr] and not runtime.PURE_MELEE[abbr:upper()] then
             local list = lookupSpells(abbr)
             if list then
                 for _, it in ipairs(list) do
@@ -2624,20 +2637,22 @@ end
 -- player can't type into a name field, so sanitizeWpField() strips any stray
 -- control characters before a field is written out, guaranteeing they can
 -- never collide with our own delimiters.
-local WP_EXPORT_VERSION = 1
-local WP_EXPORT_PREFIX  = 'TACWP' .. WP_EXPORT_VERSION .. ':'
-local WP_RS = string.char(30)
-local WP_US = string.char(31)
-
-local B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-local B64_LOOKUP = {}
-for i = 1, #B64_CHARS do B64_LOOKUP[B64_CHARS:sub(i, i)] = i - 1 end
+local WP = {
+    VERSION    = 1,
+    PREFIX     = 'TACWP1:',
+    RS         = string.char(30),
+    US         = string.char(31),
+    B64_CHARS  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+    B64_LOOKUP = {},
+}
+for i = 1, #WP.B64_CHARS do WP.B64_LOOKUP[WP.B64_CHARS:sub(i, i)] = i - 1 end
 
 local function sanitizeWpField(s)
     return (tostring(s or ''):gsub('%c', ''))
 end
 
 local function base64Encode(data)
+    local chars = WP.B64_CHARS
     local out = {}
     local len = #data
     for i = 1, len, 3 do
@@ -2646,24 +2661,25 @@ local function base64Encode(data)
         b3 = b3 or 0
         local n = b1 * 65536 + b2 * 256 + b3
         local rem = math.min(3, len - i + 1)
-        out[#out + 1] = B64_CHARS:sub(math.floor(n / 262144) % 64 + 1, math.floor(n / 262144) % 64 + 1)
-        out[#out + 1] = B64_CHARS:sub(math.floor(n / 4096) % 64 + 1, math.floor(n / 4096) % 64 + 1)
-        out[#out + 1] = (rem >= 2) and B64_CHARS:sub(math.floor(n / 64) % 64 + 1, math.floor(n / 64) % 64 + 1) or '='
-        out[#out + 1] = (rem >= 3) and B64_CHARS:sub(n % 64 + 1, n % 64 + 1) or '='
+        out[#out + 1] = chars:sub(math.floor(n / 262144) % 64 + 1, math.floor(n / 262144) % 64 + 1)
+        out[#out + 1] = chars:sub(math.floor(n / 4096) % 64 + 1, math.floor(n / 4096) % 64 + 1)
+        out[#out + 1] = (rem >= 2) and chars:sub(math.floor(n / 64) % 64 + 1, math.floor(n / 64) % 64 + 1) or '='
+        out[#out + 1] = (rem >= 3) and chars:sub(n % 64 + 1, n % 64 + 1) or '='
     end
     return table.concat(out)
 end
 
 local function base64Decode(str)
+    local lookup = WP.B64_LOOKUP
     str = tostring(str or ''):gsub('[^A-Za-z0-9%+%/%=]', '')
     local out = {}
     local i = 1
     local slen = #str
     while i + 3 <= slen do
-        local c1 = B64_LOOKUP[str:sub(i, i)]
-        local c2 = B64_LOOKUP[str:sub(i + 1, i + 1)]
+        local c1 = lookup[str:sub(i, i)]
+        local c2 = lookup[str:sub(i + 1, i + 1)]
         local s3, s4 = str:sub(i + 2, i + 2), str:sub(i + 3, i + 3)
-        local c3, c4 = B64_LOOKUP[s3], B64_LOOKUP[s4]
+        local c3, c4 = lookup[s3], lookup[s4]
         if not c1 or not c2 then return nil end
         local n = c1 * 262144 + c2 * 4096 + (c3 or 0) * 64 + (c4 or 0)
         out[#out + 1] = string.char(math.floor(n / 65536) % 256)
@@ -2734,18 +2750,6 @@ local function saveLoadout(silent)
     if not silent then print('\ag[Triune]\ax saved loadout for ' .. tostring(myName or '?') .. '.') end
 end
 
--- ignore-list helpers: applies only to Hunter/Puller AUTO-targeting (see findRoamTarget
--- below); Assist and anything you target yourself are never filtered.
-local function isIgnored(name)
-    if not name then return false end
-    local cleanName = tostring(name)
-    if cleanName == '' then return false end
-    if not runtime.ignoreList then return false end
-    for _, n in ipairs(runtime.ignoreList) do
-        if tostring(n) == cleanName then return true end
-    end
-    return false
-end
 local function addIgnore(name)
     if not name or name == '' or isIgnored(name) then return end
     table.insert(runtime.ignoreList, name)
@@ -3125,16 +3129,16 @@ function runtime.wpPresetExport(name)
         string.format('%.2f', snap.waypoint_scan_radius or 0),
         snap.waypoint_loop and '1' or '0',
     }
-    local payload = { table.concat(fields, WP_RS) }
+    local payload = { table.concat(fields, WP.RS) }
     for _, wp in ipairs(snap.waypoints) do
         payload[#payload + 1] = table.concat({
             sanitizeWpField(wp.name or ''),
             string.format('%.2f', wp.x or 0),
             string.format('%.2f', wp.y or 0),
             string.format('%.2f', wp.z or 0),
-        }, WP_US)
+        }, WP.US)
     end
-    return WP_EXPORT_PREFIX .. base64Encode(table.concat(payload, WP_RS))
+    return WP.PREFIX .. base64Encode(table.concat(payload, WP.RS))
 end
 
 -- Parses an exported string WITHOUT writing anything -- callers decide what
@@ -3147,10 +3151,10 @@ function runtime.wpPresetParseImport(str)
     local versionStr, body = str:match('^TACWP(%d+):(.+)$')
     if not versionStr then return nil, 'Not a recognized Triune waypoint string.' end
     local version = tonumber(versionStr)
-    if version ~= WP_EXPORT_VERSION then
+    if version ~= WP.VERSION then
         return nil, string.format(
             'This string uses waypoint format v%s, but this version of Triune only supports v%d. Update Triune and try again.',
-            versionStr, WP_EXPORT_VERSION)
+            versionStr, WP.VERSION)
     end
 
     local payload = base64Decode(body)
@@ -3158,7 +3162,7 @@ function runtime.wpPresetParseImport(str)
         return nil, 'Could not decode that string -- it looks corrupted or incomplete.'
     end
 
-    local parts = splitByChar(payload, WP_RS)
+    local parts = splitByChar(payload, WP.RS)
     if #parts < 6 then return nil, 'That string is missing data -- it looks corrupted or incomplete.' end
 
     local name, zoneShort, zoneDisplay = parts[1], parts[2], parts[3]
@@ -3171,7 +3175,7 @@ function runtime.wpPresetParseImport(str)
 
     local waypoints = {}
     for i = 7, #parts do
-        local wpFields = splitByChar(parts[i], WP_US)
+        local wpFields = splitByChar(parts[i], WP.US)
         local wx, wy, wz = tonumber(wpFields[2]), tonumber(wpFields[3]), tonumber(wpFields[4])
         if not (wx and wy and wz) then
             return nil, 'That string is missing data -- it looks corrupted or incomplete.'
@@ -3597,7 +3601,8 @@ function UI.drawEmblem(size)
         dl:AddTriangle(top, right, left, IM_COL32(143, 165, 235, 150), 1.1)
 
         local function node(pt, slot)
-            local c = SLOT_COLORS[slot] or { 0.5, 0.5, 0.5 }
+            local slotColors = { { 0.30, 0.70, 1.0 }, { 0.37, 0.88, 0.64 }, { 1.0, 0.70, 0.54 } }
+            local c = slotColors[slot] or { 0.5, 0.5, 0.5 }
             dl:AddCircleFilled(pt, r * 0.16,
                 IM_COL32(math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255), 255), 12)
         end
@@ -3795,10 +3800,9 @@ function UI.drawHeaderBar()
     ImGui.Separator()
 end
 
-local CLASS_PICKER_OPTIONS = { '-- None --', 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm', 'Nec',
-    'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
-
 function UI.drawClassPicker()
+    local CLASS_PICKER_OPTIONS = { '-- None --', 'War', 'Clr', 'Pal', 'Rng', 'SK', 'Dru', 'Mnk', 'Brd', 'Rog', 'Shm', 'Nec',
+        'Wiz', 'Mag', 'Enc', 'Bst', 'Ber' }
     if ImGui.CollapsingHeader('Character Classes & Loadout', ImGuiTreeNodeFlags.DefaultOpen) then
         ImGui.TextDisabled('Auto-detected from Inventory Window on login; adjust manually if needed:')
         for i = 1, 3 do
@@ -3895,22 +3899,22 @@ function UI.drawHelpTab()
             ImGui.TableSetupColumn('Behavior Description', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableHeadersRow()
 
-            for _, primaryName in ipairs(PRIMARY_MODES) do
-                if SUBMODES[primaryName] then
-                    for _, subName in ipairs(SUBMODES[primaryName]) do
+            for _, primaryName in ipairs(MODES.PRIMARY) do
+                if MODES.SUBMODES[primaryName] then
+                    for _, subName in ipairs(MODES.SUBMODES[primaryName]) do
                         local fullKey = primaryName .. ':' .. subName
                         ImGui.TableNextRow()
                         ImGui.TableNextColumn()
                         accent(GOOD, primaryName .. ' (' .. subName .. ')')
                         ImGui.TableNextColumn()
-                        ImGui.TextWrapped(SUBMODE_DESC[fullKey] or '')
+                        ImGui.TextWrapped(MODES.SUB_DESC[fullKey] or '')
                     end
                 else
                     ImGui.TableNextRow()
                     ImGui.TableNextColumn()
                     accent(GOOD, primaryName)
                     ImGui.TableNextColumn()
-                    ImGui.TextWrapped(MODE_DESC[primaryName] or '')
+                    ImGui.TextWrapped(MODES.DESC[primaryName] or '')
                 end
             end
             ImGui.EndTable()
@@ -3986,19 +3990,19 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
 
                     -- target
                     ImGui.SameLine(); ImGui.SetNextItemWidth(150)
-                    local ti = ImGui.Combo('##t', idxOf(TARGETS, g.target or 'F: Myself'), TARGETS)
+                    local ti = ImGui.Combo('##t', idxOf(COMBO_OPTIONS.TARGETS, g.target or 'F: Myself'), COMBO_OPTIONS.TARGETS)
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('Target condition: who or what to cast this spell on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                     end
-                    g.target = TARGETS[ti]
+                    g.target = COMBO_OPTIONS.TARGETS[ti]
 
                     -- when
                     ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                    local wi = ImGui.Combo('##w', idxOf(WHENS, g.when or 'always'), WHENS)
+                    local wi = ImGui.Combo('##w', idxOf(COMBO_OPTIONS.WHENS, g.when or 'always'), COMBO_OPTIONS.WHENS)
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('Trigger condition: when this spell should be cast (e.g. HP <=, my Mana <=, missing buff, in combat, always).')
                     end
-                    g.when = WHENS[wi]
+                    g.when = COMBO_OPTIONS.WHENS[wi]
 
                     -- percent: draggable slider that shows the value (0% = Disabled)
                     ImGui.SameLine(); ImGui.SetNextItemWidth(90)
@@ -4321,18 +4325,18 @@ function UI.drawClickieTab()
 
             if c.enabled ~= false then
                 ImGui.SameLine(); ImGui.SetNextItemWidth(150)
-                local ti = ImGui.Combo('##ct', idxOf(TARGETS, c.target or 'F: Myself'), TARGETS)
+                local ti = ImGui.Combo('##ct', idxOf(COMBO_OPTIONS.TARGETS, c.target or 'F: Myself'), COMBO_OPTIONS.TARGETS)
                 if ImGui.IsItemHovered() then
                     UI.setTooltip('Target condition: who or what to use this clickie on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                 end
-                c.target = TARGETS[ti]
+                c.target = COMBO_OPTIONS.TARGETS[ti]
 
                 ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                local wi = ImGui.Combo('##cw', idxOf(WHENS, c.when or 'missing buff'), WHENS)
+                local wi = ImGui.Combo('##cw', idxOf(COMBO_OPTIONS.WHENS, c.when or 'missing buff'), COMBO_OPTIONS.WHENS)
                 if ImGui.IsItemHovered() then
                     UI.setTooltip('Trigger condition: when this clickie should be used (e.g. missing buff, HP <=, in combat, always).')
                 end
-                c.when = WHENS[wi]
+                c.when = COMBO_OPTIONS.WHENS[wi]
 
                 ImGui.SameLine(); ImGui.SetNextItemWidth(90)
                 local curPct = tonumber(c.pct)
@@ -4389,8 +4393,6 @@ function UI.drawClickieTab()
     ImGui.EndChild()
     ImGui.EndTabItem()
 end
-
-local TIER_ORDER = { 'short', 'mid', 'burn' }
 
 -- UI: Innate Combat Abilities & Skills tab
 function UI.drawAbilitiesTab()
@@ -4473,17 +4475,17 @@ function UI.drawAbilitiesTab()
                         end
                     else
                         ImGui.SameLine(); ImGui.SetNextItemWidth(150)
-                        local ti = ImGui.Combo('##actt', idxOf(TARGETS, entry.target), TARGETS)
+                        local ti = ImGui.Combo('##actt', idxOf(COMBO_OPTIONS.TARGETS, entry.target), COMBO_OPTIONS.TARGETS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Target condition: who or what to use this ability on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                         end
-                        entry.target = TARGETS[ti]
+                        entry.target = COMBO_OPTIONS.TARGETS[ti]
                         ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                        local wi = ImGui.Combo('##actw', idxOf(WHENS, entry.when), WHENS)
+                        local wi = ImGui.Combo('##actw', idxOf(COMBO_OPTIONS.WHENS, entry.when), COMBO_OPTIONS.WHENS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Trigger condition: when this ability should be used (e.g. in combat, my HP <=, always).')
                         end
-                        entry.when = WHENS[wi]
+                        entry.when = COMBO_OPTIONS.WHENS[wi]
                         ImGui.SameLine(); ImGui.SetNextItemWidth(90)
                         local curPct = tonumber(entry.pct)
                         if curPct == nil then curPct = 100 end
@@ -4557,6 +4559,7 @@ function UI.drawAATab()
     ImGui.Separator()
 
     if ImGui.BeginChild('aalist', 0, 0) then
+        local TIER_ORDER = { 'short', 'mid', 'burn' }
         for _, tier in ipairs(TIER_ORDER) do
             local any = false
             for _, cls in ipairs(myClasses) do
@@ -4588,17 +4591,17 @@ function UI.drawAATab()
                                 end
                                 if entry.enabled then
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(150)
-                                    local ti = ImGui.Combo('##aat', idxOf(TARGETS, entry.target), TARGETS)
+                                    local ti = ImGui.Combo('##aat', idxOf(COMBO_OPTIONS.TARGETS, entry.target), COMBO_OPTIONS.TARGETS)
                                     if ImGui.IsItemHovered() then
                                         ImGui.SetTooltip('Target condition: who or what to cast this ability on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                                     end
-                                    entry.target = TARGETS[ti]
+                                    entry.target = COMBO_OPTIONS.TARGETS[ti]
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                                    local wi = ImGui.Combo('##aaw', idxOf(WHENS, entry.when), WHENS)
+                                    local wi = ImGui.Combo('##aaw', idxOf(COMBO_OPTIONS.WHENS, entry.when), COMBO_OPTIONS.WHENS)
                                     if ImGui.IsItemHovered() then
                                         ImGui.SetTooltip('Trigger condition: when this ability should be cast (e.g. in combat, HP <=, my Mana <=, missing buff, always).')
                                     end
-                                    entry.when = WHENS[wi]
+                                    entry.when = COMBO_OPTIONS.WHENS[wi]
                                     ImGui.SameLine(); ImGui.SetNextItemWidth(90)
                                     local curPct = tonumber(entry.pct)
                                     if curPct == nil then curPct = 30 end
@@ -4696,17 +4699,17 @@ function UI.drawDiscTab()
                     end
                     if entry.enabled then
                         ImGui.SameLine(); ImGui.SetNextItemWidth(150)
-                        local ti = ImGui.Combo('##dt', idxOf(TARGETS, entry.target), TARGETS)
+                        local ti = ImGui.Combo('##dt', idxOf(COMBO_OPTIONS.TARGETS, entry.target), COMBO_OPTIONS.TARGETS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Target condition: who or what to use this discipline on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                         end
-                        entry.target = TARGETS[ti]
+                        entry.target = COMBO_OPTIONS.TARGETS[ti]
                         ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                        local wi = ImGui.Combo('##dw', idxOf(WHENS, entry.when), WHENS)
+                        local wi = ImGui.Combo('##dw', idxOf(COMBO_OPTIONS.WHENS, entry.when), COMBO_OPTIONS.WHENS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Trigger condition: when this discipline should be used (e.g. HP <=, in combat, my Mana <=, always).')
                         end
-                        entry.when = WHENS[wi]
+                        entry.when = COMBO_OPTIONS.WHENS[wi]
                         ImGui.SameLine(); ImGui.SetNextItemWidth(90)
                         local curPct = tonumber(entry.pct)
                         if curPct == nil then curPct = 30 end
@@ -4792,9 +4795,6 @@ local function setManualHunterPetHold(on, force)
     end
 end
 
-local desiredRange    -- forward declaration; defined in the engine section below
-local maxMeleeDistance -- forward declaration; defined in the engine section below
-
 -- UI: Action controls (Start / Pause, Burn)
 function UI.drawActionControls()
     if ctrl.running then
@@ -4812,7 +4812,7 @@ function UI.drawActionControls()
                 setManualHunterPetHold(false, true)
             end
             ctrl.running = false
-            fullStop()
+            if runtime.fullStop then runtime.fullStop() end
         end
 
         if pCount > 0 then
@@ -4917,7 +4917,7 @@ function UI.drawStatusTab()
     ImGui.Dummy(0, 4)
 
     -- 1. Live Engine & Mode Overview Banner
-    local inCombat = (isCombat and isCombat()) or (mq.TLO.Me.Combat() or false)
+    local inCombat = (runtime.isCombat and runtime.isCombat()) or (mq.TLO.Me.Combat() or false)
     accent(GOLD, 'Engine Status & Mode Overview')
     ImGui.Dummy(0, 2)
 
@@ -4946,15 +4946,15 @@ function UI.drawStatusTab()
         -- Column 2: Active Mode
         ImGui.TableNextColumn()
         local modeStr = ctrl.mode or 'Manual'
-        if SUBMODES[ctrl.mode] and ctrl.submode then
+        if MODES.SUBMODES[ctrl.mode] and ctrl.submode then
             modeStr = string.format('%s (%s)', ctrl.mode, ctrl.submode)
         end
         accent(GOLD, '• Mode: ' .. modeStr)
         local descKey = ctrl.mode
-        if SUBMODES[ctrl.mode] and ctrl.submode then
+        if MODES.SUBMODES[ctrl.mode] and ctrl.submode then
             descKey = string.format('%s:%s', ctrl.mode, ctrl.submode)
         end
-        ImGui.TextDisabled(SUBMODE_DESC[descKey] or MODE_DESC[ctrl.mode] or '')
+        ImGui.TextDisabled(MODES.SUB_DESC[descKey] or MODES.DESC[ctrl.mode] or '')
 
         -- Column 3: Combat & Attack Style
         ImGui.TableNextColumn()
@@ -5063,7 +5063,7 @@ function UI.drawStatusTab()
                 accent(ARC, string.format('Distance: %.1f ft', tDist or 0))
                 local inMelee = false
                 pcall(function()
-                    local maxD = (maxMeleeDistance and maxMeleeDistance(mq.TLO.Target)) or 15
+                    local maxD = (runtime.maxMeleeDistance and runtime.maxMeleeDistance(mq.TLO.Target.ID())) or 15
                     inMelee = (tDist or 999) <= maxD
                 end)
                 if inMelee then
@@ -5525,44 +5525,44 @@ function UI.drawControlTab()
     ImGui.Dummy(0, 4)
     accent(GOLD, 'Combat Mode')
     ImGui.SetNextItemWidth(160)
-    local curPrimaryIdx = idxOf(PRIMARY_MODES, ctrl.mode)
-    local newPrimaryIdx = ImGui.Combo('##primaryMode', curPrimaryIdx, PRIMARY_MODES)
-    local newPrimaryMode = PRIMARY_MODES[newPrimaryIdx]
+    local curPrimaryIdx = idxOf(MODES.PRIMARY, ctrl.mode)
+    local newPrimaryIdx = ImGui.Combo('##primaryMode', curPrimaryIdx, MODES.PRIMARY)
+    local newPrimaryMode = MODES.PRIMARY[newPrimaryIdx]
 
     if newPrimaryMode ~= ctrl.mode then
         if ctrl.mode == 'Manual' and newPrimaryMode ~= 'Manual' then
             setManualHunterPetHold(false)
         elseif newPrimaryMode == 'Manual' then
-            if not ctrl.running or not isCombat() then
+            if not ctrl.running or not (runtime.isCombat and runtime.isCombat()) then
                 setManualHunterPetHold(true, true)
             end
         end
         ctrl.mode = newPrimaryMode
-        if SUBMODES[ctrl.mode] then
-            ctrl.submode = SUBMODES[ctrl.mode][1]
+        if MODES.SUBMODES[ctrl.mode] then
+            ctrl.submode = MODES.SUBMODES[ctrl.mode][1]
         else
             ctrl.submode = 'Hunt'
         end
-        clearMapRadiusVisuals()
+        if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
     end
 
-    if SUBMODES[ctrl.mode] then
+    if MODES.SUBMODES[ctrl.mode] then
         ImGui.SameLine()
         ImGui.SetNextItemWidth(140)
-        local subList = SUBMODES[ctrl.mode]
+        local subList = MODES.SUBMODES[ctrl.mode]
         local curSubIdx = idxOf(subList, ctrl.submode)
         local newSubIdx = ImGui.Combo('##submode', curSubIdx, subList)
         if newSubIdx ~= curSubIdx then
             ctrl.submode = subList[newSubIdx]
-            clearMapRadiusVisuals()
+            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
         end
     end
 
     local descKey = ctrl.mode
-    if SUBMODES[ctrl.mode] then
+    if MODES.SUBMODES[ctrl.mode] then
         descKey = string.format('%s:%s', ctrl.mode, ctrl.submode)
     end
-    accent(MUTED, SUBMODE_DESC[descKey] or MODE_DESC[ctrl.mode] or '')
+    accent(MUTED, MODES.SUB_DESC[descKey] or MODES.DESC[ctrl.mode] or '')
 
     -- Manual Mode Contextual Controls
     if ctrl.mode == 'Manual' then
@@ -5615,13 +5615,13 @@ function UI.drawControlTab()
         ImGui.Dummy(0, 2)
         ImGui.SetNextItemWidth(160)
         local curPullStyleIdx = 1
-        for idx, ps in ipairs(PULL_STYLES) do
+        for idx, ps in ipairs(MODES.PULL_STYLES) do
             if ps == (ctrl.pull_style or 'Melee') then
                 curPullStyleIdx = idx; break
             end
         end
-        local newPullStyleIdx = ImGui.Combo('Pull Method##pullStyle', curPullStyleIdx, PULL_STYLES)
-        ctrl.pull_style = PULL_STYLES[newPullStyleIdx]
+        local newPullStyleIdx = ImGui.Combo('Pull Method##pullStyle', curPullStyleIdx, MODES.PULL_STYLES)
+        ctrl.pull_style = MODES.PULL_STYLES[newPullStyleIdx]
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
                 'Method used to pull/tag target mob:\n- Melee: Closes to melee range and attacks\n- Spell: Casts spell from range\n- Pet: Sends pet out to tag mob\n- Ranged: Fires bow/ranged from distance')
@@ -5768,7 +5768,7 @@ function UI.drawControlTab()
                     if (ctrl.hunter_combat_radius or 0) <= 0 then
                         ctrl.hunter_combat_radius = 250
                     end
-                    if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+                    if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
                 end
             end
             if ImGui.IsItemHovered() then
@@ -5778,7 +5778,7 @@ function UI.drawControlTab()
             if ImGui.Button('Clear Anchor##pullerAnchorClear') then
                 ctrl.hunter_combat_loc = nil
                 pursuit.wanderLoc = nil
-                if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             end
 
             ImGui.SetNextItemWidth(220)
@@ -5787,7 +5787,7 @@ function UI.drawControlTab()
             local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000)
             if changed then
                 ctrl.hunter_combat_radius = newRadius
-                if updateMapRadiusVisuals then updateMapRadiusVisuals() end
+                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             end
         elseif ctrl.submode == 'Camp' then
             accent(GOLD, 'Puller Camp Location')
@@ -5840,7 +5840,7 @@ function UI.drawControlTab()
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
             end
-            clearMapRadiusVisuals()
+            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
@@ -6185,26 +6185,26 @@ function UI.drawControlTab()
         }
 
         if ImGui.Button('Select All##pullConAllBtn') then
-            for _, conName in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[conName] = true end
+            for _, conName in ipairs(MODES.PULL_CON_LIST) do ctrl.pull_con_filter[conName] = true end
             saveLoadout(true)
         end
         ImGui.SameLine()
         if ImGui.Button('Hostile Only##pullConHostileBtn') then
-            for _, conName in ipairs(PULL_CON_LIST) do
+            for _, conName in ipairs(MODES.PULL_CON_LIST) do
                 ctrl.pull_con_filter[conName] = (conName == 'Scowling' or conName == 'Threateningly' or conName == 'Dubious' or conName == 'Apprehensive')
             end
             saveLoadout(true)
         end
         ImGui.SameLine()
         if ImGui.Button('Hostile + Indifferent##pullConHostileIndiffBtn') then
-            for _, conName in ipairs(PULL_CON_LIST) do
+            for _, conName in ipairs(MODES.PULL_CON_LIST) do
                 ctrl.pull_con_filter[conName] = (conName == 'Scowling' or conName == 'Threateningly' or conName == 'Dubious' or conName == 'Apprehensive' or conName == 'Indifferent')
             end
             saveLoadout(true)
         end
         ImGui.SameLine()
         if ImGui.Button('Clear All##pullConClearBtn') then
-            for _, conName in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[conName] = false end
+            for _, conName in ipairs(MODES.PULL_CON_LIST) do ctrl.pull_con_filter[conName] = false end
             saveLoadout(true)
         end
 
@@ -6212,7 +6212,7 @@ function UI.drawControlTab()
 
         local tableFlags = bit.bor(ImGuiTableFlags.BordersOuter, ImGuiTableFlags.SizingFixedSame)
         if ImGui.BeginTable('PullConTable', 3, tableFlags) then
-            for idx, conName in ipairs(PULL_CON_LIST) do
+            for idx, conName in ipairs(MODES.PULL_CON_LIST) do
                 if (idx - 1) % 3 == 0 then
                     ImGui.TableNextRow()
                 end
@@ -6363,7 +6363,7 @@ function UI.drawSettingsTab()
         accent(GOLD, 'Engagement Style:')
         if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
             ctrl.combat_style = 'Melee'
-            revertAttackModeToMelee()
+            if runtime.revertAttackModeToMelee then runtime.revertAttackModeToMelee() end
             saveLoadout(true)
         end
         ImGui.SameLine()
@@ -6374,7 +6374,7 @@ function UI.drawSettingsTab()
         ImGui.SameLine()
         if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then
             ctrl.combat_style = 'Spell'
-            revertAttackModeToMelee()
+            if runtime.revertAttackModeToMelee then runtime.revertAttackModeToMelee() end
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
@@ -6842,36 +6842,36 @@ local function drawMiniGui()
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(100)
-        local curPrimaryIdx = idxOf(PRIMARY_MODES, ctrl.mode)
-        local newPrimaryIdx = ImGui.Combo('##miniPrimaryCombo', curPrimaryIdx, PRIMARY_MODES)
+        local curPrimaryIdx = idxOf(MODES.PRIMARY, ctrl.mode)
+        local newPrimaryIdx = ImGui.Combo('##miniPrimaryCombo', curPrimaryIdx, MODES.PRIMARY)
         if newPrimaryIdx ~= curPrimaryIdx then
-            local newPrimaryMode = PRIMARY_MODES[newPrimaryIdx]
+            local newPrimaryMode = MODES.PRIMARY[newPrimaryIdx]
             if ctrl.mode == 'Manual' and newPrimaryMode ~= 'Manual' then
                 setManualHunterPetHold(false)
             elseif newPrimaryMode == 'Manual' then
-                if not ctrl.running or not isCombat() then
+                if not ctrl.running or not (runtime.isCombat and runtime.isCombat()) then
                     setManualHunterPetHold(true, true)
                 end
             end
             ctrl.mode = newPrimaryMode
-            if SUBMODES[ctrl.mode] then
-                ctrl.submode = SUBMODES[ctrl.mode][1]
+            if MODES.SUBMODES[ctrl.mode] then
+                ctrl.submode = MODES.SUBMODES[ctrl.mode][1]
             else
                 ctrl.submode = 'Hunt'
             end
-            clearMapRadiusVisuals()
+            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             saveLoadout(true)
         end
 
-        if SUBMODES[ctrl.mode] then
+        if MODES.SUBMODES[ctrl.mode] then
             ImGui.SameLine()
             ImGui.SetNextItemWidth(90)
-            local subList = SUBMODES[ctrl.mode]
+            local subList = MODES.SUBMODES[ctrl.mode]
             local curSubIdx = idxOf(subList, ctrl.submode)
             local newSubIdx = ImGui.Combo('##miniSubCombo', curSubIdx, subList)
             if newSubIdx ~= curSubIdx then
                 ctrl.submode = subList[newSubIdx]
-                clearMapRadiusVisuals()
+                if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
                 saveLoadout(true)
             end
         end
@@ -6918,7 +6918,7 @@ local function drawMiniGui()
                     setManualHunterPetHold(false, true)
                 end
                 ctrl.running = false
-                fullStop()
+                if runtime.fullStop then runtime.fullStop() end
             end
         else
             local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
@@ -7180,7 +7180,7 @@ local function hasNamedBuff(spawnObj, name, isMe)
     end
     return found
 end
-buffActive = function(id, name)
+local function buffActive(id, name)
     if not id or id == 0 then return false end
     if id == mq.TLO.Me.ID() then
         if hasNamedBuff(mq.TLO.Me, name, true) then return true end
@@ -7237,10 +7237,8 @@ function runtime.lowestHpAlly()
     return bestId
 end
 
-local isUnreachable -- forward declaration; defined in the pursuit section below
-
 local function firstNPCXtarget(unmezzedOnly, maxZ, maxDist)
-    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, maxDist, maxZ)
+    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, maxDist, maxZ, buffActive)
 end
 
 -- Returns count of live, non-ignored NPCs occupying XTarget slots.
@@ -7379,7 +7377,7 @@ function runtime.isTargetInRange(name, targetId)
         end)
     end
     if maxRange == 0 then
-        maxRange = maxMeleeDistance(targetId)
+        maxRange = (runtime.maxMeleeDistance and runtime.maxMeleeDistance(targetId)) or 15
     end
 
     return dist <= (maxRange + 2)
@@ -7414,7 +7412,7 @@ function runtime.targetIsEngaged(id)
     return false
 end
 
-isCombat = function()
+local function isCombat()
     local ok, res = pcall(function()
         if mq.TLO.Me.Combat() then return true end
         if mq.TLO.Me.AutoFire() then return true end
@@ -7488,170 +7486,7 @@ function runtime.maTargetId()
     return t.ID()
 end
 
-resolvePetTargetId = function(when, spellName, cls, pct)
-    local allPets = getAllMyPets()
-    if #allPets == 0 then return nil end
-    if #allPets == 1 then return allPets[1] end
-
-    -- HP-based condition (healing): find lowest HP% pet among all player pets
-    if when == 'HP <=' or when == 'target HP <=' or when == 'my HP <=' then
-        local lowestPetId = nil
-        local lowestHp = 9999
-        for _, pid in ipairs(allPets) do
-            local hp = pctHP(pid)
-            if hp < lowestHp then
-                lowestHp = hp
-                lowestPetId = pid
-            end
-        end
-        return lowestPetId or allPets[1]
-    end
-
-    -- Buff condition: find pet missing the buff
-    if when == 'missing buff' and spellName and spellName ~= '' then
-        for _, pid in ipairs(allPets) do
-            if not runtime.sungBuffs[sungKey(spellName, pid)] and not buffActive(pid, spellName) then
-                return pid
-            end
-        end
-        return allPets[1]
-    end
-
-    -- Cure condition: find pet with affliction
-    if when == 'has Poison/Disease' and isPoisonedOrDiseased then
-        for _, pid in ipairs(allPets) do
-            if isPoisonedOrDiseased(pid) then
-                return pid
-            end
-        end
-        return allPets[1]
-    end
-
-    -- If class-specific pet is requested and alive, prefer it; otherwise return first pet
-    if cls and petState.myPets[cls] and isSpawnAlive(petState.myPets[cls]) then
-        return petState.myPets[cls]
-    end
-
-    return allPets[1]
-end
-
-function runtime.resolveTargetId(token, cls, when, spellName, pct)
-    local b = baseTok(token)
-    local id
-    if b == 'Myself' or b == 'Whole Group' then
-        id = mq.TLO.Me.ID()
-    elseif b == 'Main Assist' or b == 'Tank' then
-        id = runtime.maPcId()
-    elseif b == 'Lowest-HP Ally' then
-        id = runtime.lowestHpAlly()
-    elseif b == 'Pet' then
-        id = resolvePetTargetId(when, spellName, cls, pct)
-    elseif b == 'Current Target' then
-        id = mq.TLO.Target.ID()
-    elseif b == 'Assist Target' then
-        id = runtime.maTargetId()
-    elseif b == 'Unmezzed Add' then
-        id = firstNPCXtarget(true)
-    elseif b == 'Nearest Add' or b == 'All Enemies' then
-        local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
-        local maxZ = isPulling and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75)
-        id = firstNPCXtarget(false, maxZ)
-        if not id then
-            local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
-            local maxL = isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100)
-            local maxR = isPulling and (ctrl.camp_radius or 100) or (ctrl.hunter_radius or 1500)
-            local myZ = mq.TLO.Me.Z() or 0
-            for i = 1, 10 do
-                local s = mq.TLO.NearestSpawn(i, string.format('npc targetable radius %d', maxR))
-                if not s() then break end
-                local sid = s.ID() or 0
-                if sid > 0 and s.Type() == 'NPC' and not s.Dead() and s.Type() ~= 'Corpse'
-                    and not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid)
-                    and not isIgnored(s.CleanName()) and not isUnreachable(sid) then
-                    local okZ, sz = pcall(function() return s.Z() end)
-                    if okZ and sz and math.abs(sz - myZ) <= maxZ then
-                        local lvl = s.Level() or 0
-                        if lvl == 0 or (lvl >= minL and lvl <= maxL) then
-                            id = sid
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    else
-        id = mq.TLO.Target.ID()
-    end
-    if not id or id <= 0 then return nil end
-    local s = mq.TLO.Spawn(id)
-    if not s() or s.Dead() or s.Type() == 'Corpse' then return nil end
-    local stype = ''
-    pcall(function() stype = s.Type() or '' end)
-    local cname = ''
-    pcall(function() cname = s.CleanName() or '' end)
-    if cname ~= '' and isIgnored(cname) then return nil end
-    if (stype == 'NPC' or stype == 'Pet') and (ctrl.mode == 'Assist')
-        and not runtime.targetIsEngaged(id) then
-        return nil
-    end
-    return id
-end
-
-mq.event('TriuneZone', 'You have entered #*#', function()
-    runtime.sungBuffs = {}; onZoned()
-end)
-
-local function reconcileSungBuffs()
-    local found = 0
-    local function scanGemTable(gemsTable)
-        for i = 1, NUM_GEMS do
-            local g = gemsTable[i]
-            local gpct = g and tonumber(g.pct)
-            if gpct == nil then gpct = 100 end
-            if g and g.cls == 'Brd' and g.spell and g.spell ~= '' and gpct > 0 then
-                local bene = false
-                pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
-                if bene then
-                    local id = runtime.resolveTargetId(g.target, g.cls, g.when, g.spell, gpct)
-                    if id and buffActive(id, g.spell) then
-                        local key = sungKey(g.spell, id)
-                        if not runtime.sungBuffs[key] then
-                            runtime.sungBuffs[key] = true
-                            found = found + 1
-                        end
-                    end
-                end
-            end
-        end
-    end
-    scanGemTable(loadout.gems)
-    if found > 0 then
-        print('\ag[Triune]\ax found ' .. found .. ' bard buff(s) already active -- wont re-sing them.')
-    end
-end
-
-local function reconcilePets()
-    local petClassList = {}
-    for _, c in ipairs(myClasses) do if PET_CLASSES[c] then petClassList[#petClassList + 1] = c end end
-    if #petClassList == 0 then return end
-    local n = 0
-    pcall(function() n = mq.TLO.SpawnCount('pet radius 150')() or 0 end)
-    local assigned = 0
-    for i = 1, n do
-        if assigned >= #petClassList then break end
-        local s = mq.TLO.NearestSpawn(i, 'pet radius 150')
-        if s and s() and s.ID() and isSpawnMyPet(s) then
-            assigned = assigned + 1
-            petState.myPets[petClassList[assigned]] = s.ID()
-            petState.lastObservedId = s.ID()
-        end
-    end
-    if assigned > 0 then
-        print('\ag[Triune]\ax found ' .. assigned .. ' existing pet(s) -- tracking ' .. assigned .. ' pet(s).')
-    end
-end
-
-isPoisonedOrDiseased = function(targetId)
+local function isPoisonedOrDiseased(targetId)
     if not targetId or targetId <= 0 then return false end
 
     -- 1. Check local player (Me)
@@ -7767,6 +7602,169 @@ isPoisonedOrDiseased = function(targetId)
     return false
 end
 
+local function resolvePetTargetId(when, spellName, cls, pct)
+    local allPets = getAllMyPets()
+    if #allPets == 0 then return nil end
+    if #allPets == 1 then return allPets[1] end
+
+    -- HP-based condition (healing): find lowest HP% pet among all player pets
+    if when == 'HP <=' or when == 'target HP <=' or when == 'my HP <=' then
+        local lowestPetId = nil
+        local lowestHp = 9999
+        for _, pid in ipairs(allPets) do
+            local hp = pctHP(pid)
+            if hp < lowestHp then
+                lowestHp = hp
+                lowestPetId = pid
+            end
+        end
+        return lowestPetId or allPets[1]
+    end
+
+    -- Buff condition: find pet missing the buff
+    if when == 'missing buff' and spellName and spellName ~= '' then
+        for _, pid in ipairs(allPets) do
+            if not runtime.sungBuffs[sungKey(spellName, pid)] and not buffActive(pid, spellName) then
+                return pid
+            end
+        end
+        return allPets[1]
+    end
+
+    -- Cure condition: find pet with affliction
+    if when == 'has Poison/Disease' and isPoisonedOrDiseased then
+        for _, pid in ipairs(allPets) do
+            if isPoisonedOrDiseased(pid) then
+                return pid
+            end
+        end
+        return allPets[1]
+    end
+
+    -- If class-specific pet is requested and alive, prefer it; otherwise return first pet
+    if cls and petState.myPets[cls] and isSpawnAlive(petState.myPets[cls]) then
+        return petState.myPets[cls]
+    end
+
+    return allPets[1]
+end
+
+function runtime.resolveTargetId(token, cls, when, spellName, pct)
+    local b = baseTok(token)
+    local id
+    if b == 'Myself' or b == 'Whole Group' then
+        id = mq.TLO.Me.ID()
+    elseif b == 'Main Assist' or b == 'Tank' then
+        id = runtime.maPcId()
+    elseif b == 'Lowest-HP Ally' then
+        id = runtime.lowestHpAlly()
+    elseif b == 'Pet' then
+        id = resolvePetTargetId(when, spellName, cls, pct)
+    elseif b == 'Current Target' then
+        id = mq.TLO.Target.ID()
+    elseif b == 'Assist Target' then
+        id = runtime.maTargetId()
+    elseif b == 'Unmezzed Add' then
+        id = firstNPCXtarget(true)
+    elseif b == 'Nearest Add' or b == 'All Enemies' then
+        local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
+        local maxZ = isPulling and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75)
+        id = firstNPCXtarget(false, maxZ)
+        if not id then
+            local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
+            local maxL = isPulling and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100)
+            local maxR = isPulling and (ctrl.camp_radius or 100) or (ctrl.hunter_radius or 1500)
+            local myZ = mq.TLO.Me.Z() or 0
+            for i = 1, 10 do
+                local s = mq.TLO.NearestSpawn(i, string.format('npc targetable radius %d', maxR))
+                if not s() then break end
+                local sid = s.ID() or 0
+                if sid > 0 and s.Type() == 'NPC' and not s.Dead() and s.Type() ~= 'Corpse'
+                    and not isAnyPet(s) and not isSpawnPetOrPlayer(sid) and isHostileTarget(sid)
+                    and not isIgnored(s.CleanName()) and not isUnreachable(sid) then
+                    local okZ, sz = pcall(function() return s.Z() end)
+                    if okZ and sz and math.abs(sz - myZ) <= maxZ then
+                        local lvl = s.Level() or 0
+                        if lvl == 0 or (lvl >= minL and lvl <= maxL) then
+                            id = sid
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    else
+        id = mq.TLO.Target.ID()
+    end
+    if not id or id <= 0 then return nil end
+    local s = mq.TLO.Spawn(id)
+    if not s() or s.Dead() or s.Type() == 'Corpse' then return nil end
+    local stype = ''
+    pcall(function() stype = s.Type() or '' end)
+    local cname = ''
+    pcall(function() cname = s.CleanName() or '' end)
+    if cname ~= '' and isIgnored(cname) then return nil end
+    if (stype == 'NPC' or stype == 'Pet') and (ctrl.mode == 'Assist')
+        and not runtime.targetIsEngaged(id) then
+        return nil
+    end
+    return id
+end
+
+mq.event('TriuneZone', 'You have entered #*#', function()
+    runtime.sungBuffs = {}; if runtime.onZoned then runtime.onZoned() end
+end)
+
+local function reconcileSungBuffs()
+    local found = 0
+    local function scanGemTable(gemsTable)
+        for i = 1, NUM_GEMS do
+            local g = gemsTable[i]
+            local gpct = g and tonumber(g.pct)
+            if gpct == nil then gpct = 100 end
+            if g and g.cls == 'Brd' and g.spell and g.spell ~= '' and gpct > 0 then
+                local bene = false
+                pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
+                if bene then
+                    local id = runtime.resolveTargetId(g.target, g.cls, g.when, g.spell, gpct)
+                    if id and buffActive(id, g.spell) then
+                        local key = sungKey(g.spell, id)
+                        if not runtime.sungBuffs[key] then
+                            runtime.sungBuffs[key] = true
+                            found = found + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    scanGemTable(loadout.gems)
+    if found > 0 then
+        print('\ag[Triune]\ax found ' .. found .. ' bard buff(s) already active -- wont re-sing them.')
+    end
+end
+
+local function reconcilePets()
+    local petClassList = {}
+    for _, c in ipairs(myClasses) do if petState.PET_CLASSES[c] then petClassList[#petClassList + 1] = c end end
+    if #petClassList == 0 then return end
+    local n = 0
+    pcall(function() n = mq.TLO.SpawnCount('pet radius 150')() or 0 end)
+    local assigned = 0
+    for i = 1, n do
+        if assigned >= #petClassList then break end
+        local s = mq.TLO.NearestSpawn(i, 'pet radius 150')
+        if s and s() and s.ID() and isSpawnMyPet(s) then
+            assigned = assigned + 1
+            petState.myPets[petClassList[assigned]] = s.ID()
+            petState.lastObservedId = s.ID()
+        end
+    end
+    if assigned > 0 then
+        print('\ag[Triune]\ax found ' .. assigned .. ' existing pet(s) -- tracking ' .. assigned .. ' pet(s).')
+    end
+end
+
 function runtime.conditionMet(when, pct, spellName, targetId, cls)
     pct = tonumber(pct) or 0
     if pct <= 0 then return false end
@@ -7800,7 +7798,7 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls)
         pcall(function() curPetId = mq.TLO.Me.Pet.ID() or 0 end)
         if curPetId > 0 and isSpawnAlive(curPetId) and isSpawnMyPet(curPetId) then
             local petClasses = {}
-            for _, c in ipairs(myClasses) do if PET_CLASSES[c] then petClasses[#petClasses + 1] = c end end
+            for _, c in ipairs(myClasses) do if petState.PET_CLASSES[c] then petClasses[#petClasses + 1] = c end end
             if #petClasses <= 1 or not cls then
                 if cls then petState.myPets[cls] = curPetId end
                 return false
@@ -7865,8 +7863,8 @@ end
 
 local function onCannotSeeEvent()
     onFailureEvent('cannot see target')
-    if handleCannotSeeTarget then
-        handleCannotSeeTarget()
+    if runtime.handleCannotSeeTarget then
+        runtime.handleCannotSeeTarget()
     end
 end
 
@@ -8369,21 +8367,15 @@ end
 -- at 14 are already covered separately by moveToward's own stall-timeout
 -- acceptance branch below (dist + 12 tolerance, only after real evidence of
 -- being stuck) -- that path doesn't need this constant widened to work.
-local MELEE_RANGE = 14
--- Deliberately much tighter than MELEE_RANGE -- this is ONLY the "trust
--- proximity over a flaky point-blank raycast" exception (stairs/uneven
--- terrain/prop geometry can report a false "blocked" right next to the mob),
--- not a general LoS bypass. It used to be 20, same as MELEE_RANGE -- since
--- the arrival check already requires d <= MELEE_RANGE, that made the "or
--- d <= 20" clause always true and LoS was never actually checked at all for
--- melee, so a mob just around a corner (in range by straight-line distance,
--- no LoS at all) was accepted as "arrived" and never approached further --
--- reported live as sitting at a corner saying "you cannot see your target"
--- with no correction.
-local LOS_TRUST_RANGE = 8
+local NAV_CONST = {
+    MELEE_RANGE           = 14,
+    LOS_TRUST_RANGE       = 8,
+    PURSUIT_STALL_TIMEOUT = 8,   -- give up if no closer approach for this long
+    LOS_FLICKER_GRACE     = 2.5, -- treat LoS as still good this long after the last true reading (stairs flicker it)
+}
 
-maxMeleeDistance = function(id)
-    local userDist = (ctrl and ctrl.melee_dist) or MELEE_RANGE
+local function maxMeleeDistance(id)
+    local userDist = (ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE
     local spawnReach = 0
     if id and id > 0 then
         pcall(function()
@@ -8407,8 +8399,9 @@ maxMeleeDistance = function(id)
     end
     return userDist
 end
+runtime.maxMeleeDistance = maxMeleeDistance
 
-desiredRange = function(id)
+local function desiredRange(id)
     if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
         return ctrl.pull_engage_dist or 100
     end
@@ -8416,7 +8409,7 @@ desiredRange = function(id)
     if style ~= 'Melee' then
         return ctrl.ranged_dist or 40
     end
-    local userDist = (ctrl and ctrl.melee_dist) or MELEE_RANGE
+    local userDist = (ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE
     local spawnReach = 0
     if id and id > 0 then
         pcall(function()
@@ -8440,30 +8433,11 @@ desiredRange = function(id)
     end
     return math.max(5, math.floor(userDist - 2))
 end
+runtime.desiredRange = desiredRange
 
 -- ============================================================================
 -- Navigation Intelligence: Hazard Memory, Breadcrumbs & Proactive Clearance
 -- ============================================================================
-
-local PURSUIT_STALL_TIMEOUT = 8 -- give up if no closer approach for this long
-local LOS_FLICKER_GRACE = 2.5   -- treat LoS as still good this long after the last true reading (stairs flicker it)
-
--- Spawn ids MQ2Nav has told us have no path to. Cleared after 60s in case terrain
--- state changes (a door opens, etc). findRoamTarget skips these when picking a
--- fresh target; Hunter/Puller drop their current target the moment it lands here
--- rather than continuing to sit on something they can never reach.
-function runtime.markUnreachable(id)
-    pursuit.unreachableIds[id] = os.clock()
-    if runtime.clearDetour then runtime.clearDetour() end
-end
-isUnreachable = function(id)
-    local t = pursuit.unreachableIds[id]
-    if not t then return false end
-    if (os.clock() - t) > 60 then
-        pursuit.unreachableIds[id] = nil; return false
-    end
-    return true
-end
 
 -- Try to open the nearest door/switch. Direct fallback: door-target whatever
 -- Switch is nearest and click it.
@@ -8858,9 +8832,9 @@ function runtime.moveToward(id, dist, followOnly)
 
     local losNow = hasLoS(id)
     if losNow then pursuit.lastLoSAt = os.clock() end
-    local losOk = losNow or (pursuit.lastLoSAt > 0 and (os.clock() - pursuit.lastLoSAt) < LOS_FLICKER_GRACE)
+    local losOk = losNow or (pursuit.lastLoSAt > 0 and (os.clock() - pursuit.lastLoSAt) < NAV_CONST.LOS_FLICKER_GRACE)
 
-    if d <= effectiveArrivalDist and (losOk or d <= LOS_TRUST_RANGE) then
+    if d <= effectiveArrivalDist and (losOk or d <= NAV_CONST.LOS_TRUST_RANGE) then
         stopMoving()
         if not followOnly then
             if mq.TLO.Target.ID() ~= id then runtime.setTarget(id) end
@@ -8874,7 +8848,7 @@ function runtime.moveToward(id, dist, followOnly)
         return true
     end
 
-    if (os.clock() - pursuit.improvedAt) > PURSUIT_STALL_TIMEOUT or pursuit.navStalls >= 3 then
+    if (os.clock() - pursuit.improvedAt) > NAV_CONST.PURSUIT_STALL_TIMEOUT or pursuit.navStalls >= 3 then
         if d <= effectiveArrivalDist + 12 and losOk then
             stopMoving()
             if not followOnly then
@@ -8890,7 +8864,7 @@ function runtime.moveToward(id, dist, followOnly)
                 '\ay[Triune]\ax giving up on target %d -- %s (likely elevated/blocked despite a ground path existing).',
                 id,
                 pursuit.navStalls >= 3 and 'nav keeps completing without ever reaching range' or
-                ('no progress for ' .. PURSUIT_STALL_TIMEOUT .. 's')))
+                ('no progress for ' .. NAV_CONST.PURSUIT_STALL_TIMEOUT .. 's')))
             runtime.markUnreachable(id)
             stopMoving()
             pursuit.id = 0
@@ -9094,7 +9068,7 @@ end)
 -- a melee weapon. No-op if we're not confirmed in server Ranged mode, and
 -- throttled the same as the Ranged-side switch so repeated calls can't spam
 -- the chat line.
-revertAttackModeToMelee = function()
+runtime.revertAttackModeToMelee = function()
     if runtime.serverAttackMode ~= 'Ranged' then return end
     if (os.clock() - (runtime.lastAttackModeCmdAt or 0)) < 1.0 then return end
     runtime.lastAttackModeCmdAt = os.clock()
@@ -9564,7 +9538,7 @@ end
 -- repositioning maneuver steps back from the target and re-faces it. In EQ, being
 -- inside or right under a mob's bounding box/hitbox causes line-of-sight raycasts
 -- to fail internally. Stepping backward to the perimeter of melee reach restores LoS.
-handleCannotSeeTarget = function()
+runtime.handleCannotSeeTarget = function()
     if not ctrl or not ctrl.running then return end
     local tgt = mq.TLO.Target
     if not tgt or not tgt() then return end
@@ -10322,7 +10296,7 @@ function runtime.checkAggroSwitch()
     return false
 end
 
-fullStop = function()
+runtime.fullStop = function()
     stopMoving()
     if not ctrl.running and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if not ctrl.running and mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
@@ -10364,10 +10338,10 @@ fullStop = function()
     stuckState.cannotSeeAttempts = 0
 end
 
-onZoned = function()
+runtime.onZoned = function()
     if ctrl.running then
         ctrl.running = false
-        fullStop()
+        if runtime.fullStop then runtime.fullStop() end
         print('\ay[Triune]\ax zoned -- pausing autocombat.')
     end
     if castTracker and castTracker.clear then
@@ -10412,7 +10386,6 @@ onZoned = function()
 end
 
 -- Bind remaining engine helpers to runtime table
-runtime.fullStop = fullStop
 runtime.pctHP = pctHP
 runtime.isCombat = isCombat
 runtime.isXTargetId = isXTargetId
@@ -10593,7 +10566,7 @@ local function combatTick()
             petState.lastCastCls = nil
         else
             for _, c in ipairs(myClasses) do
-                if PET_CLASSES[c] and (not petState.myPets[c] or not isSpawnAlive(petState.myPets[c])) then
+                if petState.PET_CLASSES[c] and (not petState.myPets[c] or not isSpawnAlive(petState.myPets[c])) then
                     petState.myPets[c] = curPetId
                     break
                 end
@@ -11102,7 +11075,7 @@ local function combatTick()
             local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
             if haveNPC and not isDraggingToCamp and autoAttackOk then
                 local curDist = (tid > 0) and distToId(tid) or 999
-                local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or MELEE_RANGE)
+                local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE)
                 if curDist <= maxReach then
                     if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
                         print('\ag[Triune]\ax Standing up to attack.')
@@ -11421,7 +11394,7 @@ local function combatTick()
         local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
         tid = mq.TLO.Target.ID() or 0
         local d = (tid > 0) and distToId(tid) or 999
-        local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or MELEE_RANGE)
+        local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE)
         if ctrl and ctrl.combat_style == 'Melee' and haveNPC and not isDraggingToCamp then
             if d <= maxReach then
                 if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
@@ -11579,9 +11552,9 @@ local function setTriuneMode(arg1, arg2)
 
     ctrl.mode = newMode
     ctrl.submode = newSubmode
-    clearMapRadiusVisuals()
+    if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
 
-    if SUBMODES[ctrl.mode] then
+    if MODES.SUBMODES[ctrl.mode] then
         print(string.format('\ag[Triune]\ax mode set to %s (%s).', ctrl.mode, ctrl.submode))
     else
         print(string.format('\ag[Triune]\ax mode set to %s.', ctrl.mode))
@@ -11590,7 +11563,6 @@ local function setTriuneMode(arg1, arg2)
     return true
 end
 
-local triuneToggle
 local function triuneCommand(...)
     local args = { ... }
     local cmd = ''
@@ -11598,7 +11570,7 @@ local function triuneCommand(...)
         cmd = normalizeCommandKey(args[1])
     end
     if cmd == '' then
-        triuneToggle()
+        if runtime.triuneToggle then runtime.triuneToggle() end
         return
     end
     if cmd == 'run' or cmd == 'start' then
@@ -11630,12 +11602,12 @@ local function triuneCommand(...)
                 setManualHunterPetHold(false, true)
             end
             ctrl.running = false
-            fullStop()
+            if runtime.fullStop then runtime.fullStop() end
             print('\ag[Triune]\ax paused.')
         end
     elseif cmd == 'status' then
         local modeStr = ctrl.mode
-        if SUBMODES[ctrl.mode] then modeStr = modeStr .. ' (' .. ctrl.submode .. ')' end
+        if MODES.SUBMODES[ctrl.mode] then modeStr = modeStr .. ' (' .. ctrl.submode .. ')' end
         print(string.format('\ag[Triune]\ax status: %s, mode: %s, burn: %s', ctrl.running and 'running' or 'paused',
             modeStr, ctrl.burn and 'ON' or 'OFF'))
     elseif cmd == 'burn' or cmd == 'burnon' or cmd == 'burnoff' or cmd == 'burn1' or cmd == 'burn0' or cmd == 'burntoggle' then
@@ -11729,20 +11701,20 @@ local function triuneCommand(...)
         local arg3 = args[3] and string.lower(args[3]) or ''
         if arg2 == 'preset' then
             if arg3 == 'hostile' then
-                for _, c in ipairs(PULL_CON_LIST) do
+                for _, c in ipairs(MODES.PULL_CON_LIST) do
                     ctrl.pull_con_filter[c] = (c == 'Scowling' or c == 'Threateningly' or c == 'Dubious' or c == 'Apprehensive')
                 end
                 print('\ag[Triune]\ax Puller Faction Con filter set to preset: Hostile Only')
             elseif arg3 == 'indifferent' then
-                for _, c in ipairs(PULL_CON_LIST) do
+                for _, c in ipairs(MODES.PULL_CON_LIST) do
                     ctrl.pull_con_filter[c] = (c == 'Scowling' or c == 'Threateningly' or c == 'Dubious' or c == 'Apprehensive' or c == 'Indifferent')
                 end
                 print('\ag[Triune]\ax Puller Faction Con filter set to preset: Hostile + Indifferent')
             elseif arg3 == 'all' or arg3 == 'selectall' then
-                for _, c in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[c] = true end
+                for _, c in ipairs(MODES.PULL_CON_LIST) do ctrl.pull_con_filter[c] = true end
                 print('\ag[Triune]\ax Puller Faction Con filter set to preset: Select All')
             elseif arg3 == 'clear' or arg3 == 'none' then
-                for _, c in ipairs(PULL_CON_LIST) do ctrl.pull_con_filter[c] = false end
+                for _, c in ipairs(MODES.PULL_CON_LIST) do ctrl.pull_con_filter[c] = false end
                 print('\ag[Triune]\ax Puller Faction Con filter set to preset: Clear All')
             else
                 print('\ay[Triune]\ax usage: /ac pullcon preset [all|hostile|indifferent|none]')
@@ -11750,7 +11722,7 @@ local function triuneCommand(...)
             saveLoadout(true)
         elseif arg2 ~= '' then
             local targetCon = nil
-            for _, c in ipairs(PULL_CON_LIST) do
+            for _, c in ipairs(MODES.PULL_CON_LIST) do
                 if string.lower(c) == arg2 then
                     targetCon = c; break
                 end
@@ -11767,7 +11739,7 @@ local function triuneCommand(...)
             end
         else
             print('\ag[Triune]\ax --- Puller Faction Considerations ---')
-            for _, c in ipairs(PULL_CON_LIST) do
+            for _, c in ipairs(MODES.PULL_CON_LIST) do
                 print(string.format('  %s: %s', c, ctrl.pull_con_filter[c] and '\agENABLED\ax' or '\arDISABLED\ax'))
             end
             print(
@@ -11798,17 +11770,17 @@ local function triuneCommand(...)
             end
         elseif sub == 'on' or sub == '1' or sub == 'enable' then
             ctrl.use_waypoints = true
-            clearMapRadiusVisuals()
+            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             saveLoadout(true)
             print('\ag[Triune]\ax Waypoint Patrol ENABLED.')
         elseif sub == 'off' or sub == '0' or sub == 'disable' then
             ctrl.use_waypoints = false
-            clearMapRadiusVisuals()
+            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             saveLoadout(true)
             print('\ag[Triune]\ax Waypoint Patrol DISABLED.')
         elseif sub == 'toggle' then
             ctrl.use_waypoints = not ctrl.use_waypoints
-            clearMapRadiusVisuals()
+            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             saveLoadout(true)
             print(string.format('\ag[Triune]\ax Waypoint Patrol %s.', ctrl.use_waypoints and 'ENABLED' or 'DISABLED'))
         elseif sub == 'radius' or sub == 'arrival' then
@@ -11852,7 +11824,7 @@ local function triuneCommand(...)
         local st = args[2] and string.lower(args[2]) or ''
         if st == 'melee' then
             ctrl.combat_style = 'Melee'
-            revertAttackModeToMelee()
+            if runtime.revertAttackModeToMelee then runtime.revertAttackModeToMelee() end
             saveLoadout(true)
             print('\ag[Triune]\ax Combat style set to: \agMelee\ax (range ' .. tostring(ctrl.melee_dist or 14) .. ')')
         elseif st == 'ranged' or st == 'bow' then
@@ -11861,7 +11833,7 @@ local function triuneCommand(...)
             print('\ag[Triune]\ax Combat style set to: \agRanged (bow)\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
         elseif st == 'spell' or st == 'cast' or st == 'caster' then
             ctrl.combat_style = 'Spell'
-            revertAttackModeToMelee()
+            if runtime.revertAttackModeToMelee then runtime.revertAttackModeToMelee() end
             saveLoadout(true)
             print('\ag[Triune]\ax Combat style set to: \agSpell\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
         else
@@ -11925,7 +11897,7 @@ local function triuneCommand(...)
     end
 end
 
-triuneToggle = function()
+runtime.triuneToggle = function()
     if ctrl.running then
         if ctrl.mode == 'Manual' then
             setManualHunterPetHold(true, true)
@@ -11933,7 +11905,7 @@ triuneToggle = function()
             setManualHunterPetHold(false, true)
         end
         ctrl.running = false
-        fullStop()
+        if runtime.fullStop then runtime.fullStop() end
         print('\ag[Triune]\ax paused.')
     else
         if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
@@ -11957,7 +11929,7 @@ mq.unbind('/triune')
 mq.bind('/triune', triuneCommand)
 
 mq.unbind('/triunerun')
-mq.bind('/triunerun', triuneToggle)
+mq.bind('/triunerun', runtime.triuneToggle)
 
 mq.unbind('/ac')
 mq.bind('/ac', triuneCommand)
@@ -11981,31 +11953,30 @@ end
 --                                   'headshot', 'slay'.
 -- ============================================================================
 
-local CRIT_LIFETIME   = 2.0    -- seconds a floater lives
-local CRIT_RISE_SPEED = 80     -- pixels per second upward drift
-local CRIT_SPREAD     = 120    -- horizontal jitter range (pixels)
-local CRIT_BASE_SIZE  = 22     -- base font scale for normal crits
-local CRIT_BIG_SIZE   = 32     -- font scale for massive hits
-
--- Color palettes per crit type: {r, g, b} base color (0-1 floats).
--- The renderer pulses / cycles around these to keep things lively.
-local CRIT_COLORS = {
-    crit      = { 1.0, 0.85, 0.20 },   -- golden yellow
-    crip      = { 1.0, 0.30, 0.15 },   -- fiery red-orange
-    deadly    = { 0.85, 0.10, 1.0  },   -- purple
-    spellcrit = { 0.30, 0.80, 1.0  },   -- arcane blue
-    holy      = { 1.0, 1.0,  0.75 },   -- holy white-gold
-    flurry    = { 0.20, 1.0,  0.50 },   -- emerald green
-    finish    = { 1.0, 0.55, 0.0  },    -- finishing blow orange
-    assassin  = { 0.65, 0.0,  0.0 },    -- dark blood red
-    headshot  = { 0.95, 0.60, 0.80 },   -- rose pink
-    slay      = { 1.0, 0.95, 0.60 },    -- radiant gold
+local CRIT = {
+    LIFETIME   = 2.0,    -- seconds a floater lives
+    RISE_SPEED = 80,     -- pixels per second upward drift
+    SPREAD     = 120,    -- horizontal jitter range (pixels)
+    BASE_SIZE  = 22,     -- base font scale for normal crits
+    BIG_SIZE   = 32,     -- font scale for massive hits
+    COLORS     = {
+        crit      = { 1.0, 0.85, 0.20 },   -- golden yellow
+        crip      = { 1.0, 0.30, 0.15 },   -- fiery red-orange
+        deadly    = { 0.85, 0.10, 1.0  },   -- purple
+        spellcrit = { 0.30, 0.80, 1.0  },   -- arcane blue
+        holy      = { 1.0, 1.0,  0.75 },   -- holy white-gold
+        flurry    = { 0.20, 1.0,  0.50 },   -- emerald green
+        finish    = { 1.0, 0.55, 0.0  },    -- finishing blow orange
+        assassin  = { 0.65, 0.0,  0.0 },    -- dark blood red
+        headshot  = { 0.95, 0.60, 0.80 },   -- rose pink
+        slay      = { 1.0, 0.95, 0.60 },    -- radiant gold
+    },
 }
 
 local function spawnCritFloater(text, critType, dmg)
     if not ctrl.show_crit_floaters then return end
     local seed = math.random(1000)
-    local xOff = math.random(-CRIT_SPREAD / 2, CRIT_SPREAD / 2)
+    local xOff = math.random(-CRIT.SPREAD / 2, CRIT.SPREAD / 2)
     table.insert(runtime.critFloaters, {
         text      = text,
         type      = critType or 'crit',
@@ -12067,15 +12038,15 @@ local function drawCritOverlay()
         while i <= #runtime.critFloaters do
             local f = runtime.critFloaters[i]
             local age = now - f.spawnedAt
-            if age > CRIT_LIFETIME then
+            if age > CRIT.LIFETIME then
                 table.remove(runtime.critFloaters, i)
             else
-                local t = age / CRIT_LIFETIME  -- 0..1 normalized lifetime
+                local t = age / CRIT.LIFETIME  -- 0..1 normalized lifetime
 
                 -- Position: float upward, slight horizontal wobble via sin
                 local wobble = math.sin(age * 4 + f.seed) * 8
                 local px = anchorX + f.xOff + wobble
-                local py = anchorY - (age * CRIT_RISE_SPEED) - (t * t * 30)
+                local py = anchorY - (age * CRIT.RISE_SPEED) - (t * t * 30)
 
                 -- Alpha: fade in fast, hold, fade out in last 30%
                 local alpha
@@ -12090,7 +12061,7 @@ local function drawCritOverlay()
 
                 -- Scale: initial pop-in bounce, then settle
                 local isBig = f.dmg > 500
-                local baseSize = isBig and CRIT_BIG_SIZE or CRIT_BASE_SIZE
+                local baseSize = isBig and CRIT.BIG_SIZE or CRIT.BASE_SIZE
                 local scale
                 if t < 0.15 then
                     -- Pop-in: overshoot to 1.5x then settle
@@ -12102,7 +12073,7 @@ local function drawCritOverlay()
                 local fontSize = baseSize * scale
 
                 -- Color: use type palette with pulsing brightness / hue shift
-                local c = CRIT_COLORS[f.type] or CRIT_COLORS.crit
+                local c = CRIT.COLORS[f.type] or CRIT.COLORS.crit
                 local pulse = 0.7 + 0.3 * math.sin(age * 8 + f.seed)
                 local r = math.min(1, c[1] * pulse + 0.15 * math.sin(age * 5))
                 local g = math.min(1, c[2] * pulse + 0.10 * math.cos(age * 6))
@@ -12239,17 +12210,17 @@ end
 -- Map Visualization Helper
 -- ============================================================================
 
-clearMapRadiusVisuals = function()
+runtime.clearMapRadiusVisuals = function()
     mq.cmd('/maploc remove')
     mq.cmd('/mapfilter pullradius 0')
     mq.cmd('/mapfilter castradius 0')
     runtime.lastMapDraw = { active = false, type = nil, key = '' }
 end
 
-updateMapRadiusVisuals = function()
+runtime.updateMapRadiusVisuals = function()
     if not ctrl.show_map_radius then
         if runtime.lastMapDraw and runtime.lastMapDraw.active then
-            clearMapRadiusVisuals()
+            runtime.clearMapRadiusVisuals()
         end
         return
     end
@@ -12291,7 +12262,7 @@ updateMapRadiusVisuals = function()
     end
 
     -- Clear all previous map overlays before applying new one
-    clearMapRadiusVisuals()
+    runtime.clearMapRadiusVisuals()
 
     if mode == 'Puller' and hasWps then
         runtime.syncWaypointMapLines(zoneShort)
@@ -12410,7 +12381,7 @@ local function runMainLoop()
             if detected then myClasses = detected end
         end
         -- (Cursor items are cleared on-demand prior to actions/mems or post-cast completion)
-        updateMapRadiusVisuals()
+        runtime.updateMapRadiusVisuals()
         -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting
         local memmed = false
         if not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
@@ -12431,7 +12402,7 @@ local function runMainLoop()
         elseif not ctrl.running then
             if runtime.wasRunning then
                 runtime.wasRunning = false
-                fullStop()
+                if runtime.fullStop then runtime.fullStop() end
             end
         end
 
@@ -12449,5 +12420,5 @@ local function runMainLoop()
 end
 
 runMainLoop()
-clearMapRadiusVisuals()
+if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
 saveLoadout(true)

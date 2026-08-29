@@ -11,6 +11,19 @@
   - **UI & Live Status Integration**: Real-time display of current guild name and dynamic warning badge if unguilded (`[GUILD ONLY: <GuildName>]` / `[GUILD ONLY: UNGUILDED!]`), with inline checkbox and custom rejection message input box in the Controls tab.
   - **Unit Tests**: Added test suite in `tests/test_pure_logic.lua` covering case-insensitive guild matching, unguilded characters, and cross-guild rejection scenarios.
 
+- **Lua 5.1 Main Chunk 200-Local Variable Refactoring & Consolidation (`triune.lua`).**
+  - **Eliminated File-Scope Local Overflow**: Resolved Lua 5.1 / LuaJIT `Only 200 active local variables and upvalues can be existed at the same time` compiler error by eliminating redundant file-scope forward declarations and grouping loose constants into structured tables.
+  - **Consolidated Constant & Helper Tables**:
+    - Grouped mode and consideration constants into a unified `MODES` table (`PRIMARY`, `SUBMODES`, `PULL_STYLES`, `PULL_CON_LIST`, `DESC`, `SUB_DESC`).
+    - Grouped floating combat crit rendering parameters into `CRIT` table (`LIFETIME`, `RISE_SPEED`, `SPREAD`, `BASE_SIZE`, `BIG_SIZE`, `COLORS`).
+    - Grouped waypoint serialisation constants into `WP` table (`EXPORT_PREFIX`, `EXPORT_VERSION`, `RS`, `US`, `B64_CHARS`, `B64_LOOKUP`).
+    - Grouped ladder navigation constants into `LADDER_CLIMB` table.
+    - Grouped pursuit and melee navigation thresholds into `NAV_CONST` table (`MELEE_RANGE`, `LOS_TRUST_RANGE`, `PURSUIT_STALL_TIMEOUT`, `LOS_FLICKER_GRACE`).
+    - Grouped class, racial, and universal ability definitions into `CLASS_ACTIONS` table.
+    - Grouped UI combo option arrays into `COMBO_OPTIONS`.
+  - **Scoped Function Definitions**: Replaced top-level forward declarations (`isUnreachable`, `isIgnored`, `buffActive`, `isCombat`, `resolvePetTargetId`, `isPoisonedOrDiseased`, `maxMeleeDistance`, `desiredRange`, `fullStop`, `onZoned`, `handleCannotSeeTarget`, `revertAttackModeToMelee`, `updateMapRadiusVisuals`, `clearMapRadiusVisuals`) with properly ordered `local function`s and direct bindings on the `runtime` table.
+  - **Headroom & Linting**: Reduced total file-scope locals from over 200 down to 161 (over 20% safety margin below Lua 5.1's 200-local ceiling), passing full unit test suite (814 tests) and zero `luacheck` warnings.
+
 - **Separated Abilities & AAs Tabs with Full Combat Actions & Autoskill (`triune.lua`).**
   - **Dedicated Abilities Tab**: Split the previously combined "Abilities & AAs" page into two distinct, dedicated tabs: **Abilities** (`UI.drawAbilitiesTab()`) for innate class combat actions and **AAs** (`UI.drawAATab()`) for Alternate Advancements.
   - **Gestalt Trio Class Mapping & Live Skill Queries (`getClientAbilities`)**:

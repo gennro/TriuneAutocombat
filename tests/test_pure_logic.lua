@@ -168,6 +168,10 @@ local PULL_CON_LIST = {
     'Indifferent', 'Amiably', 'Kindly', 'Warmly', 'Ally',
 }
 
+local MODES = {
+    PULL_CON_LIST = PULL_CON_LIST,
+}
+
 -- The MQSHORT lookup table (used inside toCanonicalClassAbbr as a local, and
 -- referenced by parseClassLine as an upvalue that SHOULD be module-level).
 local MQSHORT = {
@@ -224,11 +228,19 @@ local MQSHORT = {
 }
 
 -- Waypoint export/import string constants (must match triune.lua's module-level definitions)
-local B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-local B64_LOOKUP = {}
-for i = 1, #B64_CHARS do B64_LOOKUP[B64_CHARS:sub(i, i)] = i - 1 end
-local WP_RS = string.char(30)
-local WP_US = string.char(31)
+local WP = {
+    B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+    B64_LOOKUP = {},
+    RS = string.char(30),
+    US = string.char(31),
+    EXPORT_PREFIX = 'TACWP1:',
+    EXPORT_VERSION = 1,
+}
+for i = 1, #WP.B64_CHARS do WP.B64_LOOKUP[WP.B64_CHARS:sub(i, i)] = i - 1 end
+local B64_CHARS = WP.B64_CHARS
+local B64_LOOKUP = WP.B64_LOOKUP
+local WP_RS = WP.RS
+local WP_US = WP.US
 
 -- ============================================================================
 -- 1.  idxOf(tbl, val)
@@ -353,7 +365,7 @@ check_defaults('bogus', nil, 'E: Current Target', 'target HP <=', 95, 'defaults:
 -- ============================================================================
 print('--- sanitizeModeConfig ---')
 local sanitizeModeConfig = loadFunc(src, 'sanitizeModeConfig',
-    { PULL_CON_LIST = PULL_CON_LIST, ctrl = nil })
+    { MODES = MODES, ctrl = nil })
 
 -- Legacy mode migration
 local function smc(mode, submode)
@@ -488,7 +500,7 @@ assert_nil(parseClassLine('LVL 50'), 'parse: "LVL 50" filtered')
 -- 8.  defaultCtrl() — shape validation
 -- ============================================================================
 print('--- defaultCtrl ---')
-local defaultCtrl = loadFunc(src, 'defaultCtrl', { PULL_CON_LIST = PULL_CON_LIST })
+local defaultCtrl = loadFunc(src, 'defaultCtrl', { MODES = MODES })
 local dc = defaultCtrl()
 
 -- Check required fields exist and have correct types
@@ -588,10 +600,10 @@ local CLASS_ACTIONS = {
     Wiz = {},
     Mag = {},
     Enc = {},
+    racial = { 'Slam', 'Hide', 'Sneak', 'Forage' },
+    universal = { 'Begging', 'Bind Wound', 'Sense Heading' },
 }
-local RACIAL_ACTIONS = { 'Slam', 'Hide', 'Sneak', 'Forage' }
-local UNIVERSAL_ACTIONS = { 'Begging', 'Bind Wound', 'Sense Heading' }
-local isActionSkill = loadFunc(src, 'isActionSkill', { CLASS_ACTIONS = CLASS_ACTIONS, RACIAL_ACTIONS = RACIAL_ACTIONS, UNIVERSAL_ACTIONS = UNIVERSAL_ACTIONS })
+local isActionSkill = loadFunc(src, 'isActionSkill', { CLASS_ACTIONS = CLASS_ACTIONS })
 local defaultActionEntry = loadFunc(src, 'defaultActionEntry', {})
 
 assert_true(isActionSkill('Mend'), 'action: Mend')
@@ -672,8 +684,6 @@ local hasActionSkill = loadFunc(src, 'hasActionSkill', { mq = mockMq })
 local getClientAbilities = loadFunc(src, 'getClientAbilities', {
     mq = mockMq,
     CLASS_ACTIONS = CLASS_ACTIONS,
-    RACIAL_ACTIONS = RACIAL_ACTIONS,
-    UNIVERSAL_ACTIONS = UNIVERSAL_ACTIONS,
     hasActionSkill = hasActionSkill,
     actionClassInfo = actionClassInfo,
     myClasses = { 'Mnk', 'War', 'Clr' },
@@ -1457,6 +1467,7 @@ assert_eq(remRes2, false, 'ignore: removing non-existent player returns false')
 -- 29. isSameGuild / guild helpers (buffbot)
 -- ============================================================================
 print('--- isSameGuild (buffbot) ---')
+---@type string|nil
 local mockMyGuild = 'Knights of Norrath'
 local mockMq = {
     TLO = {
@@ -2059,8 +2070,8 @@ assert_eq(sanitizeWpField(123), '123', 'sanitizeWpField: coerces non-string inpu
 -- base64Encode / base64Decode (waypoint preset export/import)
 -- ============================================================================
 print('--- base64Encode/base64Decode ---')
-local base64Encode = loadFunc(src, 'base64Encode', { B64_CHARS = B64_CHARS })
-local base64Decode = loadFunc(src, 'base64Decode', { B64_LOOKUP = B64_LOOKUP })
+local base64Encode = loadFunc(src, 'base64Encode', { WP = WP })
+local base64Decode = loadFunc(src, 'base64Decode', { WP = WP })
 
 assert_eq(base64Encode(''), '', 'base64Encode: empty input returns empty string')
 assert_eq(base64Encode('f'), 'Zg==', 'base64Encode: single byte pads with ==')
