@@ -527,14 +527,22 @@ local function isDirectoryAccessible(dir)
         local mode = lfs.attributes(dir, 'mode')
         return mode == 'directory'
     end
+    -- Probe common zone map files
+    local probeNames = {
+        state.currentZoneShort or 'poknowledge',
+        'poknowledge', 'qeynos', 'freporte', 'bazaar', 'nexus',
+        'planeofknowledge', 'arena', 'guildlobby', 'crescent',
+        'poearthA', 'potranquility', 'shadowhaven', 'sharvahl', 'gfaydark'
+    }
+    for _, z in ipairs(probeNames) do
+        local f1 = io.open(dir .. '/' .. z .. '.txt', 'r')
+        if f1 then f1:close(); return true end
+        local f2 = io.open(dir .. '/' .. z .. '_labels.txt', 'r')
+        if f2 then f2:close(); return true end
+    end
     local f = io.open(dir, 'r')
     if f then
         f:close()
-        return true
-    end
-    local f2 = io.open(dir .. '/poknowledge.txt', 'r') or io.open(dir .. '/qeynos.txt', 'r')
-    if f2 then
-        f2:close()
         return true
     end
     return false
@@ -593,12 +601,12 @@ local function scanMapFolders()
     local names = {}
     local seen = {}
 
-    -- Always include root maps directory as option 1
+    -- Option 1: Root maps directory
     folders[1] = { name = '[Root] Default (maps/)', relPath = '', fullPath = baseDir }
     names[1] = '[Root] Default (maps/)'
     seen[''] = true
 
-    -- Method 1: LuaFileSystem (Instant, zero child processes, zero disk writes)
+    -- Method 1: LuaFileSystem (if available in environment)
     local okLfs, lfs = pcall(require, 'lfs')
     if okLfs and lfs and lfs.dir and lfs.attributes then
         pcall(function()
@@ -614,20 +622,62 @@ local function scanMapFolders()
                 end
             end
         end)
-    else
-        -- Method 2: Fast read-only check of known map pack names
-        local knownPacks = {
-            'Brewall', 'brewall', 'Goodurden', 'goodurden', 'Goods', 'goods',
-            'MyMaps', 'mymaps', 'custom', 'Custom', 'Default', 'default', 'Atlas', 'Cartography',
-        }
-        for _, pack in ipairs(knownPacks) do
-            if not seen[pack] then
-                local subPath = baseDir .. '/' .. pack
-                if isDirectoryAccessible(subPath) then
-                    seen[pack] = true
-                    folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
-                    names[#names + 1] = pack
+    end
+
+    -- Method 2: Fast Windows Shell Directory Query (dir /a:d /b)
+    if #folders == 1 and io.popen then
+        pcall(function()
+            local winPath = baseDir:gsub('/', '\\')
+            local pipe = io.popen('cmd /c dir /a:d /b "' .. winPath .. '" 2>nul')
+            if pipe then
+                for line in pipe:lines() do
+                    local trimmed = line:match('^%s*(.-)%s*$')
+                    if trimmed and trimmed ~= '' and trimmed ~= '.' and trimmed ~= '..' and not seen[trimmed] then
+                        seen[trimmed] = true
+                        folders[#folders + 1] = { name = trimmed, relPath = trimmed, fullPath = baseDir .. '/' .. trimmed }
+                        names[#names + 1] = trimmed
+                    end
                 end
+                pipe:close()
+            end
+        end)
+    end
+
+    -- Method 3: POSIX / Linux / Wine fallback
+    if #folders == 1 and io.popen then
+        pcall(function()
+            local pipe = io.popen('find "' .. baseDir .. '" -mindepth 1 -maxdepth 1 -type d -exec basename {} \\; 2>/dev/null')
+            if pipe then
+                for line in pipe:lines() do
+                    local trimmed = line:match('^%s*(.-)%s*$')
+                    if trimmed and trimmed ~= '' and trimmed ~= '.' and trimmed ~= '..' and not seen[trimmed] then
+                        seen[trimmed] = true
+                        folders[#folders + 1] = { name = trimmed, relPath = trimmed, fullPath = baseDir .. '/' .. trimmed }
+                        names[#names + 1] = trimmed
+                    end
+                end
+                pipe:close()
+            end
+        end)
+    end
+
+    -- Method 4: Comprehensive Community Map Pack Probe Dictionary
+    local knownPacks = {
+        'Brewall', 'brewall', 'Brewalls', 'brewalls', 'BrewallMaps', 'brewallmaps', 'Brewall_RoF2', 'Brewall_Live',
+        'Goodurden', 'goodurden', 'Goods', 'goods', 'GoodUrden', 'GoodsMaps', 'goodsmaps', 'Good_Maps', 'GoodurdenMaps',
+        'MyMaps', 'mymaps', 'Custom', 'custom', 'CustomMaps', 'custommaps', 'UserMaps', 'usermaps', 'Maps', 'maps',
+        'RoF2', 'rof2', 'Underfoot', 'underfoot', 'Titanium', 'titanium', 'P99', 'p99', 'Project1999', 'project1999',
+        'EQClassic', 'eqclassic', 'Classic', 'classic', 'Live', 'live', 'Beta', 'beta',
+        'Cartography', 'cartography', 'Atlas', 'atlas', 'MapPack', 'mappack', 'ZoneMaps', 'zonemaps', 'Downloaded', 'NewMaps',
+        'TLP', 'tlp', 'EverQuest', 'everquest', 'Default', 'default'
+    }
+    for _, pack in ipairs(knownPacks) do
+        if not seen[pack] then
+            local subPath = baseDir .. '/' .. pack
+            if isDirectoryAccessible(subPath) then
+                seen[pack] = true
+                folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
+                names[#names + 1] = pack
             end
         end
     end
@@ -2182,6 +2232,45 @@ local function DrawSettingsTab()
         ImGui.TextColored(0.4, 0.8, 1.0, 1.0, string.format('Zone Map Status: %d lines, %d labels parsed from %s', mapData.totalLines, mapData.totalLabels, activeFolderLabel))
     else
         ImGui.TextColored(1.0, 0.7, 0.2, 1.0, string.format('Zone Map Status: No files found for "%s" in %s', state.currentZoneShort, activeFolderLabel))
+    end
+
+    ImGui.Spacing()
+    -- Quick Custom Subfolder Entry
+    ImGui.PushItemWidth(220)
+    local subInput, subChanged = ImGui.InputText('Add Subfolder Name##CustomSubInput', state.customSubfolderInput or '')
+    if subChanged then
+        state.customSubfolderInput = subInput
+    end
+    ImGui.PopItemWidth()
+    ImGui.SameLine()
+    if ImGui.Button('Add / Select Folder##AddCustomSubBtn') then
+        local trimmed = (state.customSubfolderInput or ''):match('^%s*(.-)%s*$')
+        if trimmed and trimmed ~= '' then
+            local baseDir = state.baseMapsDirectory or getBaseMapsDirectory()
+            local full = baseDir and (baseDir .. '/' .. trimmed) or trimmed
+            local found = false
+            for i, f in ipairs(state.mapFolders) do
+                if f.name == trimmed or f.relPath == trimmed then
+                    state.selectedFolderIndex = i
+                    state.activeMapsDirectory = f.fullPath
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                state.mapFolders[#state.mapFolders + 1] = { name = trimmed, relPath = trimmed, fullPath = full }
+                state.mapFolderNames[#state.mapFolderNames + 1] = trimmed
+                state.selectedFolderIndex = #state.mapFolders
+                state.activeMapsDirectory = full
+            end
+            loadZoneMap(state.currentZoneShort)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
+            state.statusMsg = string.format('Selected map pack "%s"', trimmed)
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Manually adds any custom subfolder name under maps/ (e.g. "Brewall_RoF2" or "MyMaps") and loads it.')
     end
 
     ImGui.Spacing()
