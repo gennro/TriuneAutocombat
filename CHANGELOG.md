@@ -2,6 +2,13 @@
 
 ## 2026-08-28
 
+- **Live Status & Engine Diagnostics Tab (`triune.lua`).**
+  - **New Primary Status Tab**: Added a dedicated **Status** tab positioned to the left of the Control tab (`UI.drawStatusTab()`), providing a real-time tactical overview of combat engine state and active subsystems.
+  - **Live Engine & Mode Banner**: Displays live engine running/paused state, active primary combat mode (Manual, Puller, Assist) and submode (Hunt, Camp, Chase, Backline), combat & attack style (Melee vs Ranged with server attack mode sync), burn state, medbreak/resting state, and active spell casting info.
+  - **Current Target & Threat Hero Card**: Renders target name, level, class, race, con color badge, dynamic color-coded HP progress bar (>50% green, 25-50% yellow, <=25% red), distance, line-of-sight status, melee range check, target heading, aggro holder (Target-of-Target), primary and secondary aggro percentages, and quick-action toolbar buttons (`Face Target`, `Attack Toggle`, `Clear Target`, `+ Pull List`, `+ Ignore List`).
+  - **Navigation & MQ2Nav Subsystem Diagnostics**: Monitors MQ2Nav plugin status, zone navmesh load status (with inline `[Load MQ2Nav]` and `[Reload Mesh]` action buttons), live navigation destination (target mob, camp location, waypoint patrol, or hunter roam), path length and distance, MoveUtils / stick status, detour obstacle avoidance countdown, nav stall counters, unreachable mob counters, stuck recovery attempts, and zone hazard hotspot counts.
+  - **Player, Gestalt Trio & Pet Vitals**: Displays player HP, Mana, and Endurance progress bars, character action flags (Combat, Moving, Ducking, Sitting, Feigning, Levitation), Gestalt Trio class badges with slot theme colors (Arcane Blue, Ember Gold, Jade Green), and active pet vitals (Pet Level, Pet HP bar, Pet Target, and Pet Hold assist threshold status).
+  - **Mode Operations & Interactive Extended Target (XTarget) Threat Monitor**: Shows mode-specific operational context (Puller state machine & camp anchor/radius, Assist MA target & chase distance, Manual camp leash, Waypoint patrol progress) and an interactive XTarget monitor table displaying active hostiles with level, distance, health bars, aggro holder, and 1-click targeting buttons.
 - **Standalone In-Game 2D Map Replacement & NPC Tracker (`triune_map.lua`).**
   - **Standalone Architecture**: Fully independent MacroQuest ImGui 2D map engine launched via `/lua run triune_map` or `/ac map`, carrying a standalone copy of the unified dark cyan theme.
   - **EverQuest Map Directory File Parser**: Auto-detects EverQuest map files (`maps/` in EQ folder, MQ folder, or custom path) and parses all four zone layers (`<zone>.txt`, `<zone>_1.txt`, `<zone>_2.txt`, `<zone>_3.txt`) plus label files (`<zone>_labels.txt` and `P` map points).
@@ -22,7 +29,27 @@
   - **Map Pack Subfolder Discovery & Dropdown Selector (`triune_map.lua`)**: Automatically scans for all map subfolders under `maps/` (e.g. `Brewall`, `Goodurden`, `MyMaps`, `Custom`), provides a dropdown selector under Settings, highlights the currently active map pack with a bright badge and file status metrics, and allows on-the-fly switching between map packs.
   - **Triune Combat Radii, Waypoints & Hazard Hotspot Overlays (`triune_map.lua`)**: Automatically syncs character loadout and zone data from `triune_loadout.lua`. Renders Camp/Combat tether radius circles, dynamic Search / Roam / Pull perimeter radii (anchored to Camp if set or centered dynamically on the Player character), waypoint scan radii and connected patrol routes with pulsing active target pins, and anti-stuck hazard danger rings on the 2D map canvas with independent visibility toggles and a real-time radius slider.
   - **Full Settings & Viewport Zoom Persistence (`triune_map_config.lua`)**: Automatically persists all UI configuration, layer toggles, visual geometry, active map pack selection, search/pull radius settings, and mouse-wheel viewport zoom level per character to `mq.configDir/triune_map_config.lua` with debounced auto-saves on change and on clean script exit.
-  - **Window Frame Cleanup (`triune_map.lua`)**: Removed unused `ImGuiWindowFlags.MenuBar` flag to eliminate the blank grey menu bar at the top of the map window.
+  - **Window Frame & Scrollbar Cleanup (`triune_map.lua`)**: Removed unused `ImGuiWindowFlags.MenuBar` flag and enabled `ImGuiWindowFlags.NoScrollbar`/`NoScrollWithMouse` with proper child bounds reservation to eliminate unwanted grey vertical and horizontal scrollbars on the right and bottom of the map window.
+  - **ImGui Child Window Stack Safety (`triune_map.lua`)**: Replaced temporary child windows in the on-canvas Floor HUD pill and Settings tab with direct canvas rendering and clean tab views, resolving the `Must call EndChild() and not End()` assertion crash.
+  - **Smart Auto-Z & Adaptive Floor Isolation (`triune_map.lua`)**:
+    - **Dynamic Elevation Clustering**: Analyzes local zone map geometry and vertical histogram distributions around the player to automatically identify floor boundaries and ceiling voids (e.g. Tower of Frozen Shadow, Ssra, Sebilis), eliminating the need to manually adjust Z sliders.
+    - **Smooth Alpha Depth Fading**: Implemented smooth alpha falloff on stairs, ramps, and elevation transitions so ascending/descending paths are clearly visible without jarring pop-in or upper/lower floor bleed-through.
+    - **Interactive On-Canvas Floor Navigator HUD**: Rendered a floating HUD pill with live floor bounds (`[ Auto-Z: 40..68 ]`), quick-peek floor buttons (`[▲]` and `[▼]`), and a one-click live player floor reset (`[↺]`).
+    - **Z-Filter Mode Selector & Persistence**: Added a 3-mode selector (`1: Auto-Z`, `2: Manual Window`, `3: Disabled`) with full persistence in `triune_map_config.lua`.
+    - **Unit Tests**: Added Suite 42 to `tests/test_pure_logic.lua` validating floor core opacity, edge fading, adjacent floor ghosting, and culling.
+  - **High-Performance Map Parser & Instant Startup Acceleration (`triune_map.lua`)**:
+    - **Bulk File Read & Fast Tokenizer**: Replaced line-by-line file streaming and complex multi-group regexes with whole-file memory reads (`f:read('*a')`) and fast LuaJIT byte matching, speeding up map loading by over 10x (parsing 60,000+ lines in $<160\text{ms}$).
+    - **Zero-Process Folder Discovery**: Replaced shell `io.popen` and disk write probes with non-blocking `lfs` attributes and fast read-only checks, eliminating the multi-second startup freeze.
+    - **Auto-Z Subsampling**: Optimized real-time floor geometry histogram generation with adaptive step subsampling for giant zones.
+    - **Progressive Startup Spawn Scan**: Spreads initial spawn acquisition smoothly so the map canvas renders instantly on frame 1 without freezing the game.
+- **Standalone Release Updater Modernization & Suite Compatibility (`triune_updater.lua`).**
+  - **Complete Suite Manifest Synchronization (`UPDATE_MAP`)**: Added `triune_map.lua`, `triune_buttons.lua`, `triune_track.lua`, and `ingame.cfg` to the updater's download map so all current satellite modules and configs are updated when applying releases.
+  - **Dual Config Destination Sync**: Automatically updates both the active `mq.configDir` and the package `TAC/config/` folder if located in separate directories.
+  - **Full Script Auto-Reloading on Update (`TRIUNE_SCRIPTS`)**: Expanded the post-update script restart pipeline to detect, stop, and restart running instances of `triune_map`, `triune_buttons`, and `triune_track` in addition to `triune`, `triune_buffbot`, `triune_cursor`, `triune_dps`, and `triune_spellbook`.
+  - **Robust JSON Tokenizer (`extractJsonString`)**: Replaced naive regex parsing with an unescaping tokenizer that preserves markdown release notes containing quotes, newlines, tabs, and slashes without premature truncation, and parses GitHub API rate-limit error responses for clear user feedback.
+  - **Binary-Safe File I/O**: Switched file writing from text mode to binary mode (`'wb'`) to prevent Windows CRLF line-ending duplication.
+  - **Wget Fallback Support**: Added `wget` fallback for individual file downloads in `executeUpdate` if `curl` is missing.
+  - **Unit Tests**: Added Suite 41 to `tests/test_pure_logic.lua` covering `cleanTag`, `extractJsonString`, error parsing, and payload tokenization.
 
 ---
 

@@ -109,10 +109,56 @@ end
 
 local function cleanTag(tag)
     if not tag then return '' end
+    tag = tag:gsub('^%s+', ''):gsub('%s+$', '')
     if tag:sub(1, 1):lower() == 'v' then
         return tag:sub(2)
     end
     return tag
+end
+
+-- Safely extract and unescape a JSON string field from raw JSON text
+local function extractJsonString(json, key)
+    if not json or not key then return nil end
+    local pattern = '"' .. key .. '"%s*:%s*"'
+    local s, e = json:find(pattern)
+    if not s then return nil end
+    local i = e + 1
+    local chars = {}
+    local len = #json
+    while i <= len do
+        local c = json:sub(i, i)
+        if c == '\\' then
+            local nextC = json:sub(i + 1, i + 1)
+            if nextC == '"' then
+                table.insert(chars, '"')
+                i = i + 2
+            elseif nextC == '\\' then
+                table.insert(chars, '\\')
+                i = i + 2
+            elseif nextC == 'n' then
+                table.insert(chars, '\n')
+                i = i + 2
+            elseif nextC == 'r' then
+                table.insert(chars, '\r')
+                i = i + 2
+            elseif nextC == 't' then
+                table.insert(chars, '\t')
+                i = i + 2
+            elseif nextC == '/' then
+                table.insert(chars, '/')
+                i = i + 2
+            else
+                table.insert(chars, nextC)
+                i = i + 2
+            end
+        elseif c == '"' then
+            break
+        else
+            table.insert(chars, c)
+            i = i + 1
+        end
+    end
+    return table.concat(chars)
 end
 
 local diagLogs = {}
@@ -135,7 +181,7 @@ local function execCommand(cmd, outputFile)
         diag('io.popen read finished. Length: ' .. tostring(output and #output or 0) .. ' bytes')
         if output and #output > 0 then
             if outputFile then
-                local f = io.open(outputFile, 'w')
+                local f = io.open(outputFile, 'wb')
                 if f then
                     f:write(output)
                     f:close()
@@ -374,16 +420,17 @@ local function checkForUpdates()
 
     diag('Raw API Output Snippet (first 150 chars): ' .. output:sub(1, 150):gsub('\r', ''):gsub('\n', ' '))
 
-    -- Extract tag_name (JSON pattern or Python CLI output pattern)
-    local tag = output:match('"tag_name"%s*:%s*"([^"]+)"') or output:match('Latest GitHub Release:%s*([^\r\n%s%(]+)')
-    local body = output:match('"body"%s*:%s*"([^"]+)"') or output:match('Release Notes:\r?\n(.*)')
+    -- Extract tag_name, body, or error message (JSON tokenizer or Python CLI output pattern)
+    local tag = extractJsonString(output, 'tag_name') or output:match('Latest GitHub Release:%s*([^\r\n%s%(]+)')
+    local body = extractJsonString(output, 'body') or output:match('Release Notes:\r?\n(.*)')
+    local errMsg = extractJsonString(output, 'message')
 
-    if tag then
+    if tag and #tag > 0 then
         latestTag = tag -- store raw tag for download URLs
         latestVersion = cleanTag(tag)
         diag('Parsed tag_name: ' .. tostring(tag) .. ' -> cleanVersion: ' .. tostring(latestVersion))
-        if body then
-            releaseNotes = body:gsub('\\r\\n', '\n'):gsub('\\n', '\n'):gsub('\\"', '"')
+        if body and #body > 0 then
+            releaseNotes = body
         else
             releaseNotes = 'No detailed release notes provided.'
         end
@@ -395,6 +442,10 @@ local function checkForUpdates()
             checkStatus = 'up_to_date'
             statusMessage = 'You are running the latest version (v' .. installedVersion .. ').'
         end
+    elseif errMsg and #errMsg > 0 then
+        checkStatus = 'error'
+        statusMessage = 'GitHub API: ' .. errMsg
+        diag('GitHub API error message: ' .. errMsg)
     else
         checkStatus = 'error'
         statusMessage = 'Failed to parse release information from GitHub response.'
@@ -430,18 +481,29 @@ local function executeUpdate()
 
     local UPDATE_MAP = {
         { repo = 'TAC/lua/triune.lua',           target = luaDir .. '/triune.lua' },
-        { repo = 'TAC/lua/triune_spellbook.lua', target = luaDir .. '/triune_spellbook.lua' },
-        { repo = 'TAC/lua/triune_cursor.lua',    target = luaDir .. '/triune_cursor.lua' },
-        { repo = 'TAC/lua/triune_updater.lua',   target = luaDir .. '/triune_updater.lua' },
+        { repo = 'TAC/lua/triune_buttons.lua',   target = luaDir .. '/triune_buttons.lua' },
         { repo = 'TAC/lua/triune_buffbot.lua',   target = luaDir .. '/triune_buffbot.lua' },
+        { repo = 'TAC/lua/triune_cursor.lua',    target = luaDir .. '/triune_cursor.lua' },
         { repo = 'TAC/lua/triune_dps.lua',       target = luaDir .. '/triune_dps.lua' },
+        { repo = 'TAC/lua/triune_map.lua',       target = luaDir .. '/triune_map.lua' },
+        { repo = 'TAC/lua/triune_spellbook.lua', target = luaDir .. '/triune_spellbook.lua' },
+        { repo = 'TAC/lua/triune_track.lua',     target = luaDir .. '/triune_track.lua' },
+        { repo = 'TAC/lua/triune_updater.lua',   target = luaDir .. '/triune_updater.lua' },
         { repo = 'TAC/config/triune_data.lua',   target = configDirTarget .. '/triune_data.lua' },
+        { repo = 'TAC/config/ingame.cfg',        target = configDirTarget .. '/ingame.cfg' },
         { repo = 'TAC/triune_updater.py',        target = parentDir .. '/triune_updater.py' },
         { repo = 'TAC/update.bat',               target = parentDir .. '/update.bat' },
         { repo = 'TAC/update.sh',                target = parentDir .. '/update.sh' },
         { repo = 'README.md',                    target = parentDir .. '/README.md' },
         { repo = 'CHANGELOG.md',                 target = parentDir .. '/CHANGELOG.md' },
     }
+
+    -- If the TAC package config folder is separate from mq.configDir, sync config files to both locations
+    local packageConfigDir = (parentDir .. '/config'):gsub('\\', '/')
+    if packageConfigDir:lower() ~= configDirTarget:lower() then
+        table.insert(UPDATE_MAP, { repo = 'TAC/config/triune_data.lua', target = packageConfigDir .. '/triune_data.lua' })
+        table.insert(UPDATE_MAP, { repo = 'TAC/config/ingame.cfg', target = packageConfigDir .. '/ingame.cfg' })
+    end
 
     -- Determine script paths for fallback candidates
     local pyScript = parentDir .. sep .. 'triune_updater.py'
@@ -450,9 +512,9 @@ local function executeUpdate()
 
     local updateSuccess = false
 
-    -- Candidate 0: Direct curl CLI individual file download (works cross-platform: Linux, macOS, Win 10/11)
+    -- Candidate 0: Direct curl / wget CLI individual file download (cross-platform: Linux, macOS, Win 10/11)
     if not updateSuccess and latestTag then
-        diag('Trying curl CLI individual file download...')
+        diag('Trying curl / wget CLI individual file download...')
         local rawBase = 'https://raw.githubusercontent.com/' .. GITHUB_REPO .. '/' .. latestTag
         local curlOkCount = 0
 
@@ -471,33 +533,43 @@ local function executeUpdate()
             local cmd = 'curl -sL -H "User-Agent: TriuneUpdater" "' .. url .. '"'
             local content = execCommand(cmd, tmpDlFile)
 
+            -- Fallback to wget if curl returned empty
+            if not content or #content == 0 then
+                local wgetCmd = 'wget -qO- --header="User-Agent: TriuneUpdater" "' .. url .. '"'
+                content = execCommand(wgetCmd, tmpDlFile)
+            end
+
             local isValidContent = content and #content > 0 and not content:find('404: Not Found') and
-            not content:find('404 Page Not Found')
+                not content:find('404 Page Not Found')
             if not isValidContent and item.repo:sub(1, 10) == 'TAC/' then
                 -- Fallback for legacy tags without TAC/ path prefix
                 local fallbackUrl = rawBase .. '/' .. item.repo:sub(11) .. '?t=' .. os.time()
                 local cmd2 = 'curl -sL -H "User-Agent: TriuneUpdater" "' .. fallbackUrl .. '"'
                 content = execCommand(cmd2, tmpDlFile)
+                if not content or #content == 0 then
+                    local wgetCmd2 = 'wget -qO- --header="User-Agent: TriuneUpdater" "' .. fallbackUrl .. '"'
+                    content = execCommand(wgetCmd2, tmpDlFile)
+                end
                 isValidContent = content and #content > 0 and not content:find('404: Not Found') and
-                not content:find('404 Page Not Found')
+                    not content:find('404 Page Not Found')
             end
 
             if isValidContent then
-                local f = io.open(destFile, 'w')
+                local f = io.open(destFile, 'wb')
                 if f then
                     f:write(content)
                     f:close()
                     curlOkCount = curlOkCount + 1
-                    diag('curl updated: ' .. item.repo .. ' -> ' .. destFile)
+                    diag('Updated file: ' .. item.repo .. ' -> ' .. destFile)
                 end
             end
         end
 
         if curlOkCount > 0 then
             updateSuccess = true
-            diag('curl individual file update succeeded with ' .. tostring(curlOkCount) .. ' files updated.')
+            diag('Individual file update succeeded with ' .. tostring(curlOkCount) .. ' files updated.')
         else
-            diag('curl individual file update produced 0 updated files.')
+            diag('Individual file update produced 0 updated files.')
         end
     end
 
@@ -686,7 +758,16 @@ local function executeUpdate()
         statusMessage = 'Update applied successfully! All active Triune scripts reloaded.'
         print('\ag[TriuneUpdater]\ax \agUpdate applied successfully!\ax Reloading active Triune scripts from disk...')
 
-        local TRIUNE_SCRIPTS = { 'triune', 'triune_spellbook', 'triune_cursor', 'triune_buffbot', 'triune_dps' }
+        local TRIUNE_SCRIPTS = {
+            'triune',
+            'triune_buttons',
+            'triune_buffbot',
+            'triune_cursor',
+            'triune_dps',
+            'triune_map',
+            'triune_spellbook',
+            'triune_track',
+        }
         local toRestart = {}
 
         for _, s in ipairs(TRIUNE_SCRIPTS) do
@@ -748,7 +829,8 @@ local function drawUpdaterWindow()
     ImGui.Separator()
 
     -- Version Information Table
-    if ImGui.BeginTable('VersionTable', 2, ImGuiTableFlags.BordersInnerV) then
+    local vTableFlags = (ImGuiTableFlags and ImGuiTableFlags.BordersInnerV) or 0
+    if ImGui.BeginTable('VersionTable', 2, vTableFlags) then
         ImGui.TableNextRow()
         ImGui.TableNextColumn()
         ImGui.Text('Installed Version:')

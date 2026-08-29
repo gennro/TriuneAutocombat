@@ -50,6 +50,15 @@ Triune keeps things simple with **3 main combat modes**:
 
 ## Key Features
 
+### 📊 Real-Time Status & Diagnostics Dashboard
+- **Primary Status Tab**: A dedicated tactical overview tab right next to Control displaying live engine state, active combat modes/submodes, and subsystem indicators.
+- **Current Target Hero Card**: Real-time target stats (Level, Class, Race, Con Color), dynamic color-coded HP bar, distance, Line-of-Sight, melee range indicator, aggro holder (Target-of-Target), and 1-click action buttons (`Face`, `Attack`, `Clear`, `+ Pull List`, `+ Ignore List`).
+- **MQ2Nav & Pathing Monitor**: Live plugin and zone navmesh load status (with inline `[Load MQ2Nav]` and `[Reload Mesh]` recovery buttons), active navigation destination, path length/distance, MoveUtils status, detour obstacle avoidance timers, and anti-stuck metrics.
+- **Player, Trio & Pet Vitals**: Visual HP, Mana, and Endurance progress bars, character action flags (Combat, Moving, Ducking, Sitting, Feigning, Levitation), Gestalt Trio class badges with slot theme colors, and live pet status (HP, Target, and Pet Hold threshold state).
+- **Interactive Extended Target (XTarget) Threat Monitor**: Live threat table displaying all active hostile combatants with level, distance, health bars, aggro holder, and 1-click targeting buttons.
+
+---
+
 ### 🎯 Smart Pulling & Target Filters
 - **Choose Your Pull Method**: Tag mobs using **Melee**, a **Spell** of your choice, a **Pet**, or **Ranged** (bow/throwing).
 - **Stand Back Mode**: Great for pet classes and rangers! Lets your pet tank or keeps you at range without running into melee.

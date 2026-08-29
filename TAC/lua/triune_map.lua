@@ -212,6 +212,21 @@ local state = {
         currentWaypointIdx  = 1,
         zoneHazards         = {},
     },
+
+    -- Smart Auto-Z & Floor Level State
+    smartFloor = {
+        minZ                = -99999,
+        maxZ                = 99999,
+        activeZ             = 0,
+        overrideOffset      = 0, -- User floor peek offset (+25, -25, etc.)
+        lastCalcTime        = 0,
+        lastCalcX           = 0,
+        lastCalcY           = 0,
+        lastCalcZ           = 0,
+        lastOffset          = 0,
+        floorLabel          = 'Level Ground',
+        isMultiFloor        = false,
+    },
 }
 
 local ctrl = {
@@ -244,9 +259,10 @@ local ctrl = {
     layer3              = true,
     layerLabels         = true,
 
-    -- Z-Height Filtering (for multi-level dungeons)
-    useZFilter          = false,
-    zFilterRange        = 75, -- +/- yards from player Z
+    -- Z-Height Filtering (Smart Auto-Z / Multi-floor Dungeons)
+    zFilterMode         = 1, -- 1: Auto-Z (Smart Floor Isolation), 2: Manual Window, 3: Disabled
+    zDepthFading        = true, -- Smooth alpha depth fading on stairs/ramps
+    zFilterRange        = 45, -- +/- yards in Manual Mode
 
     -- Visual Display Scaling
     lineThickness       = 1.0,
@@ -389,8 +405,9 @@ local function saveConfig(silent)
         layer3              = ctrl.layer3,
         layerLabels         = ctrl.layerLabels,
 
-        -- Z-Height Filtering
-        useZFilter          = ctrl.useZFilter,
+        -- Z-Height Filtering & Smart Auto-Z
+        zFilterMode         = ctrl.zFilterMode,
+        zDepthFading        = ctrl.zDepthFading,
         zFilterRange        = ctrl.zFilterRange,
 
         -- Visual Geometry
@@ -469,8 +486,13 @@ local function loadConfig()
         if cData.layer3 ~= nil then ctrl.layer3 = (cData.layer3 == true) end
         if cData.layerLabels ~= nil then ctrl.layerLabels = (cData.layerLabels == true) end
 
-        if cData.useZFilter ~= nil then ctrl.useZFilter = (cData.useZFilter == true) end
-        if cData.zFilterRange ~= nil then ctrl.zFilterRange = tonumber(cData.zFilterRange) or 75 end
+        if cData.zFilterMode ~= nil then
+            ctrl.zFilterMode = tonumber(cData.zFilterMode) or 1
+        elseif cData.useZFilter ~= nil then
+            ctrl.zFilterMode = cData.useZFilter and 2 or 3
+        end
+        if cData.zDepthFading ~= nil then ctrl.zDepthFading = (cData.zDepthFading == true) end
+        if cData.zFilterRange ~= nil then ctrl.zFilterRange = tonumber(cData.zFilterRange) or 45 end
 
         if cData.lineThickness ~= nil then ctrl.lineThickness = tonumber(cData.lineThickness) or 1.0 end
         if cData.npcNodeRadius ~= nil then ctrl.npcNodeRadius = tonumber(cData.npcNodeRadius) or 4.5 end
@@ -498,13 +520,29 @@ end
 -- ============================================================================
 -- MAP DIRECTORY DISCOVERY & FILE PARSER
 -- ============================================================================
+local function isDirectoryAccessible(dir)
+    if not dir or dir == '' then return false end
+    local okLfs, lfs = pcall(require, 'lfs')
+    if okLfs and lfs and lfs.attributes then
+        local mode = lfs.attributes(dir, 'mode')
+        return mode == 'directory'
+    end
+    local f = io.open(dir, 'r')
+    if f then
+        f:close()
+        return true
+    end
+    local f2 = io.open(dir .. '/poknowledge.txt', 'r') or io.open(dir .. '/qeynos.txt', 'r')
+    if f2 then
+        f2:close()
+        return true
+    end
+    return false
+end
+
 local function getBaseMapsDirectory()
     if state.customMapsDir and state.customMapsDir ~= '' then
-        local testFile = state.customMapsDir .. '/triune_map_test.tmp'
-        local f = io.open(testFile, 'w')
-        if f then
-            f:close()
-            os.remove(testFile)
+        if isDirectoryAccessible(state.customMapsDir) then
             return state.customMapsDir
         end
     end
@@ -531,11 +569,7 @@ local function getBaseMapsDirectory()
     end
 
     for _, dir in ipairs(candidates) do
-        local testFile = dir .. '/triune_map_test.tmp'
-        local f = io.open(testFile, 'w')
-        if f then
-            f:close()
-            os.remove(testFile)
+        if isDirectoryAccessible(dir) then
             return dir
         end
     end
@@ -564,15 +598,15 @@ local function scanMapFolders()
     names[1] = '[Root] Default (maps/)'
     seen[''] = true
 
-    -- Method 1: LuaFileSystem if available
+    -- Method 1: LuaFileSystem (Instant, zero child processes, zero disk writes)
     local okLfs, lfs = pcall(require, 'lfs')
-    if okLfs and lfs and lfs.dir then
+    if okLfs and lfs and lfs.dir and lfs.attributes then
         pcall(function()
             for file in lfs.dir(baseDir) do
-                if file ~= '.' and file ~= '..' then
+                if file ~= '.' and file ~= '..' and not seen[file] then
                     local full = baseDir .. '/' .. file
                     local mode = lfs.attributes(full, 'mode')
-                    if mode == 'directory' and not seen[file] then
+                    if mode == 'directory' then
                         seen[file] = true
                         folders[#folders + 1] = { name = file, relPath = file, fullPath = full }
                         names[#names + 1] = file
@@ -580,43 +614,20 @@ local function scanMapFolders()
                 end
             end
         end)
-    end
-
-    -- Method 2: io.popen directory scanning
-    if #folders == 1 then
-        pcall(function()
-            local cmd = string.format('dir /a:d /b "%s" 2>nul', baseDir)
-            local pipe = io.popen(cmd)
-            if pipe then
-                for line in pipe:lines() do
-                    local trimmed = string.match(line, '^%s*(.-)%s*$')
-                    if trimmed and trimmed ~= '' and trimmed ~= '.' and trimmed ~= '..' and not seen[trimmed] then
-                        seen[trimmed] = true
-                        folders[#folders + 1] = { name = trimmed, relPath = trimmed, fullPath = baseDir .. '/' .. trimmed }
-                        names[#names + 1] = trimmed
-                    end
+    else
+        -- Method 2: Fast read-only check of known map pack names
+        local knownPacks = {
+            'Brewall', 'brewall', 'Goodurden', 'goodurden', 'Goods', 'goods',
+            'MyMaps', 'mymaps', 'custom', 'Custom', 'Default', 'default', 'Atlas', 'Cartography',
+        }
+        for _, pack in ipairs(knownPacks) do
+            if not seen[pack] then
+                local subPath = baseDir .. '/' .. pack
+                if isDirectoryAccessible(subPath) then
+                    seen[pack] = true
+                    folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
+                    names[#names + 1] = pack
                 end
-                pipe:close()
-            end
-        end)
-    end
-
-    -- Method 3: Fallback common map pack names check
-    local knownPacks = {
-        'Brewall', 'brewall', 'Goodurden', 'goodurden', 'Goods', 'goods',
-        'MyMaps', 'mymaps', 'custom', 'Custom', 'Default', 'default', 'Atlas', 'Cartography',
-    }
-    for _, pack in ipairs(knownPacks) do
-        if not seen[pack] then
-            local subPath = baseDir .. '/' .. pack
-            local testFile = subPath .. '/triune_test.tmp'
-            local f = io.open(testFile, 'w')
-            if f then
-                f:close()
-                os.remove(testFile)
-                seen[pack] = true
-                folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
-                names[#names + 1] = pack
             end
         end
     end
@@ -634,20 +645,24 @@ end
 local function parseMapFile(filePath, layerId)
     local f = io.open(filePath, 'r')
     if not f then return 0, 0 end
+    local content = f:read('*a')
+    f:close()
+    if not content or content == '' then return 0, 0 end
 
     local linesAdded = 0
     local labelsAdded = 0
     local targetLines = mapData.layers[layerId] or {}
     local targetLabels = mapData.labels
+    local bMinX, bMaxX = mapData.bounds.minX, mapData.bounds.maxX
+    local bMinY, bMaxY = mapData.bounds.minY, mapData.bounds.maxY
+    local bMinZ, bMaxZ = mapData.bounds.minZ, mapData.bounds.maxZ
 
-    for line in f:lines() do
-        local firstChar = string.sub(line, 1, 1)
-        if firstChar == 'L' or firstChar == 'l' then
+    -- Fast line iterator using gmatch
+    for line in content:gmatch('[^\r\n]+') do
+        local b1 = line:byte(1)
+        if b1 == 76 or b1 == 108 then
             -- Line format: L x1, y1, z1, x2, y2, z2, r, g, b
-            -- Note: EQ Map coordinates store x = -eqX, y = -eqY, z = eqZ
-            local x1, y1, z1, x2, y2, z2, r, g, b = string.match(line,
-                '^[Ll]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+)')
-
+            local x1, y1, z1, x2, y2, z2, r, g, b = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)')
             if x1 and y1 and z1 and x2 and y2 and z2 then
                 local nx1 = -tonumber(x1)
                 local ny1 = -tonumber(y1)
@@ -655,43 +670,48 @@ local function parseMapFile(filePath, layerId)
                 local nx2 = -tonumber(x2)
                 local ny2 = -tonumber(y2)
                 local nz2 = tonumber(z2)
-                local nr = tonumber(r or 180) or 180
-                local ng = tonumber(g or 180) or 180
-                local nb = tonumber(b or 180) or 180
+                local nr = (tonumber(r) or 180) / 255.0
+                local ng = (tonumber(g) or 180) / 255.0
+                local nb = (tonumber(b) or 180) / 255.0
 
                 targetLines[#targetLines + 1] = {
                     x1 = nx1, y1 = ny1, z1 = nz1,
                     x2 = nx2, y2 = ny2, z2 = nz2,
-                    r = nr / 255.0, g = ng / 255.0, b = nb / 255.0,
+                    r = nr, g = ng, b = nb,
                 }
                 linesAdded = linesAdded + 1
 
-                -- Update bounds
-                mapData.bounds.minX = math.min(mapData.bounds.minX, nx1, nx2)
-                mapData.bounds.maxX = math.max(mapData.bounds.maxX, nx1, nx2)
-                mapData.bounds.minY = math.min(mapData.bounds.minY, ny1, ny2)
-                mapData.bounds.maxY = math.max(mapData.bounds.maxY, ny1, ny2)
-                mapData.bounds.minZ = math.min(mapData.bounds.minZ, nz1, nz2)
-                mapData.bounds.maxZ = math.max(mapData.bounds.maxZ, nz1, nz2)
-            end
-        elseif firstChar == 'P' or firstChar == 'p' then
-            -- Label format: P x, y, z, r, g, b, size, label_text
-            local x, y, z, r, g, b, size, text = string.match(line,
-                '^[Pp]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+(.+)')
+                if nx1 < bMinX then bMinX = nx1 end
+                if nx1 > bMaxX then bMaxX = nx1 end
+                if nx2 < bMinX then bMinX = nx2 end
+                if nx2 > bMaxX then bMaxX = nx2 end
 
+                if ny1 < bMinY then bMinY = ny1 end
+                if ny1 > bMaxY then bMaxY = ny1 end
+                if ny2 < bMinY then bMinY = ny2 end
+                if ny2 > bMaxY then bMaxY = ny2 end
+
+                if nz1 < bMinZ then bMinZ = nz1 end
+                if nz1 > bMaxZ then bMaxZ = nz1 end
+                if nz2 < bMinZ then bMinZ = nz2 end
+                if nz2 > bMaxZ then bMaxZ = nz2 end
+            end
+        elseif b1 == 80 or b1 == 112 then
+            -- Label format: P x, y, z, r, g, b, size, label_text
+            local x, y, z, r, g, b, size, text = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(.+)')
             if x and y and z and text then
                 local nx = -tonumber(x)
                 local ny = -tonumber(y)
                 local nz = tonumber(z)
-                local nr = tonumber(r or 255) or 255
-                local ng = tonumber(g or 255) or 255
-                local nb = tonumber(b or 255) or 255
-                local cleanText = string.gsub(text, '_', ' ')
+                local nr = (tonumber(r) or 255) / 255.0
+                local ng = (tonumber(g) or 255) / 255.0
+                local nb = (tonumber(b) or 255) / 255.0
+                local cleanText = text:gsub('_', ' ')
 
                 targetLabels[#targetLabels + 1] = {
                     x = nx, y = ny, z = nz,
-                    r = nr / 255.0, g = ng / 255.0, b = nb / 255.0,
-                    size = tonumber(size or 1) or 1,
+                    r = nr, g = ng, b = nb,
+                    size = tonumber(size) or 1,
                     text = cleanText,
                 }
                 labelsAdded = labelsAdded + 1
@@ -699,7 +719,9 @@ local function parseMapFile(filePath, layerId)
         end
     end
 
-    f:close()
+    mapData.bounds.minX, mapData.bounds.maxX = bMinX, bMaxX
+    mapData.bounds.minY, mapData.bounds.maxY = bMinY, bMaxY
+    mapData.bounds.minZ, mapData.bounds.maxZ = bMinZ, bMaxZ
     mapData.layers[layerId] = targetLines
     return linesAdded, labelsAdded
 end
@@ -881,6 +903,182 @@ local function syncTriuneLoadout()
     td.zoneHazards = hazards
 end
 
+local Z_FILTER_MODE_OPTIONS = {
+    '1: Auto-Z (Smart Floor Isolation)',
+    '2: Manual Window (± Range Slider)',
+    '3: Disabled (Show All Elevations)',
+}
+
+-- ============================================================================
+-- SMART AUTO-Z & FLOOR DETECTION ENGINE
+-- ============================================================================
+local function updateSmartFloorBounds(pX, pY, pZ)
+    local sf = state.smartFloor
+    local now = mq.gettime()
+    local effZ = pZ + sf.overrideOffset
+
+    -- Mode 2: Manual Window
+    if ctrl.zFilterMode == 2 then
+        local r = ctrl.zFilterRange or 45
+        sf.minZ = effZ - r
+        sf.maxZ = effZ + r
+        sf.activeZ = effZ
+        if sf.overrideOffset ~= 0 then
+            sf.floorLabel = string.format('Manual: Z %.0f (±%dyd, %+d)', effZ, r, sf.overrideOffset)
+        else
+            sf.floorLabel = string.format('Manual: Z %.0f (±%dyd)', effZ, r)
+        end
+        sf.isMultiFloor = true
+        return
+    elseif ctrl.zFilterMode == 3 then
+        -- Mode 3: Disabled (all elevations)
+        sf.minZ = -99999
+        sf.maxZ = 99999
+        sf.activeZ = effZ
+        sf.floorLabel = 'All Elevations'
+        sf.isMultiFloor = false
+        return
+    end
+
+    -- Mode 1: Auto-Z (Smart Floor Isolation)
+    local distSq = (pX - sf.lastCalcX)^2 + (pY - sf.lastCalcY)^2
+    local zDiff = math.abs(pZ - sf.lastCalcZ)
+    if (now - sf.lastCalcTime) < 400 and distSq < 400 and zDiff < 4 and sf.lastOffset == sf.overrideOffset then
+        return
+    end
+
+    sf.lastCalcTime = now
+    sf.lastCalcX = pX
+    sf.lastCalcY = pY
+    sf.lastCalcZ = pZ
+    sf.lastOffset = sf.overrideOffset
+    sf.activeZ = effZ
+
+    -- Sample Z-distribution of geometry within local radius (200yd)
+    local sampleRadiusSq = 200 * 200
+    local binSize = 4 -- 4-yard vertical histogram bins
+    local histogram = {}
+    local totalSamples = 0
+    local minObservedZ = 99999
+    local maxObservedZ = -99999
+
+    for lId = 0, 3 do
+        local lines = mapData.layers[lId] or {}
+        local step = (#lines > 2000) and 3 or 1
+        for i = 1, #lines, step do
+            local seg = lines[i]
+            local midX = (seg.x1 + seg.x2) * 0.5
+            local midY = (seg.y1 + seg.y2) * 0.5
+            local dSq = (midX - pX)^2 + (midY - pY)^2
+            if dSq <= sampleRadiusSq then
+                local avgZ = (seg.z1 + seg.z2) * 0.5
+                local bin = math.floor(avgZ / binSize)
+                histogram[bin] = (histogram[bin] or 0) + 1
+                totalSamples = totalSamples + 1
+                if avgZ < minObservedZ then minObservedZ = avgZ end
+                if avgZ > maxObservedZ then maxObservedZ = avgZ end
+            end
+        end
+    end
+
+    -- If few samples in local radius, fallback to comfortable default
+    if totalSamples < 10 then
+        sf.minZ = effZ - 30
+        sf.maxZ = effZ + 45
+        if sf.overrideOffset ~= 0 then
+            sf.floorLabel = string.format('Peek: Z %.0f..%.0f (%+dyd)', sf.minZ, sf.maxZ, sf.overrideOffset)
+        else
+            sf.floorLabel = string.format('Auto-Z: Z %.0f..%.0f', sf.minZ, sf.maxZ)
+        end
+        sf.isMultiFloor = false
+        return
+    end
+
+    local playerBin = math.floor(effZ / binSize)
+
+    -- 1. Scan upwards to find ceiling void / upper floor separation
+    local upperCutoffBin = playerBin + 12 -- default +48yd
+    local emptyCountUp = 0
+    for b = playerBin + 1, playerBin + 35 do
+        local count = histogram[b] or 0
+        if count == 0 then
+            emptyCountUp = emptyCountUp + 1
+            if emptyCountUp >= 3 then -- 3 consecutive empty bins (12yd void)
+                upperCutoffBin = b - 1
+                break
+            end
+        else
+            emptyCountUp = 0
+        end
+    end
+
+    -- 2. Scan downwards to find floor drop void
+    local lowerCutoffBin = playerBin - 8 -- default -32yd
+    local emptyCountDown = 0
+    for b = playerBin - 1, playerBin - 30, -1 do
+        local count = histogram[b] or 0
+        if count == 0 then
+            emptyCountDown = emptyCountDown + 1
+            if emptyCountDown >= 3 then -- 3 consecutive empty bins (12yd void)
+                lowerCutoffBin = b + 1
+                break
+            end
+        else
+            emptyCountDown = 0
+        end
+    end
+
+    local calcMinZ = lowerCutoffBin * binSize - 2
+    local calcMaxZ = (upperCutoffBin + 1) * binSize + 3
+
+    -- Ensure a minimum floor height buffer (at least 12yd below, 18yd above)
+    sf.minZ = math.min(calcMinZ, effZ - 12)
+    sf.maxZ = math.max(calcMaxZ, effZ + 18)
+
+    local zSpan = maxObservedZ - minObservedZ
+    sf.isMultiFloor = (zSpan > 45)
+
+    if sf.overrideOffset ~= 0 then
+        sf.floorLabel = string.format('Peek: Z %.0f..%.0f (%+dyd)', sf.minZ, sf.maxZ, sf.overrideOffset)
+    else
+        sf.floorLabel = string.format('Auto-Z: Z %.0f..%.0f', sf.minZ, sf.maxZ)
+    end
+end
+
+local function getZAlphaMultiplier(avgZ, minZ, maxZ)
+    if ctrl.zFilterMode == 3 then
+        return 1.0, true
+    end
+
+    if avgZ < minZ or avgZ > maxZ then
+        if ctrl.zDepthFading then
+            local d = (avgZ < minZ) and (minZ - avgZ) or (avgZ - maxZ)
+            if d <= 10 then
+                local alpha = 0.22 * (1.0 - (d / 10))
+                return alpha, true
+            end
+        end
+        return 0.0, false
+    end
+
+    if not ctrl.zDepthFading then
+        return 1.0, true
+    end
+
+    -- Smooth linear fade at floor boundary edges (within 6 yards of minZ/maxZ)
+    local fadeEdge = 6.0
+    local distToMin = avgZ - minZ
+    local distToMax = maxZ - avgZ
+    local edgeDist = math.min(distToMin, distToMax)
+
+    if edgeDist < fadeEdge then
+        local factor = 0.35 + 0.65 * (math.max(0, edgeDist) / fadeEdge)
+        return factor, true
+    end
+
+    return 1.0, true
+end
+
 -- ============================================================================
 -- SPAWN SCANNER & FILTER ENGINE
 -- ============================================================================
@@ -903,12 +1101,20 @@ local function scanZoneSpawns()
     end
 
     spawns.totalCount = count
-    local maxFetch = math.min(count, 650) -- Safety ceiling for giant raid zones
+    local isInitial = (#spawns.allNPCs == 0)
+    local maxFetch = isInitial and math.min(count, 150) or math.min(count, 450) -- Smooth startup batch
     local newNpcList = {}
 
-    local myZ = 0
+    local myX, myY, myZ = 0, 0, 0
+    local okMeX, pX = pcall(function() return mq.TLO.Me.X() end)
+    local okMeY, pY = pcall(function() return mq.TLO.Me.Y() end)
     local okMeZ, pZ = pcall(function() return mq.TLO.Me.Z() end)
+    if okMeX and pX then myX = pX end
+    if okMeY and pY then myY = pY end
     if okMeZ and pZ then myZ = pZ end
+
+    updateSmartFloorBounds(myX, myY, myZ)
+    local sf = state.smartFloor
 
     for i = 1, maxFetch do
         local okSpawn, s = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
@@ -963,7 +1169,6 @@ local function scanZoneSpawns()
     local filtered = {}
     local searchLower = string.lower(state.searchText or '')
     local filterIdx = state.conFilterIndex
-    local zRange = ctrl.zFilterRange
 
     for _, mob in ipairs(newNpcList) do
         local keep = true
@@ -1003,10 +1208,11 @@ local function scanZoneSpawns()
             keep = false
         end
 
-        -- Z-Height filter
-        if keep and ctrl.useZFilter then
-            local zDiff = math.abs(mob.z - myZ)
-            if zDiff > zRange then keep = false end
+        -- Z-Height & Smart Auto-Z filter
+        if keep and ctrl.zFilterMode ~= 3 then
+            if mob.z < sf.minZ or mob.z > sf.maxZ then
+                keep = false
+            end
         end
 
         -- Pathable only filter
@@ -1252,11 +1458,17 @@ local function DrawMapCanvas(availW, availH)
         end
     end
 
-    -- Player altitude for Z-filtering
-    local playerZ = 0
+    -- Player altitude for Z-filtering & Smart Auto-Z
+    local playerX, playerY, playerZ = 0, 0, 0
+    local okPX, pXVal = pcall(function() return mq.TLO.Me.X() end)
+    local okPY, pYVal = pcall(function() return mq.TLO.Me.Y() end)
     local okPZ, pZVal = pcall(function() return mq.TLO.Me.Z() end)
+    if okPX and pXVal then playerX = pXVal end
+    if okPY and pYVal then playerY = pYVal end
     if okPZ and pZVal then playerZ = pZVal end
-    local zRange = ctrl.zFilterRange
+
+    updateSmartFloorBounds(playerX, playerY, playerZ)
+    local sf = state.smartFloor
 
     -- Draw Map Lines (Layers 0, 1, 2, 3)
     local layerEnabled = {
@@ -1270,15 +1482,10 @@ local function DrawMapCanvas(availW, availH)
         if layerEnabled[lId] then
             local lines = mapData.layers[lId] or {}
             for _, seg in ipairs(lines) do
-                local drawSeg = true
-                if ctrl.useZFilter then
-                    local avgZ = (seg.z1 + seg.z2) * 0.5
-                    if math.abs(avgZ - playerZ) > zRange then
-                        drawSeg = false
-                    end
-                end
+                local avgZ = (seg.z1 + seg.z2) * 0.5
+                local alphaMult, isVis = getZAlphaMultiplier(avgZ, sf.minZ, sf.maxZ)
 
-                if drawSeg then
+                if isVis and alphaMult > 0.01 then
                     local sx1, sy1 = worldToScreen(seg.x1, seg.y1, cX, cY, availW, availH)
                     local sx2, sy2 = worldToScreen(seg.x2, seg.y2, cX, cY, availW, availH)
 
@@ -1289,7 +1496,7 @@ local function DrawMapCanvas(availW, availH)
                     local maxSy = math.max(sy1, sy2)
 
                     if maxSx >= cX and minSx <= cX + availW and maxSy >= cY and minSy <= cY + availH then
-                        local col = ImGui.GetColorU32(seg.r, seg.g, seg.b, 1.0)
+                        local col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
                         drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, ctrl.lineThickness)
                     end
                 end
@@ -1301,14 +1508,11 @@ local function DrawMapCanvas(availW, availH)
     if ctrl.showLabels and ctrl.layerLabels then
         local labels = mapData.labels or {}
         for _, lb in ipairs(labels) do
-            local drawLb = true
-            if ctrl.useZFilter and math.abs(lb.z - playerZ) > zRange then
-                drawLb = false
-            end
-            if drawLb then
+            local alphaMult, isVis = getZAlphaMultiplier(lb.z, sf.minZ, sf.maxZ)
+            if isVis and alphaMult > 0.01 then
                 local sx, sy = worldToScreen(lb.x, lb.y, cX, cY, availW, availH)
                 if sx >= cX - 50 and sx <= cX + availW + 50 and sy >= cY - 20 and sy <= cY + availH + 20 then
-                    local col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.85)
+                    local col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.85 * alphaMult)
                     drawList:AddText(ImVec2(sx, sy), col, lb.text)
                 end
             end
@@ -1463,21 +1667,24 @@ local function DrawMapCanvas(availW, availH)
 
     if ctrl.showNPCs then
         for _, mob in ipairs(spawns.filteredNPCs) do
-            local sx, sy = worldToScreen(mob.x, mob.y, cX, cY, availW, availH)
+            local alphaMult, isVis = getZAlphaMultiplier(mob.z, sf.minZ, sf.maxZ)
 
-            if sx >= cX - 10 and sx <= cX + availW + 10 and sy >= cY - 10 and sy <= cY + availH + 10 then
-                -- Determine Colors
-                local conStyle = getConStyle(mob.conColor)
-                local conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, 1.0)
+            if isVis and alphaMult > 0.01 then
+                local sx, sy = worldToScreen(mob.x, mob.y, cX, cY, availW, availH)
 
-                local cNav = navState.cache[mob.id]
-                local isPathable = cNav and cNav.hasPath
-                local navColU32 = (isPathable and ImGui.GetColorU32(0.15, 0.95, 0.35, 1.0)) or ImGui.GetColorU32(0.95, 0.20, 0.20, 1.0)
-                if not navState.meshLoaded then
-                    navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8)
-                end
+                if sx >= cX - 10 and sx <= cX + availW + 10 and sy >= cY - 10 and sy <= cY + availH + 10 then
+                    -- Determine Colors
+                    local conStyle = getConStyle(mob.conColor)
+                    local conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, alphaMult)
 
-                local nodeRadius = ctrl.npcNodeRadius
+                    local cNav = navState.cache[mob.id]
+                    local isPathable = cNav and cNav.hasPath
+                    local navColU32 = (isPathable and ImGui.GetColorU32(0.15, 0.95, 0.35, alphaMult)) or ImGui.GetColorU32(0.95, 0.20, 0.20, alphaMult)
+                    if not navState.meshLoaded then
+                        navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
+                    end
+
+                    local nodeRadius = ctrl.npcNodeRadius
                 local isTarget = (mob.id == targetId)
 
                 -- Draw Node by Color Mode
@@ -1530,6 +1737,7 @@ local function DrawMapCanvas(availW, availH)
             end
         end
     end
+end
 
     -- Process Clicked NPC Actions
     if doubleClickedMob then
@@ -1673,6 +1881,47 @@ local function DrawMapCanvas(availW, availH)
     -- Pop Clipping Rectangle
     drawList:PopClipRect()
 
+    -- On-Canvas Floor Navigation Widget (Top Right Pill)
+    if ctrl.zFilterMode ~= 3 then
+        local navW = (sf.overrideOffset ~= 0) and 290 or 220
+        local navH = 28
+        local badgeX = cX + availW - navW - 10
+        local badgeY = cY + 10
+
+        -- Draw HUD pill background directly to drawList
+        drawList:AddRectFilled(ImVec2(badgeX, badgeY), ImVec2(badgeX + navW, badgeY + navH), ImGui.GetColorU32(0.04, 0.07, 0.12, 0.88), 4.0)
+        drawList:AddRect(ImVec2(badgeX, badgeY), ImVec2(badgeX + navW, badgeY + navH), ImGui.GetColorU32(0.20, 0.40, 0.60, 0.75), 4.0, 1.0)
+
+        -- Position cursor inside pill for interactive buttons
+        ImGui.SetCursorScreenPos(ImVec2(badgeX + 6, badgeY + 4))
+
+        local labelCol = (sf.overrideOffset ~= 0) and {1.0, 0.85, 0.2, 1.0} or {0.3, 0.85, 1.0, 1.0}
+        ImGui.TextColored(labelCol[1], labelCol[2], labelCol[3], labelCol[4], sf.floorLabel)
+        ImGui.SameLine()
+
+        if ImGui.SmallButton('▲##FloorUp') then
+            sf.overrideOffset = sf.overrideOffset + 25
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Peek Upper Floor (+25yd)') end
+
+        ImGui.SameLine()
+        if ImGui.SmallButton('▼##FloorDown') then
+            sf.overrideOffset = sf.overrideOffset - 25
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Peek Lower Floor (-25yd)') end
+
+        if sf.overrideOffset ~= 0 then
+            ImGui.SameLine()
+            if ImGui.SmallButton('↺##ResetFloor') then
+                sf.overrideOffset = 0
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset to Live Player Floor') end
+        end
+    end
+
+    -- Restore cursor position to bottom of canvas for clean layout flow
+    ImGui.SetCursorScreenPos(ImVec2(cX, cY + availH))
+
     -- Hover Tooltip for NPC
     if hoveredMob then
         local cNav = navState.cache[hoveredMob.id]
@@ -1770,7 +2019,7 @@ local function DrawNPCTrackerTab()
     )
 
     local availW, availH = ImGui.GetContentRegionAvail()
-    local tableHeight = availH - 10
+    local tableHeight = math.max(80, availH - 32)
 
     if ImGui.BeginTable('##TriuneMapTrackerTable', 8, tableFlags, availW, tableHeight) then
         ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthStretch, 2.2)
@@ -2039,17 +2288,31 @@ local function DrawSettingsTab()
     ImGui.PopItemWidth()
 
     ImGui.Spacing()
-    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Multi-Level Z-Height Filtering')
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Multi-Level Z-Height & Smart Auto-Z')
     ImGui.Separator()
 
-    local uz, cuz = ImGui.Checkbox('Enable Z-Height Filtering (Multi-Floor Dungeons)##UseZFilter', ctrl.useZFilter)
-    if cuz then ctrl.useZFilter = uz; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    ImGui.PushItemWidth(260)
+    local zmIdx, zmChanged = ImGui.Combo('Z-Filter Mode##ZFilterModeCombo', ctrl.zFilterMode, Z_FILTER_MODE_OPTIONS)
+    if zmChanged then
+        ctrl.zFilterMode = zmIdx
+        state.dirtySettings = true
+        state.dirtySettingsTime = mq.gettime()
+    end
+    ImGui.PopItemWidth()
 
-    if ctrl.useZFilter then
+    if ctrl.zFilterMode == 1 then
+        ImGui.TextColored(0.2, 0.95, 0.35, 1.0, string.format('Active Floor Bounds: %s', state.smartFloor.floorLabel))
+        local df, cdf = ImGui.Checkbox('Smooth Alpha Depth Fading (Fade Stairs/Ramps)##ZDepthFadeCheck', ctrl.zDepthFading)
+        if cdf then ctrl.zDepthFading = df; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    elseif ctrl.zFilterMode == 2 then
+        local df, cdf = ImGui.Checkbox('Smooth Alpha Depth Fading##ZDepthFadeCheck', ctrl.zDepthFading)
+        if cdf then ctrl.zDepthFading = df; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
         ImGui.PushItemWidth(250)
-        local zRangeVal, zChanged = ImGui.SliderInt('Z Altitude Window (+/- yards)##ZRangeSlider', ctrl.zFilterRange, 15, 300)
+        local zRangeVal, zChanged = ImGui.SliderInt('Manual Z Window (± yards)##ZRangeSlider', ctrl.zFilterRange, 10, 250)
         if zChanged then ctrl.zFilterRange = zRangeVal; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
         ImGui.PopItemWidth()
+    else
+        ImGui.TextDisabled('Z-filtering disabled. All vertical floors and elevations are rendered.')
     end
 
     ImGui.Spacing()
@@ -2085,7 +2348,10 @@ local function DrawTriuneMapUI()
 
     pushTheme()
 
-    local windowFlags = ImGuiWindowFlags.None or 0
+    local windowFlags = bit.bor(
+        ImGuiWindowFlags.NoScrollbar or 0,
+        ImGuiWindowFlags.NoScrollWithMouse or 0
+    )
     -- Omit NoCollapse so WindowRounding token applies rounded corners cleanly
     windowFlags = bit.band(windowFlags, bit.bnot(ImGuiWindowFlags.NoCollapse or 0))
 
@@ -2157,7 +2423,7 @@ local function DrawTriuneMapUI()
             if ImGui.BeginTabItem('Map View##MapTab') then
                 state.activeTab = 1
                 local availW, availH = ImGui.GetContentRegionAvail()
-                local canvasHeight = availH - 24 -- Leave room for status bar
+                local canvasHeight = math.max(80, availH - 26)
                 DrawMapCanvas(availW, canvasHeight)
                 ImGui.EndTabItem()
             end

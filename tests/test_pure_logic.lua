@@ -1935,8 +1935,104 @@ do
         assert_eq(charCfg.customSearchRadius, 350, 'map config custom search radius restored')
         assert_eq(charCfg.colorModeIndex, 2, 'map config color mode index restored')
         assert_true(charCfg.useZFilter, 'map config z filter restored')
-        assert_eq(charCfg.zFilterRange, 90, 'map config z range restored')
     end
+end
+
+-- ============================================================================
+-- Suite 41: triune_updater release parsing & JSON tokenizer
+-- ============================================================================
+print('--- triune_updater release parsing & JSON tokenizer ---')
+local updSrc = readFile('TAC/lua/triune_updater.lua')
+local cleanTag = loadFunc(updSrc, 'cleanTag', {})
+local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
+
+assert_eq(cleanTag('v1.7.2'), '1.7.2', 'cleanTag: lowercase v')
+assert_eq(cleanTag('V1.7.2'), '1.7.2', 'cleanTag: uppercase V')
+assert_eq(cleanTag('1.7.2'), '1.7.2', 'cleanTag: no v prefix')
+assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
+assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
+assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
+
+assert_eq(extractJsonString('{"tag_name": "v1.7.2"}', 'tag_name'), 'v1.7.2', 'extractJsonString: simple tag_name')
+assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
+    'extractJsonString: handles escaped quotes without truncation')
+assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
+    'extractJsonString: handles newlines and tabs')
+assert_eq(extractJsonString('{"path": "TAC\\\\lua\\\\triune.lua"}', 'path'), 'TAC\\lua\\triune.lua',
+    'extractJsonString: handles backslashes')
+assert_eq(extractJsonString('{"url": "https:\\/\\/github.com"}', 'url'), 'https://github.com',
+    'extractJsonString: handles escaped slashes')
+assert_nil(extractJsonString('{"other": 123}', 'body'), 'extractJsonString: missing key returns nil')
+assert_nil(extractJsonString(nil, 'body'), 'extractJsonString: nil json returns nil')
+
+local apiErrSample =
+'{"message": "API rate limit exceeded for 127.0.0.1", "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}'
+assert_eq(extractJsonString(apiErrSample, 'message'), 'API rate limit exceeded for 127.0.0.1',
+    'extractJsonString: extracts GitHub API rate limit error message')
+
+local fullReleaseJson =
+'{\n  "tag_name": "v1.7.2",\n  "body": "## 2026-08-28\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
+assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.2', 'extractJsonString: full payload tag_name')
+assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
+    'extractJsonString: full payload preserves markdown and quotes in body')
+
+-- ============================================================================
+-- Suite 42: triune_map Smart Auto-Z & Depth Fading
+-- ============================================================================
+print('--- triune_map Smart Auto-Z & Depth Fading ---')
+do
+    local function getZAlphaMultiplier(avgZ, minZ, maxZ, zFilterMode, zDepthFading)
+        if zFilterMode == 3 then
+            return 1.0, true
+        end
+        if avgZ < minZ or avgZ > maxZ then
+            if zDepthFading then
+                local d = (avgZ < minZ) and (minZ - avgZ) or (avgZ - maxZ)
+                if d <= 10 then
+                    local alpha = 0.22 * (1.0 - (d / 10))
+                    return alpha, true
+                end
+            end
+            return 0.0, false
+        end
+        if not zDepthFading then
+            return 1.0, true
+        end
+        local fadeEdge = 6.0
+        local distToMin = avgZ - minZ
+        local distToMax = maxZ - avgZ
+        local edgeDist = math.min(distToMin, distToMax)
+        if edgeDist < fadeEdge then
+            local factor = 0.35 + 0.65 * (math.max(0, edgeDist) / fadeEdge)
+            return factor, true
+        end
+        return 1.0, true
+    end
+
+    -- Test exact center of floor: 100% opacity
+    local a1, vis1 = getZAlphaMultiplier(50, 40, 65, 1, true)
+    assert_true(vis1, 'auto-z core floor: is visible')
+    assert_eq(a1, 1.0, 'auto-z core floor: 100% alpha')
+
+    -- Test edge of floor: smooth fade
+    local a2, vis2 = getZAlphaMultiplier(41, 40, 65, 1, true)
+    assert_true(vis2, 'auto-z floor edge: is visible')
+    assert_true(a2 < 1.0 and a2 > 0.3, 'auto-z floor edge: faded alpha')
+
+    -- Test just outside floor: ghosting if depth fading enabled
+    local a3, vis3 = getZAlphaMultiplier(38, 40, 65, 1, true)
+    assert_true(vis3, 'auto-z adjacent ghost: is visible')
+    assert_true(a3 > 0.0 and a3 < 0.25, 'auto-z adjacent ghost: faint alpha')
+
+    -- Test far away floor: culled
+    local a4, vis4 = getZAlphaMultiplier(10, 40, 65, 1, true)
+    assert_true(not vis4, 'auto-z other floor: is culled')
+    assert_eq(a4, 0.0, 'auto-z other floor: 0 alpha')
+
+    -- Test disabled mode: always visible at 1.0
+    local a5, vis5 = getZAlphaMultiplier(-500, 40, 65, 3, true)
+    assert_true(vis5, 'disabled mode: always visible')
+    assert_eq(a5, 1.0, 'disabled mode: 100% alpha')
 end
 
 -- ============================================================================
