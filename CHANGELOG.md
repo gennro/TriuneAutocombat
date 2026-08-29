@@ -18,11 +18,12 @@
     - Queries `mq.TLO.Me.Skill(name)`, `mq.TLO.Me.SkillCap(name)`, and `mq.TLO.Me.AbilityReady(name)` in real time to fetch live trained skill levels and ability status.
     - Includes race-specific abilities (such as `Slam` on large races) when trained on the character.
   - **Full Innate Class Combat Actions**: Comprehensive class action support across all 16 EverQuest classes for innate abilities executed via `/doability` (Monk strikes, Mend, Backstab, Kick, Bash, Slam, Frenzy, Taunt, Disarm, Intimidation, Feign Death, etc.).
+  - **Non-Combat Abilities Auto-Attack Pausing (`isNonCombatSkill`)**: Abilities that cannot be used while auto-attacking in EverQuest (e.g. `Begging`, `Pick Pockets`, `Hide`, `Sneak`, `Bind Wound`, `Forage`) automatically pause auto-attack (`/attack off`), execute `/doability`, and seamlessly resume auto-attack (`/attack on`).
   - **Autoskill Toggle (`entry.autoskill`)**: Added an **Auto** checkbox to each combat ability. When enabled, the combat engine automatically fires the ability continuously on cooldown during melee combat against engaged hostile targets without blocking spell gems or disciplines.
   - **Conditional & Priority Execution**: Non-autoskill abilities (e.g. Mend, Feign Death, Taunt, Disarm) support full Target condition, Trigger When rule, HP % threshold, Min XTarget count, Burn Mode gate, and numeric Priority order.
   - **Trained Only Filtering**: Added `Trained Only` (`ctrl.action_trained_only`) toggle verifying live skill levels (`mq.TLO.Me.Skill` / `mq.TLO.Me.Ability`).
   - **Persistence & Migration**: Fully serialized `loadout.actions` with automatic legacy migration of special skills (such as Mend) from `loadout.discs`.
-  - **Unit Tests**: Updated `tests/test_pure_logic.lua` with test cases for `actionClassInfo`, `getClientAbilities`, `isActionSkill`, `isSpecialSkill`, and `defaultActionEntry`.
+  - **Unit Tests**: Updated `tests/test_pure_logic.lua` with test cases for `actionClassInfo`, `getClientAbilities`, `isActionSkill`, `isSpecialSkill`, `isNonCombatSkill`, and `defaultActionEntry`.
 
 ---
 

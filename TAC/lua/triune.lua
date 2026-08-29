@@ -2198,6 +2198,11 @@ local function isSpecialSkill(name)
     return false
 end
 
+local function isNonCombatSkill(name)
+    if not name or type(name) ~= 'string' or name == '' then return false end
+    return name == 'Begging' or name == 'Pick Pockets' or name == 'Hide' or name == 'Sneak' or name == 'Bind Wound' or name == 'Forage' or name == 'Sense Heading'
+end
+
 local function hasActionSkill(name)
     if not name or type(name) ~= 'string' or name == '' or name == 'NULL' or name == 'false' then return false end
     -- 1. Check if character has trained skill points (> 0) in this skill
@@ -8228,7 +8233,19 @@ runtime.fireSkill = function(name, a, id)
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and id and id > 0 and not runtime.setTarget(id) then return false end
     clearCursor()
+
+    -- Abilities like Begging and Pick Pockets require auto-attack to be OFF to execute in EverQuest
+    local pauseAttack = isNonCombatSkill(name) and wasAttacking
+    if pauseAttack then
+        mq.cmd('/attack off')
+        mq.delay(50, function() return not mq.TLO.Me.Combat() end)
+    end
+
     mq.cmdf('/doability "%s"', name)
+
+    if pauseAttack then
+        mq.delay(50)
+    end
 
     local now = os.clock()
     local key = 's' .. name
