@@ -2,6 +2,8 @@
 
 ## 2026-08-29
 
+- **Project Version Bump (v1.7.5)**: Synchronized version **1.7.5** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
 - **Norrath Zone Atlas & Travel Explorer (`triune_map.lua`, v1.1).**
   - **Replicated & Enhanced Stock In-Game Map Atlas**: Added full offline and remote zone map browsing to `triune_map`, enabling players to preview and search any zone in EverQuest without traveling or zoning.
   - **Zone Route Finder & Travel Itinerary (`findZoneRoute`)**:
@@ -30,6 +32,7 @@
     - Standard EQ maps authored for light/parchment backgrounds often use black (`0, 0, 0`) or dark charcoal for walls, contours, and landmark labels.
     - Implemented automatic luminance detection that boosts any low-luminance lines (`lum < 0.25`) to a crisp visible light silver-slate tone (`0.72, 0.76, 0.82`) and dark labels to clean off-white (`0.88, 0.92, 0.96`), ensuring zero black-on-black invisibility across the map canvas and POI tables.
     - Added user toggle in the Settings & Layers tab.
+  - **Static Analysis & Variable Scope Fixes**: Resolved variable scope of `hoveredMob` across Atlas and Live map canvas views, removed unused route lookup locals, and eliminated all 12 `luacheck` warnings (0 warnings across suite).
   - **Unit Tests**: Added Suite 43 to `tests/test_pure_logic.lua` covering Atlas history stack navigation, expansion/type filtering, BFS shortest route pathfinding, dark color boosting, and version consistency.
 
 - **Guild-Only Buffing Restriction (`triune_buffbot.lua`, v1.6).**

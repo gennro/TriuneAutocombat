@@ -1412,7 +1412,6 @@ local function findZoneRoute(startShort, targetShort)
     end
 
     local startEntry = zoneLookup[sStart] or { short = sStart, name = sStart, era = 'Unknown', type = 'Zone', level = '?' }
-    local targetEntry = zoneLookup[sTarget] or { short = sTarget, name = sTarget, era = 'Unknown', type = 'Zone', level = '?' }
 
     if sStart == sTarget then
         return { startEntry }, 0
@@ -2389,6 +2388,7 @@ local function DrawMapCanvas(availW, availH)
     end
 
     local isAtlasRemote = (state.viewMode == 'ATLAS' and state.atlasZoneShort ~= '' and state.atlasZoneShort:lower() ~= state.currentZoneShort:lower())
+    local hoveredMob = nil
 
     if isAtlasRemote then
         local aName = (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort
@@ -2413,7 +2413,6 @@ local function DrawMapCanvas(availW, availH)
         if okTarg and tId then targetId = tId end
 
         -- Draw NPCs and Process Click Hit-Testing
-        local hoveredMob = nil
         local clickedMob = nil
         local doubleClickedMob = nil
 
@@ -3715,14 +3714,14 @@ local function DrawTriuneMapUI()
             end
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Return to active zone and resume live player tracking') end
 
-            local rPath, rHops = findZoneRoute(state.currentZoneShort, state.atlasZoneShort)
+            local _, rHops = findZoneRoute(state.currentZoneShort, state.atlasZoneShort)
             if rHops and rHops > 0 then
                 ImGui.SameLine()
                 if ImGui.SmallButton(string.format('Route: %d hops##AtlasRouteHopsBtn', rHops)) then
                     state.activeTab = 2
                 end
                 if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('Click to view full step-by-step travel route in Atlas Tab\nFrom %s to %s (%d zone transitions)', state.currentZoneName, aName, rHops)
+                    ImGui.SetTooltip('%s', string.format('Click to view full step-by-step travel route in Atlas Tab\nFrom %s to %s (%d zone transitions)', state.currentZoneName, aName, rHops))
                 end
             end
         else
