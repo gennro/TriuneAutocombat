@@ -3262,11 +3262,11 @@ function UI.drawHeaderBar()
         ImGui.SetTooltip('Launches or closes the standalone Triune Spellbook interface.')
     end
     ImGui.SameLine()
-    if ImGui.Button('Cursor Manager##hdrCursor') then
-        toggleTool('triune_cursor')
+    if ImGui.Button('Map##hdrMap') then
+        toggleTool('triune_map')
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Launches or closes the standalone Triune Cursor Item Manager.')
+        ImGui.SetTooltip('Launches or closes the standalone Triune Map & NPC Tracker interface.')
     end
     ImGui.SameLine()
     if ImGui.Button('DPS Parser##hdrDPS') then
@@ -3276,26 +3276,26 @@ function UI.drawHeaderBar()
         ImGui.SetTooltip('Launches or toggles the standalone Triune DPS Parser window.')
     end
     ImGui.SameLine()
-    if ImGui.Button('Updater##hdrUpdate') then
-        toggleTool('triune_updater')
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
-    end
-    ImGui.SameLine()
-    if ImGui.Button('Map##hdrMap') then
-        toggleTool('triune_map')
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Launches or closes the standalone Triune Map & NPC Tracker interface.')
-    end
-    ImGui.SameLine()
     if ImGui.Button('Compact Mode##hdrCompact') then
         ctrl.compact = true
         saveLoadout(true)
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Switches Triune AutoCombat into a sleek compact HUD overlay window.')
+    end
+    ImGui.SameLine()
+    if ImGui.Button('Cursor Manager##hdrCursor') then
+        toggleTool('triune_cursor')
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Launches or closes the standalone Triune Cursor Item Manager.')
+    end
+    ImGui.SameLine()
+    if ImGui.Button('Updater##hdrUpdate') then
+        toggleTool('triune_updater')
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
     end
 
     if not DATA_OK then
@@ -5828,306 +5828,452 @@ function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
     ImGui.Dummy(0, 4)
 
+    -- 1. Character Classes & Profile
     UI.drawClassPicker()
+    ImGui.Dummy(0, 6)
 
-    ImGui.Dummy(0, 4)
-    accent(GOLD, 'Combat Style')
-    if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
-        ctrl.combat_style = 'Melee'
-        revertAttackModeToMelee()
-        saveLoadout(true)
-    end
-    ImGui.SameLine()
-    if ImGui.RadioButton('Ranged (bow)', ctrl.combat_style == 'Ranged') then
-        ctrl.combat_style = 'Ranged'
-        saveLoadout(true)
-    end
-    ImGui.SameLine()
-    if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then
-        ctrl.combat_style = 'Spell'
-        revertAttackModeToMelee()
-        saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Spell: stand off at the range below and never auto-attack (no\n'
-            .. '/attack, no /autofire) -- your Spell Gems loadout does all the\n'
-            .. 'damage. For pure caster trios that don\'t melee or carry a bow.')
-    end
-
-    ImGui.Dummy(0, 2)
-    if ctrl.combat_style == 'Melee' then
-        ImGui.SetNextItemWidth(200)
-        local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
-        if changed or (newDist and newDist ~= ctrl.melee_dist) then
-            ctrl.melee_dist = newDist
+    -- 2. Combat Style & Positioning
+    if ImGui.CollapsingHeader('Combat Style & Positioning', ImGuiTreeNodeFlags.DefaultOpen) then
+        ImGui.Dummy(0, 2)
+        accent(GOLD, 'Engagement Style:')
+        if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
+            ctrl.combat_style = 'Melee'
+            revertAttackModeToMelee()
+            saveLoadout(true)
+        end
+        ImGui.SameLine()
+        if ImGui.RadioButton('Ranged (bow)', ctrl.combat_style == 'Ranged') then
+            ctrl.combat_style = 'Ranged'
+            saveLoadout(true)
+        end
+        ImGui.SameLine()
+        if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then
+            ctrl.combat_style = 'Spell'
+            revertAttackModeToMelee()
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Max melee distance to position at and strike targets (default: 14).\n'
-                .. 'Adjust to stick tighter (e.g. 8-10) or fight from further away (e.g. 15-25).')
+                'Spell: stand off at the range below and never auto-attack (no\n'
+                .. '/attack, no /autofire) -- your Spell Gems loadout does all the\n'
+                .. 'damage. For pure caster trios that don\'t melee or carry a bow.')
         end
-    else
-        ImGui.SetNextItemWidth(200)
-        local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 5, 200)
-        if changed or (newDist and newDist ~= ctrl.ranged_dist) then
-            ctrl.ranged_dist = newDist
+
+        ImGui.Dummy(0, 2)
+        if ctrl.combat_style == 'Melee' then
+            ImGui.SetNextItemWidth(200)
+            local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
+            if changed or (newDist and newDist ~= ctrl.melee_dist) then
+                ctrl.melee_dist = newDist
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Max melee distance to position at and strike targets (default: 14).\n'
+                    .. 'Adjust to stick tighter (e.g. 8-10) or fight from further away (e.g. 15-25).')
+            end
+        else
+            ImGui.SetNextItemWidth(200)
+            local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 5, 200)
+            if changed or (newDist and newDist ~= ctrl.ranged_dist) then
+                ctrl.ranged_dist = newDist
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Distance to position at and engage targets from with ranged/spells (default: 40).')
+            end
+        end
+
+        local losVal = ImGui.Checkbox('Re-face Instead Of Stepping Back On Lost Line-of-Sight', ctrl.los_face_only or false)
+        if losVal ~= (ctrl.los_face_only or false) then
+            ctrl.los_face_only = losVal
             saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Distance to position at and engage targets from with ranged/spells (default: 40).')
+                'On "cannot see target", just turn to face it instead of stepping\n'
+                .. 'back and strafing. Useful in tight spaces or areas cluttered\n'
+                .. 'with obstacles, where stepping back can wedge you against a\n'
+                .. 'wall/prop instead of helping. Applies to Melee, Ranged, and\n'
+                .. 'Spell alike. Off by default.')
         end
-    end
 
-    ctrl.los_face_only = ImGui.Checkbox('Re-face Instead Of Stepping Back On Lost Line-of-Sight', ctrl.los_face_only or false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'On "cannot see target", just turn to face it instead of stepping\n'
-            .. 'back and strafing. Useful in tight spaces or areas cluttered\n'
-            .. 'with obstacles, where stepping back can wedge you against a\n'
-            .. 'wall/prop instead of helping. Applies to Melee, Ranged, and\n'
-            .. 'Spell alike. Off by default.')
-    end
-
-    ImGui.Dummy(0, 4)
-    accent(GOLD, 'Navigation & Hazard Avoidance')
-    if not navLoaded() then
-        accent(WARN, 'MQ2Nav is NOT loaded! Navigation and pathfinding require MQ2Nav.')
-        ImGui.SameLine()
-        if ImGui.Button('Load MQ2Nav##settingsLoadNav') then
-            mq.cmd('/plugin mq2nav')
+        ImGui.Dummy(0, 2)
+        accent(GOLD, 'Spell Failures & Lockouts:')
+        ImGui.SetNextItemWidth(160)
+        local retriesVal = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10)
+        if retriesVal ~= ctrl.cast_max_retries then
+            ctrl.cast_max_retries = retriesVal
+            saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            UI.setTooltip('Executes /plugin mq2nav to load the MQ2Nav plugin.')
+            ImGui.SetTooltip(
+                'Consecutive failed cast attempts allowed before temporarily locking out a spell.\nDefault: 2 tries.')
         end
-    elseif not navMeshLoaded() then
-        local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-        accent(WARN, string.format('No NavMesh loaded for zone "%s" (/nav reload).', curZone))
         ImGui.SameLine()
-        if ImGui.Button('Reload Mesh##settingsReloadMesh') then
-            mq.cmd('/nav reload')
+        ImGui.SetNextItemWidth(160)
+        local lockoutVal = ImGui.SliderInt('Lockout Time##castLockoutSec', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
+        if lockoutVal ~= ctrl.cast_lockout_sec then
+            ctrl.cast_lockout_sec = lockoutVal
+            saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
+            ImGui.SetTooltip('How many seconds to wait before trying a locked-out spell again.\nDefault: 30 seconds.')
         end
-    end
-    ctrl.nav_hazard_avoidance = ImGui.Checkbox('Auto-Avoid Stuck Hotspots', ctrl.nav_hazard_avoidance ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Remembers locations where the character repeatedly gets stuck and routes around them with detour waypoints.')
-    end
-    ImGui.SameLine()
-    ctrl.nav_reverse_breadcrumbs = ImGui.Checkbox('Reverse Breadcrumbs on Pull Return', ctrl.nav_reverse_breadcrumbs ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('In Puller Camp mode, remembers the exact path taken to the mob and walks back in reverse to guarantee a safe return to camp.')
+        ImGui.Dummy(0, 2)
     end
 
-    ctrl.nav_proactive_doors = ImGui.Checkbox('Proactive Door & Gate Opening', ctrl.nav_proactive_doors ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Predictively opens closed doors in your movement path before hitting them.')
-    end
-    ImGui.SameLine()
-    ctrl.nav_levitation_clear = ImGui.Checkbox('Levitation Archway Duck-to-Clear', ctrl.nav_levitation_clear ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Momentarily ducks under low door frames/archways if levitating to prevent ceiling snags.')
-    end
+    ImGui.Dummy(0, 6)
 
-    ImGui.SetNextItemWidth(180)
-    local newRatio = ImGui.SliderFloat('Max Path / Distance Ratio##navMaxPathRatio', ctrl.nav_max_path_ratio or 2.5, 1.2, 5.0, '%.1fx')
-    if newRatio and newRatio ~= ctrl.nav_max_path_ratio then
-        ctrl.nav_max_path_ratio = newRatio
-        saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Rejects targets if NavMesh PathLength exceeds this multiple of direct 3D distance.\nFilters out mobs across walls or on high balconies requiring long dungeon detours.')
-    end
-
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(180)
-    local newHzRad = ImGui.SliderInt('Hazard Radius##navHazardRadius', ctrl.nav_hazard_radius or 15, 8, 35, '%d units')
-    if newHzRad and newHzRad ~= ctrl.nav_hazard_radius then
-        ctrl.nav_hazard_radius = newHzRad
-        saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Avoidance radius around learned stuck hotspots.')
-    end
-
-    local curZs = runtime.getCurrentZoneShortName and runtime.getCurrentZoneShortName() or 'unknown'
-    local zoneHz = runtime.getZoneHazards and runtime.getZoneHazards(curZs) or {}
-    local activeCount = 0
-    for _, h in ipairs(zoneHz) do
-        if (h.hits or 1) >= (ctrl.nav_hazard_min_hits or 2) then
-            activeCount = activeCount + 1
+    -- 3. Navigation & Hazard Avoidance
+    if ImGui.CollapsingHeader('Navigation & Hazard Avoidance', ImGuiTreeNodeFlags.DefaultOpen) then
+        ImGui.Dummy(0, 2)
+        if not navLoaded() then
+            accent(WARN, 'MQ2Nav is NOT loaded! Navigation and pathfinding require MQ2Nav.')
+            ImGui.SameLine()
+            if ImGui.Button('Load MQ2Nav##settingsLoadNav') then
+                mq.cmd('/plugin mq2nav')
+            end
+            if ImGui.IsItemHovered() then
+                UI.setTooltip('Executes /plugin mq2nav to load the MQ2Nav plugin.')
+            end
+        elseif not navMeshLoaded() then
+            local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+            accent(WARN, string.format('No NavMesh loaded for zone "%s" (/nav reload).', curZone))
+            ImGui.SameLine()
+            if ImGui.Button('Reload Mesh##settingsReloadMesh') then
+                mq.cmd('/nav reload')
+            end
+            if ImGui.IsItemHovered() then
+                UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
+            end
         end
-    end
-    ImGui.TextDisabled(string.format('Zone "%s": %d hazard hotspot(s) logged (%d active)', curZs, #zoneHz, activeCount))
-    ImGui.SameLine()
-    if ImGui.Button('Clear Zone Hazards##clearHzBtn') then
-        if runtime.clearZoneHazards then runtime.clearZoneHazards(curZs) end
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Clears all recorded stuck hotspots for the current zone.')
-    end
 
-    ImGui.Dummy(0, 4)
-    accent(GOLD, 'Closer-NPC Retargeting During Movement')
-    ctrl.check_closer_mobs = ImGui.Checkbox('Switch to Closer Mobs While Traveling', ctrl.check_closer_mobs ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Allows switching to a significantly closer mob if one is encountered while traveling toward a distant target.')
-    end
-    ImGui.SameLine()
-    ctrl.closer_forward_cone_only = ImGui.Checkbox('Forward Arc Cone Only (+/-75 deg)', ctrl.closer_forward_cone_only ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Only retargets to closer mobs that lie in front of your movement direction, preventing 180 degree turnarounds.')
-    end
+        local hazVal = ImGui.Checkbox('Auto-Avoid Stuck Hotspots', ctrl.nav_hazard_avoidance ~= false)
+        if hazVal ~= (ctrl.nav_hazard_avoidance ~= false) then
+            ctrl.nav_hazard_avoidance = hazVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Remembers locations where the character repeatedly gets stuck and routes around them with detour waypoints.')
+        end
+        ImGui.SameLine()
+        local rbcVal = ImGui.Checkbox('Reverse Breadcrumbs on Pull Return', ctrl.nav_reverse_breadcrumbs ~= false)
+        if rbcVal ~= (ctrl.nav_reverse_breadcrumbs ~= false) then
+            ctrl.nav_reverse_breadcrumbs = rbcVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('In Puller Camp mode, remembers the exact path taken to the mob and walks back in reverse to guarantee a safe return to camp.')
+        end
 
-    ctrl.closer_los_priority = ImGui.Checkbox('Prioritize Visible Line-of-Sight Mobs', ctrl.closer_los_priority ~= false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Prioritizes closer mobs with direct Line of Sight if your distant target is obstructed behind walls/corners.')
-    end
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(180)
-    local curRetargets = ctrl.max_closer_retargets or 1
-    local retargetFmt = (curRetargets == 0) and 'Disabled (0)' or '%d retarget(s)'
-    local newMaxRetargets = ImGui.SliderInt('Max Retargets Per Leg##maxCloserRetargets', curRetargets, 0, 5, retargetFmt)
-    if newMaxRetargets and newMaxRetargets ~= ctrl.max_closer_retargets then
-        ctrl.max_closer_retargets = newMaxRetargets
-        saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Max times to switch to closer mobs during a single travel leg (0 = disabled / lock to first mob).')
-    end
+        local doorVal = ImGui.Checkbox('Proactive Door & Gate Opening', ctrl.nav_proactive_doors ~= false)
+        if doorVal ~= (ctrl.nav_proactive_doors ~= false) then
+            ctrl.nav_proactive_doors = doorVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Predictively opens closed doors in your movement path before hitting them.')
+        end
+        ImGui.SameLine()
+        local levVal = ImGui.Checkbox('Levitation Archway Duck-to-Clear', ctrl.nav_levitation_clear ~= false)
+        if levVal ~= (ctrl.nav_levitation_clear ~= false) then
+            ctrl.nav_levitation_clear = levVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Momentarily ducks under low door frames/archways if levitating to prevent ceiling snags.')
+        end
 
-    ctrl.nav_fallback_stick = ImGui.Checkbox('Fallback to Stick on Nav Failure', ctrl.nav_fallback_stick)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'If MQ2Nav reports no path to a target, /stick will still\n'
-            .. 'try to close on it in a straight line -- which walks\n'
-            .. 'straight at whatever wall is blocking the path.\n'
-            .. 'Off by default: unreachable targets are dropped instead.')
-    end
-    ctrl.debug_mode = ImGui.Checkbox('Debug Mode', ctrl.debug_mode)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Prints extra diagnostic lines (e.g. Hunter\'s full targeting\n'
-            .. 'state every few seconds) to help track down a stuck/frozen\n'
-            .. 'report. Off by default -- noisy for normal use.')
-    end
-    ctrl.show_map_radius = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Draws green radius circles on the in-game map window\n'
-            .. 'for Hunter, Anchor, and Pull/Camp radii.')
-    end
-    ctrl.show_crit_floaters = ImGui.Checkbox('Critical Hit Floating Text', ctrl.show_crit_floaters)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Shows flashy floating damage numbers above your character\n'
-            .. 'when you land a critical hit, crippling blow, deadly strike,\n'
-            .. 'or other special melee/spell criticals.')
-    end
-    ctrl.compact = ImGui.Checkbox('Compact Mini-Window HUD Mode', ctrl.compact or false)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Switches the Triune AutoCombat interface into a small, sleek HUD overlay widget.')
-    end
+        local stickVal = ImGui.Checkbox('Fallback to Stick on Nav Failure', ctrl.nav_fallback_stick or false)
+        if stickVal ~= (ctrl.nav_fallback_stick or false) then
+            ctrl.nav_fallback_stick = stickVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'If MQ2Nav reports no path to a target, /stick will still\n'
+                .. 'try to close on it in a straight line -- which walks\n'
+                .. 'straight at whatever wall is blocking the path.\n'
+                .. 'Off by default: unreachable targets are dropped instead.')
+        end
 
-    ImGui.Dummy(0, 4)
-    accent(GOLD, 'Spell Failures & Lockout')
-    ImGui.SetNextItemWidth(140)
-    local retriesVal = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10)
-    ctrl.cast_max_retries = retriesVal
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Consecutive failed cast attempts allowed before temporarily locking out a spell.\nDefault: 2 tries.')
-    end
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(140)
-    local lockoutVal = ImGui.SliderInt('Lockout Time (s)##castLockoutSec', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
-    ctrl.cast_lockout_sec = lockoutVal
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('How many seconds to wait before trying a locked-out spell again.\nDefault: 30 seconds.')
-    end
-
-    ImGui.Dummy(0, 4)
-    accent(GOLD, 'Health & Mana Management')
-    ImGui.SetNextItemWidth(180)
-    local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%')
-    ctrl.min_mana_pct = minManaVal
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Prevents automatic spell casting if current mana drops below this percentage.\n'
-            .. 'Ignored during Burn Mode (0 = disabled / cast at any mana level).')
-    end
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(180)
-    local minPullHpVal = ImGui.SliderInt('Min Pull HP %##minPullHpSettings', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
-    ctrl.pull_min_hp_pct = minPullHpVal
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s',
-            'Pauses pulling and sits out of combat to recover if current HP drops below\n'
-            .. 'this threshold. Pulling resumes once HP reaches 100%.\n'
-            .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
-    end
-
-    ImGui.Dummy(0, 4)
-    -- Pet Settings: shown when the trio has a pet class or active pet
-    if trioHasPetClass() or hasActivePet() then
-        accent(ARC, 'Pet Settings')
+        ImGui.Dummy(0, 2)
         ImGui.SetNextItemWidth(180)
-        local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
-        ctrl.pet_assist_at = petAssistVal
+        local newRatio = ImGui.SliderFloat('Max Path / Dist Ratio##navMaxPathRatio', ctrl.nav_max_path_ratio or 2.5, 1.2, 5.0, '%.1fx')
+        if newRatio and newRatio ~= ctrl.nav_max_path_ratio then
+            ctrl.nav_max_path_ratio = newRatio
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Rejects targets if NavMesh PathLength exceeds this multiple of direct 3D distance.\nFilters out mobs across walls or on high balconies requiring long dungeon detours.')
+        end
+
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        local newHzRad = ImGui.SliderInt('Hazard Radius##navHazardRadius', ctrl.nav_hazard_radius or 15, 8, 35, '%d units')
+        if newHzRad and newHzRad ~= ctrl.nav_hazard_radius then
+            ctrl.nav_hazard_radius = newHzRad
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Avoidance radius around learned stuck hotspots.')
+        end
+
+        local curZs = runtime.getCurrentZoneShortName and runtime.getCurrentZoneShortName() or 'unknown'
+        local zoneHz = runtime.getZoneHazards and runtime.getZoneHazards(curZs) or {}
+        local activeCount = 0
+        for _, h in ipairs(zoneHz) do
+            if (h.hits or 1) >= (ctrl.nav_hazard_min_hits or 2) then
+                activeCount = activeCount + 1
+            end
+        end
+        ImGui.Dummy(0, 2)
+        ImGui.TextDisabled(string.format('Zone "%s": %d hazard hotspot(s) logged (%d active)', curZs, #zoneHz, activeCount))
+        ImGui.SameLine()
+        if ImGui.Button('Clear Zone Hazards##clearHzBtn') then
+            if runtime.clearZoneHazards then runtime.clearZoneHazards(curZs) end
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Clears all recorded stuck hotspots for the current zone.')
+        end
+        ImGui.Dummy(0, 2)
+    end
+
+    ImGui.Dummy(0, 6)
+
+    -- 4. Closer-NPC Retargeting During Movement
+    if ImGui.CollapsingHeader('Closer-NPC Retargeting During Movement', ImGuiTreeNodeFlags.DefaultOpen) then
+        ImGui.Dummy(0, 2)
+        local chkVal = ImGui.Checkbox('Switch to Closer Mobs While Traveling', ctrl.check_closer_mobs ~= false)
+        if chkVal ~= (ctrl.check_closer_mobs ~= false) then
+            ctrl.check_closer_mobs = chkVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Allows switching to a significantly closer mob if one is encountered while traveling toward a distant target.')
+        end
+        ImGui.SameLine()
+        local coneVal = ImGui.Checkbox('Forward Arc Cone Only (+/-75 deg)', ctrl.closer_forward_cone_only ~= false)
+        if coneVal ~= (ctrl.closer_forward_cone_only ~= false) then
+            ctrl.closer_forward_cone_only = coneVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Only retargets to closer mobs that lie in front of your movement direction, preventing 180 degree turnarounds.')
+        end
+
+        local losPrioVal = ImGui.Checkbox('Prioritize Visible Line-of-Sight Mobs', ctrl.closer_los_priority ~= false)
+        if losPrioVal ~= (ctrl.closer_los_priority ~= false) then
+            ctrl.closer_los_priority = losPrioVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Prioritizes closer mobs with direct Line of Sight if your distant target is obstructed behind walls/corners.')
+        end
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        local curRetargets = ctrl.max_closer_retargets or 1
+        local retargetFmt = (curRetargets == 0) and 'Disabled (0)' or '%d retarget(s)'
+        local newMaxRetargets = ImGui.SliderInt('Max Retargets Per Leg##maxCloserRetargets', curRetargets, 0, 5, retargetFmt)
+        if newMaxRetargets and newMaxRetargets ~= ctrl.max_closer_retargets then
+            ctrl.max_closer_retargets = newMaxRetargets
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Max times to switch to closer mobs during a single travel leg (0 = disabled / lock to first mob).')
+        end
+        ImGui.Dummy(0, 2)
+    end
+
+    ImGui.Dummy(0, 6)
+
+    -- 5. Resting & Resource Management
+    if ImGui.CollapsingHeader('Resting & Resource Management', ImGuiTreeNodeFlags.DefaultOpen) then
+        ImGui.Dummy(0, 2)
+        accent(GOLD, 'Combat Recovery & Pull Thresholds:')
+        ImGui.SetNextItemWidth(180)
+        local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%')
+        if minManaVal ~= ctrl.min_mana_pct then
+            ctrl.min_mana_pct = minManaVal
+            saveLoadout(true)
+        end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Send pets to attack once the target drops to or below\n'
-                .. 'this HP threshold AND the player has started hitting the mob.\n'
-                .. '100 percent = send as soon as the first hit connects (default).')
+                'Prevents automatic spell casting if current mana drops below this percentage.\n'
+                .. 'Ignored during Burn Mode (0 = disabled / cast at any mana level).')
         end
-        ctrl.pet_hold_enabled = ImGui.Checkbox('Enable Pet Hold', ctrl.pet_hold_enabled ~= false)
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        local minPullHpVal = ImGui.SliderInt('Min Pull HP %##minPullHpSettings', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
+        if minPullHpVal ~= ctrl.pull_min_hp_pct then
+            ctrl.pull_min_hp_pct = minPullHpVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('%s',
+                'Pauses pulling and sits out of combat to recover if current HP drops below\n'
+                .. 'this threshold. Pulling resumes once HP reaches 100%.\n'
+                .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
+        end
+
+        ImGui.Dummy(0, 4)
+        accent(GOLD, 'Med Break Recovery System:')
+        local mbVal = ImGui.Checkbox('Enable Med Break', ctrl.medbreak_enabled or false)
+        if mbVal ~= (ctrl.medbreak_enabled or false) then
+            ctrl.medbreak_enabled = mbVal
+            saveLoadout(true)
+        end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Hold pets via "#petcmd hold all" whenever out of combat\n'
-                .. 'or prior to reaching the Pet Assist At HP threshold,\n'
-                .. 'releasing them to attack once threshold is met.')
+                'Stops everything and sits to recover once any enabled\n'
+                .. 'resource below drops to its "at" threshold; resumes once ALL enabled\n'
+                .. 'resources have recovered up to their "until" threshold.')
         end
+        if ctrl.medbreak_enabled then
+            local mbHp = ImGui.Checkbox('HP##mbhp', ctrl.medbreak_hp_on or false)
+            if mbHp ~= (ctrl.medbreak_hp_on or false) then
+                ctrl.medbreak_hp_on = mbHp
+                saveLoadout(true)
+            end
+            ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+            local mbHpStart = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%')
+            if mbHpStart ~= ctrl.medbreak_hp_start then
+                ctrl.medbreak_hp_start = mbHpStart
+                saveLoadout(true)
+            end
+            ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+            local mbHpStop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%')
+            if mbHpStop ~= ctrl.medbreak_hp_stop then
+                ctrl.medbreak_hp_stop = mbHpStop
+                saveLoadout(true)
+            end
+
+            local mbMana = ImGui.Checkbox('Mana##mbmana', ctrl.medbreak_mana_on or false)
+            if mbMana ~= (ctrl.medbreak_mana_on or false) then
+                ctrl.medbreak_mana_on = mbMana
+                saveLoadout(true)
+            end
+            ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+            local mbManaStart = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%')
+            if mbManaStart ~= ctrl.medbreak_mana_start then
+                ctrl.medbreak_mana_start = mbManaStart
+                saveLoadout(true)
+            end
+            ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+            local mbManaStop = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%')
+            if mbManaStop ~= ctrl.medbreak_mana_stop then
+                ctrl.medbreak_mana_stop = mbManaStop
+                saveLoadout(true)
+            end
+
+            local mbEnd = ImGui.Checkbox('Endurance##mbend', ctrl.medbreak_end_on or false)
+            if mbEnd ~= (ctrl.medbreak_end_on or false) then
+                ctrl.medbreak_end_on = mbEnd
+                saveLoadout(true)
+            end
+            ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+            local mbEndStart = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%')
+            if mbEndStart ~= ctrl.medbreak_end_start then
+                ctrl.medbreak_end_start = mbEndStart
+                saveLoadout(true)
+            end
+            ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+            local mbEndStop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%')
+            if mbEndStop ~= ctrl.medbreak_end_stop then
+                ctrl.medbreak_end_stop = mbEndStop
+                saveLoadout(true)
+            end
+        end
+        ImGui.Dummy(0, 2)
+    end
+
+    -- 6. Pet Management & Discipline (conditionally shown if trio has pet class or active pet)
+    if trioHasPetClass() or hasActivePet() then
+        ImGui.Dummy(0, 6)
+        if ImGui.CollapsingHeader('Pet Management & Discipline', ImGuiTreeNodeFlags.DefaultOpen) then
+            ImGui.Dummy(0, 2)
+            ImGui.SetNextItemWidth(180)
+            local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
+            if petAssistVal ~= ctrl.pet_assist_at then
+                ctrl.pet_assist_at = petAssistVal
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Send pets to attack once the target drops to or below\n'
+                    .. 'this HP threshold AND the player has started hitting the mob.\n'
+                    .. '100 percent = send as soon as the first hit connects (default).')
+            end
+            ImGui.SameLine()
+            local petHoldVal = ImGui.Checkbox('Enable Pet Hold', ctrl.pet_hold_enabled ~= false)
+            if petHoldVal ~= (ctrl.pet_hold_enabled ~= false) then
+                ctrl.pet_hold_enabled = petHoldVal
+                saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Hold pets via "#petcmd hold all" whenever out of combat\n'
+                    .. 'or prior to reaching the Pet Assist At HP threshold,\n'
+                    .. 'releasing them to attack once threshold is met.')
+            end
+            ImGui.Dummy(0, 2)
+        end
+    end
+
+    ImGui.Dummy(0, 6)
+
+    -- 7. Interface, Overlays & Diagnostics
+    if ImGui.CollapsingHeader('Interface, Overlays & Diagnostics', ImGuiTreeNodeFlags.DefaultOpen) then
+        ImGui.Dummy(0, 2)
+        local mapRadVal = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius or false)
+        if mapRadVal ~= (ctrl.show_map_radius or false) then
+            ctrl.show_map_radius = mapRadVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Draws green radius circles on the in-game map window\n'
+                .. 'for Hunter, Anchor, and Pull/Camp radii.')
+        end
+        ImGui.SameLine()
+        local critVal = ImGui.Checkbox('Critical Hit Floating Text', ctrl.show_crit_floaters or false)
+        if critVal ~= (ctrl.show_crit_floaters or false) then
+            ctrl.show_crit_floaters = critVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Shows flashy floating damage numbers above your character\n'
+                .. 'when you land a critical hit, crippling blow, deadly strike,\n'
+                .. 'or other special melee/spell criticals.')
+        end
+
+        local compactVal = ImGui.Checkbox('Compact Mini-Window HUD Mode', ctrl.compact or false)
+        if compactVal ~= (ctrl.compact or false) then
+            ctrl.compact = compactVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Switches the Triune AutoCombat interface into a small, sleek HUD overlay widget.')
+        end
+        ImGui.SameLine()
+        local dbgVal = ImGui.Checkbox('Debug Diagnostic Logging', ctrl.debug_mode or false)
+        if dbgVal ~= (ctrl.debug_mode or false) then
+            ctrl.debug_mode = dbgVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Prints extra diagnostic lines (e.g. Hunter\'s full targeting\n'
+                .. 'state every few seconds) to help track down a stuck/frozen\n'
+                .. 'report. Off by default -- noisy for normal use.')
+        end
+        ImGui.Dummy(0, 2)
     end
 
     ImGui.Dummy(0, 4)
-    accent(GOLD, 'Med Break')
-    ctrl.medbreak_enabled = ImGui.Checkbox('Enable Med Break', ctrl.medbreak_enabled)
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
-            'Stops everything and sits to recover once any enabled\n'
-            .. 'resource below drops to its "at" threshold; resumes once ALL enabled\n'
-            .. 'resources have recovered up to their "until" threshold.')
-    end
-    if ctrl.medbreak_enabled then
-        ctrl.medbreak_hp_on = ImGui.Checkbox('HP##mbhp', ctrl.medbreak_hp_on)
-        ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        local mbHpStart = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%')
-        ctrl.medbreak_hp_start = mbHpStart
-        ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        local mbHpStop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%')
-        ctrl.medbreak_hp_stop = mbHpStop
-
-        ctrl.medbreak_mana_on = ImGui.Checkbox('Mana##mbmana', ctrl.medbreak_mana_on)
-        ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        local mbManaStart = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%')
-        ctrl.medbreak_mana_start = mbManaStart
-        ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        local mbManaStop        = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%')
-        ctrl.medbreak_mana_stop = mbManaStop
-
-        ctrl.medbreak_end_on    = ImGui.Checkbox('Endurance##mbend', ctrl.medbreak_end_on)
-        ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        local mbEndStart = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%')
-        ctrl.medbreak_end_start = mbEndStart
-        ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-        local mbEndStop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%')
-        ctrl.medbreak_end_stop = mbEndStop
-    end
-
     ImGui.EndTabItem()
 end
 
@@ -6323,10 +6469,10 @@ local function drawMiniGui()
         end
 
         ImGui.SameLine()
-        if ImGui.Button('Cursor##miniCursor', 55, 22) then
-            toggleTool('triune_cursor')
+        if ImGui.Button('Map##miniMap', 48, 22) then
+            toggleTool('triune_map')
         end
-        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes standalone Cursor Manager') end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Map & NPC Tracker window') end
 
         ImGui.SameLine()
         if ImGui.Button('DPS##miniDPS', 42, 22) then
@@ -6335,16 +6481,16 @@ local function drawMiniGui()
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or toggles standalone DPS Parser window') end
 
         ImGui.SameLine()
+        if ImGui.Button('Cursor##miniCursor', 55, 22) then
+            toggleTool('triune_cursor')
+        end
+        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes standalone Cursor Manager') end
+
+        ImGui.SameLine()
         if ImGui.Button('Update##miniUpdate', 58, 22) then
             toggleTool('triune_updater')
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Release Updater window') end
-
-        ImGui.SameLine()
-        if ImGui.Button('Map##miniMap', 48, 22) then
-            toggleTool('triune_map')
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Map & NPC Tracker window') end
     end
 
     ImGui.End()
