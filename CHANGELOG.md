@@ -21,8 +21,16 @@
     - Remote zone viewing safety: Watermark banner and automatic suppression of live entity rendering when viewing non-current zones.
   - **Searchable POI Side Drawer (`DrawPoiDrawer`) & Animated Highlight Pin**:
     - Slide-out POI drawer on the Map View tab with instant filter search across all map labels and points of interest.
+    - **Responsive Full-Width Layout**: Upgraded POI table with dedicated Landmark Name (Stretch), Coordinates `(Y, X)` column, and `[Focus]` action button, eliminating wasted right-side margins.
     - **1-Click "Focus"**: Automatically centers the viewport on the selected landmark and spawns an animated pulsing locator pin.
-  - **Unit Tests**: Added Suite 43 to `tests/test_pure_logic.lua` covering Atlas history stack navigation, expansion/type filtering, BFS shortest route pathfinding, and version consistency.
+  - **On-Canvas Floating Zoom & Recenter HUD**:
+    - Moved `[+]`, `[-]`, and `[⟲]` zoom/reset buttons directly onto the bottom-right corner of the map canvas in a sleek semi-transparent HUD overlay.
+    - Freed up horizontal space in the main top navigation toolbar.
+  - **High-Contrast Dark Line & Label Brightness Correction (`ctrl.boostDarkLines`)**:
+    - Standard EQ maps authored for light/parchment backgrounds often use black (`0, 0, 0`) or dark charcoal for walls, contours, and landmark labels.
+    - Implemented automatic luminance detection that boosts any low-luminance lines (`lum < 0.25`) to a crisp visible light silver-slate tone (`0.72, 0.76, 0.82`) and dark labels to clean off-white (`0.88, 0.92, 0.96`), ensuring zero black-on-black invisibility across the map canvas and POI tables.
+    - Added user toggle in the Settings & Layers tab.
+  - **Unit Tests**: Added Suite 43 to `tests/test_pure_logic.lua` covering Atlas history stack navigation, expansion/type filtering, BFS shortest route pathfinding, dark color boosting, and version consistency.
 
 - **Guild-Only Buffing Restriction (`triune_buffbot.lua`, v1.6).**
   - **Guild Member Gating (`ctrl.guildOnly`)**: Added an optional `Guild Members Only` toggle to restrict buffing services strictly to characters belonging to the same guild as the buffbot (`isSameGuild()`).

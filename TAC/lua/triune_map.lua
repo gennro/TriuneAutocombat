@@ -304,7 +304,8 @@ local ctrl = {
     zDepthFading        = true, -- Smooth alpha depth fading on stairs/ramps
     zFilterRange        = 45, -- +/- yards in Manual Mode
 
-    -- Visual Display Scaling
+    -- Visual Display Scaling & Contrast
+    boostDarkLines      = true, -- Auto-brighten black/dark map lines & labels for high contrast on dark backgrounds
     lineThickness       = 1.0,
     npcNodeRadius       = 4.5,
     playerNodeRadius    = 6.0,
@@ -1167,6 +1168,16 @@ local function parseMapFile(filePath, layerId)
                 local ng = (tonumber(g) or 180) / 255.0
                 local nb = (tonumber(b) or 180) / 255.0
 
+                -- High-contrast brightness correction:
+                -- Standard EQ maps authored for parchment use black (0,0,0) lines.
+                -- On our dark background, boost low-luminance lines to a crisp visible light silver-slate tone.
+                local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+                if lum < 0.25 then
+                    nr = 0.72
+                    ng = 0.76
+                    nb = 0.82
+                end
+
                 targetLines[#targetLines + 1] = {
                     x1 = nx1, y1 = ny1, z1 = nz1,
                     x2 = nx2, y2 = ny2, z2 = nz2,
@@ -1200,6 +1211,15 @@ local function parseMapFile(filePath, layerId)
                 local ng = (tonumber(g) or 255) / 255.0
                 local nb = (tonumber(b) or 255) / 255.0
                 local cleanText = text:gsub('_', ' ')
+
+                -- High-contrast brightness correction for labels:
+                -- Remap black/dark labels (0,0,0) to crisp readable off-white
+                local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+                if lum < 0.25 then
+                    nr = 0.88
+                    ng = 0.92
+                    nb = 0.96
+                end
 
                 targetLabels[#targetLabels + 1] = {
                     x = nx, y = ny, z = nz,
@@ -2007,46 +2027,67 @@ local function DrawMapCanvas(availW, availH)
     local canvasPos = ImGui.GetCursorScreenPosVec()
     local cX = canvasPos.x
     local cY = canvasPos.y
+    local sf = state.smartFloor
 
-    -- Invisible button to capture all mouse inputs over canvas
+    -- Widget dimensions & hitbox exclusions
+    local navW = (sf and sf.overrideOffset ~= 0) and 290 or 220
+    local navH = 30
+    local badgeX = cX + availW - navW - 10
+    local badgeY = cY + 10
+
+    local zoomBtnSize = 24
+    local zoomPanelW = zoomBtnSize + 10
+    local zoomPanelH = (zoomBtnSize * 3) + 16
+    local zoomX = cX + availW - zoomPanelW - 10
+    local zoomY = cY + availH - zoomPanelH - 10
+
+    -- Invisible button to capture mouse inputs over canvas
     ImGui.InvisibleButton('##MapCanvasHitbox', availW, availH)
-    local isHovered = ImGui.IsItemHovered()
+    local isItemHovered = ImGui.IsItemHovered()
     local isItemActive = ImGui.IsItemActive()
 
     -- Coordinate under cursor
     local mousePos = ImGui.GetMousePosVec()
+    local isMouseOverCanvas = (mousePos.x >= cX and mousePos.x <= cX + availW and mousePos.y >= cY and mousePos.y <= cY + availH)
+    local isHovered = isItemHovered or isMouseOverCanvas
+
     if isHovered then
         state.cursorWorldX, state.cursorWorldY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
     end
 
-    -- Safe IO check
+    local isOverFloorPill = (ctrl.zFilterMode ~= 3 and mousePos.x >= badgeX and mousePos.x <= badgeX + navW and mousePos.y >= badgeY and mousePos.y <= badgeY + navH)
+    local isOverZoomWidget = (mousePos.x >= zoomX and mousePos.x <= zoomX + zoomPanelW and mousePos.y >= zoomY and mousePos.y <= zoomY + zoomPanelH)
+
+    -- Safe IO check for MouseWheel & KeyCtrl
     local hasCtrl = false
     local wheelVal = 0
-    pcall(function()
-        local io = ImGui.GetIO()
-        if io then
-            if io.KeyCtrl then hasCtrl = true end
-            local okW, w = pcall(function() return io.MouseWheel end)
-            if okW and type(w) == 'number' then wheelVal = w end
+    local okIO, io = pcall(ImGui.GetIO)
+    if okIO and io then
+        pcall(function() if io.KeyCtrl then hasCtrl = true end end)
+        local okW, w = pcall(function() return io.MouseWheel end)
+        if okW and type(w) == 'number' and w ~= 0 then
+            wheelVal = w
         end
-    end)
+    end
 
-    -- Handle Drag Panning
-    if isHovered and ImGui.IsMouseClicked(1) then
-        -- Right click starts pan
-        viewport.isDragging = true
-        viewport.dragStartMouseX = mousePos.x
-        viewport.dragStartMouseY = mousePos.y
-        viewport.dragStartCenterEqX = viewport.centerEqX
-        viewport.dragStartCenterEqY = viewport.centerEqY
-    elseif isItemActive and ImGui.IsMouseDown(0) and not hasCtrl then
-        -- Left click drag also pans if not clicking entity
-        if not viewport.isDragging then
+    -- Handle Drag Panning (Ignored when clicking overlay widgets)
+    if isHovered and not isOverFloorPill and not isOverZoomWidget then
+        if ImGui.IsMouseClicked(1) then
+            -- Right click starts pan
             viewport.isDragging = true
             viewport.dragStartMouseX = mousePos.x
             viewport.dragStartMouseY = mousePos.y
             viewport.dragStartCenterEqX = viewport.centerEqX
             viewport.dragStartCenterEqY = viewport.centerEqY
+        elseif isItemActive and ImGui.IsMouseDown(0) and not hasCtrl then
+            -- Left click drag also pans if not clicking entity or overlay
+            if not viewport.isDragging then
+                viewport.isDragging = true
+                viewport.dragStartMouseX = mousePos.x
+                viewport.dragStartMouseY = mousePos.y
+                viewport.dragStartCenterEqX = viewport.centerEqX
+                viewport.dragStartCenterEqY = viewport.centerEqY
+            end
         end
     end
 
@@ -2064,10 +2105,10 @@ local function DrawMapCanvas(availW, availH)
     end
 
     -- Handle Mouse Wheel Zoom (Centering zoom on mouse cursor)
-    if isHovered and wheelVal ~= 0 then
+    if isMouseOverCanvas and wheelVal ~= 0 then
         local oldZoom = viewport.zoom
-        local newZoom = oldZoom * (1.0 + wheelVal * 0.15)
-        newZoom = math.max(viewport.minZoom, math.min(viewport.maxZoom, newZoom))
+        local factor = (wheelVal > 0) and 1.20 or 0.80
+        local newZoom = math.max(viewport.minZoom, math.min(viewport.maxZoom, oldZoom * factor))
 
         if newZoom ~= oldZoom then
             -- Keep world coordinate under mouse fixed during zoom
@@ -2136,7 +2177,7 @@ local function DrawMapCanvas(availW, availH)
     if okPZ and pZVal then playerZ = pZVal end
 
     updateSmartFloorBounds(playerX, playerY, playerZ)
-    local sf = state.smartFloor
+    sf = state.smartFloor
 
     -- Draw Map Lines (Layers 0, 1, 2, 3)
     local layerEnabled = {
@@ -2164,7 +2205,11 @@ local function DrawMapCanvas(availW, availH)
                     local maxSy = math.max(sy1, sy2)
 
                     if maxSx >= cX and minSx <= cX + availW and maxSy >= cY and minSy <= cY + availH then
-                        local col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
+                        local lineR, lineG, lineB = seg.r, seg.g, seg.b
+                        if ctrl.boostDarkLines and (lineR * 0.299 + lineG * 0.587 + lineB * 0.114) < 0.25 then
+                            lineR, lineG, lineB = 0.72, 0.76, 0.82
+                        end
+                        local col = ImGui.GetColorU32(lineR, lineG, lineB, alphaMult)
                         drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, ctrl.lineThickness)
                     end
                 end
@@ -2180,7 +2225,11 @@ local function DrawMapCanvas(availW, availH)
             if isVis and alphaMult > 0.01 then
                 local sx, sy = worldToScreen(lb.x, lb.y, cX, cY, availW, availH)
                 if sx >= cX - 50 and sx <= cX + availW + 50 and sy >= cY - 20 and sy <= cY + availH + 20 then
-                    local col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.85 * alphaMult)
+                    local lblR, lblG, lblB = lb.r, lb.g, lb.b
+                    if ctrl.boostDarkLines and (lblR * 0.299 + lblG * 0.587 + lblB * 0.114) < 0.25 then
+                        lblR, lblG, lblB = 0.88, 0.92, 0.96
+                    end
+                    local col = ImGui.GetColorU32(lblR, lblG, lblB, 0.90 * alphaMult)
                     drawList:AddText(ImVec2(sx, sy), col, lb.text)
                 end
             end
@@ -2314,18 +2363,23 @@ local function DrawMapCanvas(availW, availH)
     -- Draw Highlighted POI Marker (if active)
     if state.highlightedPoi then
         local poi = state.highlightedPoi
+        local pTime = poi.time or 0
+        local px = poi.x or 0
+        local py = poi.y or 0
+        local pText = poi.text or 'Point of Interest'
         local now = mq.gettime()
-        if (now - poi.time) < 20000 then
-            local psx, psy = worldToScreen(poi.x, poi.y, cX, cY, availW, availH)
+
+        if (now - pTime) < 20000 then
+            local psx, psy = worldToScreen(px, py, cX, cY, availW, availH)
             if psx >= cX - 50 and psx <= cX + availW + 50 and psy >= cY - 50 and psy <= cY + availH + 50 then
-                local pulse = math.sin((now - poi.time) * 0.008) * 5.0
+                local pulse = math.sin((now - pTime) * 0.008) * 5.0
                 local rRad = math.max(10.0, 16.0 + pulse)
                 drawList:AddCircle(ImVec2(psx, psy), rRad, ImGui.GetColorU32(1.0, 0.85, 0.2, 0.9), 0, 2.5)
                 drawList:AddCircleFilled(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.2, 1.0))
                 drawList:AddCircle(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(0, 0, 0, 0.9), 0, 1.5)
                 drawList:AddLine(ImVec2(psx - rRad - 4, psy), ImVec2(psx + rRad + 4, psy), ImGui.GetColorU32(1.0, 0.85, 0.2, 0.7), 1.5)
                 drawList:AddLine(ImVec2(psx, psy - rRad - 4), ImVec2(psx, psy + rRad + 4), ImGui.GetColorU32(1.0, 0.85, 0.2, 0.7), 1.5)
-                local pLabel = string.format('[POI] %s', poi.text)
+                local pLabel = string.format('[POI] %s', pText)
                 drawList:AddText(ImVec2(psx + 8, psy - 14), ImGui.GetColorU32(0, 0, 0, 0.95), pLabel)
                 drawList:AddText(ImVec2(psx + 7, psy - 15), ImGui.GetColorU32(1.0, 0.9, 0.3, 1.0), pLabel)
             end
@@ -2580,41 +2634,91 @@ local function DrawMapCanvas(availW, availH)
 
     -- On-Canvas Floor Navigation Widget (Top Right Pill)
     if ctrl.zFilterMode ~= 3 then
-        local navW = (sf.overrideOffset ~= 0) and 290 or 220
-        local navH = 28
-        local badgeX = cX + availW - navW - 10
-        local badgeY = cY + 10
-
-        -- Draw HUD pill background directly to drawList
-        drawList:AddRectFilled(ImVec2(badgeX, badgeY), ImVec2(badgeX + navW, badgeY + navH), ImGui.GetColorU32(0.04, 0.07, 0.12, 0.88), 4.0)
-        drawList:AddRect(ImVec2(badgeX, badgeY), ImVec2(badgeX + navW, badgeY + navH), ImGui.GetColorU32(0.20, 0.40, 0.60, 0.75), 4.0, 1.0)
-
-        -- Position cursor inside pill for interactive buttons
-        ImGui.SetCursorScreenPos(ImVec2(badgeX + 6, badgeY + 4))
-
-        local labelCol = (sf.overrideOffset ~= 0) and {1.0, 0.85, 0.2, 1.0} or {0.3, 0.85, 1.0, 1.0}
-        ImGui.TextColored(labelCol[1], labelCol[2], labelCol[3], labelCol[4], sf.floorLabel)
-        ImGui.SameLine()
-
-        if ImGui.SmallButton('▲##FloorUp') then
-            sf.overrideOffset = sf.overrideOffset + 25
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Peek Upper Floor (+25yd)') end
-
-        ImGui.SameLine()
-        if ImGui.SmallButton('▼##FloorDown') then
-            sf.overrideOffset = sf.overrideOffset - 25
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Peek Lower Floor (-25yd)') end
-
-        if sf.overrideOffset ~= 0 then
+        ImGui.SetCursorScreenPos(ImVec2(badgeX, badgeY))
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90)
+        ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
+        ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 3)
+        local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
+        if ImGui.BeginChild('##FloorNavOverlayChild', ImVec2(navW, navH), true, childFlags) then
+            local labelCol = (sf.overrideOffset ~= 0) and {1.0, 0.85, 0.2, 1.0} or {0.3, 0.85, 1.0, 1.0}
+            ImGui.TextColored(labelCol[1], labelCol[2], labelCol[3], labelCol[4], sf.floorLabel)
             ImGui.SameLine()
-            if ImGui.SmallButton('↺##ResetFloor') then
-                sf.overrideOffset = 0
+
+            if ImGui.SmallButton('▲##FloorUp') then
+                sf.overrideOffset = sf.overrideOffset + 25
             end
-            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset to Live Player Floor') end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Peek Upper Floor (+25yd)') end
+
+            ImGui.SameLine()
+            if ImGui.SmallButton('▼##FloorDown') then
+                sf.overrideOffset = sf.overrideOffset - 25
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Peek Lower Floor (-25yd)') end
+
+            if sf.overrideOffset ~= 0 then
+                ImGui.SameLine()
+                if ImGui.SmallButton('↺##ResetFloor') then
+                    sf.overrideOffset = 0
+                end
+                if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset to Live Player Floor') end
+            end
         end
+        ImGui.EndChild()
+        ImGui.PopStyleVar(2)
+        ImGui.PopStyleColor(2)
     end
+
+    -- On-Canvas Floating Zoom Control Widget (Bottom-Right)
+    ImGui.SetCursorScreenPos(ImVec2(zoomX, zoomY))
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90)
+    ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
+    ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
+    local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
+    if ImGui.BeginChild('##MapZoomOverlayChild', ImVec2(zoomPanelW, zoomPanelH), true, childFlags) then
+        if ImGui.Button('+##CanvasZoomIn', ImVec2(zoomBtnSize, zoomBtnSize)) then
+            viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom In (+25%)\n(Or roll Mouse Wheel Up)') end
+
+        if ImGui.Button('-##CanvasZoomOut', ImVec2(zoomBtnSize, zoomBtnSize)) then
+            viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.80)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom Out (-20%)\n(Or roll Mouse Wheel Down)') end
+
+        if ImGui.Button('⟲##CanvasZoomReset', ImVec2(zoomBtnSize, zoomBtnSize)) then
+            if state.viewMode == 'LIVE' then
+                viewport.zoom = 1.0
+                local okX, meX = pcall(function() return mq.TLO.Me.X() end)
+                local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
+                if okX and okY and meX and meY then
+                    viewport.centerEqX = meX
+                    viewport.centerEqY = meY
+                    ctrl.followPlayer = true
+                end
+            else
+                viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+                viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+                local spanX = math.abs(mapData.bounds.maxX - mapData.bounds.minX)
+                local spanY = math.abs(mapData.bounds.maxY - mapData.bounds.minY)
+                local maxSpan = math.max(spanX, spanY)
+                if maxSpan > 50 then
+                    viewport.zoom = math.max(viewport.minZoom, math.min(1.2, 700 / maxSpan))
+                end
+            end
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
+        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset View & Zoom to Default Center') end
+    end
+    ImGui.EndChild()
+    ImGui.PopStyleVar(2)
+    ImGui.PopStyleColor(2)
 
     -- Restore cursor position to bottom of canvas for clean layout flow
     ImGui.SetCursorScreenPos(ImVec2(cX, cY + availH))
@@ -2670,9 +2774,9 @@ local function DrawPoiDrawer(availW, availH)
             ImGui.EndMenuBar()
         end
 
-        -- Search Bar
-        ImGui.PushItemWidth(availW - 36)
-        local pSearch, pChanged = ImGui.InputTextWithHint('##PoiSearchFilter', 'Filter labels/POIs...', state.poiSearchText or '')
+        -- Search Bar (Full Width)
+        ImGui.PushItemWidth(availW - 44)
+        local pSearch, pChanged = ImGui.InputTextWithHint('##PoiSearchFilter', 'Filter labels / landmarks...', state.poiSearchText or '')
         if pChanged then
             state.poiSearchText = pSearch
         end
@@ -2705,23 +2809,31 @@ local function DrawPoiDrawer(availW, availH)
                 ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'No points of interest match.')
             else
                 local tableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0)
-                if ImGui.BeginTable('##PoiDrawerTable', 2, tableFlags) then
-                    ImGui.TableSetupColumn('Label / Location', ImGuiTableColumnFlags.WidthStretch or 0)
+                if ImGui.BeginTable('##PoiDrawerTable', 3, tableFlags) then
+                    ImGui.TableSetupColumn('Landmark / Label', ImGuiTableColumnFlags.WidthStretch or 0)
+                    ImGui.TableSetupColumn('Location (Y, X)', ImGuiTableColumnFlags.WidthFixed or 0, 125)
                     ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, 56)
                     ImGui.TableHeadersRow()
 
                     for idx, poi in ipairs(matching) do
                         ImGui.TableNextRow()
                         ImGui.TableNextColumn()
+                        local pr, pg, pb = poi.r or 0.88, poi.g or 0.92, poi.b or 0.96
+                        if (pr * 0.299 + pg * 0.587 + pb * 0.114) < 0.25 then
+                            pr, pg, pb = 0.88, 0.92, 0.96
+                        end
                         local isHighlighted = (state.highlightedPoi and state.highlightedPoi.text == poi.text and state.highlightedPoi.x == poi.x and state.highlightedPoi.y == poi.y)
                         if isHighlighted then
                             ImGui.TextColored(1.0, 0.85, 0.2, 1.0, string.format('★ %s', poi.text))
                         else
-                            ImGui.TextColored(poi.r, poi.g, poi.b, 1.0, poi.text)
+                            ImGui.TextColored(pr, pg, pb, 1.0, poi.text)
                         end
                         if ImGui.IsItemHovered() then
-                            ImGui.SetTooltip('Y: %.1f, X: %.1f, Z: %.1f\nClick "Focus" to center map and pulse locator pin.', poi.y, poi.x, poi.z)
+                            ImGui.SetTooltip('Y: %.1f, X: %.1f, Z: %.1f\nClick "Focus" to center map and pulse locator pin.', poi.y, poi.x, poi.z or 0)
                         end
+
+                        ImGui.TableNextColumn()
+                        ImGui.TextColored(0.65, 0.72, 0.82, 0.85, string.format('%.1f, %.1f', poi.y, poi.x))
 
                         ImGui.TableNextColumn()
                         if ImGui.SmallButton(string.format('Focus##PoiF_%d', idx)) then
@@ -3048,12 +3160,18 @@ local function DrawAtlasTab()
                 ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('Loaded: %d map labels & landmarks in %s', #labels, z.name))
 
                 -- POI Search
-                ImGui.PushItemWidth(math.min(260, rightW - 40))
+                ImGui.PushItemWidth(math.max(280, math.min(450, rightW - 50)))
                 local pSearch, pChanged = ImGui.InputTextWithHint('##AtlasPoiSearch', 'Filter landmarks...', state.poiSearchText or '')
                 if pChanged then
                     state.poiSearchText = pSearch
                 end
                 ImGui.PopItemWidth()
+                if (state.poiSearchText or '') ~= '' then
+                    ImGui.SameLine()
+                    if ImGui.SmallButton('X##ClearAtlasPoiSearch') then
+                        state.poiSearchText = ''
+                    end
+                end
 
                 local q = (state.poiSearchText or ''):lower():match('^%s*(.-)%s*$')
                 local matching = {}
@@ -3076,7 +3194,11 @@ local function DrawAtlasTab()
                             for pIdx, poi in ipairs(matching) do
                                 ImGui.TableNextRow()
                                 ImGui.TableNextColumn()
-                                ImGui.TextColored(poi.r, poi.g, poi.b, 1.0, poi.text)
+                                local pr, pg, pb = poi.r or 0.88, poi.g or 0.92, poi.b or 0.96
+                                if (pr * 0.299 + pg * 0.587 + pb * 0.114) < 0.25 then
+                                    pr, pg, pb = 0.88, 0.92, 0.96
+                                end
+                                ImGui.TextColored(pr, pg, pb, 1.0, poi.text)
 
                                 ImGui.TableNextColumn()
                                 ImGui.TextColored(0.7, 0.7, 0.7, 0.8, string.format('%.1f, %.1f, %.1f', poi.y, poi.x, poi.z))
@@ -3515,6 +3637,10 @@ local function DrawSettingsTab()
     if cnr then ctrl.npcNodeRadius = nr; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.PopItemWidth()
 
+    local bd, cbd = ImGui.Checkbox('Auto-Brighten Black / Dark Map Lines (High Contrast)##BoostDarkLinesCheck', ctrl.boostDarkLines)
+    if cbd then ctrl.boostDarkLines = bd; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Automatically converts black (0,0,0) and dark map lines/labels to crisp visible silver/white against dark backgrounds') end
+
     ImGui.Spacing()
     ImGui.Separator()
     if ImGui.Button('Save Settings & Zoom Now##ManualSaveSettingsBtn') then
@@ -3652,13 +3778,20 @@ local function DrawTriuneMapUI()
         if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle side drawer for searching Points of Interest & Map Labels') end
 
         ImGui.SameLine()
-        if ImGui.Button('Zoom -##ZoomOutBtn') then
-            viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.8)
+        if ImGui.Button('Zoom -##TbZoomOut') then
+            viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.80)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
         end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom Out (-20%)\n(Or roll Mouse Wheel Down over canvas)') end
+
         ImGui.SameLine()
-        if ImGui.Button('Zoom +##ZoomInBtn') then
+        if ImGui.Button('Zoom +##TbZoomIn') then
             viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
         end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom In (+25%)\n(Or roll Mouse Wheel Up over canvas)') end
 
         ImGui.Separator()
 
@@ -3670,7 +3803,7 @@ local function DrawTriuneMapUI()
                 local availW, availH = ImGui.GetContentRegionAvail()
                 local canvasHeight = math.max(80, availH - 26)
                 if state.showPoiDrawer then
-                    local drawerW = math.min(320, availW * 0.35)
+                    local drawerW = math.max(340, math.min(520, availW * 0.38))
                     local canvasW = availW - drawerW - 8
                     DrawMapCanvas(canvasW, canvasHeight)
                     ImGui.SameLine()

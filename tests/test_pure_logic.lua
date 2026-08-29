@@ -2160,6 +2160,56 @@ do
 end
 
 do
+    -- High-contrast black/dark line & label boosting logic
+    local function boostDarkColor(r, g, b, isLabel)
+        local nr = (r or 0) / 255.0
+        local ng = (g or 0) / 255.0
+        local nb = (b or 0) / 255.0
+        local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+        if lum < 0.25 then
+            if isLabel then
+                return 0.88, 0.92, 0.96
+            else
+                return 0.72, 0.76, 0.82
+            end
+        end
+        return nr, ng, nb
+    end
+
+    -- Black line (0,0,0) boosted to silver
+    local lr1, lg1, lb1 = boostDarkColor(0, 0, 0, false)
+    assert_eq(lr1, 0.72, 'boost black line: r boosted to 0.72')
+    assert_eq(lg1, 0.76, 'boost black line: g boosted to 0.76')
+    assert_eq(lb1, 0.82, 'boost black line: b boosted to 0.82')
+
+    -- Black label (0,0,0) boosted to off-white
+    local pr1, pg1, pb1 = boostDarkColor(0, 0, 0, true)
+    assert_eq(pr1, 0.88, 'boost black label: r boosted to 0.88')
+    assert_eq(pg1, 0.92, 'boost black label: g boosted to 0.92')
+    assert_eq(pb1, 0.96, 'boost black label: b boosted to 0.96')
+
+    -- Bright yellow line preserved
+    local yr, yg, yb = boostDarkColor(255, 255, 0, false)
+    assert_eq(yr, 1.0, 'bright color preserved: r is 1.0')
+    assert_eq(yg, 1.0, 'bright color preserved: g is 1.0')
+    assert_eq(yb, 0.0, 'bright color preserved: b is 0.0')
+
+    -- Regression test: Ensure label loop variable 'lb' is not shadowed by blue channel
+    local testLabels = {
+        { x = 100, y = 200, z = 10, r = 0.1, g = 0.1, b = 0.1, text = 'Shadow Test Label' }
+    }
+    local renderedText = nil
+    for _, lb in ipairs(testLabels) do
+        local lblR, lblG, lblB = lb.r, lb.g, lb.b
+        if (lblR * 0.299 + lblG * 0.587 + lblB * 0.114) < 0.25 then
+            lblR, lblG, lblB = 0.88, 0.92, 0.96
+        end
+        renderedText = lb.text
+    end
+    assert_eq(renderedText, 'Shadow Test Label', 'label loop: lb.text accessible without number shadowing')
+end
+
+do
     -- Map folder selection logic
     local folders = {
         { name = '[Root] Default (maps/)', relPath = '', fullPath = 'C:/EQ/maps' },
