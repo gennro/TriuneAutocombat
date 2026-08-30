@@ -83,6 +83,7 @@ local ARC               = { 0.30, 0.70, 1.0, 1 }
 local MUTED             = { 0.49, 0.56, 0.65, 1 }
 local GOOD              = { 0.37, 0.88, 0.64, 1 }
 local WARN              = { 1.0, 0.72, 0.30, 1 }
+local ERR               = { 0.95, 0.35, 0.35, 1 }
 
 -- ============================================================================
 -- Data loading
@@ -2860,6 +2861,8 @@ local function deepCopyTable(orig)
     return copy
 end
 
+local saveLoadout
+
 local function savePreset(name)
     if not name or name == '' then return end
     loadout.presets = loadout.presets or {}
@@ -3050,7 +3053,7 @@ local function syncCurrentZoneWaypoints()
     }
 end
 
-local function saveLoadout(silent)
+saveLoadout = function(silent)
     if myName then ALLDATA[myName] = collectEntry() end
     ALLDATA.__ignore = runtime.ignoreList
     ALLDATA.__pullList = runtime.pullList
@@ -7606,7 +7609,6 @@ function UI.getTrackedCooldownItems()
     local now = os.clock()
     local myEnd = 0
     local myMana = 0
-    local inCombat = hasActualNPCXtarget()
     local targetId = 0
     local isNamedTarget = false
     local activeXtarCount = 0
@@ -7616,9 +7618,14 @@ function UI.getTrackedCooldownItems()
         myMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
         targetId = mq.TLO.Target.ID() or 0
         if targetId > 0 then
-            isNamedTarget = isNamedMob(targetId)
+            local sp = mq.TLO.Spawn(targetId)
+            if sp and sp() and sp.Named and sp.Named() then
+                isNamedTarget = true
+            end
         end
-        activeXtarCount = countValidXTargets and countValidXTargets() or 0
+        if runtime.countNPCXtarget then
+            activeXtarCount = runtime.countNPCXtarget() or 0
+        end
     end)
 
     local activeDiscName = nil
@@ -7723,7 +7730,7 @@ function UI.getTrackedCooldownItems()
                     end
                 end
 
-                local condText = ''
+                local condText
                 if entry.autoskill then
                     condText = 'Auto on Cooldown'
                 else
@@ -7745,6 +7752,7 @@ function UI.getTrackedCooldownItems()
                     reason = reason,
                     priority = entry.priority or 50,
                     burn_only = entry.burn_only or false,
+                    conditionText = condText,
                     use = function() runtime.fireSkill(nm, entry) end,
                 })
             end
