@@ -350,6 +350,7 @@ local navState = {
     navActive           = false,
     cache               = {}, -- [id] = { hasPath = bool, length = num, checkedAt = time }
     checkQueue          = {}, -- array of IDs needing path checks
+    queueHead           = 1,  -- O(1) dequeue pointer
     queueSet            = {}, -- lookup set to prevent queue duplicates
     batchSize           = 4,
     lastQueueProcessTime = 0,
@@ -919,44 +920,7 @@ local function scanMapFolders()
         end)
     end
 
-    -- Method 2: Fast Windows Shell Directory Query (dir /a:d /b)
-    if #folders == 1 and io.popen then
-        pcall(function()
-            local winPath = baseDir:gsub('/', '\\')
-            local pipe = io.popen('cmd /c dir /a:d /b "' .. winPath .. '" 2>nul')
-            if pipe then
-                for line in pipe:lines() do
-                    local trimmed = line:match('^%s*(.-)%s*$')
-                    if trimmed and trimmed ~= '' and trimmed ~= '.' and trimmed ~= '..' and not seen[trimmed] then
-                        seen[trimmed] = true
-                        folders[#folders + 1] = { name = trimmed, relPath = trimmed, fullPath = baseDir .. '/' .. trimmed }
-                        names[#names + 1] = trimmed
-                    end
-                end
-                pipe:close()
-            end
-        end)
-    end
-
-    -- Method 3: POSIX / Linux / Wine fallback
-    if #folders == 1 and io.popen then
-        pcall(function()
-            local pipe = io.popen('find "' .. baseDir .. '" -mindepth 1 -maxdepth 1 -type d -exec basename {} \\; 2>/dev/null')
-            if pipe then
-                for line in pipe:lines() do
-                    local trimmed = line:match('^%s*(.-)%s*$')
-                    if trimmed and trimmed ~= '' and trimmed ~= '.' and trimmed ~= '..' and not seen[trimmed] then
-                        seen[trimmed] = true
-                        folders[#folders + 1] = { name = trimmed, relPath = trimmed, fullPath = baseDir .. '/' .. trimmed }
-                        names[#names + 1] = trimmed
-                    end
-                end
-                pipe:close()
-            end
-        end)
-    end
-
-    -- Method 4: Comprehensive Community Map Pack Probe Dictionary (Only if directory discovery found nothing)
+    -- Method 2: Comprehensive Community Map Pack Probe Dictionary (Instant non-blocking file probing)
     if #folders == 1 then
         local knownPacks = {
             'Brewall', 'brewall', 'Brewalls', 'brewalls', 'BrewallMaps', 'brewallmaps', 'Brewall_RoF2', 'Brewall_Live',
@@ -1004,7 +968,7 @@ local function scanMapFiles()
 
     local discoveredShorts = {}
 
-    -- Method 1: lfs
+    -- Method 1: lfs (if available)
     local okLfs, lfs = pcall(require, 'lfs')
     if okLfs and lfs and lfs.dir then
         pcall(function()
@@ -1017,40 +981,7 @@ local function scanMapFiles()
         end)
     end
 
-    -- Method 2: Windows cmd dir /b *.txt
-    if io.popen and not next(discoveredShorts) then
-        pcall(function()
-            local winPath = baseDir:gsub('/', '\\')
-            local pipe = io.popen('cmd /c dir /b "' .. winPath .. '\\*.txt" 2>nul')
-            if pipe then
-                for line in pipe:lines() do
-                    local zShort = line:match('^([%w_]+)%.txt$')
-                    if zShort and not zShort:match('_%d$') and not zShort:match('_labels$') then
-                        discoveredShorts[zShort:lower()] = true
-                    end
-                end
-                pipe:close()
-            end
-        end)
-    end
-
-    -- Method 3: POSIX find
-    if io.popen and not next(discoveredShorts) then
-        pcall(function()
-            local pipe = io.popen('find "' .. baseDir .. '" -maxdepth 1 -name "*.txt" -exec basename {} \\; 2>/dev/null')
-            if pipe then
-                for line in pipe:lines() do
-                    local zShort = line:match('^([%w_]+)%.txt$')
-                    if zShort and not zShort:match('_%d$') and not zShort:match('_labels$') then
-                        discoveredShorts[zShort:lower()] = true
-                    end
-                end
-                pipe:close()
-            end
-        end)
-    end
-
-    -- Probe check for registered zones ONLY if directory listing was empty
+    -- Method 2: Instant direct zone probe for registered zones (<1ms total)
     if not next(discoveredShorts) then
         for _, z in ipairs(state.atlasAllZones) do
             local f = io.open(baseDir .. '/' .. z.short .. '.txt', 'r')
@@ -1168,90 +1099,75 @@ local function parseMapFile(filePath, layerId)
     local bMinY, bMaxY = mapData.bounds.minY, mapData.bounds.maxY
     local bMinZ, bMaxZ = mapData.bounds.minZ, mapData.bounds.maxZ
 
-    -- Fast line iterator using gmatch
-    for line in content:gmatch('[^\r\n]+') do
-        local b1 = line:byte(1)
-        if b1 == 76 or b1 == 108 then
-            -- Line format: L x1, y1, z1, x2, y2, z2, r, g, b
-            local x1, y1, z1, x2, y2, z2, r, g, b = line:match('^[Ll]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+)')
-            if not x1 then
-                x1, y1, z1, x2, y2, z2, r, g, b = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)')
-            end
-            if x1 and y1 and z1 and x2 and y2 and z2 then
-                local nx1 = -tonumber(x1)
-                local ny1 = -tonumber(y1)
-                local nz1 = tonumber(z1)
-                local nx2 = -tonumber(x2)
-                local ny2 = -tonumber(y2)
-                local nz2 = tonumber(z2)
-                local nr = (tonumber(r) or 180) / 255.0
-                local ng = (tonumber(g) or 180) / 255.0
-                local nb = (tonumber(b) or 180) / 255.0
+    -- Fast single-pass line parser (supports space and comma delimited coordinates)
+    for x1, y1, z1, x2, y2, z2, r, g, b in content:gmatch('[Ll]%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)') do
+        local nx1 = -tonumber(x1)
+        local ny1 = -tonumber(y1)
+        local nz1 = tonumber(z1)
+        local nx2 = -tonumber(x2)
+        local ny2 = -tonumber(y2)
+        local nz2 = tonumber(z2)
+        local nr = (tonumber(r) or 180) * 0.003921568627
+        local ng = (tonumber(g) or 180) * 0.003921568627
+        local nb = (tonumber(b) or 180) * 0.003921568627
 
-                -- High-contrast brightness correction:
-                local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
-                if lum < 0.25 then
-                    nr = 0.72
-                    ng = 0.76
-                    nb = 0.82
-                end
-
-                local segMinX = nx1 < nx2 and nx1 or nx2
-                local segMaxX = nx1 > nx2 and nx1 or nx2
-                local segMinY = ny1 < ny2 and ny1 or ny2
-                local segMaxY = ny1 > ny2 and ny1 or ny2
-
-                targetLines[#targetLines + 1] = {
-                    x1 = nx1, y1 = ny1, z1 = nz1,
-                    x2 = nx2, y2 = ny2, z2 = nz2,
-                    r = nr, g = ng, b = nb,
-                    avgZ = (nz1 + nz2) * 0.5,
-                    minX = segMinX, maxX = segMaxX,
-                    minY = segMinY, maxY = segMaxY,
-                }
-                linesAdded = linesAdded + 1
-
-                if segMinX < bMinX then bMinX = segMinX end
-                if segMaxX > bMaxX then bMaxX = segMaxX end
-                if segMinY < bMinY then bMinY = segMinY end
-                if segMaxY > bMaxY then bMaxY = segMaxY end
-
-                local segMinZ = nz1 < nz2 and nz1 or nz2
-                local segMaxZ = nz1 > nz2 and nz1 or nz2
-                if segMinZ < bMinZ then bMinZ = segMinZ end
-                if segMaxZ > bMaxZ then bMaxZ = segMaxZ end
-            end
-        elseif b1 == 80 or b1 == 112 then
-            -- Label format: P x, y, z, r, g, b, size, label_text
-            local x, y, z, r, g, b, size, text = line:match('^[Pp]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+(.+)')
-            if not x then
-                x, y, z, r, g, b, size, text = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(.+)')
-            end
-            if x and y and z and text then
-                local nx = -tonumber(x)
-                local ny = -tonumber(y)
-                local nz = tonumber(z)
-                local nr = (tonumber(r) or 255) / 255.0
-                local ng = (tonumber(g) or 255) / 255.0
-                local nb = (tonumber(b) or 255) / 255.0
-                local cleanText = text:gsub('_', ' ')
-
-                local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
-                if lum < 0.25 then
-                    nr = 0.88
-                    ng = 0.92
-                    nb = 0.96
-                end
-
-                targetLabels[#targetLabels + 1] = {
-                    x = nx, y = ny, z = nz,
-                    r = nr, g = ng, b = nb,
-                    size = tonumber(size) or 1,
-                    text = cleanText,
-                }
-                labelsAdded = labelsAdded + 1
-            end
+        local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+        if lum < 0.25 then
+            nr = 0.72
+            ng = 0.76
+            nb = 0.82
         end
+
+        local segMinX = nx1 < nx2 and nx1 or nx2
+        local segMaxX = nx1 > nx2 and nx1 or nx2
+        local segMinY = ny1 < ny2 and ny1 or ny2
+        local segMaxY = ny1 > ny2 and ny1 or ny2
+
+        if segMinX < bMinX then bMinX = segMinX end
+        if segMaxX > bMaxX then bMaxX = segMaxX end
+        if segMinY < bMinY then bMinY = segMinY end
+        if segMaxY > bMaxY then bMaxY = segMaxY end
+
+        local segMinZ = nz1 < nz2 and nz1 or nz2
+        local segMaxZ = nz1 > nz2 and nz1 or nz2
+        if segMinZ < bMinZ then bMinZ = segMinZ end
+        if segMaxZ > bMaxZ then bMaxZ = segMaxZ end
+
+        linesAdded = linesAdded + 1
+        targetLines[#targetLines + 1] = {
+            x1 = nx1, y1 = ny1, z1 = nz1,
+            x2 = nx2, y2 = ny2, z2 = nz2,
+            r = nr, g = ng, b = nb,
+            avgZ = (nz1 + nz2) * 0.5,
+            minX = segMinX, maxX = segMaxX,
+            minY = segMinY, maxY = segMaxY,
+        }
+    end
+
+    -- Fast single-pass label parser
+    for x, y, z, r, g, b, size, text in content:gmatch('[Pp]%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+([^\r\n]+)') do
+        local nx = -tonumber(x)
+        local ny = -tonumber(y)
+        local nz = tonumber(z)
+        local nr = (tonumber(r) or 255) * 0.003921568627
+        local ng = (tonumber(g) or 255) * 0.003921568627
+        local nb = (tonumber(b) or 255) * 0.003921568627
+
+        local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+        if lum < 0.25 then
+            nr = 0.88
+            ng = 0.92
+            nb = 0.96
+        end
+
+        local cleanText = text:gsub('_', ' ')
+        labelsAdded = labelsAdded + 1
+        targetLabels[#targetLabels + 1] = {
+            x = nx, y = ny, z = nz,
+            r = nr, g = ng, b = nb,
+            size = tonumber(size) or 1,
+            text = cleanText,
+        }
     end
 
     mapData.bounds.minX, mapData.bounds.maxX = bMinX, bMaxX
@@ -1863,8 +1779,7 @@ local function scanZoneSpawns()
 
     spawns.totalCount = count
     local nowTime = mq.gettime()
-    local isInitial = (#spawns.allNPCs == 0)
-    local maxFetch = isInitial and math.min(count, 120) or math.min(count, 350)
+    local maxFetch = math.min(count, 120)
     local newNpcList = {}
 
     local myX, myY, myZ = 0, 0, 0
@@ -2026,17 +1941,19 @@ end
 -- ============================================================================
 local function processNavBatch()
     if not navState.meshLoaded then return end
-    if #navState.checkQueue == 0 then return end
+    if navState.queueHead > #navState.checkQueue then return end
 
     local now = mq.gettime()
     local count = 0
     local maxBatch = navState.batchSize
 
-    while #navState.checkQueue > 0 and count < maxBatch do
-        local mobId = table.remove(navState.checkQueue, 1)
-        navState.queueSet[mobId] = nil
+    while navState.queueHead <= #navState.checkQueue and count < maxBatch do
+        local mobId = navState.checkQueue[navState.queueHead]
+        navState.checkQueue[navState.queueHead] = nil
+        navState.queueHead = navState.queueHead + 1
 
         if mobId and mobId > 0 then
+            navState.queueSet[mobId] = nil
             local okPath, hasPath = pcall(function()
                 return mq.TLO.Navigation.PathExists(string.format('id %d', mobId))()
             end)
@@ -2051,6 +1968,11 @@ local function processNavBatch()
             }
             count = count + 1
         end
+    end
+
+    if navState.queueHead > #navState.checkQueue then
+        navState.checkQueue = {}
+        navState.queueHead = 1
     end
 end
 
