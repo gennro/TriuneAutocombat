@@ -1802,13 +1802,16 @@ local function updateSmartFloorBounds(pX, pY, pZ)
     end
 end
 
-local function getZAlphaMultiplier(avgZ, minZ, maxZ)
-    if ctrl.zFilterMode == 3 then
+local function getZAlphaMultiplier(avgZ, minZ, maxZ, zFilterMode, zDepthFading)
+    local filterMode = (zFilterMode ~= nil) and zFilterMode or (ctrl and ctrl.zFilterMode)
+    if filterMode == 3 then
         return 1.0, true
     end
 
+    local depthFading = (zDepthFading ~= nil) and zDepthFading or (ctrl and ctrl.zDepthFading)
+
     if avgZ < minZ or avgZ > maxZ then
-        if ctrl.zDepthFading then
+        if depthFading then
             local d = (avgZ < minZ) and (minZ - avgZ) or (avgZ - maxZ)
             if d <= 10 then
                 local alpha = 0.22 * (1.0 - (d / 10))
@@ -1818,7 +1821,7 @@ local function getZAlphaMultiplier(avgZ, minZ, maxZ)
         return 0.0, false
     end
 
-    if not ctrl.zDepthFading then
+    if not depthFading then
         return 1.0, true
     end
 

@@ -1489,6 +1489,103 @@ local function findMaPcId(maName)
     return id
 end
 
+local function isDetrimentalSpell(name, targetId, kind, targetToken)
+    if not name or name == '' then return false end
+
+    -- 1. Check kind tag if explicitly provided ('heal', 'buff', 'pet', 'cure', 'util' -> beneficial; 'dd', 'dot', 'debuff', 'nuke' -> detrimental)
+    if kind then
+        local k = tostring(kind):lower()
+        if k == 'dd' or k == 'dot' or k == 'debuff' or k == 'nuke' then return true end
+        if k == 'heal' or k == 'buff' or k == 'pet' or k == 'cure' or k == 'util' then return false end
+    end
+
+    -- 2. Check targetToken if provided ('E:' -> detrimental enemy; 'S:', 'P:', 'G:', 'A:', 'C:' -> beneficial friendly)
+    if targetToken then
+        local tok = tostring(targetToken)
+        if tok:sub(1, 2) == 'E:' then return true end
+        if tok:sub(1, 2) == 'S:' or tok:sub(1, 2) == 'P:' or tok:sub(1, 2) == 'G:' or tok:sub(1, 2) == 'A:' or tok:sub(1, 2) == 'C:' then
+            return false
+        end
+    end
+
+    -- 3. Live MacroQuest TLO queries (authoritative in-game)
+    local isBene = nil
+    pcall(function()
+        local sp = mq.TLO.Spell(name)
+        if sp and sp() then isBene = sp.Beneficial() end
+    end)
+    if isBene == true then return false end
+    if isBene == false then return true end
+
+    pcall(function()
+        local aa = mq.TLO.Me.AltAbility(name)
+        if aa and aa() then
+            local sp = aa.Spell
+            if sp and sp() then isBene = sp.Beneficial() end
+        end
+    end)
+    if isBene == true then return false end
+    if isBene == false then return true end
+
+    pcall(function()
+        local ca = mq.TLO.Me.CombatAbility(name)
+        if ca and ca() then
+            local sp = ca.Spell
+            if sp and sp() then isBene = sp.Beneficial() end
+        end
+    end)
+    if isBene == true then return false end
+    if isBene == false then return true end
+
+    -- 4. Check database (DATA.spells) if loaded
+    if DATA and DATA.spells then
+        for _, list in pairs(DATA.spells) do
+            if type(list) == 'table' then
+                for _, it in ipairs(list) do
+                    if it[1] == name then
+                        if it[3] == 1 then return false end
+                        if it[3] == 0 then return true end
+                        local sKind = it[4]
+                        if sKind == 'heal' or sKind == 'buff' or sKind == 'pet' or sKind == 'cure' or sKind == 'util' then return false end
+                        if sKind == 'dd' or sKind == 'dot' or sKind == 'debuff' then return true end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 5. Fallback name heuristics (for unit tests, custom items, or offline sandbox)
+    local lowerName = name:lower()
+    if lowerName:find('heal') or lowerName:find('buff') or lowerName:find('skin') or lowerName:find('spirit')
+        or lowerName:find('aegis') or lowerName:find('breeze') or lowerName:find('clarity') or lowerName:find('haste')
+        or lowerName:find('focus') or lowerName:find('valor') or lowerName:find('canni') or lowerName:find('gate')
+        or lowerName:find('cure') or lowerName:find('summon') or lowerName:find('pet') or lowerName:find('resurrect')
+        or lowerName:find('revive') or lowerName:find('regeneration') or lowerName:find('chloroplast')
+        or lowerName:find('alacrity') or lowerName:find('symbol') or lowerName:find('armor') or lowerName:find('shield')
+        or lowerName:find('rune') or lowerName:find('pact') or lowerName:find('infusion') then
+        return false
+    end
+
+    if lowerName:find('kick') or lowerName:find('bash') or lowerName:find('backstab') or lowerName:find('frenzy')
+        or lowerName:find('slam') or lowerName:find('strike') or lowerName:find('taunt') or lowerName:find('disarm')
+        or lowerName:find('dragon punch') or lowerName:find('eagle strike') or lowerName:find('round kick') or lowerName:find('tiger claw')
+        or lowerName:find('nuke') or lowerName:find('dot') or lowerName:find('debuff') or lowerName:find('slow')
+        or lowerName:find('tash') or lowerName:find('malo') or lowerName:find('snare') or lowerName:find('root')
+        or lowerName:find('mez') or lowerName:find('comet') or lowerName:find('bolt') or lowerName:find('blast')
+        or lowerName:find('shock') or lowerName:find('poison') or lowerName:find('disease') or lowerName:find('lifetap')
+        or lowerName:find('drain') or lowerName:find('scourge') or lowerName:find('torment') or lowerName:find('burn')
+        or lowerName:find('fire') or lowerName:find('frost') or lowerName:find('ice') or lowerName:find('chill')
+        or lowerName:find('flame') or lowerName:find('ignite') or lowerName:find('sear') or lowerName:find('doom')
+        or lowerName:find('enstill') or lowerName:find('immobil') or lowerName:find('paralyz') or lowerName:find('blind')
+        or lowerName:find('fear') or lowerName:find('charm') or lowerName:find('stun') or lowerName:find('drowsy')
+        or lowerName:find('curse') or lowerName:find('rot') or lowerName:find('decay') or lowerName:find('pox')
+        or lowerName:find('fever') or lowerName:find('plague') or lowerName:find('rend') or lowerName:find('bite') then
+        return true
+    end
+
+    return false
+end
+
 local function createCastTracker()
     local failureCount     = {} -- [spellName] = { count = N, lastFail = timestamp }
     local lockouts         = {} -- [spellName] = untilTimestamp (global lockouts)
@@ -1520,8 +1617,15 @@ local function createCastTracker()
         if spellName then failureCount[spellName] = nil end
     end
 
-    local function isLockedOut(spellName, targetId)
+    local function isLockedOut(spellName, targetId, kind)
         if not spellName or spellName == '' then return false end
+
+        -- Strictly enforce: Beneficial spells are NEVER locked out under any circumstance.
+        -- Only casted detrimental spells can ever be locked out.
+        if not isDetrimentalSpell(spellName, targetId, kind) then
+            return false
+        end
+
         local tid = tonumber(targetId)
 
         -- 1. Target Immunity check (permanent for this spawn ID)
@@ -1529,7 +1633,7 @@ local function createCastTracker()
             return true, 'Immune', 9999
         end
 
-        -- 2. Target-specific lockout check (e.g. non-stacking buff backoff, resisted debuff backoff)
+        -- 2. Target-specific lockout check (e.g. resisted debuff backoff, stacking conflict backoff on detrimental spells)
         if tid and tid > 0 and targetLockouts[tid] then
             local untilTime = tonumber(targetLockouts[tid][spellName])
             if untilTime then
@@ -1581,6 +1685,13 @@ local function createCastTracker()
             lSec = tonumber(lockoutSec) or 30
         end
 
+        -- Beneficial spells (heals, buffs, pets, cures) are NEVER locked out under any condition.
+        -- Only casted detrimental spells (offensive spells/debuffs) incur failures, immunities, or lockouts.
+        if not isDetrimentalSpell(spellName, tid, k) then
+            resetFailCount(spellName)
+            return
+        end
+
         local rLow = tostring(r):lower()
 
         if rLow == 'target immune' or rLow == 'immune' then
@@ -1602,13 +1713,13 @@ local function createCastTracker()
             end
 
         elseif rLow == 'did not take hold' then
-            -- Non-stacking buff / debuff conflict: back off on this target for 120s (or custom lockoutSec), do NOT block other targets.
+            -- Non-stacking debuff conflict on enemy mob: back off on this target for 120s (or custom lockoutSec), do NOT block other targets.
             local backoff = math.max(lSec, 120)
             if tid and tid > 0 then
                 targetLockouts[tid] = targetLockouts[tid] or {}
                 targetLockouts[tid][spellName] = os.clock() + backoff
                 resetFailCount(spellName)
-                print(string.format('\ay[Triune]\ax Spell "%s" did not take hold on target #%d -- backing off on this target (%ds).', spellName, tid, backoff))
+                print(string.format('\ay[Triune]\ax Detrimental spell "%s" did not take hold on target #%d -- backing off on this target (%ds).', spellName, tid, backoff))
             else
                 lockouts[spellName] = os.clock() + lSec
                 resetFailCount(spellName)
@@ -1638,14 +1749,14 @@ local function createCastTracker()
 
         elseif rLow == 'fizzled' or rLow == 'interrupted' then
             -- Transient combat mechanics: retry on gem refresh.
-            -- Only back off if severely repeating (e.g. 4+ consecutive failures within 15s)
+            -- Only back off if severely repeating on detrimental spell (e.g. 4+ consecutive failures within 15s)
             local threshold = math.max(mRetries * 2, 4)
             local fails = incFailCount(spellName)
             if fails >= threshold then
                 local shortLock = math.min(lSec, 8)
                 lockouts[spellName] = os.clock() + shortLock
                 resetFailCount(spellName)
-                print(string.format('\ay[Triune]\ax "%s" %s %d times consecutively -- brief pause applied (%ds).', spellName, rLow, fails, shortLock))
+                print(string.format('\ay[Triune]\ax Detrimental spell "%s" %s %d times consecutively -- brief pause applied (%ds).', spellName, rLow, fails, shortLock))
             end
 
         elseif rLow == 'cannot see target' or rLow == 'out of range' or rLow == 'dead target'
@@ -1654,7 +1765,7 @@ local function createCastTracker()
             return
 
         else
-            -- Generic failure fallback
+            -- Generic failure fallback (detrimental spells only)
             local fails = incFailCount(spellName)
             if fails >= mRetries then
                 lockouts[spellName] = os.clock() + lSec
@@ -1698,12 +1809,18 @@ local function createCastTracker()
         end
 
         if castingName and castingName ~= '' then
-            tracker.failed = true
             local tid = eventTargetId or tracker.activeTargetId
             if not tid or tid <= 0 then
                 pcall(function() tid = mq.TLO.Target.ID() end)
             end
-            recordFailure(castingName, tid, reason, maxRetries, lockoutSec, tracker.activeKind)
+
+            -- Only casted detrimental spells incur failure tracking or lockouts
+            if isDetrimentalSpell(castingName, tid, tracker.activeKind) then
+                tracker.failed = true
+                recordFailure(castingName, tid, reason, maxRetries, lockoutSec, tracker.activeKind)
+            else
+                tracker.failed = false
+            end
         end
     end
 
@@ -7306,56 +7423,8 @@ end
 
 -- Returns true if an action (spell, AA, disc, skill) is detrimental (offensive).
 function runtime.isDetrimentalAction(name, targetToken, entry)
-    if not name or name == '' then return false end
-    targetToken = tostring(targetToken or '')
-
-    if targetToken:sub(1, 2) == 'E:' then return true end
-
-    local isBene = nil
-    pcall(function()
-        local sp = mq.TLO.Spell(name)
-        if sp() then isBene = sp.Beneficial() end
-    end)
-    if isBene == false then return true end
-    if isBene == true then return false end
-
-    pcall(function()
-        local aa = mq.TLO.Me.AltAbility(name)
-        if aa() then
-            local sp = aa.Spell
-            if sp() then isBene = sp.Beneficial() end
-        end
-    end)
-    if isBene == false then return true end
-    if isBene == true then return false end
-
-    pcall(function()
-        local ca = mq.TLO.Me.CombatAbility(name)
-        if ca() then
-            local sp = ca.Spell
-            if sp() then isBene = sp.Beneficial() end
-        end
-    end)
-    if isBene == false then return true end
-    if isBene == true then return false end
-
-    if entry and entry.kind then
-        if entry.kind == 'dd' or entry.kind == 'dot' or entry.kind == 'debuff' then return true end
-        if entry.kind == 'buff' or entry.kind == 'heal' or entry.kind == 'pet' or entry.kind == 'util' then return false end
-    end
-
-    local _, spellBene, kind = spellClassInfo(name)
-    if not spellBene then return true end
-    if kind == 'dd' or kind == 'dot' or kind == 'debuff' then return true end
-
-    local lowerName = name:lower()
-    if lowerName:find('kick') or lowerName:find('bash') or lowerName:find('backstab') or lowerName:find('frenzy')
-        or lowerName:find('slam') or lowerName:find('strike') or lowerName:find('taunt') or lowerName:find('disarm')
-        or lowerName:find('dragon punch') or lowerName:find('eagle strike') or lowerName:find('round kick') or lowerName:find('tiger claw') then
-        return true
-    end
-
-    return false
+    local k = entry and entry.kind
+    return isDetrimentalSpell(name, nil, k, targetToken)
 end
 
 function runtime.isTargetInRange(name, targetId)
@@ -7891,7 +7960,7 @@ function runtime.castGem(i, g, id)
         mq.cmd('/stand')
         mq.delay(50)
     end
-    if castTracker.isLockedOut(g.spell, id) then return false end
+    if castTracker.isLockedOut(g.spell, id, g.kind) then return false end
     local key = 'g' .. i
     if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.2 then return false end
     local sp = mq.TLO.Spell(g.spell)
@@ -7984,7 +8053,7 @@ function runtime.fireAA(name, a, id)
     if isSitting() or isDucking() then
         mq.cmd('/stand')
     end
-    if castTracker.isLockedOut(name, id) then return false end
+    if castTracker.isLockedOut(name, id, a and a.kind) then return false end
     local key = 'a' .. name
     if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.5 then return false end
     local aa = mq.TLO.Me.AltAbility(name)
@@ -8006,6 +8075,13 @@ function runtime.fireAA(name, a, id)
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not runtime.setTarget(id) then return false end
     clearCursor()
+    castTracker.lastSpell      = name
+    castTracker.lastTime       = os.clock()
+    castTracker.failed         = false
+    castTracker.activeSpell    = name
+    castTracker.activeTargetId = id
+    castTracker.activeKind     = a and a.kind
+    castTracker.castStartTime  = os.clock()
     mq.cmdf('/alt act %d', aa.ID())
     runtime.lastCast[key] = os.clock()
     print('\ag[Triune]\ax AA fired: ' .. name)
@@ -8278,7 +8354,7 @@ end
 runtime.useClickie = function(c, id)
     if not c or not c.name or c.name == '' then return false end
     local effName = (c.spell and c.spell ~= '') and c.spell or c.name
-    if castTracker.isLockedOut(effName, id) then return false end
+    if castTracker.isLockedOut(effName, id, c.kind) then return false end
     if isSitting() or isDucking() then
         mq.cmd('/stand')
         mq.delay(50)
@@ -11417,7 +11493,7 @@ local function combatTick()
             if isEnabled and burnOk and xtOk then
                 local effName = (c.spell and c.spell ~= '') and c.spell or c.name
                 local id = resolveTargetId(c.target, 'ALL', c.when, effName, cPct)
-                local lockedOut = id and castTracker.isLockedOut(effName, id)
+                local lockedOut = id and castTracker.isLockedOut(effName, id, c.kind)
                 if not lockedOut then
                     local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL')
                     if condOk then
@@ -11449,7 +11525,7 @@ local function combatTick()
                 local burnOk = (not g.burn_only or ctrl.burn)
                 if isEnabled and burnOk and xtOk then
                     local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal)
-                    local lockedOut = id and castTracker.isLockedOut(g.spell, id)
+                    local lockedOut = id and castTracker.isLockedOut(g.spell, id, g.kind)
                     if not lockedOut then
                         local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls)
                         if condOk then
@@ -11477,7 +11553,7 @@ local function combatTick()
                     end
                 elseif ctrl.debug_mode and (os.clock() - runtime.lastGemDiagAt) > 3.0 then
                     runtime.lastGemDiagAt = os.clock()
-                    local gLocked = castTracker.isLockedOut(g.spell)
+                    local gLocked = castTracker.isLockedOut(g.spell, nil, g.kind)
                     print(string.format(
                         '\ao[Triune debug]\ax gem %d "%s" gate failed -- isEnabled=%s(%d%%) xtOk=%s(%d>=%d) burnOk=%s lockedOut=%s',
                         i, g.spell, tostring(isEnabled), pctVal, tostring(xtOk), numXtar, minXt, tostring(burnOk), tostring(gLocked)))

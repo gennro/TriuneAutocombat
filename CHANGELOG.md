@@ -1,5 +1,22 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-30
+
+- **Beneficial Spell Lockout Exemption & Detrimental-Only Lockout Restriction (`triune.lua`).**
+  - **Zero Lockout Policy for Beneficial Spells**: Ensured that beneficial spells (heals, buffs, pet summons, cures, teleports) are never locked out under any failure scenario (fizzles, interrupts, "did not take hold", generic failures, or out-of-range).
+  - **Authoritative Beneficial vs Detrimental Classification (`isDetrimentalSpell`)**: Added multi-layered action classification checking explicit entry kind tags (`heal`, `buff`, `pet`, `cure`, `util` vs `dd`, `dot`, `debuff`, `nuke`), target token prefixes (`E:` vs `S:`, `P:`, `G:`, `A:`, `C:`), live MacroQuest spell/ability beneficial properties (`Spell().Beneficial()`, `AltAbility().Spell.Beneficial()`, `CombatAbility().Spell.Beneficial()`), era spell database definitions, and fallback keyword heuristics.
+  - **Restricted Cast Tracker Failures (`createCastTracker`)**:
+    - `isLockedOut(spellName, targetId, kind)` immediately returns `false` for any beneficial spell or ability.
+    - `recordFailure(spellName, targetId, reason, ...)` ignores failures on beneficial spells without creating target lockouts, global lockouts, or immunity flags.
+    - `onFailureEvent(reason, ...)` skips failure logging on beneficial spells so healer and buffer rotations never stall due to non-stacking buffs or interrupted casts.
+    - `runtime.fireAA` updated to maintain cast tracker context (`lastSpell`, `activeSpell`, `activeTargetId`, `activeKind`, `castStartTime`).
+    - `runtime.castGem`, `runtime.fireAA`, `runtime.useClickie`, and `combatTick` loop updated to pass `kind` to `isLockedOut` for reliable spell classification.
+  - **Unit Tests**: Added test suites in `tests/test_pure_logic.lua` covering `isDetrimentalSpell` classification across beneficial/detrimental spells and verifying that beneficial spells never lock out while detrimental spells retain target immunity, debuff resist backoff, and failure recovery.
+- **Function Parameter Consistency (`triune_map.lua`)**:
+  - Updated `getZAlphaMultiplier(avgZ, minZ, maxZ, zFilterMode, zDepthFading)` signature to formally declare optional `zFilterMode` and `zDepthFading` parameters with fallbacks to `ctrl`, eliminating language server argument count mismatch warnings.
+
+---
+
 ## 2026-08-29
 
 - **Project Version Bump (v1.7.5)**: Synchronized version **1.7.5** across `triune.lua`, `triune_updater.lua`, and `README.md`.

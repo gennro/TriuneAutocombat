@@ -912,14 +912,52 @@ assert_nil(extractConName(nil), 'con: nil')
 assert_nil(extractConName(''), 'con: empty')
 
 -- ============================================================================
--- 19. createCastTracker — failure counting and lockout system
+-- 19. createCastTracker & isDetrimentalSpell — failure counting and lockout system
 -- ============================================================================
-print('--- createCastTracker ---')
+print('--- isDetrimentalSpell & createCastTracker ---')
 
--- We can't extract createCastTracker (it references `mq` internally for
--- onFailureEvent), but the core inner functions (recordFailure, isLockedOut,
--- recordSuccess) are pure logic.  We re-implement a minimal version here to
--- test the algorithm.
+local triuneSrc = readFile('TAC/lua/triune.lua')
+local isDetrimentalSpell = loadstring(extractFunction(triuneSrc, 'isDetrimentalSpell') .. '\nreturn isDetrimentalSpell')()
+
+-- A. isDetrimentalSpell classification tests
+assert_eq(isDetrimentalSpell('Heal'), false, 'det: Heal is beneficial')
+assert_eq(isDetrimentalSpell('Complete Healing'), false, 'det: Complete Healing is beneficial')
+assert_eq(isDetrimentalSpell('Chloroplast'), false, 'det: Chloroplast is beneficial')
+assert_eq(isDetrimentalSpell('Focus of Spirit'), false, 'det: Focus of Spirit is beneficial')
+assert_eq(isDetrimentalSpell('Skin like Wood'), false, 'det: Skin like Wood is beneficial')
+assert_eq(isDetrimentalSpell('Spirit of Wolf'), false, 'det: Spirit of Wolf is beneficial')
+assert_eq(isDetrimentalSpell('Clarity'), false, 'det: Clarity is beneficial')
+assert_eq(isDetrimentalSpell('Aegolism'), false, 'det: Aegolism is beneficial')
+assert_eq(isDetrimentalSpell('Cannibalize'), false, 'det: Cannibalize is beneficial')
+assert_eq(isDetrimentalSpell('Gate'), false, 'det: Gate is beneficial')
+assert_eq(isDetrimentalSpell('Summon Companion'), false, 'det: Summon Companion is beneficial')
+
+assert_eq(isDetrimentalSpell('Nuke'), true, 'det: Nuke is detrimental')
+assert_eq(isDetrimentalSpell('Slow'), true, 'det: Slow is detrimental')
+assert_eq(isDetrimentalSpell('Tashani'), true, 'det: Tashani is detrimental')
+assert_eq(isDetrimentalSpell('Malo'), true, 'det: Malo is detrimental')
+assert_eq(isDetrimentalSpell('Root'), true, 'det: Root is detrimental')
+assert_eq(isDetrimentalSpell('Snare'), true, 'det: Snare is detrimental')
+assert_eq(isDetrimentalSpell('Enstill'), true, 'det: Enstill is detrimental')
+assert_eq(isDetrimentalSpell('Ice Comet'), true, 'det: Ice Comet is detrimental')
+assert_eq(isDetrimentalSpell('Doombringing'), true, 'det: Doombringing is detrimental')
+assert_eq(isDetrimentalSpell('Kick'), true, 'det: Kick is detrimental')
+assert_eq(isDetrimentalSpell('Taunt'), true, 'det: Taunt is detrimental')
+
+-- Explicit kind parameter overrides
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'heal'), false, 'det: kind=heal is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'buff'), false, 'det: kind=buff is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'pet'), false, 'det: kind=pet is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'cure'), false, 'det: kind=cure is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'dd'), true, 'det: kind=dd is detrimental')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'dot'), true, 'det: kind=dot is detrimental')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, 'debuff'), true, 'det: kind=debuff is detrimental')
+
+-- Target token overrides
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'E:LowestHP'), true, 'det: E: target is detrimental')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'S:Me'), false, 'det: S: target is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'P:LowestHP'), false, 'det: P: target is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'G:LowestHP'), false, 'det: G: target is beneficial')
 
 local function testCastTracker()
     local failureCount     = {}
@@ -950,8 +988,15 @@ local function testCastTracker()
         if spellName then failureCount[spellName] = nil end
     end
 
-    local function isLockedOut(spellName, targetId)
+    local function isLockedOut(spellName, targetId, kind)
         if not spellName or spellName == '' then return false end
+
+        -- Strictly enforce: Beneficial spells are NEVER locked out under any circumstance.
+        -- Only casted detrimental spells can ever be locked out.
+        if not isDetrimentalSpell(spellName, targetId, kind) then
+            return false
+        end
+
         local tid = tonumber(targetId)
 
         if tid and tid > 0 and targetImmunities[tid] and targetImmunities[tid][spellName] then
@@ -1006,6 +1051,13 @@ local function testCastTracker()
         else
             mRetries = tonumber(maxRetries) or 2
             lSec = tonumber(lockoutSec) or 30
+        end
+
+        -- Beneficial spells (heals, buffs, pets, cures) are NEVER locked out under any condition.
+        -- Only casted detrimental spells (offensive spells/debuffs) incur failures, immunities, or lockouts.
+        if not isDetrimentalSpell(spellName, tid, k) then
+            resetFailCount(spellName)
+            return
         end
 
         local rLow = tostring(r):lower()
@@ -1093,20 +1145,34 @@ local function testCastTracker()
         end
     end
 
-    -- 1. Test: not locked out initially
-    assert_eq(isLockedOut('Heal'), false, 'tracker: not locked initially')
-
-    -- 2. Test: legacy generic failure
+    -- 1. Test: Beneficial spells (Heals, Buffs, etc.) NEVER lock out
+    assert_eq(isLockedOut('Heal'), false, 'tracker: Heal not locked initially')
     recordFailure('Heal', 2, 30)
-    assert_eq(isLockedOut('Heal'), false, 'tracker: 1 failure, not locked')
     recordFailure('Heal', 2, 30)
-    assert_eq(isLockedOut('Heal'), true, 'tracker: 2 failures, locked out')
+    recordFailure('Heal', 2, 30)
+    assert_eq(isLockedOut('Heal'), false, 'tracker: Heal NEVER locked out on generic failure')
 
-    -- 3. Test: lockout expires after time passes
-    mockClock = 131 -- 100 + 30 + 1
-    assert_eq(isLockedOut('Heal'), false, 'tracker: lockout expired')
+    -- 2. Test: Beneficial buff "did not take hold" NEVER locks out or backs off
+    recordFailure('Focus', 55, 'did not take hold', 2, 30, 'buff')
+    assert_eq(isLockedOut('Focus', 55), false, 'tracker: Focus NEVER locked out on did not take hold')
 
-    -- 4. Test: recordSuccess clears failure count
+    -- 3. Test: Beneficial spells never lock out on fizzles / interrupts
+    recordFailure('Complete Healing', 10, 'fizzled', 2, 30, 'heal')
+    recordFailure('Complete Healing', 10, 'fizzled', 2, 30, 'heal')
+    recordFailure('Complete Healing', 10, 'fizzled', 2, 30, 'heal')
+    recordFailure('Complete Healing', 10, 'fizzled', 2, 30, 'heal')
+    assert_eq(isLockedOut('Complete Healing', 10), false, 'tracker: Complete Healing NEVER locked out on fizzles')
+
+    -- 4. Test: Detrimental spells (Nuke) DO lock out on generic failure after maxRetries
+    recordFailure('Nuke', 3, 60)
+    recordFailure('Nuke', 3, 60)
+    assert_eq(isLockedOut('Nuke'), false, 'tracker: Nuke 2/3 fails, not locked yet')
+    recordFailure('Nuke', 3, 60)
+    assert_eq(isLockedOut('Nuke'), true, 'tracker: Nuke 3/3 fails, locked out')
+    mockClock = 161 -- 100 + 60 + 1
+    assert_eq(isLockedOut('Nuke'), false, 'tracker: Nuke lockout expired')
+
+    -- 5. Test: recordSuccess clears failure count on detrimental spell
     recordFailure('Nuke', 3, 60)
     recordFailure('Nuke', 3, 60)
     recordSuccess('Nuke')
@@ -1114,29 +1180,29 @@ local function testCastTracker()
     recordFailure('Nuke', 3, 60)
     assert_eq(isLockedOut('Nuke'), false, 'tracker: success resets count')
 
-    -- 5. Test: Target-Scoped Immunity
+    -- 6. Test: Detrimental Target-Scoped Immunity (e.g. Slow on immune mob)
     mockClock = 200
     recordFailure('Slow', 101, 'target immune', 2, 30, 'debuff')
     assert_eq(isLockedOut('Slow', 101), true, 'tracker: target 101 is immune to Slow')
     assert_eq(isLockedOut('Slow', 102), false, 'tracker: target 102 is NOT immune to Slow')
     assert_eq(isLockedOut('Slow'), false, 'tracker: Slow is NOT locked out globally')
 
-    -- 6. Test: Target-Scoped "Did Not Take Hold" (Non-stacking buff backoff)
+    -- 7. Test: Detrimental "Did Not Take Hold" (Non-stacking debuff backoff on enemy)
     mockClock = 300
-    recordFailure('Focus', 55, 'did not take hold', 2, 30, 'buff')
-    assert_eq(isLockedOut('Focus', 55), true, 'tracker: Focus backed off on target 55')
-    assert_eq(isLockedOut('Focus', 56), false, 'tracker: Focus available for target 56')
+    recordFailure('Tash', 55, 'did not take hold', 2, 30, 'debuff')
+    assert_eq(isLockedOut('Tash', 55), true, 'tracker: Tash backed off on target 55')
+    assert_eq(isLockedOut('Tash', 56), false, 'tracker: Tash available for target 56')
     mockClock = 421 -- 300 + 120 + 1
-    assert_eq(isLockedOut('Focus', 55), false, 'tracker: Focus backoff expired on target 55')
+    assert_eq(isLockedOut('Tash', 55), false, 'tracker: Tash backoff expired on target 55')
 
-    -- 7. Test: Direct Damage Resists do NOT trigger lockouts
+    -- 8. Test: Direct Damage Resists do NOT trigger lockouts
     mockClock = 500
     recordFailure('Ice Comet', 101, 'resisted', 2, 30, 'dd')
     recordFailure('Ice Comet', 101, 'resisted', 2, 30, 'dd')
     recordFailure('Ice Comet', 101, 'resisted', 2, 30, 'dd')
     assert_eq(isLockedOut('Ice Comet', 101), false, 'tracker: DD nukes never lock out on resists')
 
-    -- 8. Test: Debuff Resists back off only on specific target after maxRetries
+    -- 9. Test: Debuff Resists back off only on specific target after maxRetries
     mockClock = 600
     recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
     assert_eq(isLockedOut('Tash', 201), false, 'tracker: 1 debuff resist does not lock')
@@ -1144,21 +1210,21 @@ local function testCastTracker()
     assert_eq(isLockedOut('Tash', 201), true, 'tracker: 2 debuff resists lock out on target 201')
     assert_eq(isLockedOut('Tash', 202), false, 'tracker: Tash remains usable on target 202')
 
-    -- 9. Test: Failure count TTL decay (15s)
+    -- 10. Test: Failure count TTL decay (15s)
     mockClock = 700
     recordFailure('Root', 301, 'resisted', 2, 30, 'debuff')
     mockClock = 720 -- 20 seconds later (> 15s decay)
     recordFailure('Root', 301, 'resisted', 2, 30, 'debuff')
     assert_eq(isLockedOut('Root', 301), false, 'tracker: failure count decayed after 20s')
 
-    -- 10. Test: Dead target / Positional events have 0 penalty
+    -- 11. Test: Dead target / Positional events have 0 penalty
     mockClock = 800
-    recordFailure('Heal', 10, 'dead target', 1, 10, 'heal')
-    recordFailure('Heal', 10, 'out of range', 1, 10, 'heal')
-    recordFailure('Heal', 10, 'cannot see target', 1, 10, 'heal')
-    assert_eq(isLockedOut('Heal', 10), false, 'tracker: positional/dead target events incur 0 penalty')
+    recordFailure('Nuke', 10, 'dead target', 1, 10, 'dd')
+    recordFailure('Nuke', 10, 'out of range', 1, 10, 'dd')
+    recordFailure('Nuke', 10, 'cannot see target', 1, 10, 'dd')
+    assert_eq(isLockedOut('Nuke', 10), false, 'tracker: positional/dead target events incur 0 penalty')
 
-    -- 11. Test: Targeted clear vs global clear
+    -- 12. Test: Targeted clear vs global clear
     mockClock = 850
     recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
     recordFailure('Tash', 201, 'resisted', 2, 30, 'debuff')
@@ -2398,8 +2464,7 @@ do
     assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
         'extractJsonString: full payload preserves markdown and quotes in body')
 
-    -- Verify suite version consistency across triune.lua, triune_updater.lua, and README.md
-    local triuneSrc = readFile('TAC/lua/triune.lua')
+    triuneSrc = readFile('TAC/lua/triune.lua')
     local triuneVer = triuneSrc:match("local VERSION%s*=%s*'([^']+)'")
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
