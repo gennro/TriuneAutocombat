@@ -178,12 +178,13 @@ local state = {
     openGUI             = true,
     isRunning           = true,
     activeTab           = 1, -- 1: Map View, 2: Zone Atlas, 3: NPC Tracker, 4: Settings & Layers
+    requestedTab        = nil, -- When set, forces ImGui to switch active tab via SetSelected
     currentZoneId       = 0,
     currentZoneShort    = '',
     currentZoneName     = 'Unknown Zone',
     statusMsg           = 'Ready',
     lastScanTime        = 0,
-    scanIntervalMs      = 250,
+    scanIntervalMs      = 300,
     lastZoneCheckTime   = 0,
     -- Maps Directory & Subfolder Management
     baseMapsDirectory   = nil,
@@ -349,7 +350,7 @@ local navState = {
     cache               = {}, -- [id] = { hasPath = bool, length = num, checkedAt = time }
     checkQueue          = {}, -- array of IDs needing path checks
     queueSet            = {}, -- lookup set to prevent queue duplicates
-    batchSize           = 10,
+    batchSize           = 4,
     lastQueueProcessTime = 0,
 }
 
@@ -954,23 +955,25 @@ local function scanMapFolders()
         end)
     end
 
-    -- Method 4: Comprehensive Community Map Pack Probe Dictionary
-    local knownPacks = {
-        'Brewall', 'brewall', 'Brewalls', 'brewalls', 'BrewallMaps', 'brewallmaps', 'Brewall_RoF2', 'Brewall_Live',
-        'Goodurden', 'goodurden', 'Goods', 'goods', 'GoodUrden', 'GoodsMaps', 'goodsmaps', 'Good_Maps', 'GoodurdenMaps',
-        'MyMaps', 'mymaps', 'Custom', 'custom', 'CustomMaps', 'custommaps', 'UserMaps', 'usermaps', 'Maps', 'maps',
-        'RoF2', 'rof2', 'Underfoot', 'underfoot', 'Titanium', 'titanium', 'P99', 'p99', 'Project1999', 'project1999',
-        'EQClassic', 'eqclassic', 'Classic', 'classic', 'Live', 'live', 'Beta', 'beta',
-        'Cartography', 'cartography', 'Atlas', 'atlas', 'MapPack', 'mappack', 'ZoneMaps', 'zonemaps', 'Downloaded', 'NewMaps',
-        'TLP', 'tlp', 'EverQuest', 'everquest', 'Default', 'default'
-    }
-    for _, pack in ipairs(knownPacks) do
-        if not seen[pack] then
-            local subPath = baseDir .. '/' .. pack
-            if isDirectoryAccessible(subPath) then
-                seen[pack] = true
-                folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
-                names[#names + 1] = pack
+    -- Method 4: Comprehensive Community Map Pack Probe Dictionary (Only if directory discovery found nothing)
+    if #folders == 1 then
+        local knownPacks = {
+            'Brewall', 'brewall', 'Brewalls', 'brewalls', 'BrewallMaps', 'brewallmaps', 'Brewall_RoF2', 'Brewall_Live',
+            'Goodurden', 'goodurden', 'Goods', 'goods', 'GoodUrden', 'GoodsMaps', 'goodsmaps', 'Good_Maps', 'GoodurdenMaps',
+            'MyMaps', 'mymaps', 'Custom', 'custom', 'CustomMaps', 'custommaps', 'UserMaps', 'usermaps', 'Maps', 'maps',
+            'RoF2', 'rof2', 'Underfoot', 'underfoot', 'Titanium', 'titanium', 'P99', 'p99', 'Project1999', 'project1999',
+            'EQClassic', 'eqclassic', 'Classic', 'classic', 'Live', 'live', 'Beta', 'beta',
+            'Cartography', 'cartography', 'Atlas', 'atlas', 'MapPack', 'mappack', 'ZoneMaps', 'zonemaps', 'Downloaded', 'NewMaps',
+            'TLP', 'tlp', 'EverQuest', 'everquest', 'Default', 'default'
+        }
+        for _, pack in ipairs(knownPacks) do
+            if not seen[pack] then
+                local subPath = baseDir .. '/' .. pack
+                if isDirectoryAccessible(subPath) then
+                    seen[pack] = true
+                    folders[#folders + 1] = { name = pack, relPath = pack, fullPath = subPath }
+                    names[#names + 1] = pack
+                end
             end
         end
     end
@@ -1046,14 +1049,20 @@ local function scanMapFiles()
         end)
     end
 
-    -- Probe check for registered zones if dir listing was empty or partial
-    for _, z in ipairs(state.atlasAllZones) do
-        local f = io.open(baseDir .. '/' .. z.short .. '.txt', 'r')
-        if f then
-            f:close()
-            z.hasMap = true
-            discoveredShorts[z.short:lower()] = true
-        else
+    -- Probe check for registered zones ONLY if directory listing was empty
+    if not next(discoveredShorts) then
+        for _, z in ipairs(state.atlasAllZones) do
+            local f = io.open(baseDir .. '/' .. z.short .. '.txt', 'r')
+            if f then
+                f:close()
+                z.hasMap = true
+                discoveredShorts[z.short:lower()] = true
+            else
+                z.hasMap = false
+            end
+        end
+    else
+        for _, z in ipairs(state.atlasAllZones) do
             z.hasMap = (discoveredShorts[z.short:lower()] == true)
         end
     end
@@ -1136,6 +1145,13 @@ local function filterAtlasZones()
     end
 end
 
+-- Zone Map In-Memory Cache (Instant switching between visited zones)
+local zoneMapCache = {}
+
+local function clearZoneMapCache()
+    zoneMapCache = {}
+end
+
 local function parseMapFile(filePath, layerId)
     local f = io.open(filePath, 'r')
     if not f then return 0, 0 end
@@ -1156,7 +1172,10 @@ local function parseMapFile(filePath, layerId)
         local b1 = line:byte(1)
         if b1 == 76 or b1 == 108 then
             -- Line format: L x1, y1, z1, x2, y2, z2, r, g, b
-            local x1, y1, z1, x2, y2, z2, r, g, b = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)')
+            local x1, y1, z1, x2, y2, z2, r, g, b = line:match('^[Ll]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+)')
+            if not x1 then
+                x1, y1, z1, x2, y2, z2, r, g, b = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)')
+            end
             if x1 and y1 and z1 and x2 and y2 and z2 then
                 local nx1 = -tonumber(x1)
                 local ny1 = -tonumber(y1)
@@ -1169,8 +1188,6 @@ local function parseMapFile(filePath, layerId)
                 local nb = (tonumber(b) or 180) / 255.0
 
                 -- High-contrast brightness correction:
-                -- Standard EQ maps authored for parchment use black (0,0,0) lines.
-                -- On our dark background, boost low-luminance lines to a crisp visible light silver-slate tone.
                 local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
                 if lum < 0.25 then
                     nr = 0.72
@@ -1178,31 +1195,37 @@ local function parseMapFile(filePath, layerId)
                     nb = 0.82
                 end
 
+                local segMinX = nx1 < nx2 and nx1 or nx2
+                local segMaxX = nx1 > nx2 and nx1 or nx2
+                local segMinY = ny1 < ny2 and ny1 or ny2
+                local segMaxY = ny1 > ny2 and ny1 or ny2
+
                 targetLines[#targetLines + 1] = {
                     x1 = nx1, y1 = ny1, z1 = nz1,
                     x2 = nx2, y2 = ny2, z2 = nz2,
                     r = nr, g = ng, b = nb,
+                    avgZ = (nz1 + nz2) * 0.5,
+                    minX = segMinX, maxX = segMaxX,
+                    minY = segMinY, maxY = segMaxY,
                 }
                 linesAdded = linesAdded + 1
 
-                if nx1 < bMinX then bMinX = nx1 end
-                if nx1 > bMaxX then bMaxX = nx1 end
-                if nx2 < bMinX then bMinX = nx2 end
-                if nx2 > bMaxX then bMaxX = nx2 end
+                if segMinX < bMinX then bMinX = segMinX end
+                if segMaxX > bMaxX then bMaxX = segMaxX end
+                if segMinY < bMinY then bMinY = segMinY end
+                if segMaxY > bMaxY then bMaxY = segMaxY end
 
-                if ny1 < bMinY then bMinY = ny1 end
-                if ny1 > bMaxY then bMaxY = ny1 end
-                if ny2 < bMinY then bMinY = ny2 end
-                if ny2 > bMaxY then bMaxY = ny2 end
-
-                if nz1 < bMinZ then bMinZ = nz1 end
-                if nz1 > bMaxZ then bMaxZ = nz1 end
-                if nz2 < bMinZ then bMinZ = nz2 end
-                if nz2 > bMaxZ then bMaxZ = nz2 end
+                local segMinZ = nz1 < nz2 and nz1 or nz2
+                local segMaxZ = nz1 > nz2 and nz1 or nz2
+                if segMinZ < bMinZ then bMinZ = segMinZ end
+                if segMaxZ > bMaxZ then bMaxZ = segMaxZ end
             end
         elseif b1 == 80 or b1 == 112 then
             -- Label format: P x, y, z, r, g, b, size, label_text
-            local x, y, z, r, g, b, size, text = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(.+)')
+            local x, y, z, r, g, b, size, text = line:match('^[Pp]%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d.-]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+([%d]+),?%s+(.+)')
+            if not x then
+                x, y, z, r, g, b, size, text = line:match('^%a%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(.+)')
+            end
             if x and y and z and text then
                 local nx = -tonumber(x)
                 local ny = -tonumber(y)
@@ -1212,8 +1235,6 @@ local function parseMapFile(filePath, layerId)
                 local nb = (tonumber(b) or 255) / 255.0
                 local cleanText = text:gsub('_', ' ')
 
-                -- High-contrast brightness correction for labels:
-                -- Remap black/dark labels (0,0,0) to crisp readable off-white
                 local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
                 if lum < 0.25 then
                     nr = 0.88
@@ -1253,6 +1274,44 @@ local function loadZoneMap(zoneShort, isAtlas)
         return false
     end
 
+    local folderDisplay = (state.mapFolders[state.selectedFolderIndex] and state.mapFolders[state.selectedFolderIndex].name) or baseDir
+    local cacheKey = string.format('%s:%s', baseDir, zoneShort:lower())
+    local cached = zoneMapCache[cacheKey]
+
+    if cached then
+        mapData.zoneShort   = zoneShort
+        mapData.layers      = cached.layers
+        mapData.labels      = cached.labels
+        mapData.totalLines  = cached.totalLines
+        mapData.totalLabels = cached.totalLabels
+        mapData.bounds      = cached.bounds
+        mapData.isLoaded    = (cached.totalLines > 0 or cached.totalLabels > 0)
+        local modeStr = isAtlas and 'Atlas' or 'Live'
+        state.statusMsg = string.format('[%s] Loaded (Cached): %s (%d lines, %d labels)', modeStr, zoneShort, mapData.totalLines, mapData.totalLabels)
+
+        if not isAtlas then
+            local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
+            local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
+            if okMeX and okMeY and meX and meY then
+                viewport.centerEqX = meX
+                viewport.centerEqY = meY
+            else
+                viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+                viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+            end
+        else
+            viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+            viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+            local spanX = math.abs(mapData.bounds.maxX - mapData.bounds.minX)
+            local spanY = math.abs(mapData.bounds.maxY - mapData.bounds.minY)
+            local maxSpan = math.max(spanX, spanY)
+            if maxSpan > 50 then
+                viewport.zoom = math.max(viewport.minZoom, math.min(1.2, 700 / maxSpan))
+            end
+        end
+        return true
+    end
+
     mapData.zoneShort = zoneShort
     mapData.layers = { [0] = {}, [1] = {}, [2] = {}, [3] = {} }
     mapData.labels = {}
@@ -1281,10 +1340,16 @@ local function loadZoneMap(zoneShort, isAtlas)
     local _, lbCount2 = parseMapFile(labelsFile, 0)
     mapData.totalLabels = mapData.totalLabels + lbCount2
 
-    local folderDisplay = (state.mapFolders[state.selectedFolderIndex] and state.mapFolders[state.selectedFolderIndex].name) or baseDir
-
     if mapData.totalLines > 0 or mapData.totalLabels > 0 then
         mapData.isLoaded = true
+        zoneMapCache[cacheKey] = {
+            layers      = mapData.layers,
+            labels      = mapData.labels,
+            totalLines  = mapData.totalLines,
+            totalLabels = mapData.totalLabels,
+            bounds      = mapData.bounds,
+        }
+
         local modeStr = isAtlas and 'Atlas' or 'Live'
         state.statusMsg = string.format('[%s] Loaded [%s]: %s (%d lines, %d labels)', modeStr, folderDisplay, zoneShort, mapData.totalLines, mapData.totalLabels)
 
@@ -1376,6 +1441,11 @@ local function atlasHistoryForward()
     end
 end
 
+local function switchToTab(tabIdx)
+    state.activeTab = tabIdx
+    state.requestedTab = tabIdx
+end
+
 local function focusPoi(poi)
     if not poi then return end
     viewport.centerEqX = poi.x
@@ -1388,7 +1458,7 @@ local function focusPoi(poi)
         text = poi.text or 'Point of Interest',
         time = mq.gettime(),
     }
-    state.activeTab = 1
+    switchToTab(1)
     state.statusMsg = string.format('Focused on POI: %s (Y:%.1f, X:%.1f, Z:%.1f)', poi.text, poi.y, poi.x, poi.z or 0)
 end
 
@@ -1788,8 +1858,9 @@ local function scanZoneSpawns()
     end
 
     spawns.totalCount = count
+    local nowTime = mq.gettime()
     local isInitial = (#spawns.allNPCs == 0)
-    local maxFetch = isInitial and math.min(count, 150) or math.min(count, 450) -- Smooth startup batch
+    local maxFetch = isInitial and math.min(count, 120) or math.min(count, 350)
     local newNpcList = {}
 
     local myX, myY, myZ = 0, 0, 0
@@ -1806,22 +1877,13 @@ local function scanZoneSpawns()
     for i = 1, maxFetch do
         local okSpawn, s = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
         if okSpawn and s and s() then
-            local okId, sId = pcall(function() return s.ID() end)
-            local okDead, isDead = pcall(function() return s.Dead() end)
+            local okData, sId, cleanName, level, classShort, conColor, distance, lineOfSight, sx, sy, sz, pctHPs, hate = pcall(function()
+                local dead = s.Dead()
+                if dead then return nil end
+                return s.ID(), s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.Distance3D(), s.LineOfSight(), s.X(), s.Y(), s.Z(), s.PctHPs(), s.Aggressive()
+            end)
 
-            if okId and sId and sId > 0 and (not okDead or not isDead) then
-                local _, cleanName   = pcall(function() return s.CleanName() end)
-                local _, level       = pcall(function() return s.Level() end)
-                local _, classShort  = pcall(function() return s.Class.ShortName() end)
-                local _, conColor    = pcall(function() return s.ConColor() end)
-                local _, distance    = pcall(function() return s.Distance3D() end)
-                local _, lineOfSight = pcall(function() return s.LineOfSight() end)
-                local _, x           = pcall(function() return s.X() end)
-                local _, y           = pcall(function() return s.Y() end)
-                local _, z           = pcall(function() return s.Z() end)
-                local _, pctHPs      = pcall(function() return s.PctHPs() end)
-                local _, hate        = pcall(function() return s.Aggressive() end)
-
+            if okData and sId and sId > 0 then
                 local mobEntry = {
                     id          = sId,
                     cleanName   = cleanName or 'Unknown NPC',
@@ -1830,9 +1892,9 @@ local function scanZoneSpawns()
                     conColor    = string.upper(tostring(conColor or 'GREY')),
                     distance    = distance or 99999,
                     lineOfSight = lineOfSight or false,
-                    x           = x or 0,
-                    y           = y or 0,
-                    z           = z or 0,
+                    x           = sx or 0,
+                    y           = sy or 0,
+                    z           = sz or 0,
                     pctHPs      = pctHPs or 100,
                     isAggro     = hate or false,
                 }
@@ -1840,7 +1902,7 @@ local function scanZoneSpawns()
 
                 -- Enqueue for background navmesh validation if not in cache
                 local cached = navState.cache[sId]
-                if not cached or (mq.gettime() - cached.checkedAt) > 6000 then
+                if not cached or (nowTime - cached.checkedAt) > 6000 then
                     if not navState.queueSet[sId] then
                         navState.checkQueue[#navState.checkQueue + 1] = sId
                         navState.queueSet[sId] = true
@@ -1939,12 +2001,10 @@ local function scanZoneSpawns()
         for g = 1, grpCount do
             local okMem, mem = pcall(function() return mq.TLO.Group.Member(g) end)
             if okMem and mem and mem() then
-                local _, mName = pcall(function() return mem.CleanName() end)
-                local _, mX = pcall(function() return mem.X() end)
-                local _, mY = pcall(function() return mem.Y() end)
-                local _, mZ = pcall(function() return mem.Z() end)
-                local _, mHp = pcall(function() return mem.PctHPs() end)
-                if mX and mY then
+                local okMData, mName, mX, mY, mZ, mHp = pcall(function()
+                    return mem.CleanName(), mem.X(), mem.Y(), mem.Z(), mem.PctHPs()
+                end)
+                if okMData and mX and mY then
                     groupList[#groupList + 1] = {
                         name = mName or ('Group ' .. g),
                         x = mX, y = mY, z = mZ or 0,
@@ -2036,7 +2096,7 @@ local function DrawMapCanvas(availW, availH)
 
     local zoomBtnSize = 24
     local zoomPanelW = zoomBtnSize + 10
-    local zoomPanelH = (zoomBtnSize * 3) + 16
+    local zoomPanelH = (zoomBtnSize * 4) + 20
     local zoomX = cX + availW - zoomPanelW - 10
     local zoomY = cY + availH - zoomPanelH - 10
 
@@ -2178,6 +2238,21 @@ local function DrawMapCanvas(availW, availH)
     updateSmartFloorBounds(playerX, playerY, playerZ)
     sf = state.smartFloor
 
+    -- Viewport World-Space Bounds for 0-allocation Frustum Culling
+    local minWx, maxWy = screenToWorld(cX, cY, cX, cY, availW, availH)
+    local maxWx, minWy = screenToWorld(cX + availW, cY + availH, cX, cY, availW, availH)
+    local vpMinX = math.min(minWx, maxWx)
+    local vpMaxX = math.max(minWx, maxWx)
+    local vpMinY = math.min(minWy, maxWy)
+    local vpMaxY = math.max(minWy, maxWy)
+
+    -- Margin buffer to avoid clipping at viewport edges
+    local vpPad = 15.0 / math.max(0.01, viewport.zoom)
+    vpMinX = vpMinX - vpPad
+    vpMaxX = vpMaxX + vpPad
+    vpMinY = vpMinY - vpPad
+    vpMaxY = vpMaxY + vpPad
+
     -- Draw Map Lines (Layers 0, 1, 2, 3)
     local layerEnabled = {
         [0] = ctrl.layer0,
@@ -2186,30 +2261,28 @@ local function DrawMapCanvas(availW, availH)
         [3] = ctrl.layer3,
     }
 
+    local lineThick = ctrl.lineThickness
+    local sfMinZ, sfMaxZ = sf.minZ, sf.maxZ
+    local zFading = ctrl.zDepthFading
+    local zFilterMode = ctrl.zFilterMode
+
     for lId = 0, 3 do
         if layerEnabled[lId] then
             local lines = mapData.layers[lId] or {}
-            for _, seg in ipairs(lines) do
-                local avgZ = (seg.z1 + seg.z2) * 0.5
-                local alphaMult, isVis = getZAlphaMultiplier(avgZ, sf.minZ, sf.maxZ)
+            for i = 1, #lines do
+                local seg = lines[i]
+                -- Fast world-space AABB culling
+                if seg.maxX >= vpMinX and seg.minX <= vpMaxX and seg.maxY >= vpMinY and seg.minY <= vpMaxY then
+                    local alphaMult, isVis = 1.0, true
+                    if zFilterMode ~= 3 then
+                        alphaMult, isVis = getZAlphaMultiplier(seg.avgZ, sfMinZ, sfMaxZ, zFilterMode, zFading)
+                    end
 
-                if isVis and alphaMult > 0.01 then
-                    local sx1, sy1 = worldToScreen(seg.x1, seg.y1, cX, cY, availW, availH)
-                    local sx2, sy2 = worldToScreen(seg.x2, seg.y2, cX, cY, availW, availH)
-
-                    -- Frustum culling
-                    local minSx = math.min(sx1, sx2)
-                    local maxSx = math.max(sx1, sx2)
-                    local minSy = math.min(sy1, sy2)
-                    local maxSy = math.max(sy1, sy2)
-
-                    if maxSx >= cX and minSx <= cX + availW and maxSy >= cY and minSy <= cY + availH then
-                        local lineR, lineG, lineB = seg.r, seg.g, seg.b
-                        if ctrl.boostDarkLines and (lineR * 0.299 + lineG * 0.587 + lineB * 0.114) < 0.25 then
-                            lineR, lineG, lineB = 0.72, 0.76, 0.82
-                        end
-                        local col = ImGui.GetColorU32(lineR, lineG, lineB, alphaMult)
-                        drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, ctrl.lineThickness)
+                    if isVis and alphaMult > 0.01 then
+                        local sx1, sy1 = worldToScreen(seg.x1, seg.y1, cX, cY, availW, availH)
+                        local sx2, sy2 = worldToScreen(seg.x2, seg.y2, cX, cY, availW, availH)
+                        local col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
+                        drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, lineThick)
                     end
                 end
             end
@@ -2219,16 +2292,16 @@ local function DrawMapCanvas(availW, availH)
     -- Draw Map Labels
     if ctrl.showLabels and ctrl.layerLabels then
         local labels = mapData.labels or {}
-        for _, lb in ipairs(labels) do
-            local alphaMult, isVis = getZAlphaMultiplier(lb.z, sf.minZ, sf.maxZ)
-            if isVis and alphaMult > 0.01 then
-                local sx, sy = worldToScreen(lb.x, lb.y, cX, cY, availW, availH)
-                if sx >= cX - 50 and sx <= cX + availW + 50 and sy >= cY - 20 and sy <= cY + availH + 20 then
-                    local lblR, lblG, lblB = lb.r, lb.g, lb.b
-                    if ctrl.boostDarkLines and (lblR * 0.299 + lblG * 0.587 + lblB * 0.114) < 0.25 then
-                        lblR, lblG, lblB = 0.88, 0.92, 0.96
-                    end
-                    local col = ImGui.GetColorU32(lblR, lblG, lblB, 0.90 * alphaMult)
+        for i = 1, #labels do
+            local lb = labels[i]
+            if lb.x >= vpMinX and lb.x <= vpMaxX and lb.y >= vpMinY and lb.y <= vpMaxY then
+                local alphaMult, isVis = 1.0, true
+                if zFilterMode ~= 3 then
+                    alphaMult, isVis = getZAlphaMultiplier(lb.z, sfMinZ, sfMaxZ, zFilterMode, zFading)
+                end
+                if isVis and alphaMult > 0.01 then
+                    local sx, sy = worldToScreen(lb.x, lb.y, cX, cY, availW, availH)
+                    local col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.90 * alphaMult)
                     drawList:AddText(ImVec2(sx, sy), col, lb.text)
                 end
             end
@@ -2360,13 +2433,13 @@ local function DrawMapCanvas(availW, availH)
     end
 
     -- Draw Highlighted POI Marker (if active)
-    if state.highlightedPoi then
-        local poi = state.highlightedPoi
-        local pTime = poi.time or 0
-        local px = poi.x or 0
-        local py = poi.y or 0
-        local pText = poi.text or 'Point of Interest'
-        local now = mq.gettime()
+    local poi = state.highlightedPoi
+    if poi ~= nil then
+        local pTime = (poi.time ~= nil and poi.time) or 0
+        local px    = (poi.x ~= nil and poi.x) or 0
+        local py    = (poi.y ~= nil and poi.y) or 0
+        local pText = (poi.text ~= nil and poi.text) or 'Point of Interest'
+        local now   = mq.gettime()
 
         if (now - pTime) < 20000 then
             local psx, psy = worldToScreen(px, py, cX, cY, availW, availH)
@@ -2714,13 +2787,42 @@ local function DrawMapCanvas(availW, availH)
             state.dirtySettingsTime = mq.gettime()
         end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset View & Zoom to Default Center') end
+
+        -- Auto-Z Floor Filtering Toggle Button (AZ)
+        local isAutoZ = (ctrl.zFilterMode ~= 3)
+        if isAutoZ then
+            ImGui.PushStyleColor(ImGuiCol.Text, 0.25, 0.95, 0.40, 1.0)
+            ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.32, 0.22, 0.85)
+        else
+            ImGui.PushStyleColor(ImGuiCol.Text, 0.60, 0.60, 0.65, 0.70)
+            ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.18, 0.22, 0.70)
+        end
+        if ImGui.Button('AZ##CanvasToggleAutoZ', ImVec2(zoomBtnSize, zoomBtnSize)) then
+            if ctrl.zFilterMode == 3 then
+                ctrl.zFilterMode = 1
+            else
+                ctrl.zFilterMode = 3
+            end
+            state.dirtySettings = true
+            state.dirtySettingsTime = mq.gettime()
+        end
+        ImGui.PopStyleColor(2)
+        if ImGui.IsItemHovered() then
+            local modeDesc = (ctrl.zFilterMode == 1 and 'Auto-Z (Smart Floor Isolation: ON)')
+                or (ctrl.zFilterMode == 2 and 'Manual Z-Window: ON')
+                or 'Disabled (Show All Elevations)'
+            ImGui.SetTooltip('%s', string.format('Auto-Z Floor Filtering: %s\nMode: %s\n[Click] %s',
+                (ctrl.zFilterMode ~= 3 and 'ON' or 'OFF'),
+                modeDesc,
+                (ctrl.zFilterMode ~= 3 and 'Turn Auto-Z OFF (Show All Elevations)' or 'Turn Auto-Z ON (Smart Floor Isolation)')
+            ))
+        end
     end
     ImGui.EndChild()
     ImGui.PopStyleVar(2)
     ImGui.PopStyleColor(2)
 
-    -- Restore cursor position to bottom of canvas for clean layout flow
-    ImGui.SetCursorScreenPos(ImVec2(cX, cY + availH))
+
 
     -- Hover Tooltip for NPC
     if hoveredMob then
@@ -2994,12 +3096,12 @@ local function DrawAtlasTab()
                 ImGui.TextColored(1.0, 0.85, 0.2, 1.0, '★ Currently Active in Map View (Atlas Mode)')
                 ImGui.SameLine()
                 if ImGui.Button('Switch to Map Tab##GoMapTab') then
-                    state.activeTab = 1
+                    switchToTab(1)
                 end
             else
                 if ImGui.Button(string.format('Open Map in Atlas View: %s##OpenAtlasBtn', z.name)) then
                     navigateToAtlasZone(z.short, true)
-                    state.activeTab = 1
+                    switchToTab(1)
                 end
             end
 
@@ -3007,7 +3109,7 @@ local function DrawAtlasTab()
                 ImGui.SameLine()
                 if ImGui.Button('Return to Live View##AtlasRetLive') then
                     returnToLiveZone()
-                    state.activeTab = 1
+                    switchToTab(1)
                 end
             end
 
@@ -3085,7 +3187,7 @@ local function DrawAtlasTab()
                                     end
                                 end
                                 navigateToAtlasZone(stepZone.short, true)
-                                state.activeTab = 1
+                                switchToTab(1)
                             end
                             if ImGui.IsItemHovered() then
                                 ImGui.SetTooltip('Switch to Map View to inspect %s (%s)', stepZone.name, stepZone.short)
@@ -3127,7 +3229,7 @@ local function DrawAtlasTab()
                             state.atlasSelectedZone = cZone
                         end
                         navigateToAtlasZone(cShort, true)
-                        state.activeTab = 1
+                        switchToTab(1)
                     end
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('Click to navigate to %s in Atlas Map View\nEra: %s', cName, cEra)
@@ -3310,19 +3412,17 @@ local function DrawNPCTrackerTab()
             ImGui.TableNextRow()
             local isSelected = (mob.id == currentTargetId)
 
-            -- Column 1: Clean Name
+            -- Column 1: Clean Name (Interactive row selectable)
             ImGui.TableSetColumnIndex(0)
             local conStyle = getConStyle(mob.conColor)
+            local namePrefix = isSelected and '> ' or ''
+            local nameLabel = string.format('%s%s##TrackMob_%d_%d', namePrefix, mob.cleanName, mob.id, idx)
             if isSelected then
-                ImGui.TextColored(0.3, 0.9, 1.0, 1.0, '> ' .. mob.cleanName)
+                ImGui.PushStyleColor(ImGuiCol.Text, 0.3, 0.9, 1.0, 1.0)
             else
-                ImGui.TextColored(conStyle.r, conStyle.g, conStyle.b, 1.0, mob.cleanName)
+                ImGui.PushStyleColor(ImGuiCol.Text, conStyle.r, conStyle.g, conStyle.b, 1.0)
             end
-
-            -- Double-click row support
-            local rowLabel = string.format('##TrackerRow_%d_%d', mob.id, idx)
-            ImGui.SameLine()
-            if ImGui.Selectable(rowLabel, isSelected, bit.bor(ImGuiSelectableFlags.SpanAllColumns or 0, ImGuiSelectableFlags.AllowDoubleClick or 0)) then
+            if ImGui.Selectable(nameLabel, isSelected, ImGuiSelectableFlags.AllowDoubleClick or 0) then
                 if ImGui.IsMouseDoubleClicked(0) then
                     actionQueue.pendingTargetId = mob.id
                     actionQueue.pendingNavId = mob.id
@@ -3332,7 +3432,12 @@ local function DrawNPCTrackerTab()
                     state.statusMsg = string.format('Navigating to: %s (ID: %d)', mob.cleanName, mob.id)
                 else
                     actionQueue.pendingTargetId = mob.id
+                    state.statusMsg = string.format('Targeted: %s (ID: %d)', mob.cleanName, mob.id)
                 end
+            end
+            ImGui.PopStyleColor()
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('%s', string.format('%s (Level %d %s)\n[Click] Target  |  [Double-Click] Navigate', mob.cleanName, mob.level, mob.class))
             end
 
             -- Column 2: Level
@@ -3374,15 +3479,18 @@ local function DrawNPCTrackerTab()
             ImGui.TableSetColumnIndex(6)
             ImGui.TextDisabled(tostring(mob.id))
 
-            -- Column 8: Actions ([Target], [Nav], [Map])
+            -- Column 8: Actions ([Tar], [Nav], [Map])
             ImGui.TableSetColumnIndex(7)
-            local targBtnId = string.format('Targ##%d', mob.id)
-            local navBtnId  = string.format('Nav##%d', mob.id)
-            local mapBtnId  = string.format('Map##%d', mob.id)
+            local targBtnId = string.format('Tar##%d_%d', mob.id, idx)
+            local navBtnId  = string.format('Nav##%d_%d', mob.id, idx)
+            local mapBtnId  = string.format('Map##%d_%d', mob.id, idx)
 
             if ImGui.SmallButton(targBtnId) then
                 actionQueue.pendingTargetId = mob.id
+                state.statusMsg = string.format('Targeted: %s (ID: %d)', mob.cleanName, mob.id)
             end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', string.format('Target %s (ID: %d)', mob.cleanName, mob.id)) end
+
             ImGui.SameLine()
             if ImGui.SmallButton(navBtnId) then
                 actionQueue.pendingTargetId = mob.id
@@ -3392,13 +3500,17 @@ local function DrawNPCTrackerTab()
                 state.activeNavCommandTime = mq.gettime()
                 state.statusMsg = string.format('Navigating to: %s (ID: %d)', mob.cleanName, mob.id)
             end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', string.format('Navigate to %s (ID: %d)', mob.cleanName, mob.id)) end
+
             ImGui.SameLine()
             if ImGui.SmallButton(mapBtnId) then
                 viewport.centerEqX = mob.x
                 viewport.centerEqY = mob.y
                 ctrl.followPlayer = false
-                state.activeTab = 1
+                switchToTab(1)
+                state.statusMsg = string.format('Focused map on: %s (Y: %.1f, X: %.1f)', mob.cleanName, mob.y, mob.x)
             end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', string.format('Center 2D map on %s (Y: %.1f, X: %.1f)', mob.cleanName, mob.y, mob.x)) end
         end
 
         ImGui.EndTable()
@@ -3429,6 +3541,7 @@ local function DrawSettingsTab()
     if fChanged then
         state.selectedFolderIndex = fIdx
         if state.mapFolders[fIdx] then
+            clearZoneMapCache()
             state.activeMapsDirectory = state.mapFolders[fIdx].fullPath
             loadZoneMap(state.currentZoneShort)
         end
@@ -3439,11 +3552,14 @@ local function DrawSettingsTab()
 
     ImGui.SameLine()
     if ImGui.Button('Scan / Refresh Folders##ScanFoldersBtn') then
+        clearZoneMapCache()
         scanMapFolders()
+        scanMapFiles()
         loadZoneMap(state.currentZoneShort)
     end
     ImGui.SameLine()
     if ImGui.Button('Reload Map##ReloadMapBtn') then
+        clearZoneMapCache()
         loadZoneMap(state.currentZoneShort)
     end
 
@@ -3718,7 +3834,7 @@ local function DrawTriuneMapUI()
             if rHops and rHops > 0 then
                 ImGui.SameLine()
                 if ImGui.SmallButton(string.format('Route: %d hops##AtlasRouteHopsBtn', rHops)) then
-                    state.activeTab = 2
+                    switchToTab(2)
                 end
                 if ImGui.IsItemHovered() then
                     ImGui.SetTooltip('%s', string.format('Click to view full step-by-step travel route in Atlas Tab\nFrom %s to %s (%d zone transitions)', state.currentZoneName, aName, rHops))
@@ -3776,61 +3892,58 @@ local function DrawTriuneMapUI()
         end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle side drawer for searching Points of Interest & Map Labels') end
 
-        ImGui.SameLine()
-        if ImGui.Button('Zoom -##TbZoomOut') then
-            viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.80)
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom Out (-20%)\n(Or roll Mouse Wheel Down over canvas)') end
 
-        ImGui.SameLine()
-        if ImGui.Button('Zoom +##TbZoomIn') then
-            viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom In (+25%)\n(Or roll Mouse Wheel Up over canvas)') end
 
         ImGui.Separator()
 
         -- Tab Bar
         local tabFlags = ImGuiTabBarFlags.None or 0
         if ImGui.BeginTabBar('##TriuneMapMainTabs', tabFlags) then
-            if ImGui.BeginTabItem('Map View##MapTab') then
+            local mapFlags = (state.requestedTab == 1 and ImGuiTabItemFlags and ImGuiTabItemFlags.SetSelected) or 0
+            if ImGui.BeginTabItem('Map View##MapTab', nil, mapFlags) then
                 state.activeTab = 1
                 local availW, availH = ImGui.GetContentRegionAvail()
                 local canvasHeight = math.max(80, availH - 26)
+                local tabStartPos = ImGui.GetCursorScreenPosVec()
+                local tabX = tabStartPos.x
+                local tabY = tabStartPos.y
+
                 if state.showPoiDrawer then
                     local drawerW = math.max(340, math.min(520, availW * 0.38))
                     local canvasW = availW - drawerW - 8
                     DrawMapCanvas(canvasW, canvasHeight)
-                    ImGui.SameLine()
+                    ImGui.SetCursorScreenPos(ImVec2(tabX + canvasW + 8, tabY))
                     DrawPoiDrawer(drawerW, canvasHeight)
+                    ImGui.SetCursorScreenPos(ImVec2(tabX, tabY + canvasHeight + 4))
                 else
                     DrawMapCanvas(availW, canvasHeight)
+                    ImGui.SetCursorScreenPos(ImVec2(tabX, tabY + canvasHeight + 4))
                 end
                 ImGui.EndTabItem()
             end
 
-            if ImGui.BeginTabItem('Zone Atlas##AtlasTab') then
+            local atlasFlags = (state.requestedTab == 2 and ImGuiTabItemFlags and ImGuiTabItemFlags.SetSelected) or 0
+            if ImGui.BeginTabItem('Zone Atlas##AtlasTab', nil, atlasFlags) then
                 state.activeTab = 2
                 DrawAtlasTab()
                 ImGui.EndTabItem()
             end
 
-            if ImGui.BeginTabItem('NPC Tracker##TrackerTab') then
+            local trackFlags = (state.requestedTab == 3 and ImGuiTabItemFlags and ImGuiTabItemFlags.SetSelected) or 0
+            if ImGui.BeginTabItem('NPC Tracker##TrackerTab', nil, trackFlags) then
                 state.activeTab = 3
                 DrawNPCTrackerTab()
                 ImGui.EndTabItem()
             end
 
-            if ImGui.BeginTabItem('Settings & Layers##SettingsTab') then
+            local setFlags = (state.requestedTab == 4 and ImGuiTabItemFlags and ImGuiTabItemFlags.SetSelected) or 0
+            if ImGui.BeginTabItem('Settings & Layers##SettingsTab', nil, setFlags) then
                 state.activeTab = 4
                 DrawSettingsTab()
                 ImGui.EndTabItem()
             end
 
+            state.requestedTab = nil
             ImGui.EndTabBar()
         end
 
@@ -3926,7 +4039,7 @@ while state.isRunning do
     end
 
     -- Process Throttled Background Navmesh Batch
-    if (now - navState.lastQueueProcessTime) >= 40 then
+    if (now - navState.lastQueueProcessTime) >= 80 then
         navState.lastQueueProcessTime = now
         processNavBatch()
     end
@@ -3944,7 +4057,24 @@ while state.isRunning do
         if navState.meshLoaded then
             pcall(function() mq.cmdf('/nav id %d', nid) end)
         else
-            pcall(function() mq.cmdf('/stick 10 hold id %d', nid) end)
+            pcall(function() mq.cmdf('/stick 10 id %d', nid) end)
+        end
+    end
+
+    -- Auto-stop fallback stick navigation upon arrival or if target dead
+    if state.activeNavSpawnId and state.activeNavSpawnId > 0 and not navState.meshLoaded then
+        local okSp, sp = pcall(function() return mq.TLO.Spawn(state.activeNavSpawnId) end)
+        if okSp and sp and sp() then
+            local okDist, dist = pcall(function() return sp.Distance3D() end)
+            local okDead, isDead = pcall(function() return sp.Dead() end)
+            if (okDist and dist and dist <= 12) or (okDead and isDead) then
+                pcall(function() mq.cmd('/stick off') end)
+                state.activeNavSpawnId = 0
+                state.statusMsg = (okDead and isDead) and 'Nav target died -- stopped.' or 'Arrived at destination.'
+            end
+        else
+            pcall(function() mq.cmd('/stick off') end)
+            state.activeNavSpawnId = 0
         end
     end
 

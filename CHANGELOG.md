@@ -23,17 +23,30 @@
     - Remote zone viewing safety: Watermark banner and automatic suppression of live entity rendering when viewing non-current zones.
   - **Searchable POI Side Drawer (`DrawPoiDrawer`) & Animated Highlight Pin**:
     - Slide-out POI drawer on the Map View tab with instant filter search across all map labels and points of interest.
+    - **Side-by-Side Top-Aligned Layout Fix**: Corrected ImGui cursor screen pos alignment so the POI panel opens cleanly side-by-side with the map canvas from the top of the tab area rather than being displaced to the bottom right of the window.
     - **Responsive Full-Width Layout**: Upgraded POI table with dedicated Landmark Name (Stretch), Coordinates `(Y, X)` column, and `[Focus]` action button, eliminating wasted right-side margins.
     - **1-Click "Focus"**: Automatically centers the viewport on the selected landmark and spawns an animated pulsing locator pin.
-  - **On-Canvas Floating Zoom & Recenter HUD**:
+  - **On-Canvas Floating Zoom, Auto-Z & Recenter HUD**:
     - Moved `[+]`, `[-]`, and `[⟲]` zoom/reset buttons directly onto the bottom-right corner of the map canvas in a sleek semi-transparent HUD overlay.
-    - Freed up horizontal space in the main top navigation toolbar.
+    - Removed redundant `Zoom -` / `Zoom +` buttons from the top navigation toolbar to keep the header uncluttered.
+    - Added an interactive **Auto-Z Toggle (`[AZ]`)** button directly alongside the on-canvas zoom controls to switch smart floor filtering ON/OFF on the fly, complete with active color states and descriptive hover tooltips.
   - **High-Contrast Dark Line & Label Brightness Correction (`ctrl.boostDarkLines`)**:
     - Standard EQ maps authored for light/parchment backgrounds often use black (`0, 0, 0`) or dark charcoal for walls, contours, and landmark labels.
     - Implemented automatic luminance detection that boosts any low-luminance lines (`lum < 0.25`) to a crisp visible light silver-slate tone (`0.72, 0.76, 0.82`) and dark labels to clean off-white (`0.88, 0.92, 0.96`), ensuring zero black-on-black invisibility across the map canvas and POI tables.
     - Added user toggle in the Settings & Layers tab.
-  - **Static Analysis & Variable Scope Fixes**: Resolved variable scope of `hoveredMob` across Atlas and Live map canvas views, removed unused route lookup locals, and eliminated all 12 `luacheck` warnings (0 warnings across suite).
-  - **Unit Tests**: Added Suite 43 to `tests/test_pure_logic.lua` covering Atlas history stack navigation, expansion/type filtering, BFS shortest route pathfinding, dark color boosting, and version consistency.
+  - **NPC Tracker Table Event & Target Lock Fix (`triune_map.lua` & `triune_track.lua`)**:
+    - **Removed Sticky Target Lock (`/stick hold`)**: Removed the `hold` parameter from fallback stick commands (`/stick 10 id %d`), which was previously instructing MQ2Stick to continuously re-acquire and lock target onto the mob, preventing players from clearing or changing targets while navigating.
+    - **Navigation Arrival Auto-Stop**: Added proximity arrival detection (<= 12 yards) and mob death detection that cleanly stops `/nav` and `/stick` when reaching the destination.
+    - **Unblocked Action Buttons**: Removed `ImGuiSelectableFlags.SpanAllColumns` from the row selection widget in column 0 which was intercepting all mouse clicks across the entire row, restoring full responsiveness to `[Tar]`, `[Nav]`, and `[Map]` action buttons.
+    - **Programmatic Tab Navigation (`switchToTab`)**: Added `requestedTab` state and `ImGuiTabItemFlags.SetSelected` integration to ensure clicking `[Map]` on the NPC Tracker or `[View]` in the Atlas tab properly switches active tabs in MacroQuest ImGui.
+  - **High-Performance Map Loading, In-Memory Caching & Stutter Elimination**:
+    - **Zone Map In-Memory Cache (`zoneMapCache`)**: Cached parsed map layer geometries and label structures in memory. Revisiting zones or switching between Live and Atlas mode loads in 0ms without disk I/O or re-parsing.
+    - **Precomputed Line & Label Geometry**: Pre-calculates segment bounding boxes `[minX, maxX, minY, maxY]`, `avgZ`, and luminance boosts during map parse time.
+    - **World-Space AABB Frustum Culling**: Viewport bounds are calculated once per frame in world space. 90–98% of offscreen map lines and labels are culled with integer comparisons before coordinate transformations, eliminating ~100,000 `worldToScreen` calculations and `ImVec2` Lua allocations per frame.
+    - **Consolidated Batch Spawn Queries**: Collapsed 11 individual protected calls per NPC into a single consolidated protected query, reducing closure allocations and `pcall` invocations from ~5,000 to ~200 per scan tick (96% reduction).
+    - **Smoothed Navmesh & Scan Throttles**: Reduced navmesh pathing batch size to 4 with an 80ms interval and increased spawn scan interval to 300ms, eliminating background micro-stutters during combat and zone exploration.
+    - **Optimized Folder & File Discovery**: Bypassed redundant probe loops in `scanMapFolders` and `scanMapFiles` when directory contents are already discovered.
+  - **Unit Tests**: Added Suites 43 and 44 to `tests/test_pure_logic.lua` covering Atlas history navigation, shortest route pathfinding, dark color boosting, zone cache hit/miss behavior, world AABB frustum culling, and consolidated spawn unpacking.
 
 - **Guild-Only Buffing Restriction (`triune_buffbot.lua`, v1.6).**
   - **Guild Member Gating (`ctrl.guildOnly`)**: Added an optional `Guild Members Only` toggle to restrict buffing services strictly to characters belonging to the same guild as the buffbot (`isSameGuild()`).

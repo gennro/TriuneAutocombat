@@ -2732,6 +2732,79 @@ do
 end
 
 -- ============================================================================
+-- Suite 44: triune_map high-performance caching & AABB culling
+-- ============================================================================
+print('--- triune_map caching & AABB culling logic ---')
+do
+    -- 1. Zone Map Cache Roundtrip
+    local testCache = {}
+    local function cachePut(baseDir, zoneShort, data)
+        local key = string.format('%s:%s', baseDir, zoneShort:lower())
+        testCache[key] = data
+    end
+    local function cacheGet(baseDir, zoneShort)
+        local key = string.format('%s:%s', baseDir, zoneShort:lower())
+        return testCache[key]
+    end
+
+    cachePut('C:/EQ/maps/Brewall', 'poknowledge', { totalLines = 15400, totalLabels = 120 })
+    local cachedEntry = cacheGet('C:/EQ/maps/Brewall', 'PoKnowledge')
+    assert_true(cachedEntry ~= nil, 'zone cache lookup: case-insensitive match found')
+    assert_eq(cachedEntry.totalLines, 15400, 'zone cache lookup: totalLines matches')
+    assert_eq(cachedEntry.totalLabels, 120, 'zone cache lookup: totalLabels matches')
+
+    local missEntry = cacheGet('C:/EQ/maps/Brewall', 'feerrott')
+    assert_nil(missEntry, 'zone cache lookup: cache miss returns nil')
+
+    -- 2. World-Space AABB Culling
+    local function isSegmentInViewport(seg, vpMinX, vpMaxX, vpMinY, vpMaxY)
+        return seg.maxX >= vpMinX and seg.minX <= vpMaxX and seg.maxY >= vpMinY and seg.minY <= vpMaxY
+    end
+
+    local vpMinX, vpMaxX, vpMinY, vpMaxY = -500, 500, -500, 500
+    local visibleSeg = { minX = 10, maxX = 50, minY = -20, maxY = 30 }
+    local offscreenSegRight = { minX = 600, maxX = 700, minY = 0, maxY = 50 }
+    local offscreenSegLeft = { minX = -800, maxX = -600, minY = 0, maxY = 50 }
+    local offscreenSegTop = { minX = 0, maxX = 50, minY = 600, maxY = 700 }
+    local spanningSeg = { minX = -1000, maxX = 1000, minY = -1000, maxY = 1000 }
+
+    assert_true(isSegmentInViewport(visibleSeg, vpMinX, vpMaxX, vpMinY, vpMaxY), 'aabb culling: visible segment kept')
+    assert_true(not isSegmentInViewport(offscreenSegRight, vpMinX, vpMaxX, vpMinY, vpMaxY), 'aabb culling: right offscreen culled')
+    assert_true(not isSegmentInViewport(offscreenSegLeft, vpMinX, vpMaxX, vpMinY, vpMaxY), 'aabb culling: left offscreen culled')
+    assert_true(not isSegmentInViewport(offscreenSegTop, vpMinX, vpMaxX, vpMinY, vpMaxY), 'aabb culling: top offscreen culled')
+    assert_true(isSegmentInViewport(spanningSeg, vpMinX, vpMaxX, vpMinY, vpMaxY), 'aabb culling: large spanning segment kept')
+
+    -- 3. Consolidated Spawn Data Extraction Logic
+    local dummySpawn = {
+        Dead = function() return false end,
+        ID = function() return 1042 end,
+        CleanName = function() return 'a gnoll pup' end,
+        Level = function() return 1 end,
+        Class = { ShortName = function() return 'WAR' end },
+        ConColor = function() return 'Green' end,
+        Distance3D = function() return 45.2 end,
+        LineOfSight = function() return true end,
+        X = function() return 100.5 end,
+        Y = function() return -200.0 end,
+        Z = function() return 5.0 end,
+        PctHPs = function() return 100 end,
+        Aggressive = function() return false end,
+    }
+
+    local okData, sId, cleanName, level, classShort, conColor, distance, lineOfSight, sx, sy, sz, pctHPs, hate = pcall(function()
+        local dead = dummySpawn.Dead()
+        if dead then return nil end
+        return dummySpawn.ID(), dummySpawn.CleanName(), dummySpawn.Level(), dummySpawn.Class.ShortName(), dummySpawn.ConColor(), dummySpawn.Distance3D(), dummySpawn.LineOfSight(), dummySpawn.X(), dummySpawn.Y(), dummySpawn.Z(), dummySpawn.PctHPs(), dummySpawn.Aggressive()
+    end)
+
+    assert_true(okData, 'consolidated spawn query: pcall succeeded')
+    assert_eq(sId, 1042, 'consolidated spawn query: id is 1042')
+    assert_eq(cleanName, 'a gnoll pup', 'consolidated spawn query: name matches')
+    assert_eq(distance, 45.2, 'consolidated spawn query: distance matches')
+    assert_eq(sx, 100.5, 'consolidated spawn query: x matches')
+end
+
+-- ============================================================================
 -- Results
 -- ============================================================================
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

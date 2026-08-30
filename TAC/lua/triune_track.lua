@@ -116,6 +116,7 @@ local state = {
     -- Thread Safety Action Queues (executed in main coroutine loop)
     pendingTargetId = 0,
     pendingNavId = 0,
+    activeNavId = 0,
     activeNavTargetName = '',
     statusMsg = 'Ready',
 }
@@ -325,6 +326,7 @@ local function DrawTrackerUI()
             pcall(function() mq.cmd('/stick off') end)
             state.statusMsg = "Navigation halted by user."
             state.activeNavTargetName = ""
+            state.activeNavId = 0
         end
         ImGui.SameLine()
         if ImGui.Button("Refresh List##RefreshBtn") then
@@ -403,25 +405,30 @@ local function DrawTrackerUI()
 
                 local isSelected = (mob.id == currentTargetId)
 
-                -- Column 1: Clean Name (First Column)
+                -- Column 1: Clean Name (Interactive row selectable)
                 ImGui.TableSetColumnIndex(0)
                 local conStyle = getConStyle(mob.conColor)
+                local namePrefix = isSelected and "> " or ""
+                local nameLabel = string.format("%s%s##TrackMob_%d_%d", namePrefix, mob.cleanName, mob.id, idx)
                 if isSelected then
-                    ImGui.TextColored(0.3, 0.9, 1.0, 1.0, "> " .. mob.cleanName)
+                    ImGui.PushStyleColor(ImGuiCol.Text, 0.3, 0.9, 1.0, 1.0)
                 else
-                    ImGui.Text(mob.cleanName)
+                    ImGui.PushStyleColor(ImGuiCol.Text, conStyle.r, conStyle.g, conStyle.b, 1.0)
                 end
-
-                -- Enable row double-click selection across column 1
-                local rowLabel = string.format("##Row_%d_%d", mob.id, idx)
-                ImGui.SameLine()
-                if ImGui.Selectable(rowLabel, isSelected, bit.bor(ImGuiSelectableFlags.SpanAllColumns or 0, ImGuiSelectableFlags.AllowDoubleClick or 0)) then
+                if ImGui.Selectable(nameLabel, isSelected, ImGuiSelectableFlags.AllowDoubleClick or 0) then
                     if ImGui.IsMouseDoubleClicked(0) then
                         state.pendingTargetId = mob.id
                         state.pendingNavId = mob.id
                         state.activeNavTargetName = mob.cleanName
                         state.statusMsg = string.format("Queued Target & Nav to: %s (ID: %d)", mob.cleanName, mob.id)
+                    else
+                        state.pendingTargetId = mob.id
+                        state.statusMsg = string.format("Queued Target: %s (ID: %d)", mob.cleanName, mob.id)
                     end
+                end
+                ImGui.PopStyleColor()
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip("%s", string.format("%s (Level %d %s)\n[Click] Target  |  [Double-Click] Navigate", mob.cleanName, mob.level, mob.class))
                 end
 
                 -- Column 2: Level
@@ -514,11 +521,33 @@ while state.isRunning do
     if state.pendingNavId > 0 then
         local nid = state.pendingNavId
         state.pendingNavId = 0
+        state.activeNavId = nid
         local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
         if meshOk and meshLoaded then
             pcall(function() mq.cmdf('/nav id %d', nid) end)
         else
-            pcall(function() mq.cmdf('/stick 10 hold id %d', nid) end)
+            pcall(function() mq.cmdf('/stick 10 id %d', nid) end)
+        end
+    end
+
+    -- Auto-stop navigation upon arrival or if target died/invalidated
+    if state.activeNavId > 0 then
+        local okSp, sp = pcall(function() return mq.TLO.Spawn(state.activeNavId) end)
+        if okSp and sp and sp() then
+            local okDist, dist = pcall(function() return sp.Distance3D() end)
+            local okDead, isDead = pcall(function() return sp.Dead() end)
+            if (okDist and dist and dist <= 12) or (okDead and isDead) then
+                pcall(function() mq.cmd('/nav stop') end)
+                pcall(function() mq.cmd('/stick off') end)
+                state.activeNavId = 0
+                state.activeNavTargetName = ''
+                state.statusMsg = (okDead and isDead) and 'Nav target died -- stopped.' or 'Arrived at destination.'
+            end
+        else
+            pcall(function() mq.cmd('/nav stop') end)
+            pcall(function() mq.cmd('/stick off') end)
+            state.activeNavId = 0
+            state.activeNavTargetName = ''
         end
     end
 
