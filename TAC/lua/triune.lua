@@ -6230,13 +6230,6 @@ function UI.drawControlTab()
             ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
             if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
 
-            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##pullerHunt',
-                ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
-            if ImGui.IsItemHovered() then
-                ImGui.SetTooltip(
-                    'While traveling to a distant target, check once for newly visible or spawning NPCs\nthat are significantly closer and switch to them.')
-            end
-
             ImGui.SetNextItemWidth(180)
             ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##pullerHuntXtar', ctrl.xtar_nav_dist or 150, 25,
                 300)
@@ -6319,9 +6312,6 @@ function UI.drawControlTab()
             ImGui.SetNextItemWidth(180)
             ctrl.pull_max_level = ImGui.SliderInt('Max NPC Level', ctrl.pull_max_level or 100, 1, 100)
             if ctrl.pull_min_level > ctrl.pull_max_level then ctrl.pull_min_level = ctrl.pull_max_level end
-
-            ctrl.check_closer_mobs = ImGui.Checkbox('Check for Closer NPCs while Traveling##pullerCampClose',
-                ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs)
 
             ImGui.SetNextItemWidth(180)
             ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##pullerCampXtar', ctrl.xtar_nav_dist or 150, 25,

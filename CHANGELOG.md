@@ -2,6 +2,9 @@
 
 ## 2026-08-30
 
+- **Control Tab UI Streamlining (`triune.lua`).**
+  - **Removed Redundant Closer-Mobs Checkboxes**: Removed the duplicate `Check for Closer NPCs while Traveling` checkboxes from the `Hunter` and `Camp` submode sections on the Control tab, consolidating closer-target movement configuration onto the dedicated `Closer-NPC Retargeting During Movement` section on the Settings tab.
+
 - **Dedicated Cooldowns Tab & Shared Popout Integration (`triune.lua`).**
   - **New Cooldowns Tab (`UI.drawCooldownsTab`)**: Added a dedicated `Cooldowns` tab directly in the main Triune window positioned right after the `AAs` tab (Status -> Control -> Settings -> Spell Gems -> Abilities -> AAs -> **Cooldowns** -> Disciplines -> Clickies -> Help).
   - **Shared Collision-Free Cooldown UI (`UI.renderCooldownContent`)**: Refactored the live ability, AA, discipline, spell, and clickie cooldown monitoring view into a unified renderer accepting unique ImGui ID suffixes (`_tab` vs `_win`), preventing ID collisions and input freezing when both the main window tab and the floating popout window are active simultaneously.
