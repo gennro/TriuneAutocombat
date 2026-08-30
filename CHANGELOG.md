@@ -2,6 +2,20 @@
 
 ## 2026-08-30
 
+- **Compact Map UI & Floating Bottom Control Dock (`triune_map.lua`).**
+  - **Removed Redundant Top Toolbar**: Eliminated the top text bar and metrics header above the tab bar so the tabs start flush at the top of the window, maximizing vertical map canvas viewing area.
+  - **Unified Floating Canvas Control Dock (`##MapControlOverlayChild`)**: Relocated the `Follow` checkbox, `Center Me` / `Center Map`, `POIs` drawer toggle, `Stop Nav`, and `Live Zone` return buttons down into a sleek floating 2-row bottom-right overlay dock alongside `+`, `-`, `⟲`, and `AZ` controls.
+  - **Larger Button Hitboxes & Double-Click Exclusion**: Increased button dimensions from 24px to 28px/26px and expanded the hitbox exclusion barrier so double-clicking on or near on-canvas control buttons never triggers accidental ground navigation or mob targeting on the underlying map canvas.
+  - **ImGui Style Stack Balance Guard**: Fixed a state-flip condition on the POIs button where toggling `state.showPoiDrawer` during the click callback caused `PopStyleColor` to be called without a preceding push, eliminating the `Calling PopStyleColor() too many times!` crash.
+
+- **Left-Click Only Map Panning (`triune_map.lua`).**
+  - **Restricted Viewport Drag Panning**: Updated viewport drag panning to trigger strictly when holding down the primary Left Mouse Button (`isItemActive and ImGui.IsMouseDown(0)` without Ctrl held), removing right-click panning initiation and right-click drag tracking.
+
+- **Interactive Mouse Wheel Zoom Fix (`triune_map.lua`).**
+  - **Scrollable Child Window Region (`##MapCanvasScrollRegion`)**: Enclosed the 2D map canvas in a dedicated child window container with virtual scroll content height (`SetNextWindowContentSize`) and baseline scroll midpoint tracking (`ImGui.GetScrollY`), replacing the unsupported `io.MouseWheel` query (which is not bound on MacroQuest's `ImGuiIO` Lua usertype) with native ImGui scroll delta capture.
+  - **Window Scroll Flag Unlocking**: Removed `ImGuiWindowFlags.NoScrollWithMouse` from the top-level main window flags so mouse wheel scroll events cleanly reach the canvas viewport and inner scrollable list panes.
+  - **Cursor-Centered Smooth Zooming**: Restored smooth zooming in (wheel up) and zooming out (wheel down) centered on the active mouse cursor coordinate.
+
 - **ImGui Window Layout Streamlining & Spacing Cleanup (`triune.lua`).**
   - **Removed Extraneous Dummy Spacing**: Removed 77 redundant `ImGui.Dummy(0, N)` and `ImGui.Dummy(N, 0)` spacers across all tabs (Status, Control, Settings, Gems, Clickies, Abilities, AAs, Discs, Help, and Class Picker), relying on natural theme item spacing for consistent, uncluttered padding.
   - **Streamlined Action Controls Bar (`UI.drawActionControls`)**: Compacted `START`/`PAUSE` and `BURN` buttons to sleek 130x24 standard dimensions with direct `ImGui.SameLine()` alignment right above the tab bar.

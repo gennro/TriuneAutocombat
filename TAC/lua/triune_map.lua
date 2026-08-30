@@ -225,6 +225,7 @@ local state = {
     dirtySettingsTime   = 0,
 
     -- Tooltip & Mouse Hover State
+    mapCanvasInitScroll = false,
     hoveredMobId        = 0,
     cursorWorldX        = 0,
     cursorWorldY        = 0,
@@ -2085,11 +2086,35 @@ end
 -- 2D MAP CANVAS RENDERING
 -- ============================================================================
 local function DrawMapCanvas(availW, availH)
+    local sf = state.smartFloor
+
+    -- Enclose canvas in a dedicated child window to capture native ImGui mouse wheel scrolling
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 0, 0)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0, 0, 0, 0)
+    local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoMove or 0)
+    local baseScroll = 500
+    ImGui.SetNextWindowContentSize(availW, availH + (baseScroll * 2))
+    local openChild = ImGui.BeginChild('##MapCanvasScrollRegion', ImVec2(availW, availH), false, childFlags)
+    if not openChild then
+        ImGui.EndChild()
+        ImGui.PopStyleColor(1)
+        ImGui.PopStyleVar(1)
+        return
+    end
+
+    local currentScroll = ImGui.GetScrollY()
+    if not state.mapCanvasInitScroll then
+        ImGui.SetScrollY(baseScroll)
+        state.mapCanvasInitScroll = true
+        currentScroll = baseScroll
+    end
+    local scrollDelta = baseScroll - currentScroll
+    ImGui.SetScrollY(baseScroll)
+
     local drawList = ImGui.GetWindowDrawList()
-    local canvasPos = ImGui.GetCursorScreenPosVec()
+    local canvasPos = ImGui.GetWindowPosVec()
     local cX = canvasPos.x
     local cY = canvasPos.y
-    local sf = state.smartFloor
 
     -- Widget dimensions & hitbox exclusions
     local navW = (sf and sf.overrideOffset ~= 0) and 290 or 220
@@ -2097,13 +2122,14 @@ local function DrawMapCanvas(availW, availH)
     local badgeX = cX + availW - navW - 10
     local badgeY = cY + 10
 
-    local zoomBtnSize = 24
-    local zoomPanelW = zoomBtnSize + 10
-    local zoomPanelH = (zoomBtnSize * 4) + 20
+    local zoomBtnSize = 28
+    local zoomPanelW = (state.viewMode == 'ATLAS') and 250 or 255
+    local zoomPanelH = 72
     local zoomX = cX + availW - zoomPanelW - 10
     local zoomY = cY + availH - zoomPanelH - 10
 
     -- Invisible button to capture mouse inputs over canvas
+    ImGui.SetCursorScreenPos(canvasPos)
     ImGui.InvisibleButton('##MapCanvasHitbox', availW, availH)
     local isItemHovered = ImGui.IsItemHovered()
     local isItemActive = ImGui.IsItemActive()
@@ -2111,38 +2137,25 @@ local function DrawMapCanvas(availW, availH)
     -- Coordinate under cursor
     local mousePos = ImGui.GetMousePosVec()
     local isMouseOverCanvas = (mousePos.x >= cX and mousePos.x <= cX + availW and mousePos.y >= cY and mousePos.y <= cY + availH)
-    local isHovered = isItemHovered or isMouseOverCanvas
+    local isHovered = isItemHovered or isMouseOverCanvas or ImGui.IsWindowHovered()
 
     if isHovered then
         state.cursorWorldX, state.cursorWorldY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
     end
 
-    local isOverFloorPill = (ctrl.zFilterMode ~= 3 and mousePos.x >= badgeX and mousePos.x <= badgeX + navW and mousePos.y >= badgeY and mousePos.y <= badgeY + navH)
-    local isOverZoomWidget = (mousePos.x >= zoomX and mousePos.x <= zoomX + zoomPanelW and mousePos.y >= zoomY and mousePos.y <= zoomY + zoomPanelH)
+    local isOverFloorPill = (ctrl.zFilterMode ~= 3 and mousePos.x >= badgeX - 4 and mousePos.x <= badgeX + navW + 4 and mousePos.y >= badgeY - 4 and mousePos.y <= badgeY + navH + 4)
+    local isOverZoomWidget = (mousePos.x >= zoomX - 6 and mousePos.x <= zoomX + zoomPanelW + 6 and mousePos.y >= zoomY - 6 and mousePos.y <= zoomY + zoomPanelH + 6)
 
-    -- Safe IO check for MouseWheel & KeyCtrl
+    -- Safe IO check for KeyCtrl
     local hasCtrl = false
-    local wheelVal = 0
     local okIO, io = pcall(ImGui.GetIO)
     if okIO and io then
         pcall(function() if io.KeyCtrl then hasCtrl = true end end)
-        local okW, w = pcall(function() return io.MouseWheel end)
-        if okW and type(w) == 'number' and w ~= 0 then
-            wheelVal = w
-        end
     end
 
-    -- Handle Drag Panning (Ignored when clicking overlay widgets)
+    -- Handle Drag Panning (Only on held down left click, ignored when clicking overlay widgets)
     if isHovered and not isOverFloorPill and not isOverZoomWidget then
-        if ImGui.IsMouseClicked(1) then
-            -- Right click starts pan
-            viewport.isDragging = true
-            viewport.dragStartMouseX = mousePos.x
-            viewport.dragStartMouseY = mousePos.y
-            viewport.dragStartCenterEqX = viewport.centerEqX
-            viewport.dragStartCenterEqY = viewport.centerEqY
-        elseif isItemActive and ImGui.IsMouseDown(0) and not hasCtrl then
-            -- Left click drag also pans if not clicking entity or overlay
+        if isItemActive and ImGui.IsMouseDown(0) and not hasCtrl then
             if not viewport.isDragging then
                 viewport.isDragging = true
                 viewport.dragStartMouseX = mousePos.x
@@ -2154,7 +2167,7 @@ local function DrawMapCanvas(availW, availH)
     end
 
     if viewport.isDragging then
-        if ImGui.IsMouseDown(0) or ImGui.IsMouseDown(1) then
+        if ImGui.IsMouseDown(0) then
             local dx = mousePos.x - viewport.dragStartMouseX
             local dy = mousePos.y - viewport.dragStartMouseY
             local z = math.max(viewport.zoom, 0.001)
@@ -2167,9 +2180,9 @@ local function DrawMapCanvas(availW, availH)
     end
 
     -- Handle Mouse Wheel Zoom (Centering zoom on mouse cursor)
-    if isMouseOverCanvas and wheelVal ~= 0 then
+    if isMouseOverCanvas and scrollDelta ~= 0 and not isOverFloorPill and not isOverZoomWidget then
         local oldZoom = viewport.zoom
-        local factor = (wheelVal > 0) and 1.20 or 0.80
+        local factor = (scrollDelta > 0) and 1.20 or 0.80
         local newZoom = math.max(viewport.minZoom, math.min(viewport.maxZoom, oldZoom * factor))
 
         if newZoom ~= oldZoom then
@@ -2580,7 +2593,7 @@ local function DrawMapCanvas(availW, availH)
         end
 
         -- Ground Click-to-Move Navigation (Double-click or Ctrl+Left click on empty terrain)
-        if isHovered and not hoveredMob then
+        if isHovered and not hoveredMob and not isOverFloorPill and not isOverZoomWidget then
             if ImGui.IsMouseDoubleClicked(0) or (ImGui.IsMouseClicked(0) and hasCtrl) then
                 local clickX, clickY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
                 actionQueue.pendingNavLoc = { y = clickY, x = clickX, z = playerZ }
@@ -2744,30 +2757,33 @@ local function DrawMapCanvas(availW, availH)
         ImGui.PopStyleColor(2)
     end
 
-    -- On-Canvas Floating Zoom Control Widget (Bottom-Right)
+    -- On-Canvas Floating Control Widget (Bottom-Right)
     ImGui.SetCursorScreenPos(ImVec2(zoomX, zoomY))
     ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90)
     ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
     ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
     ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
     local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
-    if ImGui.BeginChild('##MapZoomOverlayChild', ImVec2(zoomPanelW, zoomPanelH), true, childFlags) then
-        if ImGui.Button('+##CanvasZoomIn', ImVec2(zoomBtnSize, zoomBtnSize)) then
-            viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom In (+25%)\n(Or roll Mouse Wheel Up)') end
+    if ImGui.BeginChild('##MapControlOverlayChild', ImVec2(zoomPanelW, zoomPanelH), true, childFlags) then
+        if state.viewMode == 'LIVE' then
+            -- Row 1: Zoom In, Zoom Out, Reset, Auto-Z, Follow Checkbox
+            if ImGui.Button('+##CanvasZoomIn', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom In (+25%)\n(Or roll Mouse Wheel Up)') end
 
-        if ImGui.Button('-##CanvasZoomOut', ImVec2(zoomBtnSize, zoomBtnSize)) then
-            viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.80)
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom Out (-20%)\n(Or roll Mouse Wheel Down)') end
+            ImGui.SameLine()
+            if ImGui.Button('-##CanvasZoomOut', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.80)
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom Out (-20%)\n(Or roll Mouse Wheel Down)') end
 
-        if ImGui.Button('⟲##CanvasZoomReset', ImVec2(zoomBtnSize, zoomBtnSize)) then
-            if state.viewMode == 'LIVE' then
+            ImGui.SameLine()
+            if ImGui.Button('⟲##CanvasZoomReset', ImVec2(zoomBtnSize, zoomBtnSize)) then
                 viewport.zoom = 1.0
                 local okX, meX = pcall(function() return mq.TLO.Me.X() end)
                 local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
@@ -2776,7 +2792,107 @@ local function DrawMapCanvas(availW, availH)
                     viewport.centerEqY = meY
                     ctrl.followPlayer = true
                 end
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset Zoom & Center on Player') end
+
+            ImGui.SameLine()
+            local isAutoZ = (ctrl.zFilterMode ~= 3)
+            if isAutoZ then
+                ImGui.PushStyleColor(ImGuiCol.Text, 0.25, 0.95, 0.40, 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.32, 0.22, 0.85)
             else
+                ImGui.PushStyleColor(ImGuiCol.Text, 0.60, 0.60, 0.65, 0.70)
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.18, 0.22, 0.70)
+            end
+            if ImGui.Button('AZ##CanvasToggleAutoZ', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                if ctrl.zFilterMode == 3 then
+                    ctrl.zFilterMode = 1
+                else
+                    ctrl.zFilterMode = 3
+                end
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            ImGui.PopStyleColor(2)
+            if ImGui.IsItemHovered() then
+                local modeDesc = (ctrl.zFilterMode == 1 and 'Auto-Z (Smart Floor Isolation: ON)')
+                    or (ctrl.zFilterMode == 2 and 'Manual Z-Window: ON')
+                    or 'Disabled (Show All Elevations)'
+                ImGui.SetTooltip('%s', string.format('Auto-Z Floor Filtering: %s\nMode: %s\n[Click] %s',
+                    (ctrl.zFilterMode ~= 3 and 'ON' or 'OFF'),
+                    modeDesc,
+                    (ctrl.zFilterMode ~= 3 and 'Turn Auto-Z OFF (Show All Elevations)' or 'Turn Auto-Z ON (Smart Floor Isolation)')
+                ))
+            end
+
+            ImGui.SameLine()
+            local fp, cfp = ImGui.Checkbox('Follow##CanvasFollowCheck', ctrl.followPlayer)
+            if cfp then ctrl.followPlayer = fp end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Auto-follow player location while moving') end
+
+            -- Row 2: Center Me, POIs Drawer, Stop Nav
+            if ImGui.Button('Center Me##CanvasCenterMe', ImVec2(80, 26)) then
+                local okX, meX = pcall(function() return mq.TLO.Me.X() end)
+                local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
+                if okX and okY and meX and meY then
+                    viewport.centerEqX = meX
+                    viewport.centerEqY = meY
+                    ctrl.followPlayer = true
+                end
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Center map on player location and enable follow') end
+
+            ImGui.SameLine()
+            local poiBtnText = state.showPoiDrawer and 'POIs [ON]##CanvasTogglePoi' or 'POIs##CanvasTogglePoi'
+            local isPoiOpen = state.showPoiDrawer
+            if isPoiOpen then
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.15, 0.35, 0.50, 0.90)
+            end
+            if ImGui.Button(poiBtnText, ImVec2(72, 26)) then
+                state.showPoiDrawer = not state.showPoiDrawer
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if isPoiOpen then ImGui.PopStyleColor(1) end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle side drawer for Points of Interest & Map Labels') end
+
+            ImGui.SameLine()
+            local isNavActive = (state.activeNavLoc ~= nil) or (state.activeNavSpawnId and state.activeNavSpawnId > 0)
+            if isNavActive then
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.55, 0.15, 0.15, 0.90)
+            end
+            if ImGui.Button('Stop Nav##CanvasStopNav', ImVec2(80, 26)) then
+                actionQueue.pendingStopNav = true
+                state.activeNavLoc = nil
+                state.activeNavSpawnId = 0
+                state.activeNavCommandTime = 0
+                state.statusMsg = 'Navigation stopped.'
+            end
+            if isNavActive then ImGui.PopStyleColor(1) end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Halt active navigation and stick routing') end
+
+        else
+            -- ATLAS MODE
+            -- Row 1: Zoom In, Zoom Out, Reset, Auto-Z, History Back, History Forward
+            if ImGui.Button('+##CanvasZoomIn', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                viewport.zoom = math.min(viewport.maxZoom, viewport.zoom * 1.25)
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom In (+25%)\n(Or roll Mouse Wheel Up)') end
+
+            ImGui.SameLine()
+            if ImGui.Button('-##CanvasZoomOut', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                viewport.zoom = math.max(viewport.minZoom, viewport.zoom * 0.80)
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Zoom Out (-20%)\n(Or roll Mouse Wheel Down)') end
+
+            ImGui.SameLine()
+            if ImGui.Button('⟲##CanvasZoomReset', ImVec2(zoomBtnSize, zoomBtnSize)) then
                 viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
                 viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
                 local spanX = math.abs(mapData.bounds.maxX - mapData.bounds.minX)
@@ -2785,40 +2901,76 @@ local function DrawMapCanvas(availW, availH)
                 if maxSpan > 50 then
                     viewport.zoom = math.max(viewport.minZoom, math.min(1.2, 700 / maxSpan))
                 end
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
             end
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset View & Zoom to Default Center') end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset View & Zoom to Full Zone Bounds') end
 
-        -- Auto-Z Floor Filtering Toggle Button (AZ)
-        local isAutoZ = (ctrl.zFilterMode ~= 3)
-        if isAutoZ then
-            ImGui.PushStyleColor(ImGuiCol.Text, 0.25, 0.95, 0.40, 1.0)
-            ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.32, 0.22, 0.85)
-        else
-            ImGui.PushStyleColor(ImGuiCol.Text, 0.60, 0.60, 0.65, 0.70)
-            ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.18, 0.22, 0.70)
-        end
-        if ImGui.Button('AZ##CanvasToggleAutoZ', ImVec2(zoomBtnSize, zoomBtnSize)) then
-            if ctrl.zFilterMode == 3 then
-                ctrl.zFilterMode = 1
+            ImGui.SameLine()
+            local isAutoZ = (ctrl.zFilterMode ~= 3)
+            if isAutoZ then
+                ImGui.PushStyleColor(ImGuiCol.Text, 0.25, 0.95, 0.40, 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.32, 0.22, 0.85)
             else
-                ctrl.zFilterMode = 3
+                ImGui.PushStyleColor(ImGuiCol.Text, 0.60, 0.60, 0.65, 0.70)
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.18, 0.22, 0.70)
             end
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        ImGui.PopStyleColor(2)
-        if ImGui.IsItemHovered() then
-            local modeDesc = (ctrl.zFilterMode == 1 and 'Auto-Z (Smart Floor Isolation: ON)')
-                or (ctrl.zFilterMode == 2 and 'Manual Z-Window: ON')
-                or 'Disabled (Show All Elevations)'
-            ImGui.SetTooltip('%s', string.format('Auto-Z Floor Filtering: %s\nMode: %s\n[Click] %s',
-                (ctrl.zFilterMode ~= 3 and 'ON' or 'OFF'),
-                modeDesc,
-                (ctrl.zFilterMode ~= 3 and 'Turn Auto-Z OFF (Show All Elevations)' or 'Turn Auto-Z ON (Smart Floor Isolation)')
-            ))
+            if ImGui.Button('AZ##CanvasToggleAutoZ', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                if ctrl.zFilterMode == 3 then
+                    ctrl.zFilterMode = 1
+                else
+                    ctrl.zFilterMode = 3
+                end
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            ImGui.PopStyleColor(2)
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle Auto-Z Floor Filtering') end
+
+            ImGui.SameLine()
+            local canBack = (state.atlasHistoryIdx > 1)
+            if not canBack then ImGui.BeginDisabled() end
+            if ImGui.Button('<##CanvasAtlasBack', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                atlasHistoryBack()
+            end
+            if not canBack then ImGui.EndDisabled() end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Previous zone in Atlas history') end
+
+            ImGui.SameLine()
+            local canFwd = (state.atlasHistoryIdx < #state.atlasHistory)
+            if not canFwd then ImGui.BeginDisabled() end
+            if ImGui.Button('>##CanvasAtlasFwd', ImVec2(zoomBtnSize, zoomBtnSize)) then
+                atlasHistoryForward()
+            end
+            if not canFwd then ImGui.EndDisabled() end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Next zone in Atlas history') end
+
+            -- Row 2: Center Map, POIs Drawer, Live Zone
+            if ImGui.Button('Center Map##CanvasCenterAtlas', ImVec2(80, 26)) then
+                viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
+                viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Center map on full zone bounds') end
+
+            ImGui.SameLine()
+            local poiBtnText = state.showPoiDrawer and 'POIs [ON]##CanvasTogglePoi' or 'POIs##CanvasTogglePoi'
+            local isPoiOpen = state.showPoiDrawer
+            if isPoiOpen then
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.15, 0.35, 0.50, 0.90)
+            end
+            if ImGui.Button(poiBtnText, ImVec2(72, 26)) then
+                state.showPoiDrawer = not state.showPoiDrawer
+                state.dirtySettings = true
+                state.dirtySettingsTime = mq.gettime()
+            end
+            if isPoiOpen then ImGui.PopStyleColor(1) end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle side drawer for Points of Interest & Map Labels') end
+
+            ImGui.SameLine()
+            if ImGui.Button('Live Zone##CanvasReturnLive', ImVec2(80, 26)) then
+                returnToLiveZone()
+            end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Return to active zone and resume live player tracking') end
         end
     end
     ImGui.EndChild()
@@ -2856,6 +3008,10 @@ local function DrawMapCanvas(availW, availH)
         )
         ImGui.SetTooltip('%s', tt)
     end
+
+    ImGui.EndChild()
+    ImGui.PopStyleColor(1)
+    ImGui.PopStyleVar(1)
 end
 
 -- ============================================================================
@@ -3781,8 +3937,7 @@ local function DrawTriuneMapUI()
     pushTheme()
 
     local windowFlags = bit.bor(
-        ImGuiWindowFlags.NoScrollbar or 0,
-        ImGuiWindowFlags.NoScrollWithMouse or 0
+        ImGuiWindowFlags.NoScrollbar or 0
     )
     -- Omit NoCollapse so WindowRounding token applies rounded corners cleanly
     windowFlags = bit.band(windowFlags, bit.bnot(ImGuiWindowFlags.NoCollapse or 0))
@@ -3800,105 +3955,6 @@ local function DrawTriuneMapUI()
     end
 
     if draw then
-        -- Top Toolbar & Navigation Bar
-        if state.viewMode == 'ATLAS' then
-            ImGui.TextColored(1.0, 0.85, 0.20, 1.0, '[ATLAS MODE]')
-            ImGui.SameLine()
-            local canBack = (state.atlasHistoryIdx > 1)
-            if not canBack then ImGui.BeginDisabled() end
-            if ImGui.SmallButton('<##AtlasBackBtn') then
-                atlasHistoryBack()
-            end
-            if not canBack then ImGui.EndDisabled() end
-            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Previous zone in Atlas history') end
-
-            ImGui.SameLine()
-            local canFwd = (state.atlasHistoryIdx < #state.atlasHistory)
-            if not canFwd then ImGui.BeginDisabled() end
-            if ImGui.SmallButton('>##AtlasFwdBtn') then
-                atlasHistoryForward()
-            end
-            if not canFwd then ImGui.EndDisabled() end
-            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Next zone in Atlas history') end
-
-            ImGui.SameLine()
-            ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Zone:')
-            ImGui.SameLine()
-            local aName = (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort
-            ImGui.Text(string.format('%s (%s)', aName, state.atlasZoneShort))
-
-            ImGui.SameLine()
-            if ImGui.Button('Return to Live##ReturnLiveBtn') then
-                returnToLiveZone()
-            end
-            if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Return to active zone and resume live player tracking') end
-
-            local _, rHops = findZoneRoute(state.currentZoneShort, state.atlasZoneShort)
-            if rHops and rHops > 0 then
-                ImGui.SameLine()
-                if ImGui.SmallButton(string.format('Route: %d hops##AtlasRouteHopsBtn', rHops)) then
-                    switchToTab(2)
-                end
-                if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('%s', string.format('Click to view full step-by-step travel route in Atlas Tab\nFrom %s to %s (%d zone transitions)', state.currentZoneName, aName, rHops))
-                end
-            end
-        else
-            ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Zone:')
-            ImGui.SameLine()
-            ImGui.Text(string.format('%s (%s)', state.currentZoneName, state.currentZoneShort))
-        end
-
-        ImGui.SameLine()
-        if state.viewMode == 'LIVE' then
-            ImGui.TextDisabled(string.format('| NPCs: %d (Visible: %d)', spawns.totalCount, #spawns.filteredNPCs))
-            ImGui.SameLine()
-            if navState.meshLoaded then
-                ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '| Mesh: LOADED')
-            else
-                ImGui.TextColored(0.95, 0.3, 0.3, 1.0, '| Mesh: NONE')
-            end
-            ImGui.SameLine()
-            if ImGui.Button('Stop Nav##NavHaltBtn') then
-                actionQueue.pendingStopNav = true
-                state.activeNavLoc = nil
-                state.activeNavSpawnId = 0
-                state.activeNavCommandTime = 0
-                state.statusMsg = 'Navigation stopped.'
-            end
-            ImGui.SameLine()
-            if ImGui.Button('Center on Me##CenterMeBtn') then
-                local okX, meX = pcall(function() return mq.TLO.Me.X() end)
-                local okY, meY = pcall(function() return mq.TLO.Me.Y() end)
-                if okX and okY and meX and meY then
-                    viewport.centerEqX = meX
-                    viewport.centerEqY = meY
-                    ctrl.followPlayer = true
-                end
-            end
-            ImGui.SameLine()
-            local fp, cfp = ImGui.Checkbox('Follow##FollowPlayerCheck', ctrl.followPlayer)
-            if cfp then ctrl.followPlayer = fp end
-        else
-            if ImGui.Button('Center Map##CenterAtlasBtn') then
-                viewport.centerEqX = (mapData.bounds.minX + mapData.bounds.maxX) * 0.5
-                viewport.centerEqY = (mapData.bounds.minY + mapData.bounds.maxY) * 0.5
-            end
-        end
-
-        ImGui.SameLine()
-        local poiBtnText = state.showPoiDrawer and 'POIs [ON]##TogglePoiDrawer' or 'POIs##TogglePoiDrawer'
-        if ImGui.Button(poiBtnText) then
-            state.showPoiDrawer = not state.showPoiDrawer
-            state.dirtySettings = true
-            state.dirtySettingsTime = mq.gettime()
-        end
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Toggle side drawer for searching Points of Interest & Map Labels') end
-
-
-
-        ImGui.Separator()
-
         -- Tab Bar
         local tabFlags = ImGuiTabBarFlags.None or 0
         if ImGui.BeginTabBar('##TriuneMapMainTabs', tabFlags) then
