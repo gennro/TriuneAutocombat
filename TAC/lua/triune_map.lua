@@ -2013,10 +2013,10 @@ local function DrawMapCanvas(availW, availH)
     -- Enclose canvas in a dedicated child window to capture native ImGui mouse wheel scrolling
     ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 0, 0)
     ImGui.PushStyleColor(ImGuiCol.ChildBg, 0, 0, 0, 0)
-    local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoMove or 0)
+    local canvasChildFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoMove or 0)
     local baseScroll = 500
     ImGui.SetNextWindowContentSize(availW, availH + (baseScroll * 2))
-    local openChild = ImGui.BeginChild('##MapCanvasScrollRegion', ImVec2(availW, availH), false, childFlags)
+    local openChild = ImGui.BeginChild('##MapCanvasScrollRegion', ImVec2(availW, availH), false, canvasChildFlags)
     if not openChild then
         ImGui.EndChild()
         ImGui.PopStyleColor(1)
@@ -2649,8 +2649,8 @@ local function DrawMapCanvas(availW, availH)
         ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 3)
-        local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
-        if ImGui.BeginChild('##FloorNavOverlayChild', ImVec2(navW, navH), true, childFlags) then
+        local floorNavFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
+        if ImGui.BeginChild('##FloorNavOverlayChild', ImVec2(navW, navH), true, floorNavFlags) then
             local labelCol = (sf.overrideOffset ~= 0) and {1.0, 0.85, 0.2, 1.0} or {0.3, 0.85, 1.0, 1.0}
             ImGui.TextColored(labelCol[1], labelCol[2], labelCol[3], labelCol[4], sf.floorLabel)
             ImGui.SameLine()
@@ -2685,8 +2685,8 @@ local function DrawMapCanvas(availW, availH)
     ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
     ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
     ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
-    local childFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
-    if ImGui.BeginChild('##MapControlOverlayChild', ImVec2(zoomPanelW, zoomPanelH), true, childFlags) then
+    local overlayFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
+    if ImGui.BeginChild('##MapControlOverlayChild', ImVec2(zoomPanelW, zoomPanelH), true, overlayFlags) then
         if state.viewMode == 'LIVE' then
             -- Row 1: Zoom In, Zoom Out, Reset, Auto-Z, Follow Checkbox
             if ImGui.Button('+##CanvasZoomIn', ImVec2(zoomBtnSize, zoomBtnSize)) then

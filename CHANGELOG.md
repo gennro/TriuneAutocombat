@@ -8,6 +8,9 @@
   - **Popout Window Option Inside Tab**: Added a dedicated `Popout Window` button directly inside the Cooldowns tab header, allowing users to pop out the monitor into a standalone floating window at any time while retaining full in-tab functionality.
   - **Unit Tests**: Added test cases in `tests/test_pure_logic.lua` validating the presence and exact tab sequence ordering of `UI.drawCooldownsTab()` right after `UI.drawAATab()`.
 
+- **Lua Variable Shadowing Fix (`triune_map.lua`).**
+  - **Luacheck Warning Elimination**: Renamed shadowed `childFlags` variables within `DrawMapCanvas` to unique identifiers (`canvasChildFlags`, `floorNavFlags`, `overlayFlags`), resolving all luacheck shadowing warnings and ensuring clean CI passes.
+
 - **Map Loading Time & Anti-Stutter Performance Engine Overhaul (`triune_map.lua`).**
   - **High-Speed Stream Map Parser (`parseMapFile`)**: Replaced line-by-line regex parsing (`gmatch('[^\r\n]+')` + `line:match(...)`) with direct single-pass stream tokenizers for lines and labels, eliminating hundreds of thousands of intermediate string allocations and reducing zone map parse times by over 80%.
   - **Eliminated Blocking Process Spawns (`io.popen`)**: Removed all blocking subshell child process spawns (`cmd /c dir` / `find`) from folder and file scanning routines, substituting them with instant C-level non-blocking direct file probes (`<1ms` total probe time across all 300+ Atlas zones) to eliminate game hitching on scan/init.
