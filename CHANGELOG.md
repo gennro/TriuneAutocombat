@@ -2,6 +2,12 @@
 
 ## 2026-08-30
 
+- **ImGui Window Layout Streamlining & Spacing Cleanup (`triune.lua`).**
+  - **Removed Extraneous Dummy Spacing**: Removed 77 redundant `ImGui.Dummy(0, N)` and `ImGui.Dummy(N, 0)` spacers across all tabs (Status, Control, Settings, Gems, Clickies, Abilities, AAs, Discs, Help, and Class Picker), relying on natural theme item spacing for consistent, uncluttered padding.
+  - **Streamlined Action Controls Bar (`UI.drawActionControls`)**: Compacted `START`/`PAUSE` and `BURN` buttons to sleek 130x24 standard dimensions with direct `ImGui.SameLine()` alignment right above the tab bar.
+  - **Mini HUD Mode Spacing Refinement (`drawMiniGui`)**: Replaced double-spaced separator blocks (`Spacing(); Separator(); Spacing()`) with clean single separators and removed empty spacing lines, keeping the compact mini-window tightly fitted.
+  - **Tighter Tab Layouts & Metric Overview**: Compacted vertical padding in the Status tab overview table, Target Threat card, Navigation diagnostics, and Settings tabs so key combat telemetry and controls fit naturally on screen without excessive scrolling.
+
 - **Popout Cooldown & Ability Monitor Window (`triune.lua`).**
   - **Standalone Popout ImGui Window (`TriuneCooldownWindow`)**: Registered an independent, top-level ImGui window (`TriuneCooldownWindow`) providing real-time live monitoring of all enabled Innate Combat Abilities, Alternate Advancements (AAs), Disciplines, Spells (Gems), and Clickie items across all three character classes.
   - **Cooldown-First Automatic Sorting**: Updated default time sorting so items currently on cooldown and active effects sort directly to the **top** of the list with soonest-to-recover abilities appearing first, followed by ready abilities ordered by priority.

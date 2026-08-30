@@ -4165,21 +4165,17 @@ function UI.drawClassPicker()
             ImGui.SameLine()
         end
         if ImGui.Button('Re-detect') then reDetectRequested = true end
-        ImGui.Dummy(0, 4)
         if ImGui.Button('Save Loadout', 140, 24) then saveLoadout() end
         ImGui.SameLine(); ImGui.TextDisabled('-> triune_loadout.lua (auto-saves on changes)')
         accent(MUTED, 'Detected from your in-game Inventory Window.')
-        ImGui.Dummy(0, 2)
     end
 end
 
 function UI.drawHelpTab()
     if not ImGui.BeginTabItem('Help') then return end
-    ImGui.Dummy(0, 4)
 
     if ImGui.CollapsingHeader('Slash Commands', ImGuiTreeNodeFlags.DefaultOpen) then
         accent(GOLD, 'Commands (Alias: /ac or /triune):')
-        ImGui.Dummy(0, 2)
         local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
         if ImGui.BeginTable('##HelpCmdTable', 2, tableFlags) then
             ImGui.TableSetupColumn('Command', ImGuiTableColumnFlags.WidthFixed, 180)
@@ -4224,11 +4220,9 @@ function UI.drawHelpTab()
         end
     end
 
-    ImGui.Dummy(0, 6)
 
     if ImGui.CollapsingHeader('Combat Modes', ImGuiTreeNodeFlags.DefaultOpen) then
         accent(GOLD, 'Available Combat Modes & Behavior:')
-        ImGui.Dummy(0, 2)
         local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
         if ImGui.BeginTable('##HelpModeTable', 2, tableFlags) then
             ImGui.TableSetupColumn('Mode', ImGuiTableColumnFlags.WidthFixed, 180)
@@ -4489,7 +4483,6 @@ end
 
 -- Header controls for the Spell Gems tab: level band, auto-mem, import, presets, and "Mem All to Bar".
 function UI.drawGemTabHeader(gemsTable)
-    ImGui.Dummy(0, 2)
     ImGui.TextDisabled('Lvl:')
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Filter available spells by character level range.') end
     ImGui.SameLine(); ImGui.SetNextItemWidth(36)
@@ -4556,7 +4549,6 @@ function UI.drawGemTabHeader(gemsTable)
     end
 
     -- Row 2: Spell Gem Presets & Multi-Spec Profiles Toolbar
-    ImGui.Dummy(0, 1)
     ImGui.TextDisabled('Preset:')
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Manage named Spell Gem loadout presets.') end
     ImGui.SameLine()
@@ -4696,12 +4688,10 @@ end
 
 function UI.drawClickieTab()
     if not ImGui.BeginTabItem('Clickies') then return end
-    ImGui.Dummy(0, 4)
     ImGui.TextWrapped('Clickable Items: Manage inventory and equipped items with activatable spell effects. Click [+ Add Item on Cursor] while holding an item to add it.')
     if ImGui.IsItemHovered() then
         UI.setTooltip('Configure automated clickies (inventory/worn items). Items are clicked automatically when conditions are met.')
     end
-    ImGui.Dummy(0, 2)
 
     -- Cursor inspection info
     local curItem = mq.TLO.Cursor
@@ -4867,7 +4857,6 @@ function UI.drawClickieTab()
         end
 
         if #loadout.clickies == 0 then
-            ImGui.Dummy(0, 10)
             accent(MUTED, '  (No clickies added yet -- pick up an item with a click effect on your cursor and click [+ Add Item on Cursor] above)')
         end
     end
@@ -4878,7 +4867,6 @@ end
 -- UI: Innate Combat Abilities & Skills tab
 function UI.drawAbilitiesTab()
     if not ImGui.BeginTabItem('Abilities') then return end
-    ImGui.Dummy(0, 4)
     ImGui.TextWrapped('Innate Combat Abilities & Skills (/doability) -- Kick, Bash, Slam, Mend, Backstab, Monk strikes, Taunt, Disarm, Frenzy, etc.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Innate class actions and combat abilities operate independently of spell gems and fire automatically when ready or when conditions are met.')
@@ -5035,7 +5023,6 @@ end
 -- UI: activated AAs tab
 function UI.drawAATab()
     if not ImGui.BeginTabItem('AAs') then return end
-    ImGui.Dummy(0, 4)
     ImGui.TextWrapped('Activated Alternate Advancements (each has its own timer -- all fire when ready). Grouped by cooldown.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.')
@@ -5150,7 +5137,6 @@ end
 
 function UI.drawDiscTab()
     if not ImGui.BeginTabItem('Disciplines') then return end
-    ImGui.Dummy(0, 4)
     ImGui.TextWrapped(
         'Disciplines (/disc) -- no cooldown data from the extractor to group by tier, so listed flat per class. '
         ..
@@ -5310,7 +5296,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.08, 0.40, 0.15, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
-        if ImGui.Button('PAUSE', 150, 30) then
+        if ImGui.Button('PAUSE', 130, 24) then
             if ctrl.mode == 'Manual' then
                 setManualHunterPetHold(true, true)
             else
@@ -5329,7 +5315,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.80, 0.22, 0.22, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.50, 0.10, 0.10, 1.0) then pCount = pCount + 1 end
-        if ImGui.Button('START', 150, 30) then
+        if ImGui.Button('START', 130, 24) then
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
             end
@@ -5349,7 +5335,7 @@ function UI.drawActionControls()
             pcall(ImGui.PopStyleColor, pCount)
         end
     end
-    ImGui.SameLine(); ImGui.Dummy(10, 0); ImGui.SameLine()
+    ImGui.SameLine()
     if ctrl.burn then
         local nowSec = os.clock()
         local pulse = (math.sin(nowSec * 8.0) + 1.0) * 0.5
@@ -5367,7 +5353,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.70, 0.00, 0.00, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
-        if ImGui.Button('BURN (ON)##btnBurn', 150, 30) then
+        if ImGui.Button('BURN (ON)##btnBurn', 130, 24) then
             ctrl.burn = false
             print('\ag[Triune]\ax Burn mode DISABLED.')
         end
@@ -5376,16 +5362,15 @@ function UI.drawActionControls()
             pcall(ImGui.PopStyleColor, pCount)
         end
     else
-        if ImGui.Button('BURN (OFF)##btnBurn', 150, 30) then
+        if ImGui.Button('BURN (OFF)##btnBurn', 130, 24) then
             ctrl.burn = true
             print('\ag[Triune]\ax Burn mode ENABLED!')
         end
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip(
+        UI.setTooltip(
             'Enable/disable Burn Mode. When enabled, spells, AAs, and disciplines marked "Burn Only" will fire.\nTurns off automatically when extended target list clears.')
     end
-    ImGui.Dummy(0, 4)
 end
 
 local function drawStatusProgressBar(fraction, w, h, text, r, g, b, a)
@@ -5419,7 +5404,6 @@ end
 -- UI: status tab
 function UI.drawStatusTab()
     if not ImGui.BeginTabItem('Status') then return end
-    ImGui.Dummy(0, 4)
 
     -- 1. Live Engine & Mode Overview Banner
     local inCombat = hasActualNPCXtarget()
@@ -5432,7 +5416,6 @@ function UI.drawStatusTab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Opens the standalone popout Cooldown & Ability Monitor window.')
     end
-    ImGui.Dummy(0, 2)
 
     local statusTableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
     if ImGui.BeginTable('##StatusOverviewTable', 4, statusTableFlags) then
@@ -5500,7 +5483,6 @@ function UI.drawStatusTab()
         ImGui.EndTable()
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 2. Current Target & Threat Card
     if ImGui.CollapsingHeader('Current Target & Threat', ImGuiTreeNodeFlags.DefaultOpen) then
@@ -5613,7 +5595,6 @@ function UI.drawStatusTab()
             end
 
             -- Target Quick Actions Toolbar
-            ImGui.Dummy(0, 2)
             if ImGui.Button('Face Target##statFace') then
                 mq.cmd('/face fast')
             end
@@ -5655,7 +5636,6 @@ function UI.drawStatusTab()
         end
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 3. Navigation & MQ2Nav Subsystem Card
     if ImGui.CollapsingHeader('Navigation & MQ2Nav Subsystem', ImGuiTreeNodeFlags.DefaultOpen) then
@@ -5777,7 +5757,6 @@ function UI.drawStatusTab()
         end
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 4. Player, Gestalt Trio & Pet Vitals Card
     if ImGui.CollapsingHeader('Player, Gestalt Trio & Pet Vitals', ImGuiTreeNodeFlags.DefaultOpen) then
@@ -5822,7 +5801,6 @@ function UI.drawStatusTab()
         end
 
         -- Status flags & Trio class badges
-        ImGui.Dummy(0, 2)
         accent(GOLD, 'Gestalt Trio:')
         for i = 1, 3 do
             local cls = myClasses[i]
@@ -5854,7 +5832,6 @@ function UI.drawStatusTab()
         end)
 
         if petId and petId > 0 then
-            ImGui.Dummy(0, 4)
             accent(GOLD, string.format('Active Pet: [Lvl %d] %s (ID: %d)', petLvl or 0, petName or 'Pet', petId))
             ImGui.SameLine(); ImGui.TextDisabled('|')
             ImGui.SameLine(); accent(ARC, string.format('Pet Target: %s', petTargetName or 'None'))
@@ -5871,7 +5848,6 @@ function UI.drawStatusTab()
         end
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 5. Mode Operations & Extended Target (XTarget) Threat Monitor
     if ImGui.CollapsingHeader('Mode Operations & Extended Target (XTarget) Threat', ImGuiTreeNodeFlags.DefaultOpen) then
@@ -5930,11 +5906,9 @@ function UI.drawStatusTab()
                 ctrl.current_waypoint_idx or 1, #ctrl.waypoints, dirStr, loopStr))
         end
 
-        ImGui.Dummy(0, 4)
 
         -- Interactive Extended Target (XTarget) Table
         accent(GOLD, 'Extended Target (XTarget) Threat Monitor:')
-        ImGui.Dummy(0, 2)
 
         local xtarSlots = 13
         pcall(function() xtarSlots = mq.TLO.Me.XTargetSlots() or 13 end)
@@ -6034,14 +6008,12 @@ function UI.drawStatusTab()
         end
     end
 
-    ImGui.Dummy(0, 4)
     ImGui.EndTabItem()
 end
 
 -- UI: control tab
 function UI.drawControlTab()
     if not ImGui.BeginTabItem('Control') then return end
-    ImGui.Dummy(0, 4)
     accent(GOLD, 'Combat Mode')
     ImGui.SetNextItemWidth(160)
     local curPrimaryIdx = idxOf(MODES.PRIMARY, ctrl.mode)
@@ -6085,7 +6057,6 @@ function UI.drawControlTab()
 
     -- Manual Mode Contextual Controls
     if ctrl.mode == 'Manual' then
-        ImGui.Dummy(0, 4)
         accent(GOLD, 'Camp Location (optional)')
         if ctrl.camp_loc then
             ImGui.Text(string.format('Camp set at: %.1f, %.1f, %.1f',
@@ -6111,7 +6082,6 @@ function UI.drawControlTab()
             ctrl.camp_radius = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500)
         end
 
-        ImGui.Dummy(0, 4)
         ctrl.manual_auto_xtarget = ImGui.Checkbox('Auto-Target Hostiles on XTarget##manualAutoXtar',
             ctrl.manual_auto_xtarget ~= false)
         if ImGui.IsItemHovered() then
@@ -6131,7 +6101,6 @@ function UI.drawControlTab()
 
     -- Puller Mode Contextual Controls
     if ctrl.mode == 'Puller' then
-        ImGui.Dummy(0, 2)
         ImGui.SetNextItemWidth(160)
         local curPullStyleIdx = 1
         for idx, ps in ipairs(MODES.PULL_STYLES) do
@@ -6203,7 +6172,6 @@ function UI.drawControlTab()
         end
 
         if (ctrl.pull_style or 'Melee') ~= 'Melee' then
-            ImGui.Dummy(0, 2)
             ImGui.SetNextItemWidth(180)
             ctrl.pull_engage_dist = ImGui.SliderInt('Engagement Distance##pullEngageDist', ctrl.pull_engage_dist or 100,
                 15, 250)
@@ -6220,7 +6188,6 @@ function UI.drawControlTab()
             end
         end
 
-        ImGui.Dummy(0, 2)
         ImGui.SetNextItemWidth(180)
         local pullMinHpVal = ImGui.SliderInt('Min Pull HP %##pullMinHpCtrl', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
         ctrl.pull_min_hp_pct = pullMinHpVal
@@ -6231,7 +6198,6 @@ function UI.drawControlTab()
                 .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
         end
 
-        ImGui.Dummy(0, 4)
 
         if ctrl.submode == 'Hunt' then
             accent(ARC, 'Puller (Hunt)')
@@ -6271,7 +6237,6 @@ function UI.drawControlTab()
                     'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
 
-            ImGui.Dummy(0, 2)
             accent(GOLD, 'Combat Radius Anchor (optional)')
             if ctrl.hunter_combat_loc then
                 ImGui.Text(string.format('Anchor: %.1f, %.1f, %.1f',
@@ -6351,7 +6316,6 @@ function UI.drawControlTab()
         end
 
         -- Puller Waypoint Patrol Section
-        ImGui.Dummy(0, 4)
         accent(GOLD, 'Puller Waypoint Patrol')
         local useWp = ImGui.Checkbox('Enable Waypoint Patrol##useWaypoints', ctrl.use_waypoints == true)
         if useWp ~= ctrl.use_waypoints then
@@ -6405,7 +6369,6 @@ function UI.drawControlTab()
                     .. 'reversing direction at each end.')
             end
 
-            ImGui.Dummy(0, 4)
             do
                 local zs = runtime.getCurrentZoneShortName()
                 local zoneDisplay = runtime.getZoneDisplayName(zs)
@@ -6489,7 +6452,6 @@ function UI.drawControlTab()
                 end
                 if not hasSelection then ImGui.EndDisabled() end
 
-                ImGui.Dummy(0, 4)
                 ImGui.SetNextItemWidth(320)
                 runtime.wpImportInput = ImGui.InputText('##wpImportInput', runtime.wpImportInput or '', 4096)
                 ImGui.SameLine()
@@ -6536,7 +6498,6 @@ function UI.drawControlTab()
                         ImGui.Text(string.format('A preset named "%s" already exists for %s.', p.name, p.zoneDisplay))
                         ImGui.Text('Importing will overwrite it.')
                         if p.zoneMismatch then
-                            ImGui.Dummy(0, 2)
                             ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format(
                                 'Note: this was exported from %s -- you are currently in %s.',
                                 p.zoneDisplay, p.currentZoneDisplay))
@@ -6584,7 +6545,6 @@ function UI.drawControlTab()
                     ImGui.EndPopup()
                 end
             end
-            ImGui.Dummy(0, 4)
 
             if ImGui.Button('Add Current Location##addWpLoc') then
                 runtime.wpAdd()
@@ -6682,14 +6642,11 @@ function UI.drawControlTab()
         end
 
         -- Puller Mob Filtering: Faction Considerations, Pull List & Ignore List
-        ImGui.Dummy(0, 4)
         ImGui.Separator()
-        ImGui.Dummy(0, 4)
         accent(GOLD, 'Puller Target Filters')
 
         accent(GOLD, 'Target Faction Considerations')
         accent(MUTED, 'Select which NPC faction considerations Puller is allowed to auto-target.')
-        ImGui.Dummy(0, 2)
 
         ctrl.pull_con_filter = ctrl.pull_con_filter or {
             ['Scowling'] = true,
@@ -6727,7 +6684,6 @@ function UI.drawControlTab()
             saveLoadout(true)
         end
 
-        ImGui.Dummy(0, 4)
 
         local tableFlags = bit.bor(ImGuiTableFlags.BordersOuter, ImGuiTableFlags.SizingFixedSame)
         if ImGui.BeginTable('PullConTable', 3, tableFlags) then
@@ -6747,11 +6703,9 @@ function UI.drawControlTab()
             ImGui.EndTable()
         end
 
-        ImGui.Dummy(0, 6)
 
         accent(GOLD, 'NPCs to Pull (Include List)')
         accent(MUTED, 'If empty, pulls any mob in radius. If populated, ONLY pulls listed names.')
-        ImGui.Dummy(0, 2)
 
         if ImGui.Button('Pull Current Target##pullCurTgt', 170, 24) then
             local nm
@@ -6772,7 +6726,6 @@ function UI.drawControlTab()
             end
         end
 
-        ImGui.Dummy(0, 2)
         if ImGui.BeginChild('pullListFrame', 0, 90, true) then
             if not runtime.pullList or #runtime.pullList == 0 then
                 ImGui.TextDisabled('(all mobs allowed)')
@@ -6787,10 +6740,8 @@ function UI.drawControlTab()
         end
         ImGui.EndChild()
 
-        ImGui.Dummy(0, 4)
         accent(GOLD, 'NPCs to Ignore (Ignore List)')
         accent(MUTED, 'Puller will NEVER auto-target these names (shared across all characters).')
-        ImGui.Dummy(0, 2)
 
         if ImGui.Button('Ignore Current Target##ignoreCurTgt', 170, 24) then
             local nm
@@ -6812,7 +6763,6 @@ function UI.drawControlTab()
             end
         end
 
-        ImGui.Dummy(0, 2)
         if ImGui.BeginChild('ignoreListFrame', 0, 90, true) then
             if not runtime.ignoreList or #runtime.ignoreList == 0 then
                 ImGui.TextDisabled('(none ignored)')
@@ -6870,15 +6820,12 @@ end
 
 function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
-    ImGui.Dummy(0, 4)
 
     -- 1. Character Classes & Profile
     UI.drawClassPicker()
-    ImGui.Dummy(0, 6)
 
     -- 2. Combat Style & Positioning
     if ImGui.CollapsingHeader('Combat Style & Positioning', ImGuiTreeNodeFlags.DefaultOpen) then
-        ImGui.Dummy(0, 2)
         accent(GOLD, 'Engagement Style:')
         if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
             ctrl.combat_style = 'Melee'
@@ -6903,7 +6850,6 @@ function UI.drawSettingsTab()
                 .. 'damage. For pure caster trios that don\'t melee or carry a bow.')
         end
 
-        ImGui.Dummy(0, 2)
         if ctrl.combat_style == 'Melee' then
             ImGui.SetNextItemWidth(200)
             local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
@@ -6943,7 +6889,6 @@ function UI.drawSettingsTab()
                 .. 'Spell alike. Off by default.')
         end
 
-        ImGui.Dummy(0, 2)
         accent(GOLD, 'Spell Failures & Lockouts:')
         ImGui.SetNextItemWidth(160)
         local retriesVal = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10)
@@ -6977,14 +6922,11 @@ function UI.drawSettingsTab()
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('Instantly clear all active spell lockouts, non-stacking buff backoffs, and mob immunities.')
         end
-        ImGui.Dummy(0, 2)
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 3. Navigation & Hazard Avoidance
     if ImGui.CollapsingHeader('Navigation & Hazard Avoidance', ImGuiTreeNodeFlags.DefaultOpen) then
-        ImGui.Dummy(0, 2)
         if not navLoaded() then
             accent(WARN, 'MQ2Nav is NOT loaded! Navigation and pathfinding require MQ2Nav.')
             ImGui.SameLine()
@@ -7055,7 +6997,6 @@ function UI.drawSettingsTab()
                 .. 'Off by default: unreachable targets are dropped instead.')
         end
 
-        ImGui.Dummy(0, 2)
         ImGui.SetNextItemWidth(180)
         local newRatio = ImGui.SliderFloat('Max Path / Dist Ratio##navMaxPathRatio', ctrl.nav_max_path_ratio or 2.5, 1.2, 5.0, '%.1fx')
         if newRatio and newRatio ~= ctrl.nav_max_path_ratio then
@@ -7085,7 +7026,6 @@ function UI.drawSettingsTab()
                 activeCount = activeCount + 1
             end
         end
-        ImGui.Dummy(0, 2)
         ImGui.TextDisabled(string.format('Zone "%s": %d hazard hotspot(s) logged (%d active)', curZs, #zoneHz, activeCount))
         ImGui.SameLine()
         if ImGui.Button('Clear Zone Hazards##clearHzBtn') then
@@ -7094,14 +7034,11 @@ function UI.drawSettingsTab()
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('Clears all recorded stuck hotspots for the current zone.')
         end
-        ImGui.Dummy(0, 2)
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 4. Closer-NPC Retargeting During Movement
     if ImGui.CollapsingHeader('Closer-NPC Retargeting During Movement', ImGuiTreeNodeFlags.DefaultOpen) then
-        ImGui.Dummy(0, 2)
         local chkVal = ImGui.Checkbox('Switch to Closer Mobs While Traveling', ctrl.check_closer_mobs ~= false)
         if chkVal ~= (ctrl.check_closer_mobs ~= false) then
             ctrl.check_closer_mobs = chkVal
@@ -7140,14 +7077,11 @@ function UI.drawSettingsTab()
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('Max times to switch to closer mobs during a single travel leg (0 = disabled / lock to first mob).')
         end
-        ImGui.Dummy(0, 2)
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 5. Resting & Resource Management
     if ImGui.CollapsingHeader('Resting & Resource Management', ImGuiTreeNodeFlags.DefaultOpen) then
-        ImGui.Dummy(0, 2)
         accent(GOLD, 'Combat Recovery & Pull Thresholds:')
         ImGui.SetNextItemWidth(180)
         local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%')
@@ -7174,7 +7108,6 @@ function UI.drawSettingsTab()
                 .. 'Automatically stands to fight if attacked (0 = disabled / pull at any HP).')
         end
 
-        ImGui.Dummy(0, 4)
         accent(GOLD, 'Med Break Recovery System:')
         local mbVal = ImGui.Checkbox('Enable Med Break', ctrl.medbreak_enabled or false)
         if mbVal ~= (ctrl.medbreak_enabled or false) then
@@ -7242,14 +7175,11 @@ function UI.drawSettingsTab()
                 saveLoadout(true)
             end
         end
-        ImGui.Dummy(0, 2)
     end
 
     -- 6. Pet Management & Discipline (conditionally shown if trio has pet class or active pet)
     if trioHasPetClass() or hasActivePet() then
-        ImGui.Dummy(0, 6)
         if ImGui.CollapsingHeader('Pet Management & Discipline', ImGuiTreeNodeFlags.DefaultOpen) then
-            ImGui.Dummy(0, 2)
             ImGui.SetNextItemWidth(180)
             local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
             if petAssistVal ~= ctrl.pet_assist_at then
@@ -7274,15 +7204,12 @@ function UI.drawSettingsTab()
                     .. 'or prior to reaching the Pet Assist At HP threshold,\n'
                     .. 'releasing them to attack once threshold is met.')
             end
-            ImGui.Dummy(0, 2)
         end
     end
 
-    ImGui.Dummy(0, 6)
 
     -- 7. Interface, Overlays & Diagnostics
     if ImGui.CollapsingHeader('Interface, Overlays & Diagnostics', ImGuiTreeNodeFlags.DefaultOpen) then
-        ImGui.Dummy(0, 2)
         local mapRadVal = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius or false)
         if mapRadVal ~= (ctrl.show_map_radius or false) then
             ctrl.show_map_radius = mapRadVal
@@ -7326,10 +7253,8 @@ function UI.drawSettingsTab()
                 .. 'state every few seconds) to help track down a stuck/frozen\n'
                 .. 'report. Off by default -- noisy for normal use.')
         end
-        ImGui.Dummy(0, 2)
     end
 
-    ImGui.Dummy(0, 4)
     ImGui.EndTabItem()
 end
 
@@ -7411,7 +7336,7 @@ local function drawMiniGui()
             UI.setTooltip('Toggle popout Cooldown & Ability Monitor window')
         end
 
-        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
+        ImGui.Separator()
 
         if not navLoaded() then
             accent(WARN, '[!] MQ2Nav is NOT loaded')
@@ -7422,7 +7347,6 @@ local function drawMiniGui()
             if ImGui.Button('Load MQ2Nav##miniLoadNav', 90, 20) then
                 mq.cmd('/plugin mq2nav')
             end
-            ImGui.Spacing()
         elseif not navMeshLoaded() then
             local curZone = mq.TLO.Zone.ShortName() or 'zone'
             accent(WARN, string.format('[!] No NavMesh for %s', curZone))
@@ -7433,7 +7357,6 @@ local function drawMiniGui()
             if ImGui.Button('Reload##miniReloadMesh', 65, 20) then
                 mq.cmd('/nav reload')
             end
-            ImGui.Spacing()
         end
 
         -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
@@ -7491,7 +7414,7 @@ local function drawMiniGui()
             UI.setTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
         end
 
-        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing()
+        ImGui.Separator()
 
         -- Row 3: Session Tracker Banner
         UI.updateTracker()
@@ -8430,7 +8353,6 @@ local function drawCooldownWindow()
 
         -- Render Items in Table View or Cards HUD View
         if #filteredItems == 0 then
-            ImGui.Dummy(0, 10)
             if #allItems == 0 then
                 accent(MUTED, '  (No abilities, AAs, or disciplines enabled in loadout.)')
             else
