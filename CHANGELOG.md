@@ -2,6 +2,25 @@
 
 ## 2026-08-30
 
+- **Popout Cooldown & Ability Monitor Window (`triune.lua`).**
+  - **Standalone Popout ImGui Window (`TriuneCooldownWindow`)**: Registered an independent, top-level ImGui window (`TriuneCooldownWindow`) providing real-time live monitoring of all enabled Innate Combat Abilities, Alternate Advancements (AAs), Disciplines, Spells (Gems), and Clickie items across all three character classes.
+  - **Cooldown-First Automatic Sorting**: Updated default time sorting so items currently on cooldown and active effects sort directly to the **top** of the list with soonest-to-recover abilities appearing first, followed by ready abilities ordered by priority.
+  - **AA & Discipline Cooldown Timer Overhaul (`runtime.fireAA`, `runtime.fireDisc`, `isDiscReady`)**:
+    - **Alternate Advancements (AAs)**: Dual-path lookup querying `mq.TLO.Me.AltAbilityTimer` by both name and integer AA ID (`aaObj.ID()`), evaluating hastened reuse times (`MyReuseTime()`), tracking software timestamps (`runtime.lastAAFiredAt`), and inspecting spell-name buffers (`Buff(spellName)`, `Song(spellName)`) so AA durations and cooldowns tick down second-by-second.
+    - **Combat Disciplines (Discs)**: Handled MQ `CombatAbilityTimer` ticks conversion (1 tick = 6s) and milliseconds normalization, added shared EverQuest Timer Group cooldown tracking (`runtime.timerGroupCooldown`), and software elapsed tracking (`runtime.lastDiscFiredAt`).
+    - **Innate Abilities**: Implemented `ABILITY_BASE_COOLDOWNS` lookup database and dual-path TLO inspection (`mq.TLO.Me.AbilityTimer(nm)`, `mq.TLO.Me.AbilityTimer(idx)`, `AbilityTimerTotal`) with software elapsed time tracking (`runtime.lastSkillFiredAt`).
+  - **Active Duration & Stance Countdown**: Displays active buff and discipline stance durations with glowing cyan progress bars and countdowns (`[ ACTIVE: Xs ]`) before transitioning into cooldown.
+  - **Smart Readiness & Condition Diagnostics**: Pinpoints the exact reason why an ability is gated: `[ READY ]`, `[ LOW END ]` (with required vs current endurance values), `[ LOW MANA ]`, `[ NEED BURN ]`, `[ NEED BOSS ]`, `[ MIN XTAR ]`, `[ LOCKED ]`, and `[ BLOCKED ]`.
+  - **EverQuest Shared Timer Group Detection**: Identifies and badges EQ discipline and skill timer groups (`[T1]`, `[T2]`, `[T4]`, etc.) to clearly highlight shared cooldown lockouts.
+  - **Compact Mode & Streamlined Screen Space Footprint**:
+    - Reduced default window footprint to a sleek 500x340 overlay with tight padding (`CellPadding 3,2`, `ItemSpacing 4,3`, `FramePadding 3,2`).
+    - Merged multi-line toolbars into a clean 2-line header: Line 1 hosts live counters (`R:5 A:1 CD:2`), `[HUD]/[Table]` toggle, `Lock` checkbox, `Compact` checkbox, and inline `Tune` toggle; Line 2 provides compact category, status, sort, search, and alpha controls.
+    - Removed unused "Next Up" indicator and star column, streamlining the table directly to Class, Ability Name, Status & Timer, and Action button.
+  - **Floating Overlay Controls**: Configurable background transparency slider (`Alpha 0.10 - 1.00`), window lock mode (`NoTitleBar / NoMove / NoResize`), category filters (`All`, `Abilities`, `AAs`, `Disciplines`, `Spells`, `Items`), status filters (`All`, `Ready`, `Cooldown`, `Active`), sort selector (`Time Left`, `Status`, `Priority`, `Class`, `Type`, `Alphabetical`), and live name search box.
+  - **In-Place Loadout Tuning**: Optional inline editing controls enabling live adjustment of `Enabled`, threshold `HP %`, and `Burn Only` toggles directly from the monitor table.
+  - **UI Integration & Slash Commands**: Added popout toggle buttons across the Main Header Bar (`Cooldowns##hdrCooldowns`), Mini HUD (`CDs##miniCooldowns`), Status Tab (`Popout Cooldowns##statCdBtn`), Abilities Tab, AAs Tab, and Disciplines Tab, along with `/ac cd`, `/ac cds`, `/ac cooldown`, `/ac cooldowns`, and `/triune cd` slash commands.
+  - **Unit Tests**: Added test suites in `tests/test_pure_logic.lua` verifying cooldown configuration fields in `defaultCtrl()`, ability base cooldowns, AA/disc timer conversions, shared timer groups, status evaluation, and cooldown-first sorting algorithms.
+
 - **Beneficial Spell Lockout Exemption & Detrimental-Only Lockout Restriction (`triune.lua`).**
   - **Zero Lockout Policy for Beneficial Spells**: Ensured that beneficial spells (heals, buffs, pet summons, cures, teleports) are never locked out under any failure scenario (fizzles, interrupts, "did not take hold", generic failures, or out-of-range).
   - **Authoritative Beneficial vs Detrimental Classification (`isDetrimentalSpell`)**: Added multi-layered action classification checking explicit entry kind tags (`heal`, `buff`, `pet`, `cure`, `util` vs `dd`, `dot`, `debuff`, `nuke`), target token prefixes (`E:` vs `S:`, `P:`, `G:`, `A:`, `C:`), live MacroQuest spell/ability beneficial properties (`Spell().Beneficial()`, `AltAbility().Spell.Beneficial()`, `CombatAbility().Spell.Beneficial()`), era spell database definitions, and fallback keyword heuristics.
@@ -18,6 +37,30 @@
   - **Strict XTarget NPC In-Combat Filter (`hasActualNPCXtarget`)**: Updated the Status tab to only display the engine in combat (`• COMBAT: IN COMBAT` / `Combat: Yes`) when there is an actual live, non-ignored, hostile NPC occupying an active Extended Target (XTarget) slot, preventing lingering out-of-combat timers or idle auto-attack from misrepresenting combat state.
   - **Threat Monitor Threat Filtering**: Updated the active XTarget list generator in the Threat Monitor table to filter out corpses, dead targets, players, friendly pets, and ignored spawns.
   - **Unit Tests**: Added unit tests in `tests/test_pure_logic.lua` covering `hasActualNPCXtarget` across live hostile NPCs, corpses, players, friendly pets, and ignored targets.
+- **Combat Engine Spell Gems, Abilities, AA, Disciplines, Buffs & Heals Overhaul (`triune.lua`).**
+  - **Out-of-Combat `min_xtar` Gate Fix**: Updated Spell Gems, Clickies, AAs, Autoskill Actions, Priority Conditional Actions, and Disciplines execution loops to allow beneficial actions (buffs, heals, cures, pet summons, resurrection) to execute out of combat when `numXtar == 0`, evaluating `xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)`.
+  - **Deferred Target Restoration for Cast-Time Spells & Clickies**: Fixed an issue in `castGem` and `useClickie` where beneficial spells and cast-time clickies targeting friendly party members or pets prematurely retargeted the mob after 60ms during mid-cast. The engine now holds target on the ally throughout the cast bar, and defers restoring the combat mob target until the spell finishes casting in `combatTick`.
+  - **Assist Mode Friendly Pet Target Safety**: Fixed a critical target-acquisition bug in `resolveTargetId` where friendly player pets (`stype == 'Pet'`) were rejected in Assist mode by the unengaged mob gate. Added `isHostileTarget(id)` verification so only unengaged hostile enemy pets/adds are gated.
+  - **Whole Group Heal & Cure Condition Evaluation**: Updated `conditionMet` to evaluate the lowest health in the group (`pctHP(runtime.lowestHpAlly()) <= pct`) and scan all group members for poison/disease when targeting `F: Whole Group`, ensuring group heals and group cures fire when party members are endangered.
+  - **Target Token Beneficial Prefix (`F:`)**: Added `tok:sub(1, 2) == 'F:'` to `isDetrimentalSpell` to immediately recognize all standard friendly target tokens (`F: Myself`, `F: Lowest-HP Ally`, `F: Whole Group`, `F: Pet`, `F: Tank`, `F: Main Assist`) as beneficial actions.
+  - **Group Member Cure Counter Inspection**: Enhanced `isPoisonedOrDiseased` to iterate through standard `Group.Member(0..total)` party members and inspect their poison/disease status and counter totals (`CountersPoison`, `CountersDisease`), allowing party curing even without NetBots.
+  - **Bard Twist Song Cycling**: Updated `castGem` to allow bard songs with `when == 'twist while fighting'` to bypass the `dur > 0 and buffActive` lockout, ensuring bard song twist rotations continuously cycle and refresh.
+  - **Unit Tests**: Added test cases in `tests/test_pure_logic.lua` validating `F:` target tokens and out-of-combat `min_xtar` evaluation.
+- **Spell Gems Modernization: Presets, Advanced Triggers, Rebuffing & Live Badges (`triune.lua`).**
+  - **Spell Gem Presets & Multi-Spec Profiles**: Added full named loadout preset management (`loadout.presets`) with in-UI selector combo, save/load/delete buttons, and slash commands (`/ac preset [save|load|delete|list]`, `/ac loadout`). Loading a preset automatically memorizes the entire spell set to the spell bar.
+  - **Live In-UI Gem Status Badges (`UI.getGemStatusBadge`)**: Added color-coded live feedback badges on every gem row: `[Ready]` (Green), `[CD: X.Xs]` (Gold with active countdown timer), `[Not Memmed]` / `[Memming...]` (Orange), `[Low Mana]` (Red with mana requirement tooltip), and `[Locked Out]` (Purple).
+  - **1-Click Gem Slot Reordering (`▲` / `▼`)**: Added interactive Move Up and Move Down buttons on every gem slot for instant swapping and reordering without manual dropdown re-selection.
+  - **Advanced Triggers & Conditions**:
+    - `target HP between`: Added configurable `Min HP%` and `Max HP%` window for damage-over-time (DoT) and nukes, preventing wasting mana on mobs about to die.
+    - `has Curse` & `has Corruption`: Added full cure evaluation (`isCursed`, `isCorrupted`) inspecting `Me`, `Group.Member(i)`, `NetBots`, and `Target` counters.
+    - `Aggro on Me` & `my Aggro >=`: Added threat triggers reacting when mob aggro shifts to the player or exceeds a percentage threshold.
+    - `Boss Only` Toggle on Gems: Added dedicated Named / Boss mob filtering checkbox per gem slot.
+  - **Intelligent Pre-Buff Refreshing & Reagent Verification**:
+    - Added proactive out-of-combat buff refreshing (`ctrl.buff_refresh_sec`, default 45s) so buffs are renewed before falling off mid-combat.
+    - Added `hasSpellReagents(spellName)` verifying inventory component counts (`Spell.ReagentID`) before casting to eliminate missing reagent chat spam.
+  - **Compact UI Layout & Screen Space Optimization**: Streamlined the entire Spell Gems tab with concise status badges (`[RDY]`, `[CD]`, `[UNMEM]`, `[MANA]`, `[LOCK]`, `[--]`), optimized dropdown and slider widths, compact plain numerical text boxes for level range filtering without stepper `+`/`-` buttons, tight button padding, and compact two-row header controls, significantly reducing horizontal width footprint by ~240px.
+  - **Dynamic Spell Gem Slot Support (`getNumGems`)**: Automatically queries `mq.TLO.Me.NumGems()` to dynamically display 8 to 12 gem slots based on character AAs and server client capabilities.
+  - **Unit Tests**: Added test suite in `tests/test_pure_logic.lua` covering preset snapshots and deep-copy isolation, gem slot swapping, `target HP between` windows, aggro triggers, and reagent verification.
 
 ---
 

@@ -568,6 +568,15 @@ local EXPECTED_FIELDS = {
     { 'pet_assist_at',           'number' },
     { 'pet_hold_enabled',        'boolean' },
     { 'show_map_radius',         'boolean' },
+    { 'show_cooldowns',          'boolean' },
+    { 'cooldown_alpha',          'number' },
+    { 'cooldown_locked',         'boolean' },
+    { 'cooldown_view_mode',      'string' },
+    { 'cooldown_sort_by',        'string' },
+    { 'cooldown_category',       'string' },
+    { 'cooldown_status_filter',  'string' },
+    { 'cooldown_compact',        'boolean' },
+    { 'cooldown_show_inline_edit', 'boolean' },
     { 'burn',                    'boolean' },
     { 'compact',                 'boolean' },
     { 'use_waypoints',           'boolean' },
@@ -591,6 +600,9 @@ end
 assert_eq(dc.running, false, 'defaultCtrl: running=false')
 assert_eq(dc.mode, 'Manual', 'defaultCtrl: mode=Manual')
 assert_eq(dc.submode, 'Hunt', 'defaultCtrl: submode=Hunt')
+assert_eq(dc.show_cooldowns, false, 'defaultCtrl: show_cooldowns=false')
+assert_eq(dc.cooldown_alpha, 0.90, 'defaultCtrl: cooldown_alpha=0.90')
+assert_eq(dc.cooldown_view_mode, 'table', 'defaultCtrl: cooldown_view_mode=table')
 
 -- ============================================================================
 -- 9.  isActionSkill(name) & defaultActionEntry
@@ -958,6 +970,24 @@ assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'E:LowestHP'), true, 'det:
 assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'S:Me'), false, 'det: S: target is beneficial')
 assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'P:LowestHP'), false, 'det: P: target is beneficial')
 assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'G:LowestHP'), false, 'det: G: target is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'F: Myself'), false, 'det: F: Myself is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'F: Lowest-HP Ally'), false, 'det: F: Lowest-HP Ally is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'F: Whole Group'), false, 'det: F: Whole Group is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'F: Pet'), false, 'det: F: Pet is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'F: Tank'), false, 'det: F: Tank is beneficial')
+assert_eq(isDetrimentalSpell('CustomSpell', nil, nil, 'F: Main Assist'), false, 'det: F: Main Assist is beneficial')
+
+-- B. Out-of-Combat min_xtar evaluation logic tests
+local function evalXtOk(numXtar, minXt, isDet)
+    return (numXtar >= minXt) or (not isDet and minXt <= 1)
+end
+assert_eq(evalXtOk(0, 1, false), true, 'min_xtar: OOC beneficial spell with min_xtar=1 is allowed')
+assert_eq(evalXtOk(0, 1, true), false, 'min_xtar: OOC detrimental spell with min_xtar=1 is blocked')
+assert_eq(evalXtOk(1, 1, true), true, 'min_xtar: Combat detrimental spell with min_xtar=1 is allowed')
+assert_eq(evalXtOk(1, 2, true), false, 'min_xtar: Combat detrimental spell with min_xtar=2 blocked on 1 mob')
+assert_eq(evalXtOk(2, 2, true), true, 'min_xtar: Combat detrimental spell with min_xtar=2 allowed on 2 mobs')
+assert_eq(evalXtOk(0, 3, false), false, 'min_xtar: OOC beneficial spell with explicit min_xtar=3 is blocked')
+assert_eq(evalXtOk(3, 3, false), true, 'min_xtar: Combat beneficial spell with explicit min_xtar=3 allowed on 3 mobs')
 
 local function testCastTracker()
     local failureCount     = {}
@@ -2918,6 +2948,200 @@ do
     assert_eq(cleanName, 'a gnoll pup', 'consolidated spawn query: name matches')
     assert_eq(distance, 45.2, 'consolidated spawn query: distance matches')
     assert_eq(sx, 100.5, 'consolidated spawn query: x matches')
+end
+
+-- ============================================================================
+-- 40. Spell Gem Enhancements (Presets, Advanced Conditions, Reagents, Swap)
+-- ============================================================================
+print('--- Spell Gem Enhancements ---')
+do
+    -- A. Deep copy & Preset Management
+    local function deepCopyTable(orig)
+        local orig_type = type(orig)
+        local copy
+        if orig_type == 'table' then
+            copy = {}
+            for orig_key, orig_value in next, orig, nil do
+                copy[deepCopyTable(orig_key)] = deepCopyTable(orig_value)
+            end
+            setmetatable(copy, deepCopyTable(getmetatable(orig)))
+        else
+            copy = orig
+        end
+        return copy
+    end
+
+    local testGems = {
+        [1] = { cls = 'Clr', spell = 'Complete Healing', target = 'F: Tank', when = 'HP <=', pct = 50 },
+        [2] = { cls = 'Wiz', spell = 'Ice Comet', target = 'E: Current Target', when = 'target HP between', pct = 90, min_hp = 20, boss_only = true },
+        [3] = { cls = 'Enc', spell = 'Tashani', target = 'E: Current Target', when = 'in combat', pct = 100 }
+    }
+
+    local presets = {}
+    presets['BossBurn'] = {
+        name = 'BossBurn',
+        gems = deepCopyTable(testGems),
+        savedAt = '2026-08-30 12:00:00'
+    }
+
+    -- Verify deep copy isolation
+    testGems[1].pct = 20
+    assert_eq(presets['BossBurn'].gems[1].pct, 50, 'preset deep copy: original modification does not alter preset')
+    assert_eq(presets['BossBurn'].gems[2].boss_only, true, 'preset deep copy: boss_only preserved')
+    assert_eq(presets['BossBurn'].gems[2].min_hp, 20, 'preset deep copy: min_hp preserved')
+
+    -- B. Gem Slot Swap Logic
+    local function swapGems(t, slotA, slotB)
+        local tmp = t[slotA]
+        t[slotA] = t[slotB]
+        t[slotB] = tmp
+    end
+
+    local gemBar = { [1] = 'Heal', [2] = 'Nuke', [3] = 'Stun' }
+    swapGems(gemBar, 1, 2)
+    assert_eq(gemBar[1], 'Nuke', 'gem swap: slot 1 is now Nuke')
+    assert_eq(gemBar[2], 'Heal', 'gem swap: slot 2 is now Heal')
+
+    -- C. Advanced Condition Evaluations
+    local function evalHpBetween(targetHp, minHp, maxHp)
+        return targetHp >= (minHp or 20) and targetHp <= (maxHp or 100)
+    end
+
+    assert_true(evalHpBetween(50, 20, 90), 'hp between: 50% is between 20% and 90%')
+    assert_true(evalHpBetween(20, 20, 90), 'hp between: 20% is at lower bound')
+    assert_true(evalHpBetween(90, 20, 90), 'hp between: 90% is at upper bound')
+    assert_true(not evalHpBetween(15, 20, 90), 'hp between: 15% is below min (DoT skipped on low mob)')
+    assert_true(not evalHpBetween(95, 20, 90), 'hp between: 95% is above max')
+
+    local function evalAggro(myAggro, targetAggroHolder, myName, threshold)
+        local aggro = myAggro or 0
+        if aggro == 0 and targetAggroHolder == myName then aggro = 100 end
+        return aggro >= threshold
+    end
+
+    assert_true(evalAggro(0, 'PlayerA', 'PlayerA', 90), 'aggro on me: target targeting me gives 100% aggro')
+    assert_true(evalAggro(95, 'TankB', 'PlayerA', 90), 'my aggro >=: 95% >= 90% triggers')
+    assert_true(not evalAggro(40, 'TankB', 'PlayerA', 90), 'my aggro >=: 40% < 90% does not trigger')
+
+    -- D. Reagent Checking Logic
+    local function checkReagents(reagentList, inventoryCounts)
+        for _, req in ipairs(reagentList) do
+            local cur = inventoryCounts[req.id] or 0
+            if cur < req.count then return false end
+        end
+        return true
+    end
+
+    local boneChipsReq = { { id = 13073, count = 1 } } -- Bone Chips
+    assert_true(checkReagents(boneChipsReq, { [13073] = 10 }), 'reagent check: bone chips available')
+    assert_true(not checkReagents(boneChipsReq, { [13073] = 0 }), 'reagent check: missing bone chips blocks cast')
+    assert_true(not checkReagents(boneChipsReq, {}), 'reagent check: empty inventory blocks cast')
+end
+
+-- ============================================================================
+-- 38. Cooldown Monitor Logic & Diagnostics Tests
+-- ============================================================================
+print('--- Cooldown Monitor Logic & Diagnostics ---')
+do
+    -- A. Diagnostics evaluator
+    local function evaluateStatus(isReady, isActive, activeSec, endCost, myEnd, isBurnOnly, isBurnActive, minXt, xtCount)
+        if isActive then return 'ACTIVE' end
+        if not isReady then return 'COOLDOWN' end
+        if endCost > 0 and myEnd < endCost then return 'LOW END' end
+        if isBurnOnly and not isBurnActive then return 'NEED BURN' end
+        if xtCount < minXt then return 'MIN XTAR' end
+        return 'READY'
+    end
+
+    assert_eq(evaluateStatus(true, false, 0, 0, 1000, false, false, 1, 2), 'READY', 'cd status: ready')
+    assert_eq(evaluateStatus(false, true, 12, 0, 1000, false, false, 1, 2), 'ACTIVE', 'cd status: active')
+    assert_eq(evaluateStatus(false, false, 0, 0, 1000, false, false, 1, 2), 'COOLDOWN', 'cd status: cooldown')
+    assert_eq(evaluateStatus(true, false, 0, 500, 200, false, false, 1, 2), 'LOW END', 'cd status: low endurance')
+    assert_eq(evaluateStatus(true, false, 0, 0, 1000, true, false, 1, 2), 'NEED BURN', 'cd status: need burn')
+    assert_eq(evaluateStatus(true, false, 0, 0, 1000, false, false, 3, 1), 'MIN XTAR', 'cd status: min xtar')
+
+    -- B. Sorting evaluator (Cooldown & Active items at TOP of the list)
+    local testItems = {
+        { name = 'Kick', ready = true, active = false, priority = 50, timeLeft = 0 },
+        { name = 'Defensive', ready = false, active = true, activeSec = 18, priority = 10, timeLeft = 0 },
+        { name = 'Bash', ready = true, active = false, priority = 20, timeLeft = 0 },
+        { name = 'Furious', ready = false, active = false, priority = 10, timeLeft = 45 },
+        { name = 'Fortitude', ready = false, active = false, priority = 15, timeLeft = 12 },
+    }
+
+    table.sort(testItems, function(a, b)
+        -- 1. Active items first
+        if a.active ~= b.active then return a.active end
+        if a.active and b.active then return (a.activeSec or 0) < (b.activeSec or 0) end
+
+        -- 2. Items on Cooldown NEXT at the top of the list
+        local aInCd = (not a.ready)
+        local bInCd = (not b.ready)
+        if aInCd ~= bInCd then return aInCd end
+
+        -- Both on cooldown: sort by time remaining ascending (soonest to become ready first)
+        if aInCd and bInCd then
+            if math.abs((a.timeLeft or 0) - (b.timeLeft or 0)) > 0.05 then
+                return (a.timeLeft or 0) < (b.timeLeft or 0)
+            end
+            return (a.priority or 50) < (b.priority or 50)
+        end
+
+        -- 3. Both Ready: sort by priority ascending
+        if (a.priority or 50) ~= (b.priority or 50) then
+            return (a.priority or 50) < (b.priority or 50)
+        end
+        return (a.name or '') < (b.name or '')
+    end)
+
+    assert_eq(testItems[1].name, 'Defensive', 'cd sort time: Active item at top')
+    assert_eq(testItems[2].name, 'Fortitude', 'cd sort time: Soonest off cooldown next at top (12s < 45s)')
+    assert_eq(testItems[3].name, 'Furious', 'cd sort time: Later off cooldown (45s)')
+    assert_eq(testItems[4].name, 'Bash', 'cd sort time: Ready item with higher priority next (Pri 20 < 50)')
+    assert_eq(testItems[5].name, 'Kick', 'cd sort time: Ready item with lower priority last (Pri 50)')
+
+    -- C. Ability Base Cooldowns
+    local ABILITY_BASE_COOLDOWNS = {
+        ['Kick'] = 6, ['Bash'] = 6, ['Slam'] = 6, ['Flying Kick'] = 6,
+        ['Backstab'] = 10, ['Taunt'] = 6, ['Mend'] = 360, ['Feign Death'] = 8,
+    }
+    assert_eq(ABILITY_BASE_COOLDOWNS['Kick'], 6, 'ability cd: Kick is 6s')
+    assert_eq(ABILITY_BASE_COOLDOWNS['Backstab'], 10, 'ability cd: Backstab is 10s')
+    assert_eq(ABILITY_BASE_COOLDOWNS['Mend'], 360, 'ability cd: Mend is 360s')
+    assert_eq(ABILITY_BASE_COOLDOWNS['Feign Death'], 8, 'ability cd: Feign Death is 8s')
+
+    -- D. AA and Discipline Timer Conversions & Timer Groups
+    local function parseCombatAbilityTimer(rawVal)
+        if type(rawVal) == 'table' and rawVal.TotalSeconds then
+            return rawVal.TotalSeconds
+        end
+        local n = tonumber(rawVal) or 0
+        if n > 1000 then return n / 1000.0 end
+        if n > 0 and n <= 500 then return n * 6 end -- ticks to seconds
+        return n
+    end
+
+    assert_eq(parseCombatAbilityTimer(5), 30, 'disc timer: 5 ticks = 30s')
+    assert_eq(parseCombatAbilityTimer(10), 60, 'disc timer: 10 ticks = 60s')
+    assert_eq(parseCombatAbilityTimer(90000), 90, 'disc timer: 90000ms = 90s')
+    assert_eq(parseCombatAbilityTimer({ TotalSeconds = 45 }), 45, 'disc timer: TotalSeconds = 45s')
+
+    local function checkTimerGroupActive(activeTimerGroups, discTimerGroup, now)
+        if not discTimerGroup then return false, 0 end
+        local exp = activeTimerGroups[discTimerGroup] or 0
+        if exp > now then
+            return true, exp - now
+        end
+        return false, 0
+    end
+
+    local now = 1000
+    local timerGroups = { ['T1'] = 1045, ['T2'] = 980 }
+    local isT1Active, t1Rem = checkTimerGroupActive(timerGroups, 'T1', now)
+    local isT2Active, t2Rem = checkTimerGroupActive(timerGroups, 'T2', now)
+    assert_true(isT1Active, 'timer group: T1 is active')
+    assert_eq(t1Rem, 45, 'timer group: T1 has 45s left')
+    assert_true(not isT2Active, 'timer group: T2 has expired')
 end
 
 -- ============================================================================

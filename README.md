@@ -127,12 +127,25 @@ Want to clear up screen clutter while playing?
 
 ---
 
+### ⏱️ Popout Cooldown & Ability Monitor
+Keep track of every enabled combat ability, activated AA, and discipline in real time:
+- **Popout Window**: Open via `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD to float and dock the monitor anywhere on screen.
+- **Active Duration Tracking**: Glowing cyan progress bars show remaining active buff/stance duration (e.g. *Defensive Discipline*, *Harmshield*, *Furious*) before transitioning to cooldown.
+- **Smart Readiness Diagnostics**: Instant feedback on why abilities are gated: `[READY]`, `[LOW END]`, `[LOW MANA]`, `[NEED BURN]`, `[NEED BOSS]`, `[MIN XTAR]`, or `[LOCKED]`.
+- **EverQuest Timer Groups**: Badges display EQ shared timer banks (`[T1]`, `[T2]`, `[T4]`) to clarify shared cooldown lockouts.
+- **"Next Up" Combat Forecast**: Highlights the highest-priority ability queued to execute on the next combat tick with a golden star (`★ Next`).
+- **1-Click Execution**: Interactive **`[ Use ]`** buttons allow manual firing of any ready ability directly from the monitor.
+- **Dual View Modes & HUD Overlay**: Switch between a detailed Table View and a sleek horizontal HUD Cards View with background transparency opacity slider and window position lock.
+
+---
+
 ## Built-in Bonus Tools
 
 Triune comes packed with handy standalone tools you can open right from the main window or via chat commands:
 
 | Tool | Chat Command | What It Does |
 |---|---|---|
+| ⏱️ **Cooldown Monitor** | `/ac cd` | Standalone popout live ability, AA, and discipline cooldown monitor with active buff duration countdowns, smart diagnostics, timer groups, next-up forecast, and 1-click execution. |
 | 🗺️ **2D Map & Norrath Atlas** | `/ac map` | Interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, and Point of Interest locator. |
 | 🧙 **Spellbook Browser** | `/ac spellbook` | Browse and search all spells across all 3 of your character's classes, filter by level or type, and assign them to your loadout with one click. |
 | 🖱️ **Cursor Manager** | `/ac cursorui` | Displays what's on your cursor and can automatically dump items into your bags (`/ac clearcursor`). |
@@ -155,6 +168,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac burn [on\|off]` | `/ac burnon`, `/ac burnoff` | Toggle Burn mode on/off |
 | `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |
 | `/ac compact` | `/ac mini`, `/ac hud` | Toggle the compact Mini HUD |
+| `/ac cd` | `/ac cooldowns`, `/ac cds` | Toggle the popout Cooldown & Ability Monitor window |
 | `/ac status` | | Print current status and mode to chat |
 | `/ac help` | `/ac ?` | Show command help in chat |
 | `/ac <mode> [submode]` | | Switch mode (e.g. `/ac manual`, `/ac puller camp`, `/ac assist chase`, `/ac backline`) |
@@ -165,6 +179,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
 | `/ac clear lockouts` | `/ac clearlockouts`, `/ac unlock` | Clear active spell lockouts, non-stacking buff backoffs, and mob immunities |
+| `/ac preset [save\|load\|del\|list]` | `/ac loadout` | Save, load, list, or delete named spell gem loadout presets |
 | `/ac style [melee\|ranged\|spell]` | | Set combat style |
 | `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (5-200) distance |
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |
