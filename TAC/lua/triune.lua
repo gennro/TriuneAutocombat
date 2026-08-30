@@ -1435,6 +1435,30 @@ local function isXTargetId(id)
     return false
 end
 
+local function hasActualNPCXtarget()
+    local found = false
+    pcall(function()
+        local slots = 13
+        pcall(function() slots = mq.TLO.Me.XTargetSlots() or 13 end)
+        for i = 1, slots do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt and xt() then
+                local id = xt.ID() or 0
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
+                    local stype = xt.Type() or ''
+                    if (stype == 'NPC' or stype == 'Pet') and not xt.Dead() and stype ~= 'Corpse'
+                        and not (isIgnored and isIgnored(xt.CleanName()))
+                        and (not isHostileTarget or isHostileTarget(id)) then
+                        found = true
+                        return
+                    end
+                end
+            end
+        end
+    end)
+    return found
+end
+
 local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ, isBuffActiveFn)
     maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
     local myZ = mq.TLO.Me.Z() or 0
@@ -5034,7 +5058,7 @@ function UI.drawStatusTab()
     ImGui.Dummy(0, 4)
 
     -- 1. Live Engine & Mode Overview Banner
-    local inCombat = (runtime.isCombat and runtime.isCombat()) or (mq.TLO.Me.Combat() or false)
+    local inCombat = hasActualNPCXtarget()
     accent(GOLD, 'Engine Status & Mode Overview')
     ImGui.Dummy(0, 2)
 
@@ -5547,19 +5571,25 @@ function UI.drawStatusTab()
         for slot = 1, xtarSlots do
             pcall(function()
                 local xt = mq.TLO.Me.XTarget(slot)
-                if xt and xt() and xt.ID() and xt.ID() > 0 and not xt.Dead() and xt.Type() ~= 'Corpse' then
-                    table.insert(activeXtargets, {
-                        slot = slot,
-                        id = xt.ID(),
-                        name = xt.CleanName() or 'Unknown',
-                        level = xt.Level() or 0,
-                        class = xt.Class.ShortName() or '?',
-                        dist = xt.Distance() or 0,
-                        hpPct = xt.PctHPs() or 0,
-                        con = xt.ConColor() or 'White',
-                        tot = xt.TargetOfTarget.CleanName() or 'None',
-                        aggroPct = xt.PctAggro() or 0
-                    })
+                if xt and xt() and xt.ID() and xt.ID() > 0 and isSpawnAlive(xt.ID())
+                    and not isGroupOrRaidMember(xt.ID()) and not isSpawnPetOrPlayer(xt.ID()) then
+                    local stype = xt.Type() or ''
+                    if (stype == 'NPC' or stype == 'Pet') and not xt.Dead() and stype ~= 'Corpse'
+                        and not (isIgnored and isIgnored(xt.CleanName()))
+                        and (not isHostileTarget or isHostileTarget(xt.ID())) then
+                        table.insert(activeXtargets, {
+                            slot = slot,
+                            id = xt.ID(),
+                            name = xt.CleanName() or 'Unknown',
+                            level = xt.Level() or 0,
+                            class = xt.Class.ShortName() or '?',
+                            dist = xt.Distance() or 0,
+                            hpPct = xt.PctHPs() or 0,
+                            con = xt.ConColor() or 'White',
+                            tot = xt.TargetOfTarget.CleanName() or 'None',
+                            aggroPct = xt.PctAggro() or 0
+                        })
+                    end
                 end
             end)
         end
@@ -10464,6 +10494,7 @@ end
 -- Bind remaining engine helpers to runtime table
 runtime.pctHP = pctHP
 runtime.isCombat = isCombat
+runtime.hasActualNPCXtarget = hasActualNPCXtarget
 runtime.isXTargetId = isXTargetId
 runtime.isGroupOrRaidMember = isGroupOrRaidMember
 runtime.isAnyPet = isAnyPet

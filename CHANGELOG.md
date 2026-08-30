@@ -14,6 +14,10 @@
   - **Unit Tests**: Added test suites in `tests/test_pure_logic.lua` covering `isDetrimentalSpell` classification across beneficial/detrimental spells and verifying that beneficial spells never lock out while detrimental spells retain target immunity, debuff resist backoff, and failure recovery.
 - **Function Parameter Consistency (`triune_map.lua`)**:
   - Updated `getZAlphaMultiplier(avgZ, minZ, maxZ, zFilterMode, zDepthFading)` signature to formally declare optional `zFilterMode` and `zDepthFading` parameters with fallbacks to `ctrl`, eliminating language server argument count mismatch warnings.
+- **Status Page Active NPC On XTarget Combat State (`triune.lua`)**:
+  - **Strict XTarget NPC In-Combat Filter (`hasActualNPCXtarget`)**: Updated the Status tab to only display the engine in combat (`• COMBAT: IN COMBAT` / `Combat: Yes`) when there is an actual live, non-ignored, hostile NPC occupying an active Extended Target (XTarget) slot, preventing lingering out-of-combat timers or idle auto-attack from misrepresenting combat state.
+  - **Threat Monitor Threat Filtering**: Updated the active XTarget list generator in the Threat Monitor table to filter out corpses, dead targets, players, friendly pets, and ignored spawns.
+  - **Unit Tests**: Added unit tests in `tests/test_pure_logic.lua` covering `hasActualNPCXtarget` across live hostile NPCs, corpses, players, friendly pets, and ignored targets.
 
 ---
 

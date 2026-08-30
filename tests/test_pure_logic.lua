@@ -1936,33 +1936,20 @@ assert_eq(losCand, 104, 'closer retarget: LoS priority allowed visible mob at 78
 -- 34. XTarget Detection & Range Suite
 -- ============================================================================
 print('--- xtarget detection & range ---')
-local dummyXtarSlots = {
-    [1] = { id = 201, type = 'NPC', dead = false, cleanName = 'a_moss_snake', hp = 80, dist = 180, z = 10 },
-    [2] = { id = 202, type = 'NPC', dead = false, cleanName = 'a_decaying_skeleton', hp = 40, dist = 50, z = 5 },
-    [3] = { id = 203, type = 'Corpse', dead = true, cleanName = 'a_dead_rat', hp = 0, dist = 10, z = 0 }
-}
-local dummyMqXtar = {
-    TLO = {
-        Me = {
-            Z = function() return 0 end,
-            XTargetSlots = function() return 3 end,
-            XTarget = function(i)
-                local slot = dummyXtarSlots[i]
-                if not slot then return function() return false end end
-                return setmetatable({
-                    ID = function() return slot.id end,
-                    Type = function() return slot.type end,
-                    Dead = function() return slot.dead end,
-                    CleanName = function() return slot.cleanName end,
-                    PctHPs = function() return slot.hp end,
-                    Distance3D = function() return slot.dist end,
-                    Z = function() return slot.z end
-                }, { __call = function() return true end })
-            end
-        },
-        Spawn = function(id)
-            for _, slot in pairs(dummyXtarSlots) do
-                if slot.id == id then
+do
+    local dummyXtarSlots = {
+        [1] = { id = 201, type = 'NPC', dead = false, cleanName = 'a_moss_snake', hp = 80, dist = 180, z = 10 },
+        [2] = { id = 202, type = 'NPC', dead = false, cleanName = 'a_decaying_skeleton', hp = 40, dist = 50, z = 5 },
+        [3] = { id = 203, type = 'Corpse', dead = true, cleanName = 'a_dead_rat', hp = 0, dist = 10, z = 0 }
+    }
+    local dummyMqXtar = {
+        TLO = {
+            Me = {
+                Z = function() return 0 end,
+                XTargetSlots = function() return 3 end,
+                XTarget = function(i)
+                    local slot = dummyXtarSlots[i]
+                    if not slot then return function() return false end end
                     return setmetatable({
                         ID = function() return slot.id end,
                         Type = function() return slot.type end,
@@ -1973,45 +1960,109 @@ local dummyMqXtar = {
                         Z = function() return slot.z end
                     }, { __call = function() return true end })
                 end
+            },
+            Spawn = function(id)
+                for _, slot in pairs(dummyXtarSlots) do
+                    if slot.id == id then
+                        return setmetatable({
+                            ID = function() return slot.id end,
+                            Type = function() return slot.type end,
+                            Dead = function() return slot.dead end,
+                            CleanName = function() return slot.cleanName end,
+                            PctHPs = function() return slot.hp end,
+                            Distance3D = function() return slot.dist end,
+                            Z = function() return slot.z end
+                        }, { __call = function() return true end })
+                    end
+                end
+                return function() return false end
             end
-            return function() return false end
-        end
+        }
     }
-}
 
-local findFirstNPCXtarget = loadFunc(src, 'findFirstNPCXtarget', {
-    ctrl = { xtar_nav_dist = 150 },
-    mq = dummyMqXtar,
-    isSpawnAlive = function(id) return id ~= 203 end,
-    isGroupOrRaidMember = function() return false end,
-    isSpawnPetOrPlayer = function() return false end,
-    isHostileTarget = function() return true end,
-    buffActive = function() return false end
-})
+    local findFirstNPCXtarget = loadFunc(src, 'findFirstNPCXtarget', {
+        ctrl = { xtar_nav_dist = 150 },
+        mq = dummyMqXtar,
+        isSpawnAlive = function(id) return id ~= 203 end,
+        isGroupOrRaidMember = function() return false end,
+        isSpawnPetOrPlayer = function() return false end,
+        isHostileTarget = function() return true end,
+        buffActive = function() return false end
+    })
 
-local isXTargetId = loadFunc(src, 'isXTargetId', {
-    mq = dummyMqXtar,
-    isGroupOrRaidMember = function() return false end,
-    isSpawnPetOrPlayer = function() return false end,
-    isHostileTarget = function() return true end,
-    isIgnored = function() return false end
-})
+    local isXTargetId = loadFunc(src, 'isXTargetId', {
+        mq = dummyMqXtar,
+        isGroupOrRaidMember = function() return false end,
+        isSpawnPetOrPlayer = function() return false end,
+        isHostileTarget = function() return true end,
+        isIgnored = function() return false end
+    })
 
--- 1. Default maxDist (150) picks lowest HP within 150 (mob 202 at dist 50, hp 40; ignores 201 at dist 180)
-local xtId1 = findFirstNPCXtarget(false, nil, nil, nil, nil)
-assert_eq(xtId1, 202, 'xtarget: default maxDist 150 picks lowest HP mob within 150')
+    -- 1. Default maxDist (150) picks lowest HP within 150 (mob 202 at dist 50, hp 40; ignores 201 at dist 180)
+    local xtId1 = findFirstNPCXtarget(false, nil, nil, nil, nil)
+    assert_eq(xtId1, 202, 'xtarget: default maxDist 150 picks lowest HP mob within 150')
 
--- 2. Extended maxDist (200) allows reaching mob 201 at dist 180 if mob 202 was not eligible
-dummyXtarSlots[2].dead = true
-local xtId2 = findFirstNPCXtarget(false, nil, nil, 200, 50)
-assert_eq(xtId2, 201, 'xtarget: extended maxDist 200 acquires mob 201 at dist 180')
-dummyXtarSlots[2].dead = false
+    -- 2. Extended maxDist (200) allows reaching mob 201 at dist 180 if mob 202 was not eligible
+    dummyXtarSlots[2].dead = true
+    local xtId2 = findFirstNPCXtarget(false, nil, nil, 200, 50)
+    assert_eq(xtId2, 201, 'xtarget: extended maxDist 200 acquires mob 201 at dist 180')
+    dummyXtarSlots[2].dead = false
 
--- 3. isXTargetId returns true for valid hostile NPC on XTarget
-assert_eq(isXTargetId(201), true, 'isXTargetId: recognizes mob 201 on XTarget')
-assert_eq(isXTargetId(202), true, 'isXTargetId: recognizes mob 202 on XTarget')
-assert_eq(isXTargetId(203), false, 'isXTargetId: corpse 203 returns false')
-assert_eq(isXTargetId(999), false, 'isXTargetId: non-xtarget id returns false')
+    -- 3. isXTargetId returns true for valid hostile NPC on XTarget
+    assert_eq(isXTargetId(201), true, 'isXTargetId: recognizes mob 201 on XTarget')
+    assert_eq(isXTargetId(202), true, 'isXTargetId: recognizes mob 202 on XTarget')
+    assert_eq(isXTargetId(203), false, 'isXTargetId: corpse 203 returns false')
+    assert_eq(isXTargetId(999), false, 'isXTargetId: non-xtarget id returns false')
+
+    -- 4. hasActualNPCXtarget returns true if and only if a live hostile non-ignored NPC is on XTarget
+    local hasActualNPCXtarget = loadFunc(src, 'hasActualNPCXtarget', {
+        mq = dummyMqXtar,
+        isSpawnAlive = function(id) return id ~= 203 end,
+        isGroupOrRaidMember = function() return false end,
+        isSpawnPetOrPlayer = function() return false end,
+        isHostileTarget = function() return true end,
+        isIgnored = function() return false end
+    })
+
+    assert_eq(hasActualNPCXtarget(), true, 'hasActualNPCXtarget: true with active hostile NPCs on XTarget')
+
+    -- Test when only dead corpses / non-NPCs remain
+    dummyXtarSlots[1].dead = true
+    dummyXtarSlots[2].dead = true
+    local hasActualNPCXtargetDead = loadFunc(src, 'hasActualNPCXtarget', {
+        mq = dummyMqXtar,
+        isSpawnAlive = function(id) return false end,
+        isGroupOrRaidMember = function() return false end,
+        isSpawnPetOrPlayer = function() return false end,
+        isHostileTarget = function() return true end,
+        isIgnored = function() return false end
+    })
+    assert_eq(hasActualNPCXtargetDead(), false, 'hasActualNPCXtarget: false when all spawns are dead or corpses')
+    dummyXtarSlots[1].dead = false
+    dummyXtarSlots[2].dead = false
+
+    -- Test when spawns are players or friendly
+    local hasActualNPCXtargetFriendly = loadFunc(src, 'hasActualNPCXtarget', {
+        mq = dummyMqXtar,
+        isSpawnAlive = function(id) return true end,
+        isGroupOrRaidMember = function() return true end,
+        isSpawnPetOrPlayer = function() return true end,
+        isHostileTarget = function() return false end,
+        isIgnored = function() return false end
+    })
+    assert_eq(hasActualNPCXtargetFriendly(), false, 'hasActualNPCXtarget: false when spawns are group members or players')
+
+    -- Test when spawns are ignored
+    local hasActualNPCXtargetIgnored = loadFunc(src, 'hasActualNPCXtarget', {
+        mq = dummyMqXtar,
+        isSpawnAlive = function(id) return true end,
+        isGroupOrRaidMember = function() return false end,
+        isSpawnPetOrPlayer = function() return false end,
+        isHostileTarget = function() return true end,
+        isIgnored = function() return true end
+    })
+    assert_eq(hasActualNPCXtargetIgnored(), false, 'hasActualNPCXtarget: false when all spawns are on ignore list')
+end
 
 -- ============================================================================
 -- 34. MQ2Nav Plugin Loaded Detection
