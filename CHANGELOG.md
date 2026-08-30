@@ -117,6 +117,11 @@
   - **Dynamic Spell Gem Slot Support (`getNumGems`)**: Automatically queries `mq.TLO.Me.NumGems()` to dynamically display 8 to 12 gem slots based on character AAs and server client capabilities.
   - **Unit Tests**: Added test suite in `tests/test_pure_logic.lua` covering preset snapshots and deep-copy isolation, gem slot swapping, `target HP between` windows, aggro triggers, and reagent verification.
 
+- **Main Window UI Cleanup (`triune.lua`).**
+  - **Static Header & Tab Bar**: Wrapped each of the 9 tab bodies (Status, Control, Settings, Spell Gems, Clickies, Abilities, AAs, Disciplines, Help) in its own scrolling `ImGui.BeginChild` region so the header bar, action controls, and tab bar never scroll out of view -- only the active tab's content scrolls now.
+  - **Reordered Header Toolbar**: Moved the `Compact Mode` button to the far left of the toolbar row, ahead of `Open Spellbook`.
+  - **Unified Pause/Burn Styling (`UI.drawActionControls`)**: Added a `compact` parameter so the mini HUD's Pause/Start and Burn buttons render through the same function as the full window, guaranteeing identical colors (green/red state coloring, pulsing red Burn-active animation) and text (`PAUSE`/`START`, `BURN (ON)`/`BURN (OFF)`) instead of a separately maintained, drifted copy.
+
 ---
 
 ## 2026-08-29

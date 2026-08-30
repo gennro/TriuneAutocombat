@@ -4339,6 +4339,14 @@ function UI.drawHeaderBar()
     end
 
     -- Toolbar buttons (on line below script info and trackers)
+    if ImGui.Button('Compact Mode##hdrCompact') then
+        ctrl.compact = true
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Switches Triune AutoCombat into a sleek compact HUD overlay window.')
+    end
+    ImGui.SameLine()
     if ImGui.Button('Open Spellbook##hdrBook') then
         toggleTool('triune_spellbook')
     end
@@ -4358,14 +4366,6 @@ function UI.drawHeaderBar()
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or toggles the standalone Triune DPS Parser window.')
-    end
-    ImGui.SameLine()
-    if ImGui.Button('Compact Mode##hdrCompact') then
-        ctrl.compact = true
-        saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Switches Triune AutoCombat into a sleek compact HUD overlay window.')
     end
     ImGui.SameLine()
     if ImGui.Button('Cursor Manager##hdrCursor') then
@@ -4463,6 +4463,8 @@ end
 
 function UI.drawHelpTab()
     if not ImGui.BeginTabItem('Help') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##HelpTabScroll', 0, 0)
 
     if ImGui.CollapsingHeader('Slash Commands', ImGuiTreeNodeFlags.DefaultOpen) then
         accent(GOLD, 'Commands (Alias: /ac or /triune):')
@@ -4541,6 +4543,7 @@ function UI.drawHelpTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -4896,8 +4899,11 @@ end
 
 function UI.drawGemTab()
     if not ImGui.BeginTabItem('Spell Gems') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##GemTabScroll', 0, 0)
     UI.drawGemTabHeader(loadout.gems)
     UI.drawGemList(loadout.gems, 'gem', true, true)
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -4978,6 +4984,8 @@ end
 
 function UI.drawClickieTab()
     if not ImGui.BeginTabItem('Clickies') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##ClickieTabScroll', 0, 0)
     ImGui.TextWrapped('Clickable Items: Manage inventory and equipped items with activatable spell effects. Click [+ Add Item on Cursor] while holding an item to add it.')
     if ImGui.IsItemHovered() then
         UI.setTooltip('Configure automated clickies (inventory/worn items). Items are clicked automatically when conditions are met.')
@@ -5151,12 +5159,15 @@ function UI.drawClickieTab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: Innate Combat Abilities & Skills tab
 function UI.drawAbilitiesTab()
     if not ImGui.BeginTabItem('Abilities') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##AbilitiesTabScroll', 0, 0)
     ImGui.TextWrapped('Innate Combat Abilities & Skills (/doability) -- Kick, Bash, Slam, Mend, Backstab, Monk strikes, Taunt, Disarm, Frenzy, etc.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Innate class actions and combat abilities operate independently of spell gems and fire automatically when ready or when conditions are met.')
@@ -5307,12 +5318,15 @@ function UI.drawAbilitiesTab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: activated AAs tab
 function UI.drawAATab()
     if not ImGui.BeginTabItem('AAs') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##AATabScroll', 0, 0)
     ImGui.TextWrapped('Activated Alternate Advancements (each has its own timer -- all fire when ready). Grouped by cooldown.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.')
@@ -5422,6 +5436,7 @@ function UI.drawAATab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -5434,6 +5449,8 @@ end
 
 function UI.drawDiscTab()
     if not ImGui.BeginTabItem('Disciplines') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##DiscTabScroll', 0, 0)
     ImGui.TextWrapped(
         'Disciplines (/disc) -- no cooldown data from the extractor to group by tier, so listed flat per class. '
         ..
@@ -5561,6 +5578,7 @@ function UI.drawDiscTab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -5584,7 +5602,17 @@ local function setManualHunterPetHold(on, force)
 end
 
 -- UI: Action controls (Start / Pause, Burn)
-function UI.drawActionControls()
+-- compact=true renders the smaller mini-HUD button sizes/IDs used by drawMiniGui,
+-- sharing this same logic so Pause/Burn styling and text can never drift between
+-- the full window and compact HUD.
+function UI.drawActionControls(compact)
+    local btnW, btnH = compact and 65 or 130, compact and 22 or 24
+    local startW = compact and 80 or 130
+    local pauseId = compact and 'PAUSE##miniRunBtn' or 'PAUSE'
+    local startId = compact and 'START##miniStartBtn' or 'START'
+    local burnOnId = compact and 'BURN (ON)##miniBurnBtn' or 'BURN (ON)##btnBurn'
+    local burnOffId = compact and 'BURN (OFF)##miniBurnBtn' or 'BURN (OFF)##btnBurn'
+
     if ctrl.running then
         local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local pCount = 0
@@ -5593,7 +5621,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.08, 0.40, 0.15, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
-        if ImGui.Button('PAUSE', 130, 24) then
+        if ImGui.Button(pauseId, btnW, btnH) then
             if ctrl.mode == 'Manual' then
                 setManualHunterPetHold(true, true)
             else
@@ -5612,7 +5640,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.80, 0.22, 0.22, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.50, 0.10, 0.10, 1.0) then pCount = pCount + 1 end
-        if ImGui.Button('START', 130, 24) then
+        if ImGui.Button(startId, startW, btnH) then
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
             end
@@ -5650,7 +5678,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.70, 0.00, 0.00, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
-        if ImGui.Button('BURN (ON)##btnBurn', 130, 24) then
+        if ImGui.Button(burnOnId, btnW, btnH) then
             ctrl.burn = false
             print('\ag[Triune]\ax Burn mode DISABLED.')
         end
@@ -5659,7 +5687,7 @@ function UI.drawActionControls()
             pcall(ImGui.PopStyleColor, pCount)
         end
     else
-        if ImGui.Button('BURN (OFF)##btnBurn', 130, 24) then
+        if ImGui.Button(burnOffId, btnW, btnH) then
             ctrl.burn = true
             print('\ag[Triune]\ax Burn mode ENABLED!')
         end
@@ -5701,6 +5729,8 @@ end
 -- UI: status tab
 function UI.drawStatusTab()
     if not ImGui.BeginTabItem('Status') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##StatusTabScroll', 0, 0)
 
     -- 1. Live Engine & Mode Overview Banner
     local inCombat = hasActualNPCXtarget()
@@ -6305,12 +6335,15 @@ function UI.drawStatusTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: control tab
 function UI.drawControlTab()
     if not ImGui.BeginTabItem('Control') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##ControlTabScroll', 0, 0)
     accent(GOLD, 'Combat Mode')
     ImGui.SetNextItemWidth(160)
     local curPrimaryIdx = idxOf(MODES.PRIMARY, ctrl.mode)
@@ -7111,11 +7144,14 @@ function UI.drawControlTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##SettingsTabScroll', 0, 0)
 
     -- 1. Character Classes & Profile
     UI.drawClassPicker()
@@ -7551,6 +7587,7 @@ function UI.drawSettingsTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -7655,60 +7692,9 @@ local function drawMiniGui()
             end
         end
 
-        -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
-        if ctrl.running then
-            if ImGui.Button('Pause##miniRunBtn', 65, 22) then
-                if ctrl.mode == 'Manual' then
-                    setManualHunterPetHold(true, true)
-                else
-                    setManualHunterPetHold(false, true)
-                end
-                ctrl.running = false
-                if runtime.fullStop then runtime.fullStop() end
-            end
-        else
-            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-            local pCount = 0
-            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then
-                pCount = pCount + 1
-            end
-            if ImGui.Button('START##miniStartBtn', 80, 22) then
-                if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
-                    runtime.setNearestWaypoint()
-                end
-                ctrl.running = true
-                runtime.wasRunning = true
-                if not navLoaded() and ctrl.mode ~= 'Manual' then
-                    mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
-                    print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
-                elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
-                    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-                    mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
-                    print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
-                end
-            end
-            if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
-        end
-
-        ImGui.SameLine()
-        if ctrl.burn then
-            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-            local pCount = 0
-            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.8, 0.2, 0.2, 1.0) then
-                pCount = pCount + 1
-            end
-            if ImGui.Button('BURN ON##miniBurnBtn', 75, 22) then
-                ctrl.burn = false
-            end
-            if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
-        else
-            if ImGui.Button('Burn##miniBurnBtn', 65, 22) then
-                ctrl.burn = true
-            end
-        end
-        if ImGui.IsItemHovered() then
-            UI.setTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
-        end
+        -- Row 2: Action Controls Toolbar (Run/Pause, Burn) -- shared with the full
+        -- window so styling and text always match between the two.
+        UI.drawActionControls(true)
 
         ImGui.Separator()
 
