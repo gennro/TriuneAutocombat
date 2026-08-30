@@ -2,6 +2,8 @@
 
 ## 2026-08-30
 
+- **Project Version Bump (v1.7.6)**: Synchronized version **1.7.6** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
 - **Control Tab UI Streamlining (`triune.lua`).**
   - **Removed Redundant Closer-Mobs Checkboxes**: Removed the duplicate `Check for Closer NPCs while Traveling` checkboxes from the `Hunter` and `Camp` submode sections on the Control tab, consolidating closer-target movement configuration onto the dedicated `Closer-NPC Retargeting During Movement` section on the Settings tab.
 

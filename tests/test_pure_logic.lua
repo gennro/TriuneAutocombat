@@ -2516,14 +2516,14 @@ do
     local cleanTag = loadFunc(updSrc, 'cleanTag', {})
     local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
 
-    assert_eq(cleanTag('v1.7.5'), '1.7.5', 'cleanTag: lowercase v')
-    assert_eq(cleanTag('V1.7.5'), '1.7.5', 'cleanTag: uppercase V')
-    assert_eq(cleanTag('1.7.5'), '1.7.5', 'cleanTag: no v prefix')
+    assert_eq(cleanTag('v1.7.6'), '1.7.6', 'cleanTag: lowercase v')
+    assert_eq(cleanTag('V1.7.6'), '1.7.6', 'cleanTag: uppercase V')
+    assert_eq(cleanTag('1.7.6'), '1.7.6', 'cleanTag: no v prefix')
     assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
     assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
     assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
 
-    assert_eq(extractJsonString('{"tag_name": "v1.7.5"}', 'tag_name'), 'v1.7.5', 'extractJsonString: simple tag_name')
+    assert_eq(extractJsonString('{"tag_name": "v1.7.6"}', 'tag_name'), 'v1.7.6', 'extractJsonString: simple tag_name')
     assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
         'extractJsonString: handles escaped quotes without truncation')
     assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
@@ -2541,8 +2541,8 @@ do
         'extractJsonString: extracts GitHub API rate limit error message')
 
     local fullReleaseJson =
-    '{\n  "tag_name": "v1.7.5",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
-    assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.5', 'extractJsonString: full payload tag_name')
+    '{\n  "tag_name": "v1.7.6",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
+    assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.6', 'extractJsonString: full payload tag_name')
     assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
         'extractJsonString: full payload preserves markdown and quotes in body')
 
@@ -2551,9 +2551,9 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '1.7.5', 'triune.lua version is 1.7.5')
-    assert_eq(updaterVer, '1.7.5', 'triune_updater.lua version is 1.7.5')
-    assert_eq(readmeVer, '1.7.5', 'README.md version is 1.7.5')
+    assert_eq(triuneVer, '1.7.6', 'triune.lua version is 1.7.6')
+    assert_eq(updaterVer, '1.7.6', 'triune_updater.lua version is 1.7.6')
+    assert_eq(readmeVer, '1.7.6', 'README.md version is 1.7.6')
 end
 
 -- ============================================================================
