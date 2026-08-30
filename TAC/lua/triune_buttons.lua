@@ -368,9 +368,44 @@ end
 -- ============================================================================
 -- Cooldown lookup (TLO based, pcall-safe, returns seconds remaining)
 -- ============================================================================
-local function msToSec(v)
-    if type(v) == 'number' and v > 0 then return v / 1000 end
-    return 0
+local function parseTloTimer(v)
+    if not v then return 0 end
+    local sec = 0
+    pcall(function()
+        if type(v) == 'number' then
+            if v > 1000 then sec = v / 1000.0
+            elseif v > 0 and v <= 500 then sec = v * 6
+            else sec = v end
+            return
+        end
+        if type(v) == 'table' then
+            if v.TotalSeconds then sec = tonumber(v.TotalSeconds) or 0; return end
+            if v.Ticks then sec = (tonumber(v.Ticks) or 0) * 6; return end
+            if v.Raw then sec = (tonumber(v.Raw) or 0) / 1000.0; return end
+        end
+        if type(v.TotalSeconds) == 'function' then
+            local ts = tonumber(v.TotalSeconds() or 0) or 0
+            if ts > 0 then sec = ts; return end
+        elseif type(v.TotalSeconds) == 'number' then
+            local ts = tonumber(v.TotalSeconds or 0) or 0
+            if ts > 0 then sec = ts; return end
+        end
+        if type(v.Ticks) == 'function' then
+            local t = tonumber(v.Ticks() or 0) or 0
+            if t > 0 then sec = t * 6; return end
+        end
+        if v.Raw and type(v.Raw) == 'function' then
+            local raw = tonumber(v.Raw() or 0) or 0
+            if raw > 0 then sec = raw / 1000.0; return end
+        end
+        if type(v) == 'function' or v() ~= nil then
+            local n = tonumber(v()) or 0
+            if n > 1000 then sec = n / 1000.0
+            elseif n > 0 and n <= 500 then sec = n * 6
+            else sec = n end
+        end
+    end)
+    return sec
 end
 
 local function getCooldown(btn)
@@ -379,13 +414,22 @@ local function getCooldown(btn)
     local key = btn.timerKey
 
     if tt == 'Gem' then
-        return msToSec(tlo(function() return mq.TLO.Me.GemTimer(tonumber(key) or 1) end))
+        return parseTloTimer(tlo(function() return mq.TLO.Me.GemTimer(tonumber(key) or 1) end))
     elseif tt == 'Ability' then
-        return msToSec(tlo(function() return mq.TLO.Me.AbilityTimer(tostring(key)) end))
+        return parseTloTimer(tlo(function() return mq.TLO.Me.AbilityTimer(tostring(key)) end))
     elseif tt == 'AA' then
-        return msToSec(tlo(function() return mq.TLO.Me.AltAbilityTimer(tostring(key)) end))
+        return parseTloTimer(tlo(function() return mq.TLO.Me.AltAbilityTimer(tostring(key)) end))
     elseif tt == 'Disc' then
-        return msToSec(tlo(function() return mq.TLO.Me.CombatAbilityTimer(tostring(key)) end))
+        return parseTloTimer(tlo(function()
+            local cat = mq.TLO.Me.CombatAbilityTimer(tostring(key))
+            if not cat or not cat() then
+                local ca = mq.TLO.Me.CombatAbility(tostring(key))
+                if ca and ca() and tonumber(ca()) then
+                    cat = mq.TLO.Me.CombatAbilityTimer(tonumber(ca()))
+                end
+            end
+            return cat
+        end))
     elseif tt == 'Item' then
         local v = tlo(function() return mq.TLO.FindItem(tostring(key)).TimerReady() end)
         if type(v) == 'number' and v > 0 then
@@ -393,6 +437,8 @@ local function getCooldown(btn)
             if v > 1800 then return v / 1000 end
             return v
         end
+        local vt = tlo(function() return mq.TLO.FindItem(tostring(key)).Timer() end)
+        if vt then return parseTloTimer(vt) end
         return 0
     elseif tt == 'Seconds' then
         local t = fireTime[btn.uid]

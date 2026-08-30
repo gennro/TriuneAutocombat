@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.7.6'
+local VERSION           = '1.7.7'
 local open              = true
 local cfg               = mq.configDir
 
@@ -2443,6 +2443,295 @@ local function getAbilityBaseCooldown(name)
     end)
     if tot > 0 then return tot end
     return 6
+end
+
+local function parseDurationSec(durObj)
+    if not durObj then return 0 end
+    local sec = 0
+    pcall(function()
+        if type(durObj) == 'number' then
+            if durObj > 10000 then
+                sec = durObj / 1000.0
+            else
+                sec = durObj
+            end
+            return
+        end
+
+        if type(durObj) == 'table' then
+            if durObj.TotalSeconds then
+                sec = tonumber(durObj.TotalSeconds) or 0
+                if sec > 0 then return end
+            end
+            if durObj.Raw then
+                sec = (tonumber(durObj.Raw) or 0) / 1000.0
+                if sec > 0 then return end
+            end
+            if durObj.Ticks then
+                sec = (tonumber(durObj.Ticks) or 0) * 6
+                if sec > 0 then return end
+            end
+        end
+
+        if type(durObj.TotalSeconds) == 'function' then
+            local ts = tonumber(durObj.TotalSeconds() or 0) or 0
+            if ts > 0 then sec = ts; return end
+        elseif type(durObj.TotalSeconds) == 'number' then
+            local ts = tonumber(durObj.TotalSeconds or 0) or 0
+            if ts > 0 then sec = ts; return end
+        end
+
+        if durObj.Raw and type(durObj.Raw) == 'function' then
+            local raw = tonumber(durObj.Raw() or 0) or 0
+            if raw > 0 then sec = raw / 1000.0; return end
+        end
+
+        if durObj.Ticks and type(durObj.Ticks) == 'function' then
+            local t = tonumber(durObj.Ticks() or 0) or 0
+            if t > 0 then sec = t * 6; return end
+        end
+
+        if type(durObj) == 'function' or durObj() ~= nil then
+            local v = tonumber(durObj()) or 0
+            if v > 1000 then
+                sec = v / 1000.0
+            elseif v > 0 and v <= 500 then
+                sec = v * 6
+            else
+                sec = v
+            end
+        end
+    end)
+    return sec
+end
+
+local function parseCombatAbilityTimer(cat)
+    if not cat then return 0 end
+    local sec = 0
+    pcall(function()
+        if type(cat) == 'number' then
+            if cat > 1000 then sec = cat / 1000.0
+            elseif cat > 0 and cat <= 500 then sec = cat * 6
+            else sec = cat end
+            return
+        end
+        if type(cat) == 'table' then
+            if cat.TotalSeconds then sec = tonumber(cat.TotalSeconds) or 0; return end
+            if cat.Ticks then sec = (tonumber(cat.Ticks) or 0) * 6; return end
+            if cat.Raw then sec = (tonumber(cat.Raw) or 0) / 1000.0; return end
+        end
+        if type(cat.TotalSeconds) == 'function' then
+            local ts = tonumber(cat.TotalSeconds() or 0) or 0
+            if ts > 0 then sec = ts; return end
+        elseif type(cat.TotalSeconds) == 'number' then
+            local ts = tonumber(cat.TotalSeconds or 0) or 0
+            if ts > 0 then sec = ts; return end
+        end
+        if type(cat.Ticks) == 'function' then
+            local t = tonumber(cat.Ticks() or 0) or 0
+            if t > 0 then sec = t * 6; return end
+        end
+        if cat.Raw and type(cat.Raw) == 'function' then
+            local raw = tonumber(cat.Raw() or 0) or 0
+            if raw > 0 then sec = raw / 1000.0; return end
+        end
+        if type(cat) == 'function' or cat() ~= nil then
+            local n = tonumber(cat()) or 0
+            if n > 1000 then sec = n / 1000.0
+            elseif n > 0 and n <= 500 then sec = n * 6
+            else sec = n end
+        end
+    end)
+    return sec
+end
+
+local function parseSpellRecastTime(sp)
+    if not sp then return 0 end
+    local sec = 0
+    pcall(function()
+        if type(sp.RecastTime) == 'userdata' or type(sp.RecastTime) == 'table' then
+            if type(sp.RecastTime.TotalSeconds) == 'function' then
+                local ts = tonumber(sp.RecastTime.TotalSeconds() or 0) or 0
+                if ts > 0 then sec = ts; return end
+            elseif type(sp.RecastTime.TotalSeconds) == 'number' then
+                local ts = tonumber(sp.RecastTime.TotalSeconds or 0) or 0
+                if ts > 0 then sec = ts; return end
+            end
+            if sp.RecastTime.Raw and type(sp.RecastTime.Raw) == 'function' then
+                local raw = tonumber(sp.RecastTime.Raw() or 0) or 0
+                if raw > 0 then sec = raw / 1000.0; return end
+            end
+        end
+
+        local rt = sp.RecastTime and sp.RecastTime()
+        if type(rt) == 'number' or tonumber(rt) then
+            local numRt = tonumber(rt) or 0
+            if numRt > 86400 then
+                sec = numRt / 1000.0
+            elseif numRt >= 10000 and numRt % 500 == 0 then
+                sec = numRt / 1000.0
+            elseif numRt > 0 then
+                sec = numRt
+            end
+        end
+    end)
+    return sec
+end
+
+local DISC_BASE_COOLDOWNS = {
+    ['Defensive Discipline']       = 900,
+    ['Evasive Discipline']         = 900,
+    ['Stonewall Discipline']       = 900,
+    ['Furious Discipline']         = 3600,
+    ['Fortitude Discipline']       = 3600,
+    ['Mighty Strike Discipline']   = 3600,
+    ['Charge Discipline']          = 900,
+    ['Resistant Discipline']       = 600,
+    ['Fearless Discipline']        = 600,
+    ['Precision Discipline']       = 300,
+    ['Aggressive Discipline']      = 300,
+    ['Frenzied Defense Discipline']= 900,
+    ['Fellstrike Discipline']      = 900,
+    ['Bellow of the Mastruq']      = 30,
+    ['Incite']                     = 30,
+    ['Berate']                     = 30,
+    ['Provoke']                    = 30,
+    ['Bellow']                     = 30,
+    ['Ancient: Chaos Cry']         = 30,
+    ['Aura of Runes']              = 30,
+    ['Infused by Rage']            = 30,
+    ['Nimble Discipline']          = 900,
+    ['Deftdance Discipline']       = 900,
+    ['Kinesthetics Discipline']    = 1800,
+    ['Duelist Discipline']         = 900,
+    ['Blinding Speed Discipline']  = 900,
+    ['Twisted Shank']              = 30,
+    ['Kyv Tear']                   = 30,
+    ['Kyv Strike']                 = 30,
+    ['Stonestance Discipline']     = 720,
+    ['Hundred Fists Discipline']   = 1800,
+    ['Inner Flame Discipline']     = 1800,
+    ['Whirlwind Discipline']       = 1800,
+    ['Voiddance Discipline']       = 900,
+    ['Ashenhand Discipline']       = 1800,
+    ['Thunderkick Discipline']     = 900,
+    ['Silentfist Discipline']      = 1800,
+    ["Dreamstrider's Discipline"]  = 1800,
+    ['Holyforge Discipline']       = 1800,
+    ['Sanctification Discipline']  = 1800,
+    ['Unholy Aura Discipline']     = 1800,
+    ['Leechcurse Discipline']      = 1800,
+    ['Bloodthirst Discipline']     = 900,
+    ['Trueshot Discipline']        = 1800,
+    ['Weapon Shield Discipline']   = 1800,
+    ['Fistshot Discipline']        = 900,
+    ["Warder's Protection"]        = 900,
+    ['Puretone Discipline']        = 1800,
+    ['Blind Rage Discipline']      = 900,
+    ['Cleaving Anger Discipline']  = 900,
+    ['Blood Pact Discipline']      = 900,
+    ['Reckless Abandon Discipline']= 900,
+    ['Savage Spirit Discipline']   = 900,
+    ['Cry Havoc']                  = 30,
+    ['Axe of the Destroyer']       = 30,
+    ['Vicious Spiral']             = 30,
+    ['Confusing Strike']           = 30,
+}
+
+local DISC_BASE_DURATIONS = {
+    ['Defensive Discipline']       = 18,
+    ['Evasive Discipline']         = 18,
+    ['Stonewall Discipline']       = 18,
+    ['Furious Discipline']         = 12,
+    ['Fortitude Discipline']       = 12,
+    ['Mighty Strike Discipline']   = 12,
+    ['Charge Discipline']          = 12,
+    ['Resistant Discipline']       = 120,
+    ['Fearless Discipline']        = 120,
+    ['Precision Discipline']       = 18,
+    ['Aggressive Discipline']      = 18,
+    ['Frenzied Defense Discipline']= 18,
+    ['Fellstrike Discipline']      = 18,
+    ['Nimble Discipline']          = 12,
+    ['Deftdance Discipline']       = 12,
+    ['Kinesthetics Discipline']    = 18,
+    ['Duelist Discipline']         = 14,
+    ['Stonestance Discipline']     = 12,
+    ['Hundred Fists Discipline']   = 14,
+    ['Inner Flame Discipline']     = 14,
+    ['Whirlwind Discipline']       = 12,
+    ['Voiddance Discipline']       = 8,
+    ['Ashenhand Discipline']       = 12,
+    ['Thunderkick Discipline']     = 12,
+    ['Holyforge Discipline']       = 300,
+    ['Sanctification Discipline']  = 18,
+    ['Unholy Aura Discipline']     = 300,
+    ['Leechcurse Discipline']      = 18,
+    ['Bloodthirst Discipline']     = 18,
+    ['Trueshot Discipline']        = 120,
+    ['Weapon Shield Discipline']   = 18,
+    ['Puretone Discipline']        = 120,
+    ['Blind Rage Discipline']      = 18,
+    ['Cleaving Anger Discipline']  = 18,
+    ['Blood Pact Discipline']      = 18,
+    ['Reckless Abandon Discipline']= 18,
+    ['Savage Spirit Discipline']   = 18,
+}
+
+local function getDiscCooldownAndDuration(name)
+    local recastSec = 0
+    local durSec = 0
+    local timerGroupId = nil
+    local endCost = 0
+    local discIdx = 0
+
+    if not name or name == '' then
+        return { recastSec = 0, durSec = 0, timerGroupId = nil, endCost = 0, discIdx = 0 }
+    end
+
+    pcall(function()
+        local ca = mq.TLO.Me.CombatAbility(name)
+        if ca and ca() then
+            discIdx = tonumber(ca() or 0) or 0
+        end
+
+        local sp = mq.TLO.Spell(name)
+        if (not sp or not sp()) and discIdx > 0 then
+            sp = mq.TLO.Me.CombatAbility(discIdx)
+        end
+
+        if sp and sp() then
+            endCost = tonumber(sp.EnduranceCost and sp.EnduranceCost() or 0) or 0
+            recastSec = parseSpellRecastTime(sp)
+
+            if sp.Duration then
+                durSec = parseDurationSec(sp.Duration)
+            end
+            if durSec <= 0 and sp.MyDuration then
+                durSec = parseDurationSec(sp.MyDuration)
+            end
+
+            local tid = sp.TimerID and sp.TimerID()
+            if tid and tonumber(tid) and tonumber(tid) > 0 then
+                timerGroupId = 'T' .. tostring(tid)
+            end
+        end
+    end)
+
+    if recastSec <= 0 and DISC_BASE_COOLDOWNS[name] then
+        recastSec = DISC_BASE_COOLDOWNS[name]
+    end
+    if durSec <= 0 and DISC_BASE_DURATIONS[name] then
+        durSec = DISC_BASE_DURATIONS[name]
+    end
+
+    return {
+        recastSec = recastSec,
+        durSec = durSec,
+        timerGroupId = timerGroupId,
+        endCost = endCost,
+        discIdx = discIdx,
+    }
 end
 
 local function hasActionSkill(name)
@@ -7586,16 +7875,7 @@ function UI.getTrackedCooldownItems()
                         if idx and idx > 0 then t = mq.TLO.Me.AbilityTimer(idx) end
                     end
                     if t and t() then
-                        if type(t.TotalSeconds) == 'function' then
-                            timerSec = tonumber(t.TotalSeconds() or 0) or 0
-                        elseif type(t.TotalSeconds) == 'number' then
-                            timerSec = tonumber(t.TotalSeconds) or 0
-                        elseif t.Raw and type(t.Raw) == 'function' then
-                            timerSec = (tonumber(t.Raw() or 0) or 0) / 1000.0
-                        elseif tonumber(t()) then
-                            local n = tonumber(t()) or 0
-                            timerSec = n > 1000 and (n / 1000.0) or n
-                        end
+                        timerSec = parseDurationSec(t)
                     end
 
                     local tot = mq.TLO.Me.AbilityTimerTotal(nm)
@@ -7604,17 +7884,7 @@ function UI.getTrackedCooldownItems()
                         if idx and idx > 0 then tot = mq.TLO.Me.AbilityTimerTotal(idx) end
                     end
                     if tot and tot() then
-                        local numTot = 0
-                        if type(tot.TotalSeconds) == 'function' then
-                            numTot = tonumber(tot.TotalSeconds() or 0) or 0
-                        elseif type(tot.TotalSeconds) == 'number' then
-                            numTot = tonumber(tot.TotalSeconds) or 0
-                        elseif tot.Raw and type(tot.Raw) == 'function' then
-                            numTot = (tonumber(tot.Raw() or 0) or 0) / 1000.0
-                        elseif tonumber(tot()) then
-                            local n = tonumber(tot()) or 0
-                            numTot = n > 1000 and (n / 1000.0) or n
-                        end
+                        local numTot = parseDurationSec(tot)
                         if numTot > 0 then totalSec = numTot end
                     end
                 end)
@@ -7626,18 +7896,13 @@ function UI.getTrackedCooldownItems()
                     isReady = false
                 end
 
-                if not isReady and timerSec <= 0 then
-                    if runtime.lastSkillFiredAt and runtime.lastSkillFiredAt[nm] then
-                        local elapsed = now - runtime.lastSkillFiredAt[nm]
-                        if elapsed < totalSec then
-                            timerSec = totalSec - elapsed
-                        else
-                            timerSec = 1.0
-                        end
+                if runtime.lastSkillFiredAt and runtime.lastSkillFiredAt[nm] then
+                    local elapsed = now - runtime.lastSkillFiredAt[nm]
+                    if elapsed < totalSec then
+                        local sRem = totalSec - elapsed
+                        if sRem > timerSec then timerSec = sRem end
                     else
-                        timerSec = totalSec
-                        if not runtime.lastSkillFiredAt then runtime.lastSkillFiredAt = {} end
-                        runtime.lastSkillFiredAt[nm] = now
+                        runtime.lastSkillFiredAt[nm] = nil
                     end
                 end
 
@@ -7677,6 +7942,7 @@ function UI.getTrackedCooldownItems()
                     ready = isReady,
                     active = false,
                     activeSec = 0,
+                    activeTotalSec = 0,
                     timeLeft = timerSec,
                     totalSec = totalSec,
                     status = status,
@@ -7700,6 +7966,7 @@ function UI.getTrackedCooldownItems()
                 local endCost = 0
                 local manaCost = 0
                 local activeSec = 0
+                local activeTotalSec = 0
                 local isActive = false
                 local aaId = 0
                 local spellName = nil
@@ -7715,8 +7982,11 @@ function UI.getTrackedCooldownItems()
                         local rt = aaObj.ReuseTime and aaObj.ReuseTime()
                         totalSec = tonumber(mrt or rt or 0) or 0
                         if totalSec == 0 and aaObj.Spell and aaObj.Spell() then
-                            totalSec = tonumber(aaObj.Spell.RecastTime() or 0) or 0
+                            totalSec = parseSpellRecastTime(aaObj.Spell)
                             spellName = aaObj.Spell.Name and aaObj.Spell.Name()
+                        end
+                        if aaObj.Spell and aaObj.Spell() and aaObj.Spell.Duration then
+                            activeTotalSec = parseDurationSec(aaObj.Spell.Duration)
                         end
                     end
 
@@ -7731,6 +8001,9 @@ function UI.getTrackedCooldownItems()
                             if not spellName and myAA.Spell.Name then
                                 spellName = myAA.Spell.Name()
                             end
+                            if activeTotalSec <= 0 and myAA.Spell.Duration then
+                                activeTotalSec = parseDurationSec(myAA.Spell.Duration)
+                            end
                         end
                     end
 
@@ -7740,34 +8013,33 @@ function UI.getTrackedCooldownItems()
                         t = mq.TLO.Me.AltAbilityTimer(aaId)
                     end
                     if t and t() then
-                        if type(t.TotalSeconds) == 'function' then
-                            timerSec = tonumber(t.TotalSeconds() or 0) or 0
-                        elseif type(t.TotalSeconds) == 'number' then
-                            timerSec = tonumber(t.TotalSeconds() or 0) or 0
-                        elseif t.Raw and type(t.Raw) == 'function' then
-                            timerSec = (tonumber(t.Raw() or 0) or 0) / 1000.0
-                        elseif tonumber(t()) then
-                            local n = tonumber(t()) or 0
-                            timerSec = n > 1000 and (n / 1000.0) or n
-                        end
+                        timerSec = parseDurationSec(t)
                     end
 
                     -- Check Active state on Buff or Song (by AA name or Spell name)
                     local b = mq.TLO.Me.Buff(nm)
-                    if (not b or not b() or (tonumber(b.Duration() or 0) or 0) <= 0) and spellName and spellName ~= '' then
+                    if (not b or not b()) and spellName and spellName ~= '' then
                         b = mq.TLO.Me.Buff(spellName)
                     end
-                    if b and b() and (tonumber(b.Duration() or 0) or 0) > 0 then
-                        isActive = true
-                        activeSec = (tonumber(b.Duration() or 0) or 0) * 6
-                    else
+                    if b and b() then
+                        local bDur = parseDurationSec(b.Duration)
+                        if bDur > 0 then
+                            isActive = true
+                            activeSec = bDur
+                        end
+                    end
+
+                    if not isActive then
                         local s = mq.TLO.Me.Song(nm)
-                        if (not s or not s() or (tonumber(s.Duration() or 0) or 0) <= 0) and spellName and spellName ~= '' then
+                        if (not s or not s()) and spellName and spellName ~= '' then
                             s = mq.TLO.Me.Song(spellName)
                         end
-                        if s and s() and (tonumber(s.Duration() or 0) or 0) > 0 then
-                            isActive = true
-                            activeSec = (tonumber(s.Duration() or 0) or 0) * 6
+                        if s and s() then
+                            local sDur = parseDurationSec(s.Duration)
+                            if sDur > 0 then
+                                isActive = true
+                                activeSec = sDur
+                            end
                         end
                     end
                 end)
@@ -7781,6 +8053,8 @@ function UI.getTrackedCooldownItems()
                     if totalSec > 0 and elapsed < totalSec then
                         local rem = totalSec - elapsed
                         if rem > timerSec then timerSec = rem end
+                    else
+                        runtime.lastAAFiredAt[nm] = nil
                     end
                 end
 
@@ -7791,19 +8065,13 @@ function UI.getTrackedCooldownItems()
                     isReady = false
                 end
 
-                if not isReady and not isActive and timerSec <= 0 then
-                    if totalSec <= 0 then totalSec = 60 end
-                    timerSec = totalSec
-                    if not runtime.lastAAFiredAt then runtime.lastAAFiredAt = {} end
-                    runtime.lastAAFiredAt[nm] = now
-                end
-
                 if timerSec > 0.05 then
                     isReady = false
                 elseif isReady and not isActive then
                     timerSec = 0
                 end
                 if totalSec <= 0 then totalSec = math.max(timerSec, 60) end
+                if activeTotalSec <= 0 then activeTotalSec = math.max(activeSec, 18) end
 
                 local status = isReady and 'READY' or 'COOLDOWN'
                 local reason = ''
@@ -7841,6 +8109,7 @@ function UI.getTrackedCooldownItems()
                     ready = isReady,
                     active = isActive,
                     activeSec = activeSec,
+                    activeTotalSec = activeTotalSec,
                     timeLeft = timerSec,
                     totalSec = totalSec,
                     status = status,
@@ -7866,16 +8135,20 @@ function UI.getTrackedCooldownItems()
                 local totalSec = 0
                 local endCost = 0
                 local activeSec = 0
+                local activeTotalSec = 0
                 local isActive = false
                 local timerGroupId = nil
                 local discIdx = 0
 
+                local discInfo = getDiscCooldownAndDuration(nm)
+                totalSec = discInfo.recastSec
+                activeTotalSec = discInfo.durSec
+                timerGroupId = discInfo.timerGroupId
+                endCost = discInfo.endCost
+                discIdx = discInfo.discIdx
+
                 pcall(function()
                     isReady = runtime.isDiscReady(nm)
-                    local ca = mq.TLO.Me.CombatAbility(nm)
-                    if ca and ca() then
-                        discIdx = tonumber(ca() or 0) or 0
-                    end
 
                     local r = mq.TLO.Me.CombatAbilityReady(nm)()
                     if r ~= nil and not r then isReady = false end
@@ -7885,77 +8158,52 @@ function UI.getTrackedCooldownItems()
                         cat = mq.TLO.Me.CombatAbilityTimer(discIdx)
                     end
                     if cat and cat() then
-                        if type(cat.TotalSeconds) == 'function' then
-                            timerSec = tonumber(cat.TotalSeconds() or 0) or 0
-                        elseif type(cat.TotalSeconds) == 'number' then
-                            timerSec = tonumber(cat.TotalSeconds() or 0) or 0
-                        elseif type(cat.Ticks) == 'function' then
-                            timerSec = (tonumber(cat.Ticks() or 0) or 0) * 6
-                        elseif cat.Raw and type(cat.Raw) == 'function' then
-                            timerSec = (tonumber(cat.Raw() or 0) or 0) / 1000.0
-                        elseif tonumber(cat()) then
-                            local n = tonumber(cat()) or 0
-                            if n > 1000 then
-                                timerSec = n / 1000.0
-                            elseif n > 0 and n <= 500 then
-                                timerSec = n * 6
-                            else
-                                timerSec = n
-                            end
-                        end
-                    end
-
-                    local sp = mq.TLO.Spell(nm)
-                    if sp and sp() then
-                        endCost = tonumber(sp.EnduranceCost() or 0) or 0
-                        local rt = sp.RecastTime and sp.RecastTime()
-                        if type(rt) == 'number' or tonumber(rt) then
-                            local numRt = tonumber(rt) or 0
-                            if numRt > 18000 then
-                                totalSec = numRt / 1000.0
-                            elseif numRt > 0 then
-                                totalSec = numRt
-                            end
-                        end
-                        if totalSec == 0 and type(sp.RecastTime) == 'userdata' then
-                            local ts = tonumber(sp.RecastTime.TotalSeconds and sp.RecastTime.TotalSeconds() or 0) or 0
-                            if ts > 0 then totalSec = ts end
-                        end
-                        local dTicks = tonumber(sp.Duration and sp.Duration() or 0) or 0
-                        if dTicks > 0 and (dTicks * 6) > totalSec then
-                            if totalSec == 0 then totalSec = dTicks * 6 end
-                        end
-                        local tid = sp.TimerID and sp.TimerID()
-                        if tid and tonumber(tid) and tonumber(tid) > 0 then
-                            timerGroupId = 'T' .. tostring(tid)
-                        end
+                        local cSec = parseCombatAbilityTimer(cat)
+                        if cSec > 0 then timerSec = cSec end
                     end
                 end)
 
-                -- Check active state
+                -- Check active state: ActiveDisc / Buff / Song
                 if activeDiscName and (activeDiscName:lower() == nm:lower() or activeDiscName == nm) then
                     isActive = true
-                else
-                    pcall(function()
-                        local b = mq.TLO.Me.Buff(nm)
-                        if b and b() and (tonumber(b.Duration() or 0) or 0) > 0 then
+                end
+
+                pcall(function()
+                    local b = mq.TLO.Me.Buff(nm)
+                    if b and b() then
+                        local bDur = parseDurationSec(b.Duration)
+                        if bDur > 0 then
                             isActive = true
-                            activeSec = (tonumber(b.Duration() or 0) or 0) * 6
-                        else
-                            local s = mq.TLO.Me.Song(nm)
-                            if s and s() and (tonumber(s.Duration() or 0) or 0) > 0 then
+                            activeSec = bDur
+                        end
+                    else
+                        local s = mq.TLO.Me.Song(nm)
+                        if s and s() then
+                            local sDur = parseDurationSec(s.Duration)
+                            if sDur > 0 then
                                 isActive = true
-                                activeSec = (tonumber(s.Duration() or 0) or 0) * 6
+                                activeSec = sDur
                             end
                         end
-                    end)
-                end
+                    end
+                end)
 
                 if runtime.discExpires and runtime.discExpires[nm] and runtime.discExpires[nm] > now then
                     local rem = runtime.discExpires[nm] - now
                     isActive = true
                     if rem > activeSec then activeSec = rem end
                 end
+
+                -- If active but activeSec is 0, estimate from base duration and initialize software expiry
+                if isActive and activeSec <= 0 then
+                    local baseDur = activeTotalSec > 0 and activeTotalSec or 18
+                    if not runtime.discExpires then runtime.discExpires = {} end
+                    if not runtime.discExpires[nm] or runtime.discExpires[nm] <= now then
+                        runtime.discExpires[nm] = now + baseDur
+                    end
+                    activeSec = math.max(1, runtime.discExpires[nm] - now)
+                end
+
                 if runtime.discCooldown and runtime.discCooldown[nm] and runtime.discCooldown[nm] > now then
                     local rem = runtime.discCooldown[nm] - now
                     if rem > timerSec then timerSec = rem end
@@ -7973,11 +8221,14 @@ function UI.getTrackedCooldownItems()
                     isReady = false
                 end
 
-                if not isReady and not isActive and timerSec <= 0 then
-                    if totalSec <= 0 then totalSec = 30 end
-                    timerSec = totalSec
-                    if not runtime.lastDiscFiredAt then runtime.lastDiscFiredAt = {} end
-                    runtime.lastDiscFiredAt[nm] = now
+                if runtime.lastDiscFiredAt and runtime.lastDiscFiredAt[nm] then
+                    local elapsed = now - runtime.lastDiscFiredAt[nm]
+                    if totalSec > 0 and elapsed < totalSec then
+                        local rem = totalSec - elapsed
+                        if rem > timerSec then timerSec = rem end
+                    else
+                        runtime.lastDiscFiredAt[nm] = nil
+                    end
                 end
 
                 if timerSec > 0.05 then
@@ -7986,6 +8237,7 @@ function UI.getTrackedCooldownItems()
                     timerSec = 0
                 end
                 if totalSec <= 0 then totalSec = math.max(timerSec, 30) end
+                if activeTotalSec <= 0 then activeTotalSec = math.max(activeSec, 18) end
 
                 local status = isReady and 'READY' or 'COOLDOWN'
                 local reason = ''
@@ -8023,6 +8275,7 @@ function UI.getTrackedCooldownItems()
                     ready = isReady,
                     active = isActive,
                     activeSec = activeSec,
+                    activeTotalSec = activeTotalSec,
                     timeLeft = timerSec,
                     totalSec = totalSec,
                     status = status,
@@ -8050,11 +8303,7 @@ function UI.getTrackedCooldownItems()
                     isReady = mq.TLO.Me.SpellReady(slot)() or false
                     local gt = mq.TLO.Me.GemTimer(slot)
                     if gt and gt() then
-                        if type(gt.TotalSeconds) == 'function' then
-                            timerSec = tonumber(gt.TotalSeconds() or 0) or 0
-                        elseif type(gt.TotalSeconds) == 'number' then
-                            timerSec = tonumber(gt.TotalSeconds) or 0
-                        end
+                        timerSec = parseDurationSec(gt)
                     end
                 end)
                 local condText = string.format('Gem %d: %s (%s %d%%)', slot, g.target or 'Target', g.when or 'in combat', tonumber(g.pct) or 100)
@@ -8067,6 +8316,7 @@ function UI.getTrackedCooldownItems()
                     ready = isReady,
                     active = false,
                     activeSec = 0,
+                    activeTotalSec = 0,
                     timeLeft = timerSec,
                     totalSec = math.max(timerSec, 5),
                     status = isReady and 'READY' or 'COOLDOWN',
@@ -8092,10 +8342,14 @@ function UI.getTrackedCooldownItems()
                 pcall(function()
                     isReady = mq.TLO.Me.ItemReady(c.name)() or false
                     local itm = mq.TLO.FindItem(c.name)
-                    if itm and itm() and itm.Timer and itm.Timer() then
-                        local t = itm.Timer()
-                        if type(t) == 'number' or tonumber(t) then
-                            timerSec = tonumber(t) or 0
+                    if itm and itm() then
+                        if itm.TimerReady then
+                            local tr = itm.TimerReady()
+                            if type(tr) == 'number' and tr > 0 then
+                                timerSec = tr > 1800 and (tr / 1000.0) or tr
+                            end
+                        elseif itm.Timer and itm.Timer() then
+                            timerSec = parseDurationSec(itm.Timer)
                         end
                     end
                 end)
@@ -8109,6 +8363,7 @@ function UI.getTrackedCooldownItems()
                     ready = isReady,
                     active = false,
                     activeSec = 0,
+                    activeTotalSec = 0,
                     timeLeft = timerSec,
                     totalSec = math.max(timerSec, 30),
                     status = isReady and 'READY' or 'COOLDOWN',
@@ -8437,18 +8692,20 @@ function UI.renderCooldownContent(idSuffix, isPopout)
                 -- 3. Status Bar & Timer
                 ImGui.TableNextColumn()
                 if itm.active then
-                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 1) / (itm.totalSec > 0 and itm.totalSec or 60)))
+                    local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
+                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 0) / actTotal))
                     local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
                     drawStatusProgressBar(frac, 110, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
                 elseif itm.ready then
                     if itm.status ~= 'READY' then
-                        -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR)
+                        -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR, BLOCKED)
                         drawStatusProgressBar(1.0, 110, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
                     else
                         drawStatusProgressBar(1.0, 110, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
                     end
                 else
-                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / (itm.totalSec > 0 and itm.totalSec or 60))))
+                    local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(itm.timeLeft or 0, 30)
+                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / cdTotal)))
                     local tStr = fmtSec(math.ceil(itm.timeLeft or 0))
                     drawStatusProgressBar(frac, 110, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
                 end
@@ -8516,7 +8773,8 @@ function UI.renderCooldownContent(idSuffix, isPopout)
 
                 ImGui.SameLine(); ImGui.SetNextItemWidth(105)
                 if itm.active then
-                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 1) / (itm.totalSec > 0 and itm.totalSec or 60)))
+                    local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
+                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 0) / actTotal))
                     local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
                     drawStatusProgressBar(frac, 105, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
                 elseif itm.ready then
@@ -8526,7 +8784,8 @@ function UI.renderCooldownContent(idSuffix, isPopout)
                         drawStatusProgressBar(1.0, 105, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
                     end
                 else
-                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / (itm.totalSec > 0 and itm.totalSec or 60))))
+                    local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(itm.timeLeft or 0, 30)
+                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / cdTotal)))
                     local tStr = fmtSec(math.ceil(itm.timeLeft or 0))
                     drawStatusProgressBar(frac, 105, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
                 end
@@ -9817,18 +10076,13 @@ runtime.isDiscReady = function(name)
         return false
     end
 
-    pcall(function()
-        local sp = mq.TLO.Spell(name)
-        if sp and sp() then
-            local tid = sp.TimerID and sp.TimerID()
-            if tid and tonumber(tid) and tonumber(tid) > 0 then
-                local tgKey = 'T' .. tostring(tid)
-                if runtime.timerGroupCooldown and runtime.timerGroupCooldown[tgKey] and now < (tonumber(runtime.timerGroupCooldown[tgKey]) or 0) then
-                    return false
-                end
-            end
+    local discInfo = getDiscCooldownAndDuration(name)
+    if discInfo.timerGroupId then
+        local tgKey = discInfo.timerGroupId
+        if runtime.timerGroupCooldown and runtime.timerGroupCooldown[tgKey] and now < (tonumber(runtime.timerGroupCooldown[tgKey]) or 0) then
+            return false
         end
-    end)
+    end
 
     -- 2. Known combat ability check
     local known = false
@@ -9836,54 +10090,39 @@ runtime.isDiscReady = function(name)
         local ca = mq.TLO.Me.CombatAbility(name)
         if ca and ca() then known = true end
     end)
-    if not known then return false end
+    if not known and discInfo.discIdx <= 0 then return false end
 
     -- 3. MQ CombatAbilityReady check
     local readyOk, isReady = pcall(function() return mq.TLO.Me.CombatAbilityReady(name)() end)
     if readyOk and isReady == false then return false end
 
-    -- 4. MQ CombatAbilityTimer check
-    local timerOk, timerVal = pcall(function() return mq.TLO.Me.CombatAbilityTimer(name) end)
+    -- 4. MQ CombatAbilityTimer check (dual-path: name, then index)
+    local timerOk, timerVal = pcall(function()
+        local cat = mq.TLO.Me.CombatAbilityTimer(name)
+        if (not cat or not cat()) and discInfo.discIdx > 0 then
+            cat = mq.TLO.Me.CombatAbilityTimer(discInfo.discIdx)
+        end
+        return cat
+    end)
     if timerOk and timerVal then
-        local sec = 0
-        pcall(function()
-            if type(timerVal.TotalSeconds) == 'function' then
-                sec = tonumber(timerVal.TotalSeconds() or 0) or 0
-            elseif type(timerVal.TotalSeconds) == 'number' then
-                sec = tonumber(timerVal.TotalSeconds or 0) or 0
-            elseif type(timerVal.Ticks) == 'function' then
-                sec = (tonumber(timerVal.Ticks() or 0) or 0) * 6
-            elseif timerVal.Raw and type(timerVal.Raw) == 'function' then
-                sec = (tonumber(timerVal.Raw() or 0) or 0) / 1000.0
-            elseif timerVal() then
-                local v = timerVal()
-                sec = tonumber(v) or 0
-                if sec > 0 and sec <= 500 then sec = sec * 6 end
-            end
-        end)
+        local sec = parseCombatAbilityTimer(timerVal)
         if sec > 0 then return false end
     end
 
     -- 5. Spell info (duration, endurance cost, target type)
-    local spOk, sp = pcall(function() return mq.TLO.Spell(name) end)
-    local hasDuration = false
+    local endCost = discInfo.endCost
+    local durSec = discInfo.durSec
     local isSelfTarget = true
-    if spOk and sp and sp() then
-        local endCost = 0
-        local durTicks = 0
-        pcall(function()
-            endCost = tonumber(sp.EnduranceCost() or 0) or 0
-            durTicks = tonumber(sp.Duration() or sp.MyDuration() or 0) or 0
+    pcall(function()
+        local sp = mq.TLO.Spell(name)
+        if sp and sp() then
             local tt = sp.TargetType()
             if tt and tostring(tt):lower() ~= 'self' then isSelfTarget = false end
-        end)
-        local myEnd = tonumber(mq.TLO.Me.CurrentEndurance() or 0) or 0
-        if endCost > 0 and myEnd < endCost then
-            return false
         end
-        if durTicks > 0 then
-            hasDuration = true
-        end
+    end)
+    local myEnd = tonumber(mq.TLO.Me.CurrentEndurance() or 0) or 0
+    if endCost > 0 and myEnd < endCost then
+        return false
     end
 
     -- 6. Active Disc state (Me.ActiveDisc)
@@ -9901,7 +10140,7 @@ runtime.isDiscReady = function(name)
                 return false
             end
             -- If this discipline is a duration/stance disc, cannot activate while another active disc is running
-            if hasDuration and isSelfTarget then
+            if durSec > 0 and isSelfTarget then
                 return false
             end
         end
@@ -9911,10 +10150,10 @@ runtime.isDiscReady = function(name)
     local buffFound = false
     pcall(function()
         local b = mq.TLO.Me.Buff(name)
-        if b and b() and (tonumber(b.Duration() or 0) or 0) > 0 then buffFound = true end
+        if b and b() and parseDurationSec(b.Duration) > 0 then buffFound = true end
         if not buffFound then
             local s = mq.TLO.Me.Song(name)
-            if s and s() and (tonumber(s.Duration() or 0) or 0) > 0 then buffFound = true end
+            if s and s() and parseDurationSec(s.Duration) > 0 then buffFound = true end
         end
     end)
     if buffFound then return false end
@@ -9931,17 +10170,7 @@ runtime.isSkillReady = function(name)
     if readyOk and isReady == false then return false end
     local timerOk, timerVal = pcall(function() return mq.TLO.Me.AbilityTimer(name) end)
     if timerOk and timerVal then
-        local sec = 0
-        pcall(function()
-            if type(timerVal.TotalSeconds) == 'function' then
-                sec = tonumber(timerVal.TotalSeconds() or 0) or 0
-            elseif type(timerVal.TotalSeconds) == 'number' then
-                sec = tonumber(timerVal.TotalSeconds) or 0
-            elseif timerVal() then
-                local v = timerVal()
-                sec = tonumber(v) or 0
-            end
-        end)
+        local sec = parseDurationSec(timerVal)
         if sec > 0 then return false end
     end
     return true
@@ -9963,52 +10192,18 @@ runtime.fireDisc = function(name, a, id)
     -- Calculate duration & cooldown to lock out until the timer runs out
     local now = os.clock()
     local key = 'd' .. name
-    local durSec = 0
-    local recastSec = 0
-    local timerGroupId = nil
-    pcall(function()
-        local sp = mq.TLO.Spell(name)
-        if sp and sp() then
-            local ticks = tonumber(sp.Duration() or sp.MyDuration() or 0) or 0
-            if ticks > 0 then durSec = ticks * 6 end
-            local rt = sp.RecastTime() or 0
-            if type(rt) == 'number' or tonumber(rt) then
-                local numRt = tonumber(rt) or 0
-                if numRt > 18000 then recastSec = numRt / 1000.0 else recastSec = numRt end
-            end
-            if recastSec == 0 and type(sp.RecastTime) == 'userdata' then
-                local ts = tonumber(sp.RecastTime.TotalSeconds and sp.RecastTime.TotalSeconds() or 0) or 0
-                if ts > 0 then recastSec = ts end
-            end
-            local tid = sp.TimerID and sp.TimerID()
-            if tid and tonumber(tid) and tonumber(tid) > 0 then
-                timerGroupId = 'T' .. tostring(tid)
-            end
-        end
-    end)
+    local discInfo = getDiscCooldownAndDuration(name)
+    local durSec = discInfo.durSec
+    local recastSec = discInfo.recastSec
+    local timerGroupId = discInfo.timerGroupId
 
     pcall(function()
         local cat = mq.TLO.Me.CombatAbilityTimer(name)
-        if not cat or not cat() then
-            local ca = mq.TLO.Me.CombatAbility(name)
-            if ca and ca() and tonumber(ca()) then
-                cat = mq.TLO.Me.CombatAbilityTimer(tonumber(ca()))
-            end
+        if (not cat or not cat()) and discInfo.discIdx > 0 then
+            cat = mq.TLO.Me.CombatAbilityTimer(discInfo.discIdx)
         end
         if cat and cat() then
-            local ts = 0
-            if type(cat.TotalSeconds) == 'function' then
-                ts = tonumber(cat.TotalSeconds() or 0) or 0
-            elseif type(cat.TotalSeconds) == 'number' then
-                ts = tonumber(cat.TotalSeconds() or 0) or 0
-            elseif type(cat.Ticks) == 'function' then
-                ts = (tonumber(cat.Ticks() or 0) or 0) * 6
-            elseif cat.Raw and type(cat.Raw) == 'function' then
-                ts = (tonumber(cat.Raw() or 0) or 0) / 1000.0
-            elseif tonumber(cat()) then
-                local n = tonumber(cat()) or 0
-                if n > 1000 then ts = n / 1000.0 elseif n > 0 and n <= 500 then ts = n * 6 else ts = n end
-            end
+            local ts = parseCombatAbilityTimer(cat)
             if ts > recastSec then recastSec = ts end
         end
     end)

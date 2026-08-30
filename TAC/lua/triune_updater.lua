@@ -1,6 +1,6 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- Triune AutoCombat — Standalone ImGui Release Updater (v1.7.6)
+-- Triune AutoCombat — Standalone ImGui Release Updater (v1.7.7)
 -- Checks GitHub Releases for updates, displays release notes, and updates
 -- script files on Windows and Linux directly within MacroQuest.
 -- ============================================================================
@@ -8,7 +8,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.7.6'
+local VERSION = '1.7.7'
 local GITHUB_REPO = 'gennro/TriuneAutocombat'
 local API_URL = 'https://api.github.com/repos/' .. GITHUB_REPO .. '/releases/latest'
 local latestTag = nil -- raw git tag from API (e.g. 'V1.3')

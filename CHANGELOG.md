@@ -2,7 +2,15 @@
 
 ## 2026-08-30
 
-- **Project Version Bump (v1.7.6)**: Synchronized version **1.7.6** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+- **Project Version Bump (v1.7.7)**: Synchronized version **1.7.7** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+- **Cooldown & Active Duration Accuracy Overhaul (`triune.lua`, `triune_buttons.lua`).**
+  - **Accurate Active Duration Calculation (`parseDurationSec`)**: Fixed active duration parsing across Alternate Advancements, Disciplines, Buffs, and Songs. MacroQuest's `Me.Buff.Duration` timestamp object is now parsed directly via `.TotalSeconds()`, `.Raw()` (/ 1000.0), or standard string conversion, eliminating previous tick-multiplication bugs (`duration * 6` on millisecond timestamps) that erroneously multiplied milliseconds by 6.
+  - **Discipline Reuse & Base Cooldown Engine (`getDiscCooldownAndDuration`, `DISC_BASE_COOLDOWNS`, `DISC_BASE_DURATIONS`)**: Added a comprehensive database of era-accurate discipline cooldowns and durations across all melee/hybrid classes (War, Pal, SK, Mnk, Rog, Rng, Ber, Bst). Discipline recast lookups now seamlessly merge spell data with `DISC_BASE_COOLDOWNS` fallbacks when MacroQuest `Spell.RecastTime` returns 0 for classic EQ combat abilities.
+  - **Discipline Timer Parsing (`parseCombatAbilityTimer`)**: Fixed `CombatAbilityTimer` lookups by supporting dual-path query (both by discipline name and integer combat ability index) and properly converting raw tick values (`1 tick = 6s`) to seconds while safely handling millisecond returns.
+  - **Eliminated Phantom Cooldown Loops**: Removed destructive fallback blocks in `UI.getTrackedCooldownItems()` that falsely set full artificial cooldowns and stamped `lastDiscFiredAt = now` on every frame for ready abilities gated by resource/combat checks (`LOW END`, `BLOCKED`, `NEED BURN`, `NEED BOSS`, `MIN XTAR`).
+  - **Cyan Active Progress Bar Scaling (`activeTotalSec`)**: Connected each ability's true baseline active duration (`activeTotalSec`) to both Table and HUD Card progress bars, ensuring active stances and buffs render a full 100% -> 0% countdown rather than a thin 2% sliver.
+  - **Toolbar Buttons Cooldown Sync (`triune_buttons.lua`)**: Updated `getCooldown(btn)` to use the shared `parseTloTimer` logic, properly converting `CombatAbilityTimer` ticks to seconds rather than misinterpreting ticks as milliseconds.
 
 - **Control Tab UI Streamlining (`triune.lua`).**
   - **Removed Redundant Closer-Mobs Checkboxes**: Removed the duplicate `Check for Closer NPCs while Traveling` checkboxes from the `Hunter` and `Camp` submode sections on the Control tab, consolidating closer-target movement configuration onto the dedicated `Closer-NPC Retargeting During Movement` section on the Settings tab.

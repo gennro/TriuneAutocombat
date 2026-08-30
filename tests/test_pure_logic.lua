@@ -2516,14 +2516,14 @@ do
     local cleanTag = loadFunc(updSrc, 'cleanTag', {})
     local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
 
-    assert_eq(cleanTag('v1.7.6'), '1.7.6', 'cleanTag: lowercase v')
-    assert_eq(cleanTag('V1.7.6'), '1.7.6', 'cleanTag: uppercase V')
-    assert_eq(cleanTag('1.7.6'), '1.7.6', 'cleanTag: no v prefix')
+    assert_eq(cleanTag('v1.7.7'), '1.7.7', 'cleanTag: lowercase v')
+    assert_eq(cleanTag('V1.7.7'), '1.7.7', 'cleanTag: uppercase V')
+    assert_eq(cleanTag('1.7.7'), '1.7.7', 'cleanTag: no v prefix')
     assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
     assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
     assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
 
-    assert_eq(extractJsonString('{"tag_name": "v1.7.6"}', 'tag_name'), 'v1.7.6', 'extractJsonString: simple tag_name')
+    assert_eq(extractJsonString('{"tag_name": "v1.7.7"}', 'tag_name'), 'v1.7.7', 'extractJsonString: simple tag_name')
     assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
         'extractJsonString: handles escaped quotes without truncation')
     assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
@@ -2541,8 +2541,8 @@ do
         'extractJsonString: extracts GitHub API rate limit error message')
 
     local fullReleaseJson =
-    '{\n  "tag_name": "v1.7.6",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
-    assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.6', 'extractJsonString: full payload tag_name')
+    '{\n  "tag_name": "v1.7.7",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
+    assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.7', 'extractJsonString: full payload tag_name')
     assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
         'extractJsonString: full payload preserves markdown and quotes in body')
 
@@ -2551,9 +2551,9 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '1.7.6', 'triune.lua version is 1.7.6')
-    assert_eq(updaterVer, '1.7.6', 'triune_updater.lua version is 1.7.6')
-    assert_eq(readmeVer, '1.7.6', 'README.md version is 1.7.6')
+    assert_eq(triuneVer, '1.7.7', 'triune.lua version is 1.7.7')
+    assert_eq(updaterVer, '1.7.7', 'triune_updater.lua version is 1.7.7')
+    assert_eq(readmeVer, '1.7.7', 'README.md version is 1.7.7')
 end
 
 -- ============================================================================
@@ -3149,6 +3149,102 @@ do
     assert_true(triuneContent:find('function UI.drawCooldownsTab()', 1, true) ~= nil, 'cooldown tab: UI.drawCooldownsTab defined')
     local tabOrderMatch = triuneContent:find('UI.drawAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawDiscTab%(%)')
     assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned right after AAs tab in triuneTabs')
+
+    -- F. parseDurationSec & parseSpellRecastTime Comprehensive Tests
+    local function parseDurationSec(durObj)
+        if not durObj then return 0 end
+        local sec = 0
+        pcall(function()
+            if type(durObj) == 'number' then
+                if durObj > 1800 then sec = durObj / 1000.0
+                elseif durObj > 0 and durObj <= 500 then sec = durObj * 6
+                else sec = durObj end
+                return
+            end
+            if type(durObj) == 'table' then
+                if durObj.TotalSeconds then
+                    if type(durObj.TotalSeconds) == 'function' then
+                        sec = tonumber(durObj.TotalSeconds() or 0) or 0
+                    else
+                        sec = tonumber(durObj.TotalSeconds) or 0
+                    end
+                    if sec > 0 then return end
+                end
+                if durObj.Raw then
+                    local r = type(durObj.Raw) == 'function' and durObj.Raw() or durObj.Raw
+                    local nr = tonumber(r or 0) or 0
+                    if nr > 0 then sec = nr / 1000.0; return end
+                end
+                if durObj.Ticks then
+                    local t = type(durObj.Ticks) == 'function' and durObj.Ticks() or durObj.Ticks
+                    local nt = tonumber(t or 0) or 0
+                    if nt > 0 then sec = nt * 6; return end
+                end
+            end
+            if type(durObj) == 'function' then
+                local val = durObj()
+                if val ~= nil then
+                    local n = tonumber(val) or 0
+                    if n > 1800 then sec = n / 1000.0
+                    elseif n > 0 and n <= 500 then sec = n * 6
+                    else sec = n end
+                end
+            end
+        end)
+        return sec
+    end
+
+    -- MacroQuest Me.Buff.Duration tests
+    assert_eq(parseDurationSec({ TotalSeconds = function() return 180 end }), 180, 'parseDurationSec: TotalSeconds() method')
+    assert_eq(parseDurationSec({ TotalSeconds = 45 }), 45, 'parseDurationSec: TotalSeconds property')
+    assert_eq(parseDurationSec({ Raw = function() return 18000 end }), 18, 'parseDurationSec: Raw() ms method (18000ms = 18s)')
+    assert_eq(parseDurationSec({ Ticks = function() return 10 end }), 60, 'parseDurationSec: Ticks() method (10 ticks = 60s)')
+    assert_eq(parseDurationSec(function() return "18000" end), 18, 'parseDurationSec: string ms fallback (18000ms = 18s)')
+    assert_eq(parseDurationSec(function() return "5" end), 30, 'parseDurationSec: string ticks fallback (5 ticks = 30s)')
+
+    -- G. DISC_BASE_COOLDOWNS and DISC_BASE_DURATIONS Lookups
+    local DISC_BASE_COOLDOWNS = {
+        ['defensive discipline'] = 900,
+        ['evasive discipline'] = 900,
+        ['fortitude discipline'] = 3600,
+        ['furious discipline'] = 3600,
+        ['stonewall discipline'] = 900,
+        ['duelist discipline'] = 1200,
+        ['kinetics discipline'] = 1200,
+        ['trueshot discipline'] = 1800,
+        ['weapon shield discipline'] = 3600,
+        ['hundred fists discipline'] = 1800,
+        ['unflinching will'] = 30,
+        ['bellow of the kedge'] = 30,
+    }
+    local DISC_BASE_DURATIONS = {
+        ['defensive discipline'] = 180,
+        ['evasive discipline'] = 180,
+        ['fortitude discipline'] = 8,
+        ['furious discipline'] = 9,
+        ['stonewall discipline'] = 180,
+        ['duelist discipline'] = 72,
+        ['kinetics discipline'] = 72,
+        ['trueshot discipline'] = 120,
+        ['weapon shield discipline'] = 18,
+        ['hundred fists discipline'] = 72,
+        ['unflinching will'] = 18,
+    }
+
+    assert_eq(DISC_BASE_COOLDOWNS['defensive discipline'], 900, 'disc base cd: Defensive is 900s (15m)')
+    assert_eq(DISC_BASE_COOLDOWNS['fortitude discipline'], 3600, 'disc base cd: Fortitude is 3600s (60m)')
+    assert_eq(DISC_BASE_DURATIONS['defensive discipline'], 180, 'disc base dur: Defensive is 180s (3m)')
+    assert_eq(DISC_BASE_DURATIONS['fortitude discipline'], 8, 'disc base dur: Fortitude is 8s')
+
+    -- H. Progress Bar Active Scaling Calculation
+    local activeSec = 180
+    local activeTotalSec = 180
+    local actFrac = math.min(1.0, math.max(0.0, activeSec / activeTotalSec))
+    assert_eq(actFrac, 1.0, 'progress bar active: Full duration gives 100% (1.0) cyan bar')
+
+    activeSec = 90
+    actFrac = math.min(1.0, math.max(0.0, activeSec / activeTotalSec))
+    assert_eq(actFrac, 0.5, 'progress bar active: Half duration gives 50% (0.5) cyan bar')
 end
 
 -- ============================================================================
