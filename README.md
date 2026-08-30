@@ -127,15 +127,15 @@ Want to clear up screen clutter while playing?
 
 ---
 
-### ⏱️ Popout Cooldown & Ability Monitor
-Keep track of every enabled combat ability, activated AA, and discipline in real time:
-- **Popout Window**: Open via `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD to float and dock the monitor anywhere on screen.
+### ⏱️ Cooldown & Ability Monitor
+Keep track of every enabled combat ability, activated AA, discipline, spell gem, and clickie item in real time:
+- **Dedicated Tab & Popout Window**: Access directly via the **Cooldowns** tab in the main window (positioned right after AAs) or float as a standalone window using the `Popout Window` button, `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD.
 - **Active Duration Tracking**: Glowing cyan progress bars show remaining active buff/stance duration (e.g. *Defensive Discipline*, *Harmshield*, *Furious*) before transitioning to cooldown.
 - **Smart Readiness Diagnostics**: Instant feedback on why abilities are gated: `[READY]`, `[LOW END]`, `[LOW MANA]`, `[NEED BURN]`, `[NEED BOSS]`, `[MIN XTAR]`, or `[LOCKED]`.
 - **EverQuest Timer Groups**: Badges display EQ shared timer banks (`[T1]`, `[T2]`, `[T4]`) to clarify shared cooldown lockouts.
-- **"Next Up" Combat Forecast**: Highlights the highest-priority ability queued to execute on the next combat tick with a golden star (`★ Next`).
 - **1-Click Execution**: Interactive **`[ Use ]`** buttons allow manual firing of any ready ability directly from the monitor.
 - **Dual View Modes & HUD Overlay**: Switch between a detailed Table View and a sleek horizontal HUD Cards View with background transparency opacity slider and window position lock.
+- **In-Place Loadout Tuning**: Optional inline editing controls enabling live adjustment of `Enabled`, threshold `HP %`, and `Burn Only` toggles directly from the monitor.
 
 ---
 

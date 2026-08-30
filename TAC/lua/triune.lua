@@ -5136,6 +5136,13 @@ function UI.drawAATab()
     ImGui.EndTabItem()
 end
 
+-- UI: Cooldown & Ability Monitor Tab
+function UI.drawCooldownsTab()
+    if not ImGui.BeginTabItem('Cooldowns') then return end
+    UI.renderCooldownContent('_tab', false)
+    ImGui.EndTabItem()
+end
+
 function UI.drawDiscTab()
     if not ImGui.BeginTabItem('Disciplines') then return end
     ImGui.TextWrapped(
@@ -7514,6 +7521,7 @@ local function drawFullGui()
         UI.drawGemTab()
         UI.drawAbilitiesTab()
         UI.drawAATab()
+        UI.drawCooldownsTab()
         UI.drawDiscTab()
         UI.drawClickieTab()
         UI.drawHelpTab()
@@ -8130,6 +8138,427 @@ function UI.getTrackedCooldownItems()
     return items
 end
 
+function UI.renderCooldownContent(idSuffix, isPopout)
+    idSuffix = idSuffix or ''
+    local allItems = UI.getTrackedCooldownItems()
+
+    -- Count totals
+    local countReady = 0
+    local countActive = 0
+    local countCooldown = 0
+    for _, itm in ipairs(allItems) do
+        if itm.active then countActive = countActive + 1
+        elseif itm.status == 'READY' then countReady = countReady + 1
+        else countCooldown = countCooldown + 1 end
+    end
+
+    -- Header Line 1: Metrics Strip & Quick View Toggles
+    accent(ARC, 'COOLDOWNS')
+    ImGui.SameLine(); ImGui.TextDisabled('|')
+    ImGui.SameLine(); accent(GOOD, string.format('R:%d', countReady))
+    ImGui.SameLine(); accent(ARC, string.format('A:%d', countActive))
+    ImGui.SameLine(); accent(WARN, string.format('CD:%d', countCooldown))
+
+    if not isPopout then
+        ImGui.SameLine()
+        if ImGui.Button('Popout Window##cdTabPop' .. idSuffix) then
+            ctrl.show_cooldowns = true
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Opens the standalone popout Cooldown & Ability Monitor window.')
+        end
+    end
+
+    -- Right-aligned Quick Controls
+    ImGui.SameLine()
+    local isTableView = (ctrl.cooldown_view_mode ~= 'cards')
+    if ImGui.Button((isTableView and 'HUD##cdView' or 'Table##cdView') .. idSuffix, 44, 18) then
+        ctrl.cooldown_view_mode = isTableView and 'cards' or 'table'
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('Toggle Table View / Compact HUD Cards') end
+
+    if isPopout then
+        ImGui.SameLine()
+        local lockVal = ImGui.Checkbox('Lock##cdLock' .. idSuffix, ctrl.cooldown_locked or false)
+        if lockVal ~= ctrl.cooldown_locked then
+            ctrl.cooldown_locked = lockVal
+            saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then UI.setTooltip('Lock window position and hide borders') end
+    end
+
+    ImGui.SameLine()
+    local isCmp = (ctrl.cooldown_compact ~= false)
+    local cmpVal = ImGui.Checkbox('Compact##cdCmp' .. idSuffix, isCmp)
+    if cmpVal ~= isCmp then
+        ctrl.cooldown_compact = cmpVal
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('Ultra-compact mode (streamlined columns)') end
+
+    ImGui.SameLine()
+    local editVal = ImGui.Checkbox('Tune##cdEdit' .. idSuffix, ctrl.cooldown_show_inline_edit or false)
+    if editVal ~= ctrl.cooldown_show_inline_edit then
+        ctrl.cooldown_show_inline_edit = editVal
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('Show inline loadout tuning controls (Enabled, HP %, Burn)') end
+
+    -- Header Line 2: Streamlined Filters & Search
+    -- Category Dropdown
+    ImGui.SetNextItemWidth(72)
+    local CAT_OPTS = { 'All', 'Skills', 'AAs', 'Discs', 'Spells', 'Items' }
+    local CAT_MAP = { All = 'All', Skills = 'Abilities', AAs = 'AAs', Discs = 'Disciplines', Spells = 'Spells', Items = 'Items' }
+    local REV_CAT = { All = 'All', Abilities = 'Skills', AAs = 'AAs', Disciplines = 'Discs', Spells = 'Spells', Items = 'Items' }
+    local curCatLabel = REV_CAT[ctrl.cooldown_category or 'All'] or 'All'
+    local curCatIdx = idxOf(CAT_OPTS, curCatLabel)
+    local newCatIdx = ImGui.Combo('##cdCat' .. idSuffix, curCatIdx, CAT_OPTS)
+    if newCatIdx ~= curCatIdx then
+        ctrl.cooldown_category = CAT_MAP[CAT_OPTS[newCatIdx]] or 'All'
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('Filter by ability category') end
+
+    ImGui.SameLine()
+    -- Status Filter Dropdown
+    ImGui.SetNextItemWidth(68)
+    local STATUS_OPTS = { 'All', 'Ready', 'CD', 'Active' }
+    local STATUS_MAP = { All = 'All', Ready = 'Ready', CD = 'Cooldown', Active = 'Active' }
+    local REV_STATUS = { All = 'All', Ready = 'Ready', Cooldown = 'CD', Active = 'Active' }
+    local curStatusLabel = REV_STATUS[ctrl.cooldown_status_filter or 'All'] or 'All'
+    local curStatusIdx = idxOf(STATUS_OPTS, curStatusLabel)
+    local newStatusIdx = ImGui.Combo('##cdStatusFilter' .. idSuffix, curStatusIdx, STATUS_OPTS)
+    if newStatusIdx ~= curStatusIdx then
+        ctrl.cooldown_status_filter = STATUS_MAP[STATUS_OPTS[newStatusIdx]] or 'All'
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('Filter by readiness status') end
+
+    ImGui.SameLine()
+    -- Sort Selector
+    ImGui.SetNextItemWidth(70)
+    local SORT_LABELS = { 'Time', 'Status', 'Pri', 'Cls', 'Type', 'A-Z' }
+    local SORT_KEYS = { 'time', 'status', 'priority', 'class', 'type', 'alpha' }
+    local curSortIdx = idxOf(SORT_KEYS, ctrl.cooldown_sort_by or 'time')
+    local newSortIdx = ImGui.Combo('##cdSortBy' .. idSuffix, curSortIdx, SORT_LABELS)
+    if newSortIdx ~= curSortIdx then
+        ctrl.cooldown_sort_by = SORT_KEYS[newSortIdx]
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('Sort items by time, status, priority, or class') end
+
+    ImGui.SameLine()
+    -- Search Input
+    ImGui.SetNextItemWidth(105)
+    runtime.cooldownSearch = ImGui.InputTextWithHint('##cdSearch' .. idSuffix, 'Search...', runtime.cooldownSearch or '', 64)
+
+    if isPopout then
+        ImGui.SameLine()
+        -- Transparency Slider
+        ImGui.SetNextItemWidth(55)
+        local newAlpha = ImGui.SliderFloat('##cdAlpha' .. idSuffix, ctrl.cooldown_alpha or 0.90, 0.10, 1.00, '%.2f')
+        if newAlpha ~= ctrl.cooldown_alpha then
+            ctrl.cooldown_alpha = newAlpha
+        end
+        if ImGui.IsItemHovered() then UI.setTooltip(string.format('Overlay transparency (current: %.2f)', ctrl.cooldown_alpha or 0.90)) end
+    end
+
+    ImGui.Separator()
+
+    -- Filter items based on active criteria
+    local filteredItems = {}
+    local searchStr = (runtime.cooldownSearch or ''):lower()
+    for _, itm in ipairs(allItems) do
+        local passCat = true
+        if ctrl.cooldown_category == 'Abilities' then passCat = (itm.kind == 'Skill')
+        elseif ctrl.cooldown_category == 'AAs' then passCat = (itm.kind == 'AA')
+        elseif ctrl.cooldown_category == 'Disciplines' then passCat = (itm.kind == 'Disc')
+        elseif ctrl.cooldown_category == 'Spells' then passCat = (itm.kind == 'Spell')
+        elseif ctrl.cooldown_category == 'Items' then passCat = (itm.kind == 'Item')
+        end
+
+        local passStatus = true
+        if ctrl.cooldown_status_filter == 'Ready' then passStatus = itm.ready
+        elseif ctrl.cooldown_status_filter == 'Cooldown' then passStatus = (not itm.ready and not itm.active)
+        elseif ctrl.cooldown_status_filter == 'Active' then passStatus = itm.active
+        end
+
+        local passSearch = true
+        if searchStr ~= '' then
+            passSearch = string.find(itm.name:lower(), searchStr, 1, true) ~= nil
+        end
+
+        if passCat and passStatus and passSearch then
+            table.insert(filteredItems, itm)
+        end
+    end
+
+    -- Sort filtered items
+    local sortKey = ctrl.cooldown_sort_by or 'time'
+    table.sort(filteredItems, function(a, b)
+        if sortKey == 'time' then
+            -- 1. Active items first (running stances / active duration buffs)
+            if a.active ~= b.active then
+                return a.active
+            end
+            if a.active and b.active then
+                return (a.activeSec or 0) < (b.activeSec or 0)
+            end
+
+            -- 2. Items on Cooldown NEXT at the top of the list
+            local aInCd = (not a.ready)
+            local bInCd = (not b.ready)
+            if aInCd ~= bInCd then
+                return aInCd
+            end
+
+            -- Both are on cooldown: sort by time remaining ascending (soonest to become ready first)
+            if aInCd and bInCd then
+                if math.abs((a.timeLeft or 0) - (b.timeLeft or 0)) > 0.05 then
+                    return (a.timeLeft or 0) < (b.timeLeft or 0)
+                end
+                return (a.priority or 50) < (b.priority or 50)
+            end
+
+            -- 3. Both are Ready: sort by priority ascending (pri 1 before pri 50)
+            if (a.priority or 50) ~= (b.priority or 50) then
+                return (a.priority or 50) < (b.priority or 50)
+            end
+            return (a.name or '') < (b.name or '')
+        elseif sortKey == 'status' then
+            local statusRank = {
+                ACTIVE = 1,
+                COOLDOWN = 2,
+                ['LOW END'] = 3,
+                ['LOW MANA'] = 4,
+                ['NEED BURN'] = 5,
+                ['NEED BOSS'] = 6,
+                ['MIN XTAR'] = 7,
+                LOCKED = 8,
+                BLOCKED = 9,
+                READY = 10,
+            }
+            local rA = statusRank[a.status] or 11
+            local rB = statusRank[b.status] or 11
+            if rA ~= rB then return rA < rB end
+            return (a.timeLeft or 0) < (b.timeLeft or 0)
+        elseif sortKey == 'priority' then
+            return (a.priority or 50) < (b.priority or 50)
+        elseif sortKey == 'class' then
+            if (a.cls or '') ~= (b.cls or '') then return (a.cls or '') < (b.cls or '') end
+            return (a.name or '') < (b.name or '')
+        elseif sortKey == 'type' then
+            if (a.kind or '') ~= (b.kind or '') then return (a.kind or '') < (b.kind or '') end
+            return (a.name or '') < (b.name or '')
+        elseif sortKey == 'alpha' then
+            return (a.name or ''):lower() < (b.name or ''):lower()
+        end
+        return false
+    end)
+
+    -- Render Items in Table View or Cards HUD View
+    if #filteredItems == 0 then
+        if #allItems == 0 then
+            accent(MUTED, '  (No abilities, AAs, or disciplines enabled in loadout.)')
+        else
+            accent(MUTED, '  (No abilities match current filters.)')
+        end
+    elseif isTableView then
+        -- Compact Table View
+        local tableFlags = bit.bor(
+            ImGuiTableFlags.Borders,
+            ImGuiTableFlags.RowBg,
+            ImGuiTableFlags.Resizable,
+            ImGuiTableFlags.ScrollY,
+            ImGuiTableFlags.SizingFixedFit
+        )
+        local isCompactMode = (ctrl.cooldown_compact ~= false)
+        local colCount = isCompactMode and 4 or 6
+        if ctrl.cooldown_show_inline_edit then colCount = colCount + 1 end
+
+        if ImGui.BeginTable('##TriuneCooldownTable' .. idSuffix, colCount, tableFlags) then
+            ImGui.TableSetupColumn('Cls', ImGuiTableColumnFlags.WidthFixed, 28)
+            if not isCompactMode then
+                ImGui.TableSetupColumn('Type', ImGuiTableColumnFlags.WidthFixed, 55)
+            end
+            ImGui.TableSetupColumn('Ability Name', ImGuiTableColumnFlags.WidthStretch, 130)
+            if not isCompactMode then
+                ImGui.TableSetupColumn('Trigger / Cond', ImGuiTableColumnFlags.WidthStretch, 110)
+            end
+            ImGui.TableSetupColumn('Status & Timer', ImGuiTableColumnFlags.WidthFixed, 115)
+            if ctrl.cooldown_show_inline_edit then
+                ImGui.TableSetupColumn('Tuning', ImGuiTableColumnFlags.WidthFixed, 120)
+            end
+            ImGui.TableSetupColumn('Act', ImGuiTableColumnFlags.WidthFixed, 36)
+            ImGui.TableHeadersRow()
+
+            for _, itm in ipairs(filteredItems) do
+                ImGui.TableNextRow()
+                ImGui.PushID('cdrow_' .. idSuffix .. '_' .. itm.kind .. '_' .. tostring(itm.cls) .. '_' .. tostring(itm.name))
+
+                -- 1. Class Badge
+                ImGui.TableNextColumn()
+                local r, g, b, a = classColor(itm.cls)
+                ImGui.TextColored(r, g, b, a, itm.cls) ---@diagnostic disable-line: param-type-mismatch
+                if ImGui.IsItemHovered() then UI.setTooltip(string.format('Class: %s', itm.cls)) end
+
+                -- Optional Type Column
+                if not isCompactMode then
+                    ImGui.TableNextColumn()
+                    ImGui.TextDisabled(itm.typeLabel or itm.kind)
+                    if itm.timerGroup and ImGui.IsItemHovered() then
+                        UI.setTooltip(string.format('EQ Timer Group: %s', itm.timerGroup))
+                    end
+                end
+
+                -- 2. Ability Name
+                ImGui.TableNextColumn()
+                ImGui.Text(itm.name)
+                if itm.timerGroup then
+                    ImGui.SameLine()
+                    accent(ARC, '[' .. itm.timerGroup .. ']')
+                end
+                if ImGui.IsItemHovered() then
+                    local desc = string.format('%s (%s)\nPriority: %d\nTrigger: %s',
+                        itm.name, itm.typeLabel or itm.kind, itm.priority or 50, itm.conditionText or '')
+                    if itm.reason and itm.reason ~= '' then
+                        desc = desc .. '\nStatus Note: ' .. itm.reason
+                    end
+                    if itm.timerGroup then
+                        desc = desc .. string.format('\nShared EQ Timer Group: %s', itm.timerGroup)
+                    end
+                    UI.setTooltip(desc)
+                end
+
+                -- Optional Trigger / Condition Column
+                if not isCompactMode then
+                    ImGui.TableNextColumn()
+                    ImGui.Text(itm.conditionText or '')
+                    if itm.burn_only then
+                        ImGui.SameLine(); accent({ 1.0, 0.35, 0.35, 1.0 }, '[B]')
+                    end
+                    if itm.boss_only then
+                        ImGui.SameLine(); accent(GOLD, '[Boss]')
+                    end
+                end
+
+                -- 3. Status Bar & Timer
+                ImGui.TableNextColumn()
+                if itm.active then
+                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 1) / (itm.totalSec > 0 and itm.totalSec or 60)))
+                    local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
+                    drawStatusProgressBar(frac, 110, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
+                elseif itm.ready then
+                    if itm.status ~= 'READY' then
+                        -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR)
+                        drawStatusProgressBar(1.0, 110, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
+                    else
+                        drawStatusProgressBar(1.0, 110, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
+                    end
+                else
+                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / (itm.totalSec > 0 and itm.totalSec or 60))))
+                    local tStr = fmtSec(math.ceil(itm.timeLeft or 0))
+                    drawStatusProgressBar(frac, 110, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
+                end
+                if itm.reason and itm.reason ~= '' and ImGui.IsItemHovered() then
+                    UI.setTooltip(itm.reason)
+                end
+
+                -- Optional In-Place Tuning Column
+                if ctrl.cooldown_show_inline_edit then
+                    ImGui.TableNextColumn()
+                    if itm.entry then
+                        local enVal = ImGui.Checkbox('##tblEn', itm.entry.enabled or false)
+                        itm.entry.enabled = enVal
+                        if itm.entry.pct ~= nil then
+                            ImGui.SameLine(); ImGui.SetNextItemWidth(55)
+                            local spVal = ImGui.SliderInt('##tblPct', tonumber(itm.entry.pct) or 100, 0, 100, '%d%%')
+                            itm.entry.pct = spVal
+                        end
+                        if itm.entry.burn_only ~= nil then
+                            ImGui.SameLine()
+                            local boVal = ImGui.Checkbox('B##tblBo', itm.entry.burn_only or false)
+                            itm.entry.burn_only = boVal
+                            if ImGui.IsItemHovered() then UI.setTooltip('Burn Only toggle') end
+                        end
+                    end
+                end
+
+                -- 4. Direct Action Button
+                ImGui.TableNextColumn()
+                if itm.ready and not itm.active then
+                    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+                    local pCount = 0
+                    if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
+                    if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.18, 0.70, 0.28, 1.0) then pCount = pCount + 1 end
+                    if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
+                    if ImGui.Button('Use##cdBtnUse', 34, 16) then
+                        if itm.use then itm.use() end
+                    end
+                    if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
+                    if ImGui.IsItemHovered() then UI.setTooltip(string.format('Click to execute %s', itm.name)) end
+                else
+                    ImGui.TextDisabled(' --')
+                end
+
+                ImGui.PopID()
+            end
+
+            ImGui.EndTable()
+        end
+    else
+        -- Compact HUD Cards View
+        if ImGui.BeginChild('##TriuneCooldownCardsList' .. idSuffix, 0, 0) then
+            for _, itm in ipairs(filteredItems) do
+                ImGui.PushID('card_' .. idSuffix .. '_' .. itm.kind .. '_' .. tostring(itm.cls) .. '_' .. tostring(itm.name))
+
+                local r, g, b, a = classColor(itm.cls)
+                ImGui.TextColored(r, g, b, a, string.format('[%s]', itm.cls)) ---@diagnostic disable-line: param-type-mismatch
+                ImGui.SameLine()
+
+                ImGui.Text(itm.name)
+                if itm.timerGroup then
+                    ImGui.SameLine()
+                    accent(ARC, '[' .. itm.timerGroup .. ']')
+                end
+
+                ImGui.SameLine(); ImGui.SetNextItemWidth(105)
+                if itm.active then
+                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 1) / (itm.totalSec > 0 and itm.totalSec or 60)))
+                    local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
+                    drawStatusProgressBar(frac, 105, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
+                elseif itm.ready then
+                    if itm.status ~= 'READY' then
+                        drawStatusProgressBar(1.0, 105, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
+                    else
+                        drawStatusProgressBar(1.0, 105, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
+                    end
+                else
+                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / (itm.totalSec > 0 and itm.totalSec or 60))))
+                    local tStr = fmtSec(math.ceil(itm.timeLeft or 0))
+                    drawStatusProgressBar(frac, 105, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
+                end
+
+                if itm.ready and not itm.active then
+                    ImGui.SameLine()
+                    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+                    local pCount = 0
+                    if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
+                    if ImGui.Button('Use##cardUse', 34, 15) then
+                        if itm.use then itm.use() end
+                    end
+                    if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
+                end
+
+                ImGui.PopID()
+            end
+            ImGui.EndChild()
+        end
+    end
+end
+
 local function drawCooldownWindow()
     if not ctrl.show_cooldowns then return end
     UI.pushTheme()
@@ -8158,408 +8587,7 @@ local function drawCooldownWindow()
     end
 
     if show then
-        local allItems = UI.getTrackedCooldownItems()
-
-        -- Count totals
-        local countReady = 0
-        local countActive = 0
-        local countCooldown = 0
-        for _, itm in ipairs(allItems) do
-            if itm.active then countActive = countActive + 1
-            elseif itm.status == 'READY' then countReady = countReady + 1
-            else countCooldown = countCooldown + 1 end
-        end
-
-        -- Header Line 1: Metrics Strip & Quick View Toggles
-        accent(ARC, 'COOLDOWNS')
-        ImGui.SameLine(); ImGui.TextDisabled('|')
-        ImGui.SameLine(); accent(GOOD, string.format('R:%d', countReady))
-        ImGui.SameLine(); accent(ARC, string.format('A:%d', countActive))
-        ImGui.SameLine(); accent(WARN, string.format('CD:%d', countCooldown))
-
-        -- Right-aligned Quick Controls
-        ImGui.SameLine()
-        local isTableView = (ctrl.cooldown_view_mode ~= 'cards')
-        if ImGui.Button(isTableView and 'HUD##cdView' or 'Table##cdView', 44, 18) then
-            ctrl.cooldown_view_mode = isTableView and 'cards' or 'table'
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Toggle Table View / Compact HUD Cards') end
-
-        ImGui.SameLine()
-        local lockVal = ImGui.Checkbox('Lock##cdLock', ctrl.cooldown_locked or false)
-        if lockVal ~= ctrl.cooldown_locked then
-            ctrl.cooldown_locked = lockVal
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Lock window position and hide borders') end
-
-        ImGui.SameLine()
-        local isCmp = (ctrl.cooldown_compact ~= false)
-        local cmpVal = ImGui.Checkbox('Compact##cdCmp', isCmp)
-        if cmpVal ~= isCmp then
-            ctrl.cooldown_compact = cmpVal
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Ultra-compact mode (streamlined columns)') end
-
-        ImGui.SameLine()
-        local editVal = ImGui.Checkbox('Tune##cdEdit', ctrl.cooldown_show_inline_edit or false)
-        if editVal ~= ctrl.cooldown_show_inline_edit then
-            ctrl.cooldown_show_inline_edit = editVal
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Show inline loadout tuning controls (Enabled, HP %, Burn)') end
-
-        -- Header Line 2: Streamlined Filters & Search
-        -- Category Dropdown
-        ImGui.SetNextItemWidth(72)
-        local CAT_OPTS = { 'All', 'Skills', 'AAs', 'Discs', 'Spells', 'Items' }
-        local CAT_MAP = { All = 'All', Skills = 'Abilities', AAs = 'AAs', Discs = 'Disciplines', Spells = 'Spells', Items = 'Items' }
-        local REV_CAT = { All = 'All', Abilities = 'Skills', AAs = 'AAs', Disciplines = 'Discs', Spells = 'Spells', Items = 'Items' }
-        local curCatLabel = REV_CAT[ctrl.cooldown_category or 'All'] or 'All'
-        local curCatIdx = idxOf(CAT_OPTS, curCatLabel)
-        local newCatIdx = ImGui.Combo('##cdCat', curCatIdx, CAT_OPTS)
-        if newCatIdx ~= curCatIdx then
-            ctrl.cooldown_category = CAT_MAP[CAT_OPTS[newCatIdx]] or 'All'
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Filter by ability category') end
-
-        ImGui.SameLine()
-        -- Status Filter Dropdown
-        ImGui.SetNextItemWidth(68)
-        local STATUS_OPTS = { 'All', 'Ready', 'CD', 'Active' }
-        local STATUS_MAP = { All = 'All', Ready = 'Ready', CD = 'Cooldown', Active = 'Active' }
-        local REV_STATUS = { All = 'All', Ready = 'Ready', Cooldown = 'CD', Active = 'Active' }
-        local curStatusLabel = REV_STATUS[ctrl.cooldown_status_filter or 'All'] or 'All'
-        local curStatusIdx = idxOf(STATUS_OPTS, curStatusLabel)
-        local newStatusIdx = ImGui.Combo('##cdStatusFilter', curStatusIdx, STATUS_OPTS)
-        if newStatusIdx ~= curStatusIdx then
-            ctrl.cooldown_status_filter = STATUS_MAP[STATUS_OPTS[newStatusIdx]] or 'All'
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Filter by readiness status') end
-
-        ImGui.SameLine()
-        -- Sort Selector
-        ImGui.SetNextItemWidth(70)
-        local SORT_LABELS = { 'Time', 'Status', 'Pri', 'Cls', 'Type', 'A-Z' }
-        local SORT_KEYS = { 'time', 'status', 'priority', 'class', 'type', 'alpha' }
-        local curSortIdx = idxOf(SORT_KEYS, ctrl.cooldown_sort_by or 'time')
-        local newSortIdx = ImGui.Combo('##cdSortBy', curSortIdx, SORT_LABELS)
-        if newSortIdx ~= curSortIdx then
-            ctrl.cooldown_sort_by = SORT_KEYS[newSortIdx]
-            saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Sort items by time, status, priority, or class') end
-
-        ImGui.SameLine()
-        -- Search Input
-        ImGui.SetNextItemWidth(105)
-        runtime.cooldownSearch = ImGui.InputTextWithHint('##cdSearch', 'Search...', runtime.cooldownSearch or '', 64)
-
-        ImGui.SameLine()
-        -- Transparency Slider
-        ImGui.SetNextItemWidth(55)
-        local newAlpha = ImGui.SliderFloat('##cdAlpha', ctrl.cooldown_alpha or 0.90, 0.10, 1.00, '%.2f')
-        if newAlpha ~= ctrl.cooldown_alpha then
-            ctrl.cooldown_alpha = newAlpha
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip(string.format('Overlay transparency (current: %.2f)', ctrl.cooldown_alpha or 0.90)) end
-
-        ImGui.Separator()
-
-        -- Filter items based on active criteria
-        local filteredItems = {}
-        local searchStr = (runtime.cooldownSearch or ''):lower()
-        for _, itm in ipairs(allItems) do
-            local passCat = true
-            if ctrl.cooldown_category == 'Abilities' then passCat = (itm.kind == 'Skill')
-            elseif ctrl.cooldown_category == 'AAs' then passCat = (itm.kind == 'AA')
-            elseif ctrl.cooldown_category == 'Disciplines' then passCat = (itm.kind == 'Disc')
-            elseif ctrl.cooldown_category == 'Spells' then passCat = (itm.kind == 'Spell')
-            elseif ctrl.cooldown_category == 'Items' then passCat = (itm.kind == 'Item')
-            end
-
-            local passStatus = true
-            if ctrl.cooldown_status_filter == 'Ready' then passStatus = itm.ready
-            elseif ctrl.cooldown_status_filter == 'Cooldown' then passStatus = (not itm.ready and not itm.active)
-            elseif ctrl.cooldown_status_filter == 'Active' then passStatus = itm.active
-            end
-
-            local passSearch = true
-            if searchStr ~= '' then
-                passSearch = string.find(itm.name:lower(), searchStr, 1, true) ~= nil
-            end
-
-            if passCat and passStatus and passSearch then
-                table.insert(filteredItems, itm)
-            end
-        end
-
-        -- Sort filtered items
-        local sortKey = ctrl.cooldown_sort_by or 'time'
-        table.sort(filteredItems, function(a, b)
-            if sortKey == 'time' then
-                -- 1. Active items first (running stances / active duration buffs)
-                if a.active ~= b.active then
-                    return a.active
-                end
-                if a.active and b.active then
-                    return (a.activeSec or 0) < (b.activeSec or 0)
-                end
-
-                -- 2. Items on Cooldown NEXT at the top of the list
-                local aInCd = (not a.ready)
-                local bInCd = (not b.ready)
-                if aInCd ~= bInCd then
-                    return aInCd
-                end
-
-                -- Both are on cooldown: sort by time remaining ascending (soonest to become ready first)
-                if aInCd and bInCd then
-                    if math.abs((a.timeLeft or 0) - (b.timeLeft or 0)) > 0.05 then
-                        return (a.timeLeft or 0) < (b.timeLeft or 0)
-                    end
-                    return (a.priority or 50) < (b.priority or 50)
-                end
-
-                -- 3. Both are Ready: sort by priority ascending (pri 1 before pri 50)
-                if (a.priority or 50) ~= (b.priority or 50) then
-                    return (a.priority or 50) < (b.priority or 50)
-                end
-                return (a.name or '') < (b.name or '')
-            elseif sortKey == 'status' then
-                local statusRank = {
-                    ACTIVE = 1,
-                    COOLDOWN = 2,
-                    ['LOW END'] = 3,
-                    ['LOW MANA'] = 4,
-                    ['NEED BURN'] = 5,
-                    ['NEED BOSS'] = 6,
-                    ['MIN XTAR'] = 7,
-                    LOCKED = 8,
-                    BLOCKED = 9,
-                    READY = 10,
-                }
-                local rA = statusRank[a.status] or 11
-                local rB = statusRank[b.status] or 11
-                if rA ~= rB then return rA < rB end
-                return (a.timeLeft or 0) < (b.timeLeft or 0)
-            elseif sortKey == 'priority' then
-                return (a.priority or 50) < (b.priority or 50)
-            elseif sortKey == 'class' then
-                if (a.cls or '') ~= (b.cls or '') then return (a.cls or '') < (b.cls or '') end
-                return (a.name or '') < (b.name or '')
-            elseif sortKey == 'type' then
-                if (a.kind or '') ~= (b.kind or '') then return (a.kind or '') < (b.kind or '') end
-                return (a.name or '') < (b.name or '')
-            elseif sortKey == 'alpha' then
-                return (a.name or ''):lower() < (b.name or ''):lower()
-            end
-            return false
-        end)
-
-        -- Render Items in Table View or Cards HUD View
-        if #filteredItems == 0 then
-            if #allItems == 0 then
-                accent(MUTED, '  (No abilities, AAs, or disciplines enabled in loadout.)')
-            else
-                accent(MUTED, '  (No abilities match current filters.)')
-            end
-        elseif isTableView then
-            -- Compact Table View
-            local tableFlags = bit.bor(
-                ImGuiTableFlags.Borders,
-                ImGuiTableFlags.RowBg,
-                ImGuiTableFlags.Resizable,
-                ImGuiTableFlags.ScrollY,
-                ImGuiTableFlags.SizingFixedFit
-            )
-            local isCompactMode = (ctrl.cooldown_compact ~= false)
-            local colCount = isCompactMode and 4 or 6
-            if ctrl.cooldown_show_inline_edit then colCount = colCount + 1 end
-
-            if ImGui.BeginTable('##TriuneCooldownTable', colCount, tableFlags) then
-                ImGui.TableSetupColumn('Cls', ImGuiTableColumnFlags.WidthFixed, 28)
-                if not isCompactMode then
-                    ImGui.TableSetupColumn('Type', ImGuiTableColumnFlags.WidthFixed, 55)
-                end
-                ImGui.TableSetupColumn('Ability Name', ImGuiTableColumnFlags.WidthStretch, 130)
-                if not isCompactMode then
-                    ImGui.TableSetupColumn('Trigger / Cond', ImGuiTableColumnFlags.WidthStretch, 110)
-                end
-                ImGui.TableSetupColumn('Status & Timer', ImGuiTableColumnFlags.WidthFixed, 115)
-                if ctrl.cooldown_show_inline_edit then
-                    ImGui.TableSetupColumn('Tuning', ImGuiTableColumnFlags.WidthFixed, 120)
-                end
-                ImGui.TableSetupColumn('Act', ImGuiTableColumnFlags.WidthFixed, 36)
-                ImGui.TableHeadersRow()
-
-                for _, itm in ipairs(filteredItems) do
-                    ImGui.TableNextRow()
-                    ImGui.PushID('cdrow_' .. itm.kind .. '_' .. tostring(itm.cls) .. '_' .. tostring(itm.name))
-
-                    -- 1. Class Badge
-                    ImGui.TableNextColumn()
-                    local r, g, b, a = classColor(itm.cls)
-                    ImGui.TextColored(r, g, b, a, itm.cls) ---@diagnostic disable-line: param-type-mismatch
-                    if ImGui.IsItemHovered() then UI.setTooltip(string.format('Class: %s', itm.cls)) end
-
-                    -- Optional Type Column
-                    if not isCompactMode then
-                        ImGui.TableNextColumn()
-                        ImGui.TextDisabled(itm.typeLabel or itm.kind)
-                        if itm.timerGroup and ImGui.IsItemHovered() then
-                            UI.setTooltip(string.format('EQ Timer Group: %s', itm.timerGroup))
-                        end
-                    end
-
-                    -- 2. Ability Name
-                    ImGui.TableNextColumn()
-                    ImGui.Text(itm.name)
-                    if itm.timerGroup then
-                        ImGui.SameLine()
-                        accent(ARC, '[' .. itm.timerGroup .. ']')
-                    end
-                    if ImGui.IsItemHovered() then
-                        local desc = string.format('%s (%s)\nPriority: %d\nTrigger: %s',
-                            itm.name, itm.typeLabel or itm.kind, itm.priority or 50, itm.conditionText or '')
-                        if itm.reason and itm.reason ~= '' then
-                            desc = desc .. '\nStatus Note: ' .. itm.reason
-                        end
-                        if itm.timerGroup then
-                            desc = desc .. string.format('\nShared EQ Timer Group: %s', itm.timerGroup)
-                        end
-                        UI.setTooltip(desc)
-                    end
-
-                    -- Optional Trigger / Condition Column
-                    if not isCompactMode then
-                        ImGui.TableNextColumn()
-                        ImGui.Text(itm.conditionText or '')
-                        if itm.burn_only then
-                            ImGui.SameLine(); accent({ 1.0, 0.35, 0.35, 1.0 }, '[B]')
-                        end
-                        if itm.boss_only then
-                            ImGui.SameLine(); accent(GOLD, '[Boss]')
-                        end
-                    end
-
-                    -- 3. Status Bar & Timer
-                    ImGui.TableNextColumn()
-                    if itm.active then
-                        local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 1) / (itm.totalSec > 0 and itm.totalSec or 60)))
-                        local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
-                        drawStatusProgressBar(frac, 110, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
-                    elseif itm.ready then
-                        if itm.status ~= 'READY' then
-                            -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR)
-                            drawStatusProgressBar(1.0, 110, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
-                        else
-                            drawStatusProgressBar(1.0, 110, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
-                        end
-                    else
-                        local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / (itm.totalSec > 0 and itm.totalSec or 60))))
-                        local tStr = fmtSec(math.ceil(itm.timeLeft or 0))
-                        drawStatusProgressBar(frac, 110, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
-                    end
-                    if itm.reason and itm.reason ~= '' and ImGui.IsItemHovered() then
-                        UI.setTooltip(itm.reason)
-                    end
-
-                    -- Optional In-Place Tuning Column
-                    if ctrl.cooldown_show_inline_edit then
-                        ImGui.TableNextColumn()
-                        if itm.entry then
-                            local enVal = ImGui.Checkbox('##tblEn', itm.entry.enabled or false)
-                            itm.entry.enabled = enVal
-                            if itm.entry.pct ~= nil then
-                                ImGui.SameLine(); ImGui.SetNextItemWidth(55)
-                                local spVal = ImGui.SliderInt('##tblPct', tonumber(itm.entry.pct) or 100, 0, 100, '%d%%')
-                                itm.entry.pct = spVal
-                            end
-                            if itm.entry.burn_only ~= nil then
-                                ImGui.SameLine()
-                                local boVal = ImGui.Checkbox('B##tblBo', itm.entry.burn_only or false)
-                                itm.entry.burn_only = boVal
-                                if ImGui.IsItemHovered() then UI.setTooltip('Burn Only toggle') end
-                            end
-                        end
-                    end
-
-                    -- 4. Direct Action Button
-                    ImGui.TableNextColumn()
-                    if itm.ready and not itm.active then
-                        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-                        local pCount = 0
-                        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
-                        if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.18, 0.70, 0.28, 1.0) then pCount = pCount + 1 end
-                        if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
-                        if ImGui.Button('Use##cdBtnUse', 34, 16) then
-                            if itm.use then itm.use() end
-                        end
-                        if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
-                        if ImGui.IsItemHovered() then UI.setTooltip(string.format('Click to execute %s', itm.name)) end
-                    else
-                        ImGui.TextDisabled(' --')
-                    end
-
-                    ImGui.PopID()
-                end
-
-                ImGui.EndTable()
-            end
-        else
-            -- Compact HUD Cards View
-            if ImGui.BeginChild('##TriuneCooldownCardsList', 0, 0) then
-                for _, itm in ipairs(filteredItems) do
-                    ImGui.PushID('card_' .. itm.kind .. '_' .. tostring(itm.cls) .. '_' .. tostring(itm.name))
-
-                    local r, g, b, a = classColor(itm.cls)
-                    ImGui.TextColored(r, g, b, a, string.format('[%s]', itm.cls)) ---@diagnostic disable-line: param-type-mismatch
-                    ImGui.SameLine()
-
-                    ImGui.Text(itm.name)
-                    if itm.timerGroup then
-                        ImGui.SameLine()
-                        accent(ARC, '[' .. itm.timerGroup .. ']')
-                    end
-
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(105)
-                    if itm.active then
-                        local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 1) / (itm.totalSec > 0 and itm.totalSec or 60)))
-                        local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
-                        drawStatusProgressBar(frac, 105, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
-                    elseif itm.ready then
-                        if itm.status ~= 'READY' then
-                            drawStatusProgressBar(1.0, 105, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
-                        else
-                            drawStatusProgressBar(1.0, 105, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
-                        end
-                    else
-                        local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / (itm.totalSec > 0 and itm.totalSec or 60))))
-                        local tStr = fmtSec(math.ceil(itm.timeLeft or 0))
-                        drawStatusProgressBar(frac, 105, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
-                    end
-
-                    if itm.ready and not itm.active then
-                        ImGui.SameLine()
-                        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-                        local pCount = 0
-                        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
-                        if ImGui.Button('Use##cardUse', 34, 15) then
-                            if itm.use then itm.use() end
-                        end
-                        if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
-                    end
-
-                    ImGui.PopID()
-                end
-                ImGui.EndChild()
-            end
-        end
+        UI.renderCooldownContent('_win', true)
     end
 
     ImGui.End()

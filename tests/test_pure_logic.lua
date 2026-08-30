@@ -3143,6 +3143,12 @@ do
     assert_true(isT1Active, 'timer group: T1 is active')
     assert_eq(t1Rem, 45, 'timer group: T1 has 45s left')
     assert_true(not isT2Active, 'timer group: T2 has expired')
+
+    -- E. Cooldowns Tab Ordering & Declaration
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find('function UI.drawCooldownsTab()', 1, true) ~= nil, 'cooldown tab: UI.drawCooldownsTab defined')
+    local tabOrderMatch = triuneContent:find('UI.drawAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawDiscTab%(%)')
+    assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned right after AAs tab in triuneTabs')
 end
 
 -- ============================================================================
