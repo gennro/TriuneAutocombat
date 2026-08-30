@@ -257,6 +257,7 @@ local function defaultCtrl()
         pull_engage_dist     = 100,
         pull_stand_back      = false,
         xtar_nav_dist        = 150,
+        ignore_distant_xtargets = false,
         combat_style         = 'Melee',
         melee_dist           = 14,
         ranged_dist          = 40,
@@ -6236,6 +6237,15 @@ function UI.drawControlTab()
                 ImGui.SetTooltip(
                     'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
+
+            ctrl.ignore_distant_xtargets = ImGui.Checkbox('Ignore Distant XTargets When Pulling##pullerHuntXtarIgnore',
+                ctrl.ignore_distant_xtargets == true)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'When checked, an XTarget enemy farther than Max XTarget Chase Range is skipped entirely\ninstead of being chased -- Puller looks for a new mob to pull instead.')
+            end
+
+            ImGui.Dummy(0, 2)
 
             accent(GOLD, 'Combat Radius Anchor (optional)')
             if ctrl.hunter_combat_loc then
@@ -12468,7 +12478,13 @@ local function combatTick()
             local maxHuntZ = ctrl.hunter_z or 75
             local myZ = mq.TLO.Me.Z() or 0
             local maxScan = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
-            local maxHuntXtarDist = math.max(ctrl.xtar_nav_dist or 150, maxScan)
+            -- Normally widened to at least the scan radius so in-range XTargets aren't
+            -- ignored (see: "Fix Puller (Hunt) Mode Ignoring In-Range XTarget Enemies").
+            -- ignore_distant_xtargets opts out of that widening: XTargets beyond the raw
+            -- chase range are skipped entirely so Puller looks for a different mob instead
+            -- of trying to close a long distance.
+            local maxHuntXtarDist = ctrl.ignore_distant_xtargets and (ctrl.xtar_nav_dist or 150)
+                or math.max(ctrl.xtar_nav_dist or 150, maxScan)
             local maxHuntXtarZ = math.max(maxHuntZ, 75) + 25
 
             if haveNPC then

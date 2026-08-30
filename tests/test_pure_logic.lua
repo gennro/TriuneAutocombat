@@ -527,6 +527,7 @@ local EXPECTED_FIELDS = {
     { 'pull_spell_gem',          'number' },
     { 'pull_engage_dist',        'number' },
     { 'xtar_nav_dist',           'number' },
+    { 'ignore_distant_xtargets', 'boolean' },
     { 'combat_style',            'string' },
     { 'melee_dist',              'number' },
     { 'ranged_dist',             'number' },
