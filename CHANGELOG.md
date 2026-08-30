@@ -2,6 +2,13 @@
 
 ## 2026-08-30
 
+- **Luacheck Warning Elimination (`triune.lua`).**
+  - **Direct Discipline Metric Initialization (`UI.getTrackedCooldownItems`)**: Initialized `totalSec`, `endCost`, `activeTotalSec`, `timerGroupId`, and `discIdx` directly from `discInfo` instead of pre-initializing with dummy zeroes/nil, resolving all luacheck overwritten variable warnings and ensuring clean CI passes (`0 warnings / 0 errors in 10 files`).
+
+- **LuaLS Type Warnings & Nil Check Hardening (`triune_buttons.lua`).**
+  - **Type-Safe Timer Key Assignment (`saveEdit`)**: Decoupled buffer string reading from `tk` variable declaration, eliminating LuaLS static type conversion warnings when assigning numeric gem indices, integer second delays, or nil.
+  - **Button Edit State Nil Guard (`drawEditWindow`)**: Added an explicit `edit.tmp` nil check and early close fallback before rendering the button edit controls, preventing nil index warnings across all button attribute inputs.
+
 - **Project Version Bump (v1.7.7)**: Synchronized version **1.7.7** across `triune.lua`, `triune_updater.lua`, and `README.md`.
 
 - **Cooldown & Active Duration Accuracy Overhaul (`triune.lua`, `triune_buttons.lua`).**

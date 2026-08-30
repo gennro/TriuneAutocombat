@@ -563,9 +563,10 @@ local function saveEdit()
     end
 
     local tt = TIMER_KEYS[edit.timerIdx]
-    local tk = edit.timerKeyBuf
+    local rawKey = edit.timerKeyBuf
+    local tk
     if tt == 'Gem' then
-        local g = tonumber(tk) or 1
+        local g = tonumber(rawKey) or 1
         local maxG = 12
         local ng = tlo(function() return mq.TLO.Me.NumGems() end)
         if type(ng) == 'number' and ng > 0 then maxG = math.floor(ng) end
@@ -573,10 +574,10 @@ local function saveEdit()
         if g > maxG then g = maxG end
         tk = g
     elseif tt == 'Seconds' then
-        tk = math.max(0, tonumber(tk) or 0)
+        tk = math.max(0, tonumber(rawKey) or 0)
     elseif tt == 'Item' or tt == 'Ability' or tt == 'AA' or tt == 'Disc' then
-        tk = trim(tk)
-        if tk == '' then tk = label end
+        local trimmed = trim(rawKey)
+        tk = trimmed ~= '' and trimmed or label
     else
         tk = nil
     end
@@ -882,71 +883,74 @@ local function drawEditWindow()
     end
     if draw then
         local t = edit.tmp
+        if not t then
+            closeEditRef()
+        else
+            ImGui.PushItemWidth(-120)
+            local newLabel = ImGui.InputText('Label', t.label)
+            ImGui.PopItemWidth()
+            if newLabel ~= t.label then t.label = newLabel; edit.dirty = true end
 
-        ImGui.PushItemWidth(-120)
-        local newLabel = ImGui.InputText('Label', t.label)
-        ImGui.PopItemWidth()
-        if newLabel ~= t.label then t.label = newLabel; edit.dirty = true end
-
-        ImGui.SameLine()
-        if ImGui.Button('From Cursor##editIcon', 92, 24) then
-            local ic = cursorIconId()
-            if ic then
-                edit.iconBuf = tostring(ic)
+            ImGui.SameLine()
+            if ImGui.Button('From Cursor##editIcon', 92, 24) then
+                local ic = cursorIconId()
+                if ic then
+                    edit.iconBuf = tostring(ic)
+                    edit.dirty   = true
+                end
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Clear##editIcon', 60, 24) then
+                edit.iconBuf = ''
                 edit.dirty   = true
             end
-        end
-        ImGui.SameLine()
-        if ImGui.Button('Clear##editIcon', 60, 24) then
-            edit.iconBuf = ''
-            edit.dirty   = true
-        end
 
-        local newIconBuf = ImGui.InputText('Icon ID', edit.iconBuf)
-        if newIconBuf ~= edit.iconBuf then edit.iconBuf = newIconBuf; edit.dirty = true end
+            local newIconBuf = ImGui.InputText('Icon ID', edit.iconBuf)
+            if newIconBuf ~= edit.iconBuf then edit.iconBuf = newIconBuf; edit.dirty = true end
 
-        local newTimerIdx = ImGui.Combo('Timer', edit.timerIdx, TIMER_TYPES)
-        if newTimerIdx ~= edit.timerIdx then
-            edit.timerIdx    = newTimerIdx
-            edit.timerKeyBuf = ''
-            edit.dirty       = true
-        end
+            local newTimerIdx = ImGui.Combo('Timer', edit.timerIdx, TIMER_TYPES)
+            if newTimerIdx ~= edit.timerIdx then
+                edit.timerIdx    = newTimerIdx
+                edit.timerKeyBuf = ''
+                edit.dirty       = true
+            end
 
-        if edit.timerIdx > 1 then
-            local keyHint = {
-                [2] = 'Gem number (1-12)',
-                [3] = 'Ability name',
-                [4] = 'AA name',
-                [5] = 'Discipline name',
-                [6] = 'Item name',
-                [7] = 'Seconds',
-            }
-            ImGui.PushItemWidth(-140)
-            local newKeyBuf = ImGui.InputText('Timer Key', edit.timerKeyBuf)
-            ImGui.PopItemWidth()
-            if newKeyBuf ~= edit.timerKeyBuf then edit.timerKeyBuf = newKeyBuf; edit.dirty = true end
+            if edit.timerIdx > 1 then
+                local keyHint = {
+                    [2] = 'Gem number (1-12)',
+                    [3] = 'Ability name',
+                    [4] = 'AA name',
+                    [5] = 'Discipline name',
+                    [6] = 'Item name',
+                    [7] = 'Seconds',
+                }
+                ImGui.PushItemWidth(-140)
+                local newKeyBuf = ImGui.InputText('Timer Key', edit.timerKeyBuf)
+                ImGui.PopItemWidth()
+                if newKeyBuf ~= edit.timerKeyBuf then edit.timerKeyBuf = newKeyBuf; edit.dirty = true end
+                ImGui.SameLine()
+                ImGui.TextDisabled(keyHint[edit.timerIdx] or '')
+            end
+
+            local newShow = ImGui.Checkbox('Show Label', t.showLabel)
+            if newShow ~= t.showLabel then t.showLabel = newShow; edit.dirty = true end
+
+            local newCmd = ImGui.InputTextMultiline('Commands (one per line)', t.cmd, 0, 90)
+            if newCmd ~= t.cmd then t.cmd = newCmd; edit.dirty = true end
+
+            ImGui.Dummy(0, 4)
+            local ctrlS = false
+            if ImGuiMod and ImGuiKey then
+                local ok, pressed = pcall(ImGui.IsKeyChordPressed, bit.bor(ImGuiMod.Ctrl, ImGuiKey.S))
+                ctrlS = ok and pressed or false
+            end
+            if ImGui.Button('Save', 90, 26) or ctrlS then
+                saveEdit()
+            end
             ImGui.SameLine()
-            ImGui.TextDisabled(keyHint[edit.timerIdx] or '')
-        end
-
-        local newShow = ImGui.Checkbox('Show Label', t.showLabel)
-        if newShow ~= t.showLabel then t.showLabel = newShow; edit.dirty = true end
-
-        local newCmd = ImGui.InputTextMultiline('Commands (one per line)', t.cmd, 0, 90)
-        if newCmd ~= t.cmd then t.cmd = newCmd; edit.dirty = true end
-
-        ImGui.Dummy(0, 4)
-        local ctrlS = false
-        if ImGuiMod and ImGuiKey then
-            local ok, pressed = pcall(ImGui.IsKeyChordPressed, bit.bor(ImGuiMod.Ctrl, ImGuiKey.S))
-            ctrlS = ok and pressed or false
-        end
-        if ImGui.Button('Save', 90, 26) or ctrlS then
-            saveEdit()
-        end
-        ImGui.SameLine()
-        if ImGui.Button('Cancel', 90, 26) then
-            closeEditRef()
+            if ImGui.Button('Cancel', 90, 26) then
+                closeEditRef()
+            end
         end
     end
     ImGui.End()

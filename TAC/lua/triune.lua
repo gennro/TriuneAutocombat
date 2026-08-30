@@ -8130,22 +8130,16 @@ function UI.getTrackedCooldownItems()
     if loadout and loadout.discs then
         for nm, entry in pairs(loadout.discs) do
             if entry and entry.enabled then
+                local discInfo = getDiscCooldownAndDuration(nm)
                 local isReady = false
                 local timerSec = 0
-                local totalSec = 0
-                local endCost = 0
+                local totalSec = discInfo.recastSec
+                local endCost = discInfo.endCost
                 local activeSec = 0
-                local activeTotalSec = 0
+                local activeTotalSec = discInfo.durSec
                 local isActive = false
-                local timerGroupId = nil
-                local discIdx = 0
-
-                local discInfo = getDiscCooldownAndDuration(nm)
-                totalSec = discInfo.recastSec
-                activeTotalSec = discInfo.durSec
-                timerGroupId = discInfo.timerGroupId
-                endCost = discInfo.endCost
-                discIdx = discInfo.discIdx
+                local timerGroupId = discInfo.timerGroupId
+                local discIdx = discInfo.discIdx
 
                 pcall(function()
                     isReady = runtime.isDiscReady(nm)
