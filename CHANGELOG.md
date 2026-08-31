@@ -11,8 +11,10 @@
   - **Auto-Summon Fireworks Engine (`runtime.checkAutoSummonFireworks`)**: Optionally monitors the fireworks summoning ability (ID 17788: *Alternately Advanced Fireworks*) and activates `/alt activate <id>` whenever ready (out of combat and stationary), automatically clearing the summoned firework into inventory bags (`/autoinventory`).
   - **Interactive Actions**: Added instant action buttons in the UI for `Train AA Now (/notify AAWindow)`, `Summon Fireworks Now (/alt activate 17788)`, and `Clear Cursor (/autoinv)`.
   - **Slash Commands**: Added slash command control with `/ac autoaa [on|off]`, `/ac autofw [on|off]`, `/ac aatrain` / `/ac spendnow`, `/ac summonnow`, `/ac aathreshold [25-100]`, `/ac aacost [1-50]`, and `/ac aaid [id]`.
-  - **Status Tab UI Streamlining**: Removed the redundant `Popout Cooldowns` button from the top of the Status tab in favor of the dedicated `Cooldowns` tab and header toolbar toggle.
-  - **Project Version Bump (v1.7.8)**: Synchronized version **1.7.8** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+- **Class Detection Zoning Reset & Parsing Fix (`triune.lua`, `triune_spellbook.lua`).**
+  - **Eliminated Erroneous Zoning Class Reset**: Removed destructive `classesFromInventoryWindow()` calls from `runtime.onZoned()`. Player classes are loaded on character login/switch or configured via the Class Picker UI and should not be re-scanned or overwritten during zone changes.
+  - **Fixed UI Text Substring False Positives (`parseClassLine`)**: Removed prefix-slice checks (`sub(1, 3)` and `sub(1, 2)`) that erroneously matched arbitrary Inventory Window UI labels and buttons to classes (such as "Skills" matching "SK" and "Magic Resist" matching "Mag", which caused `myClasses` to reset to `{"SK", "Mag"}`). `parseClassLine` now strictly validates entire cleaned strings or whole-word tokens against the canonical `MQSHORT` table.
+  - **Standalone Parity & Unit Tests**: Synchronized `MQSHORT` and `parseClassLine` across `triune.lua` and `triune_spellbook.lua` per the Standalone File Rule, and added test coverage in `tests/test_pure_logic.lua` ensuring UI strings (`Skills`, `Magic`, `Magic Resist`, `Warhammer`, `Stats`, `Inventory`) correctly return `nil`.
 
 ---
 

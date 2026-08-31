@@ -888,37 +888,34 @@ local function processQueue()
 end
 
 local MQSHORT = {
-    WARRIOR = 'War',
-    CLERIC = 'Clr',
-    PALADIN = 'Pal',
-    RANGER = 'Rng',
-    SHADOWKNIGHT = 'SK',
-    DRUID = 'Dru',
-    MONK = 'Mnk',
-    BARD = 'Brd',
-    ROGUE = 'Rog',
-    SHAMAN = 'Shm',
-    NECROMANCER = 'Nec',
-    WIZARD = 'Wiz',
-    MAGICIAN = 'Mag',
-    ENCHANTER = 'Enc',
-    BEASTLORD = 'Bst',
-    BERSERKER = 'Ber'
+    WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
+    CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
+    PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
+    RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
+    SHADOWKNIGHT = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
+    DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
+    MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
+    BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
+    ROGUE = 'Rog', ROG = 'Rog', ROGUES = 'Rog',
+    SHAMAN = 'Shm', SHM = 'Shm', SHAMANS = 'Shm',
+    NECROMANCER = 'Nec', NEC = 'Nec', NECROMANCERS = 'Nec',
+    WIZARD = 'Wiz', WIZ = 'Wiz', WIZARDS = 'Wiz',
+    MAGICIAN = 'Mag', MAG = 'Mag', MAGICIANS = 'Mag',
+    ENCHANTER = 'Enc', ENC = 'Enc', ENCHANTERS = 'Enc',
+    BEASTLORD = 'Bst', BST = 'Bst', BEASTLORDS = 'Bst',
+    BERSERKER = 'Ber', BER = 'Ber', BERSERKERS = 'Ber',
 }
 
 local function parseClassLine(text)
     if not text or type(text) ~= 'string' or text == '' or text == 'NULL' then return nil end
-    local cleaned = text:gsub('^%s*%d+[%s%.:]*', ''):gsub('^%s+', '')
+    local cleaned = text:gsub('^%s*%d+[%s%.:]*', ''):gsub('^%s+', ''):gsub('%s+$', '')
     if cleaned == '' then return nil end
 
     local up = cleaned:upper()
     if up:find('^LEVEL') or up:find('^LVL') then return nil end
 
-    local code3 = up:sub(1, 3)
-    if MQSHORT[code3] then return MQSHORT[code3] end
-
-    local code2 = up:sub(1, 2)
-    if MQSHORT[code2] then return MQSHORT[code2] end
+    local noSpaces = up:gsub('[%s_%-]+', '')
+    if MQSHORT[noSpaces] then return MQSHORT[noSpaces] end
 
     for word in cleaned:gmatch('%a+') do
         local wup = word:upper()

@@ -49,7 +49,7 @@ local MQSHORT = {
     CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
     PALADIN = 'Pal', PAL = 'Pal', PALADINS = 'Pal',
     RANGER = 'Rng', RNG = 'Rng', RANGERS = 'Rng',
-    SHADOWKNIGHT = 'SK', SHADOW = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
+    SHADOWKNIGHT = 'SK', SHD = 'SK', SK = 'SK', SHADOWKNIGHTS = 'SK',
     DRUID = 'Dru', DRU = 'Dru', DRUIDS = 'Dru',
     MONK = 'Mnk', MNK = 'Mnk', MONKS = 'Mnk',
     BARD = 'Brd', BRD = 'Brd', BARDS = 'Brd',
@@ -779,17 +779,15 @@ end
 
 local function parseClassLine(text)
     if not text or type(text) ~= 'string' or text == '' or text == 'NULL' then return nil end
-    local cleaned = text:gsub('^%s*%d+[%s%.:]*', ''):gsub('^%s+', '')
+    local cleaned = text:gsub('^%s*%d+[%s%.:]*', ''):gsub('^%s+', ''):gsub('%s+$', '')
     if cleaned == '' then return nil end
 
     local up = cleaned:upper()
     if up:find('^LEVEL') or up:find('^LVL') then return nil end
 
-    local code3 = up:sub(1, 3)
-    if MQSHORT[code3] then return MQSHORT[code3] end
-
-    local code2 = up:sub(1, 2)
-    if MQSHORT[code2] then return MQSHORT[code2] end
+    local noSpaces = up:gsub('[%s_%-]+', '')
+    if MQSHORT[noSpaces] then return MQSHORT[noSpaces] end
+    if ALL_ABBR and idxOf(ALL_ABBR, cleaned) > 0 then return cleaned end
 
     for word in cleaned:gmatch('%a+') do
         local wup = word:upper()
@@ -5520,7 +5518,7 @@ function UI.drawAutoAATab()
         ImGui.SetTooltip('%s', 'The exact AA Ability name in your AA window (e.g. Alternately Advanced Fireworks).')
     end
 
-    -- 4. Activation ID & Auto-Detect
+    -- 4. Activation ID Input
     ImGui.SetNextItemWidth(140)
     local curId = ctrl.auto_spend_aa_id or 17788
     local newId = ImGui.InputInt('Activation ID (for /alt act)##autoAaId', curId)
@@ -5532,23 +5530,6 @@ function UI.drawAutoAATab()
         ImGui.SetTooltip('%s', 'The Spell / Ability ID used for /alt activate fireworks summoning (default: 17788).')
     end
 
-    ImGui.SameLine()
-    if ImGui.Button('Auto-Detect AA Info##detectAaFullBtn') then
-        local info = runtime.resolveAAFullInfo and runtime.resolveAAFullInfo()
-        if info then
-            if info.name and info.name ~= '' then ctrl.auto_spend_aa_name = info.name end
-            if info.spellId and info.spellId > 0 then ctrl.auto_spend_aa_id = info.spellId end
-            if info.cost and info.cost > 0 then ctrl.auto_spend_aa_cost = info.cost end
-            saveLoadout(true)
-            print(string.format('\ag[Triune]\ax Detected AA: "%s" | Activation ID: %d | Cost: %d AA | Current Rank: %d/%d | Can Train: %s',
-                info.name, ctrl.auto_spend_aa_id, ctrl.auto_spend_aa_cost,
-                info.rank, info.maxRank, (info.canTrain == true and 'Yes' or (info.canTrain == false and 'No' or 'Unknown'))))
-        end
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'Queries MacroQuest for the ability name, cost, and fireworks spell activation ID.')
-    end
-
     -- 5. Auto-Summon Fireworks Toggle
     local summonVal = ImGui.Checkbox('Enable Auto-Summon Fireworks (/alt activate)', ctrl.auto_summon_fireworks or false)
     if summonVal ~= (ctrl.auto_summon_fireworks or false) then
@@ -5558,18 +5539,6 @@ function UI.drawAutoAATab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'When ready (out of combat & stationary), automatically activates the AA ability to summon fireworks\nand clears the cursor into inventory via /autoinventory.')
     end
-
-    -- Live Game Client AA Status Card
-    local info = runtime.resolveAAFullInfo and runtime.resolveAAFullInfo() or {}
-    ImGui.Spacing()
-    ImGui.TextDisabled(string.format('Game Detected: "%s" | Cost: %d AA | Rank: %d/%d | Can Train: %s | Ready: %s',
-        info.name or 'Unknown',
-        info.cost or (ctrl.auto_spend_aa_cost or 25),
-        info.rank or 0,
-        info.maxRank or 1,
-        (info.canTrain == true and 'Yes' or (info.canTrain == false and 'No' or 'Unknown')),
-        (info.isReady and 'Yes' or 'No')
-    ))
 
     ImGui.Spacing()
     ImGui.Separator()
@@ -10231,70 +10200,7 @@ function runtime.fireAA(name, a, id)
     return true
 end
 
-function runtime.resolveAAFullInfo()
-    local res = {
-        name = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks',
-        buyId = tonumber(ctrl.auto_spend_aa_buy_id) or 0,
-        spellId = tonumber(ctrl.auto_spend_aa_id) or 17788,
-        cost = tonumber(ctrl.auto_spend_aa_cost) or 25,
-        maxRank = 1,
-        rank = 0,
-        canTrain = nil,
-        isReady = false
-    }
-    pcall(function()
-        local candidateNames = {
-            res.name,
-            'Alternately Advanced Fireworks',
-            'Alternatly advanced fireworks',
-            'Alternate Advanced Fireworks',
-            'Alternately Advanced Firework',
-            'Alternate Adv Fireworks',
-            'Advanced Fireworks'
-        }
-        local a = nil
-        for _, nm in ipairs(candidateNames) do
-            if nm and nm ~= '' then
-                a = mq.TLO.AltAbility(nm)
-                if a and a() and a.ID and a.ID() and tonumber(a.ID()) > 0 then
-                    res.name = a.Name and a.Name() or nm
-                    break
-                end
-            end
-        end
-        if (not a or not a()) and res.buyId > 0 then a = mq.TLO.AltAbility(res.buyId) end
-        if (not a or not a()) and res.spellId > 0 then a = mq.TLO.AltAbility(res.spellId) end
 
-        if a and a() then
-            if a.Name and a.Name() and a.Name() ~= '' then res.name = a.Name() end
-            if a.ID and a.ID() and tonumber(a.ID()) > 0 then res.buyId = tonumber(a.ID()) end
-            if a.Cost and a.Cost() then res.cost = tonumber(a.Cost()) or res.cost end
-            if a.MaxRank and a.MaxRank() then res.maxRank = tonumber(a.MaxRank()) or res.maxRank end
-            if a.Spell and a.Spell() and a.Spell.ID and a.Spell.ID() then
-                res.spellId = tonumber(a.Spell.ID()) or res.spellId
-            end
-        end
-
-        local ma = nil
-        if res.name and res.name ~= '' then ma = mq.TLO.Me.AltAbility(res.name) end
-        if (not ma or not ma()) and res.buyId > 0 then ma = mq.TLO.Me.AltAbility(res.buyId) end
-        if (not ma or not ma()) and res.spellId > 0 then ma = mq.TLO.Me.AltAbility(res.spellId) end
-
-        if ma and ma() then
-            if ma.Name and ma.Name() and (not res.name or res.name == '') then res.name = ma.Name() end
-            if ma.ID and ma.ID() and res.buyId <= 0 then res.buyId = tonumber(ma.ID()) or 0 end
-            if ma.Rank then res.rank = tonumber(ma.Rank()) or 0 end
-            if ma.CanTrain ~= nil then res.canTrain = ma.CanTrain() end
-        end
-
-        local r = nil
-        if res.buyId > 0 then r = mq.TLO.Me.AltAbilityReady(res.buyId) end
-        if (not r or not r()) and res.spellId > 0 then r = mq.TLO.Me.AltAbilityReady(res.spellId) end
-        if (not r or not r()) and res.name and res.name ~= '' then r = mq.TLO.Me.AltAbilityReady(res.name) end
-        if r and r() then res.isReady = true end
-    end)
-    return res
-end
 
 local function findAAInWindowLists(targetName)
     local win = nil
@@ -10559,10 +10465,9 @@ function runtime.checkAutoSpendAA()
         unspent = tonumber(raw or 0) or 0
     end)
 
-    local info = runtime.resolveAAFullInfo and runtime.resolveAAFullInfo() or {}
     local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 100
-    local cost = tonumber(ctrl.auto_spend_aa_cost) or info.cost or 25
-    local effectiveName = ctrl.auto_spend_aa_name or info.name or 'Alternately Advanced Fireworks'
+    local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
+    local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
 
     if cost > 0 and unspent >= threshold and unspent >= cost then
         runtime.lastAutoSpendAAAt = now
@@ -10577,9 +10482,8 @@ function runtime.manualSpendAA()
         local raw = mq.TLO.Me.AAPoints()
         unspent = tonumber(raw or 0) or 0
     end)
-    local info = runtime.resolveAAFullInfo and runtime.resolveAAFullInfo() or {}
-    local cost = tonumber(ctrl.auto_spend_aa_cost) or info.cost or 25
-    local effectiveName = ctrl.auto_spend_aa_name or info.name or 'Alternately Advanced Fireworks'
+    local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
+    local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
 
     if unspent < cost then
         print(string.format('\ay[Triune]\ax Cannot purchase %s: have %d unspent AA, need %d AA.', effectiveName, unspent, cost))
@@ -12976,10 +12880,6 @@ runtime.onZoned = function()
         print(string.format('\ag[Triune]\ax Loaded saved waypoint route for %s (%d waypoint(s)).',
             runtime.getZoneDisplayName(runtime.getCurrentZoneShortName()), #(ctrl.waypoints or {})))
     end
-    local detected = classesFromInventoryWindow(false, true)
-    if detected then
-        myClasses = detected
-    end
 end
 
 -- Bind remaining engine helpers to runtime table
@@ -14391,26 +14291,14 @@ local function triuneCommand(...)
         else
             print(string.format('\ag[Triune]\ax Current Auto-Spend Activation ID: %d. (usage: /ac aaid [id])', ctrl.auto_spend_aa_id or 17788))
         end
-    elseif cmd == 'aabuyid' or cmd == 'buyid' then
-        local val = tonumber(args[2])
-        if val and val >= 0 then
-            ctrl.auto_spend_aa_buy_id = math.floor(val)
+    elseif cmd == 'aaname' or cmd == 'setaaname' then
+        local newName = table.concat(args, ' ', 2)
+        if newName and newName ~= '' then
+            ctrl.auto_spend_aa_name = newName
             saveLoadout(true)
-            print(string.format('\ag[Triune]\ax Auto-Spend AA Buy ID set to %d.', ctrl.auto_spend_aa_buy_id))
+            print(string.format('\ag[Triune]\ax Auto-Spend AA Ability Name set to "%s".', ctrl.auto_spend_aa_name))
         else
-            print(string.format('\ag[Triune]\ax Current Auto-Spend AA Buy ID: %d. (usage: /ac aabuyid [id])', ctrl.auto_spend_aa_buy_id or 0))
-        end
-    elseif cmd == 'aadetect' or cmd == 'detectaa' then
-        local info = runtime.resolveAAFullInfo and runtime.resolveAAFullInfo()
-        if info then
-            if info.buyId and info.buyId > 0 then ctrl.auto_spend_aa_buy_id = info.buyId end
-            if info.name and info.name ~= '' then ctrl.auto_spend_aa_name = info.name end
-            if info.spellId and info.spellId > 0 then ctrl.auto_spend_aa_id = info.spellId end
-            if info.cost and info.cost > 0 then ctrl.auto_spend_aa_cost = info.cost end
-            saveLoadout(true)
-            print(string.format('\ag[Triune]\ax Detected AA: "%s" | Buy ID: %d | Activation Spell ID: %d | Cost: %d AA | Current Rank: %d/%d | Can Train: %s',
-                info.name, ctrl.auto_spend_aa_buy_id, ctrl.auto_spend_aa_id, ctrl.auto_spend_aa_cost,
-                info.rank, info.maxRank, (info.canTrain == true and 'Yes' or (info.canTrain == false and 'No' or 'Unknown'))))
+            print(string.format('\ag[Triune]\ax Current Auto-Spend AA Ability Name: "%s". (usage: /ac aaname [name])', ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'))
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()

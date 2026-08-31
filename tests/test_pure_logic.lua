@@ -188,7 +188,6 @@ local MQSHORT = {
     RNG = 'Rng',
     RANGERS = 'Rng',
     SHADOWKNIGHT = 'SK',
-    SHADOW = 'SK',
     SHD = 'SK',
     SK = 'SK',
     SHADOWKNIGHTS = 'SK',
@@ -508,6 +507,12 @@ assert_nil(parseClassLine(''), 'parse: empty')
 assert_nil(parseClassLine('NULL'), 'parse: NULL')
 assert_nil(parseClassLine('Level 60'), 'parse: "Level 60" filtered')
 assert_nil(parseClassLine('LVL 50'), 'parse: "LVL 50" filtered')
+assert_nil(parseClassLine('Skills'), 'parse: "Skills" UI button text returns nil')
+assert_nil(parseClassLine('Magic'), 'parse: "Magic" UI label returns nil')
+assert_nil(parseClassLine('Magic Resist'), 'parse: "Magic Resist" UI label returns nil')
+assert_nil(parseClassLine('Warhammer'), 'parse: "Warhammer" non-class word returns nil')
+assert_nil(parseClassLine('Stats'), 'parse: "Stats" UI tab returns nil')
+assert_nil(parseClassLine('Inventory'), 'parse: "Inventory" UI title returns nil')
 
 -- ============================================================================
 -- 8.  defaultCtrl() — shape validation
