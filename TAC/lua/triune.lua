@@ -4339,6 +4339,14 @@ function UI.drawHeaderBar()
     end
 
     -- Toolbar buttons (on line below script info and trackers)
+    if ImGui.Button('Compact Mode##hdrCompact') then
+        ctrl.compact = true
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Switches Triune AutoCombat into a sleek compact HUD overlay window.')
+    end
+    ImGui.SameLine()
     if ImGui.Button('Open Spellbook##hdrBook') then
         toggleTool('triune_spellbook')
     end
@@ -4358,14 +4366,6 @@ function UI.drawHeaderBar()
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches or toggles the standalone Triune DPS Parser window.')
-    end
-    ImGui.SameLine()
-    if ImGui.Button('Compact Mode##hdrCompact') then
-        ctrl.compact = true
-        saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Switches Triune AutoCombat into a sleek compact HUD overlay window.')
     end
     ImGui.SameLine()
     if ImGui.Button('Cursor Manager##hdrCursor') then
@@ -4463,6 +4463,8 @@ end
 
 function UI.drawHelpTab()
     if not ImGui.BeginTabItem('Help') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##HelpTabScroll', 0, 0)
 
     if ImGui.CollapsingHeader('Slash Commands', ImGuiTreeNodeFlags.DefaultOpen) then
         accent(GOLD, 'Commands (Alias: /ac or /triune):')
@@ -4541,6 +4543,7 @@ function UI.drawHelpTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -4714,7 +4717,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     local isDis = (curPct == 0)
                     local pCount = 0
                     if isDis then pCount = UI.pushDisabledSliderStyle() end
-                    local newPct = ImGui.SliderInt('##p', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                    local newPct = ImGui.SliderInt('##p', curPct, 0, 100, isDis and 'Disabled' or '%d%%', ImGuiSliderFlags.NoInput or 0)
                     local isHov = ImGui.IsItemHovered()
                     if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                     g.pct = newPct
@@ -4730,7 +4733,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     if g.when == 'target HP between' then
                         ImGui.SameLine(); ImGui.SetNextItemWidth(62)
                         local minHp = tonumber(g.min_hp) or 20
-                        local newMinHp = ImGui.SliderInt('##minhp', minHp, 0, 100, '%d%% min')
+                        local newMinHp = ImGui.SliderInt('##minhp', minHp, 0, 100, '%d%% min', ImGuiSliderFlags.NoInput or 0)
                         g.min_hp = newMinHp
                         if ImGui.IsItemHovered() then
                             UI.setTooltip(string.format('Min Target HP%%: %d%% (Cast when target is between %d%% and %d%% HP).', newMinHp, newMinHp, newPct))
@@ -4887,7 +4890,7 @@ function UI.drawGemTabHeader(gemsTable)
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Pre-refresh buffs out of combat when remaining duration falls below this threshold.') end
     ImGui.SameLine(); ImGui.SetNextItemWidth(65)
     local curRefSec = tonumber(ctrl.buff_refresh_sec) or 45
-    local newRefSec = ImGui.SliderInt('##refsec', curRefSec, 0, 300, '%ds')
+    local newRefSec = ImGui.SliderInt('##refsec', curRefSec, 0, 300, '%ds', ImGuiSliderFlags.NoInput or 0)
     ctrl.buff_refresh_sec = newRefSec
     if ImGui.IsItemHovered() then UI.setTooltip(string.format('Pre-refresh buffs out of combat if remaining duration <= %d seconds (0s = only when expired).', newRefSec)) end
 
@@ -4896,8 +4899,11 @@ end
 
 function UI.drawGemTab()
     if not ImGui.BeginTabItem('Spell Gems') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##GemTabScroll', 0, 0)
     UI.drawGemTabHeader(loadout.gems)
     UI.drawGemList(loadout.gems, 'gem', true, true)
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -4978,6 +4984,8 @@ end
 
 function UI.drawClickieTab()
     if not ImGui.BeginTabItem('Clickies') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##ClickieTabScroll', 0, 0)
     ImGui.TextWrapped('Clickable Items: Manage inventory and equipped items with activatable spell effects. Click [+ Add Item on Cursor] while holding an item to add it.')
     if ImGui.IsItemHovered() then
         UI.setTooltip('Configure automated clickies (inventory/worn items). Items are clicked automatically when conditions are met.')
@@ -5105,7 +5113,7 @@ function UI.drawClickieTab()
                 local isDis = (curPct == 0)
                 local pCount = 0
                 if isDis then pCount = UI.pushDisabledSliderStyle() end
-                local cpVal = ImGui.SliderInt('##cp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                local cpVal = ImGui.SliderInt('##cp', curPct, 0, 100, isDis and 'Disabled' or '%d%%', ImGuiSliderFlags.NoInput or 0)
                 local isHov = ImGui.IsItemHovered()
                 if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                 c.pct = cpVal
@@ -5151,12 +5159,15 @@ function UI.drawClickieTab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: Innate Combat Abilities & Skills tab
 function UI.drawAbilitiesTab()
     if not ImGui.BeginTabItem('Abilities') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##AbilitiesTabScroll', 0, 0)
     ImGui.TextWrapped('Innate Combat Abilities & Skills (/doability) -- Kick, Bash, Slam, Mend, Backstab, Monk strikes, Taunt, Disarm, Frenzy, etc.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Innate class actions and combat abilities operate independently of spell gems and fire automatically when ready or when conditions are met.')
@@ -5259,7 +5270,7 @@ function UI.drawAbilitiesTab()
                         local isDis = (curPct == 0)
                         local pCount = 0
                         if isDis then pCount = UI.pushDisabledSliderStyle() end
-                        local spVal = ImGui.SliderInt('##actp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                        local spVal = ImGui.SliderInt('##actp', curPct, 0, 100, isDis and 'Disabled' or '%d%%', ImGuiSliderFlags.NoInput or 0)
                         local isHov = ImGui.IsItemHovered()
                         if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                         entry.pct = spVal
@@ -5287,7 +5298,7 @@ function UI.drawAbilitiesTab()
                             ImGui.SetTooltip('Only fires when Burn Mode is ON.')
                         end
                         ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                        local priVal = ImGui.SliderInt('##actpri', entry.priority or 50, 1, 99, 'Pri %d')
+                        local priVal = ImGui.SliderInt('##actpri', entry.priority or 50, 1, 99, 'Pri %d', ImGuiSliderFlags.NoInput or 0)
                         entry.priority = priVal
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Lower = tried first when more than one eligible ability is ready at the same time.')
@@ -5307,12 +5318,15 @@ function UI.drawAbilitiesTab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: activated AAs tab
 function UI.drawAATab()
     if not ImGui.BeginTabItem('AAs') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##AATabScroll', 0, 0)
     ImGui.TextWrapped('Activated Alternate Advancements (each has its own timer -- all fire when ready). Grouped by cooldown.')
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.')
@@ -5382,7 +5396,7 @@ function UI.drawAATab()
                                     local isDis = (curPct == 0)
                                     local pCount = 0
                                     if isDis then pCount = UI.pushDisabledSliderStyle() end
-                                    local newPct = ImGui.SliderInt('##aap', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                                    local newPct = ImGui.SliderInt('##aap', curPct, 0, 100, isDis and 'Disabled' or '%d%%', ImGuiSliderFlags.NoInput or 0)
                                     local isHov = ImGui.IsItemHovered()
                                     if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                                     entry.pct = newPct
@@ -5422,18 +5436,24 @@ function UI.drawAATab()
         end
     end
     ImGui.EndChild()
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: Cooldown & Ability Monitor Tab
 function UI.drawCooldownsTab()
     if not ImGui.BeginTabItem('Cooldowns') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##CooldownsTabScroll', 0, 0)
     UI.renderCooldownContent('_tab', false)
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 function UI.drawDiscTab()
     if not ImGui.BeginTabItem('Disciplines') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##DiscTabScroll', 0, 0)
     ImGui.TextWrapped(
         'Disciplines (/disc) -- no cooldown data from the extractor to group by tier, so listed flat per class. '
         ..
@@ -5504,7 +5524,7 @@ function UI.drawDiscTab()
                         local isDis = (curPct == 0)
                         local pCount = 0
                         if isDis then pCount = UI.pushDisabledSliderStyle() end
-                        local dpVal = ImGui.SliderInt('##dp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                        local dpVal = ImGui.SliderInt('##dp', curPct, 0, 100, isDis and 'Disabled' or '%d%%', ImGuiSliderFlags.NoInput or 0)
                         local isHov = ImGui.IsItemHovered()
                         if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                         entry.pct = dpVal
@@ -5541,7 +5561,7 @@ function UI.drawDiscTab()
                                 'Only fires when Burn Mode is ON.')
                         end
                         ImGui.SameLine(); ImGui.SetNextItemWidth(80)
-                        local priVal = ImGui.SliderInt('##pri', entry.priority or 50, 1, 99, 'Pri %d')
+                        local priVal = ImGui.SliderInt('##pri', entry.priority or 50, 1, 99, 'Pri %d', ImGuiSliderFlags.NoInput or 0)
                         entry.priority = priVal
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip(
@@ -5560,6 +5580,7 @@ function UI.drawDiscTab()
             end
         end
     end
+    ImGui.EndChild()
     ImGui.EndChild()
     ImGui.EndTabItem()
 end
@@ -5584,7 +5605,20 @@ local function setManualHunterPetHold(on, force)
 end
 
 -- UI: Action controls (Start / Pause, Burn)
-function UI.drawActionControls()
+-- compact=true renders the smaller mini-HUD button sizes/IDs used by drawMiniGui,
+-- sharing this same logic so Pause/Burn styling and text can never drift between
+-- the full window and compact HUD.
+function UI.drawActionControls(compact)
+    local btnW, btnH = compact and 65 or 130, compact and 22 or 24
+    local startW = compact and 80 or 130
+    -- Burn's label is longer ("BURN (OFF)"/"BURN (ON)") than Pause/Start's, so it
+    -- needs its own wider slot in compact mode or the text gets clipped.
+    local burnW = compact and 95 or 130
+    local pauseId = compact and 'PAUSE##miniRunBtn' or 'PAUSE'
+    local startId = compact and 'START##miniStartBtn' or 'START'
+    local burnOnId = compact and 'BURN (ON)##miniBurnBtn' or 'BURN (ON)##btnBurn'
+    local burnOffId = compact and 'BURN (OFF)##miniBurnBtn' or 'BURN (OFF)##btnBurn'
+
     if ctrl.running then
         local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local pCount = 0
@@ -5593,7 +5627,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.08, 0.40, 0.15, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
-        if ImGui.Button('PAUSE', 130, 24) then
+        if ImGui.Button(pauseId, btnW, btnH) then
             if ctrl.mode == 'Manual' then
                 setManualHunterPetHold(true, true)
             else
@@ -5612,7 +5646,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.80, 0.22, 0.22, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.50, 0.10, 0.10, 1.0) then pCount = pCount + 1 end
-        if ImGui.Button('START', 130, 24) then
+        if ImGui.Button(startId, startW, btnH) then
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
             end
@@ -5650,7 +5684,7 @@ function UI.drawActionControls()
         if Col and pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.70, 0.00, 0.00, 1.0) then pCount = pCount + 1 end
         if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
 
-        if ImGui.Button('BURN (ON)##btnBurn', 130, 24) then
+        if ImGui.Button(burnOnId, burnW, btnH) then
             ctrl.burn = false
             print('\ag[Triune]\ax Burn mode DISABLED.')
         end
@@ -5659,7 +5693,7 @@ function UI.drawActionControls()
             pcall(ImGui.PopStyleColor, pCount)
         end
     else
-        if ImGui.Button('BURN (OFF)##btnBurn', 130, 24) then
+        if ImGui.Button(burnOffId, burnW, btnH) then
             ctrl.burn = true
             print('\ag[Triune]\ax Burn mode ENABLED!')
         end
@@ -5701,6 +5735,8 @@ end
 -- UI: status tab
 function UI.drawStatusTab()
     if not ImGui.BeginTabItem('Status') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##StatusTabScroll', 0, 0)
 
     -- 1. Live Engine & Mode Overview Banner
     local inCombat = hasActualNPCXtarget()
@@ -6305,12 +6341,15 @@ function UI.drawStatusTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 -- UI: control tab
 function UI.drawControlTab()
     if not ImGui.BeginTabItem('Control') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##ControlTabScroll', 0, 0)
     accent(GOLD, 'Combat Mode')
     ImGui.SetNextItemWidth(160)
     local curPrimaryIdx = idxOf(MODES.PRIMARY, ctrl.mode)
@@ -6376,7 +6415,7 @@ function UI.drawControlTab()
 
         if ctrl.camp_loc then
             ImGui.SetNextItemWidth(180)
-            ctrl.camp_radius = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500)
+            ctrl.camp_radius = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500, nil, ImGuiSliderFlags.NoInput or 0)
         end
 
         ctrl.manual_auto_xtarget = ImGui.Checkbox('Auto-Target Hostiles on XTarget##manualAutoXtar',
@@ -6388,7 +6427,7 @@ function UI.drawControlTab()
         if ctrl.manual_auto_xtarget ~= false then
             ImGui.SetNextItemWidth(180)
             ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##manualXtarDist', ctrl.xtar_nav_dist or 150, 25,
-                300)
+                300, nil, ImGuiSliderFlags.NoInput or 0)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
                     'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
@@ -6471,7 +6510,7 @@ function UI.drawControlTab()
         if (ctrl.pull_style or 'Melee') ~= 'Melee' then
             ImGui.SetNextItemWidth(180)
             ctrl.pull_engage_dist = ImGui.SliderInt('Engagement Distance##pullEngageDist', ctrl.pull_engage_dist or 100,
-                15, 250)
+                15, 250, nil, ImGuiSliderFlags.NoInput or 0)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
                     'Distance (units) to close to before sending in pets, casting pull spell, or firing bow.')
@@ -6486,7 +6525,7 @@ function UI.drawControlTab()
         end
 
         ImGui.SetNextItemWidth(180)
-        local pullMinHpVal = ImGui.SliderInt('Min Pull HP %##pullMinHpCtrl', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
+        local pullMinHpVal = ImGui.SliderInt('Min Pull HP %##pullMinHpCtrl', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%', ImGuiSliderFlags.NoInput or 0)
         ctrl.pull_min_hp_pct = pullMinHpVal
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('%s',
@@ -6499,29 +6538,29 @@ function UI.drawControlTab()
         if ctrl.submode == 'Hunt' then
             accent(ARC, 'Puller (Hunt)')
             ImGui.SetNextItemWidth(180)
-            ctrl.hunter_radius = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000)
+            ctrl.hunter_radius = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000, nil, ImGuiSliderFlags.NoInput or 0)
             ImGui.SetNextItemWidth(180)
-            ctrl.hunter_z_plane = ImGui.SliderInt('Floor Height (Z Plane)', ctrl.hunter_z_plane or 15, 5, 50)
+            ctrl.hunter_z_plane = ImGui.SliderInt('Floor Height (Z Plane)', ctrl.hunter_z_plane or 15, 5, 50, nil, ImGuiSliderFlags.NoInput or 0)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
                     'Tier 1 vertical search threshold. Triune prioritizes NPCs on the same floor or Z plane\nwithin this height difference before searching other floors.')
             end
             ImGui.SetNextItemWidth(180)
-            ctrl.hunter_z = ImGui.SliderInt('Max Height Diff (Z)', ctrl.hunter_z or 75, 10, 300)
+            ctrl.hunter_z = ImGui.SliderInt('Max Height Diff (Z)', ctrl.hunter_z or 75, 10, 300, nil, ImGuiSliderFlags.NoInput or 0)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
                     'Tier 2 vertical search limit. If no valid NPCs are found on your immediate floor,\nTriune expands search up to this maximum height difference across floors and ledges.')
             end
             ImGui.SetNextItemWidth(180)
-            ctrl.hunter_min_level = ImGui.SliderInt('Min NPC Level', ctrl.hunter_min_level or 1, 1, 100)
+            ctrl.hunter_min_level = ImGui.SliderInt('Min NPC Level', ctrl.hunter_min_level or 1, 1, 100, nil, ImGuiSliderFlags.NoInput or 0)
             ImGui.SameLine()
             ImGui.SetNextItemWidth(180)
-            ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100)
+            ctrl.hunter_max_level = ImGui.SliderInt('Max NPC Level', ctrl.hunter_max_level or 100, 1, 100, nil, ImGuiSliderFlags.NoInput or 0)
             if ctrl.hunter_min_level > ctrl.hunter_max_level then ctrl.hunter_min_level = ctrl.hunter_max_level end
 
             ImGui.SetNextItemWidth(180)
             ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##pullerHuntXtar', ctrl.xtar_nav_dist or 150, 25,
-                300)
+                300, nil, ImGuiSliderFlags.NoInput or 0)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
                     'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
@@ -6567,7 +6606,7 @@ function UI.drawControlTab()
             ImGui.SetNextItemWidth(220)
             local curRadius = (ctrl.hunter_combat_radius and ctrl.hunter_combat_radius > 0) and ctrl
                 .hunter_combat_radius or 250
-            local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000)
+            local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000, nil, ImGuiSliderFlags.NoInput or 0)
             if changed then
                 ctrl.hunter_combat_radius = newRadius
                 if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
@@ -6591,20 +6630,20 @@ function UI.drawControlTab()
             end
 
             ImGui.SetNextItemWidth(180)
-            ctrl.camp_radius = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500)
+            ctrl.camp_radius = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500, nil, ImGuiSliderFlags.NoInput or 0)
             ImGui.SetNextItemWidth(180)
-            ctrl.camp_z = ImGui.SliderInt('Pull Height Diff (Z)', ctrl.camp_z or 75, 10, 300)
+            ctrl.camp_z = ImGui.SliderInt('Pull Height Diff (Z)', ctrl.camp_z or 75, 10, 300, nil, ImGuiSliderFlags.NoInput or 0)
 
             ImGui.SetNextItemWidth(180)
-            ctrl.pull_min_level = ImGui.SliderInt('Min NPC Level', ctrl.pull_min_level or 1, 1, 100)
+            ctrl.pull_min_level = ImGui.SliderInt('Min NPC Level', ctrl.pull_min_level or 1, 1, 100, nil, ImGuiSliderFlags.NoInput or 0)
             ImGui.SameLine()
             ImGui.SetNextItemWidth(180)
-            ctrl.pull_max_level = ImGui.SliderInt('Max NPC Level', ctrl.pull_max_level or 100, 1, 100)
+            ctrl.pull_max_level = ImGui.SliderInt('Max NPC Level', ctrl.pull_max_level or 100, 1, 100, nil, ImGuiSliderFlags.NoInput or 0)
             if ctrl.pull_min_level > ctrl.pull_max_level then ctrl.pull_min_level = ctrl.pull_max_level end
 
             ImGui.SetNextItemWidth(180)
             ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##pullerCampXtar', ctrl.xtar_nav_dist or 150, 25,
-                300)
+                300, nil, ImGuiSliderFlags.NoInput or 0)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
                     'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
@@ -6630,7 +6669,7 @@ function UI.drawControlTab()
         if ctrl.use_waypoints then
             ImGui.SameLine()
             ImGui.SetNextItemWidth(120)
-            local newRad, changedRad = ImGui.SliderInt('Arrival Radius##wpRadius', ctrl.waypoint_radius or 20, 5, 100)
+            local newRad, changedRad = ImGui.SliderInt('Arrival Radius##wpRadius', ctrl.waypoint_radius or 20, 5, 100, nil, ImGuiSliderFlags.NoInput or 0)
             if changedRad then
                 ctrl.waypoint_radius = newRad
                 saveLoadout(true)
@@ -6642,7 +6681,7 @@ function UI.drawControlTab()
             ImGui.SameLine()
             ImGui.SetNextItemWidth(130)
             local newScan, changedScan = ImGui.SliderInt('Scan Radius##wpScanRadius', ctrl.waypoint_scan_radius or 100,
-                20, 500)
+                20, 500, nil, ImGuiSliderFlags.NoInput or 0)
             if changedScan then
                 ctrl.waypoint_scan_radius = newScan
                 saveLoadout(true)
@@ -7081,13 +7120,13 @@ function UI.drawControlTab()
         ctrl.ma_name = ImGui.InputText('MA Name', ctrl.ma_name or '')
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Character to assist. Leave blank to assist group leader.') end
         ImGui.SetNextItemWidth(160)
-        ctrl.assist_at = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%')
+        ctrl.assist_at = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
 
         if ctrl.submode == 'Chase' then
             ctrl.chase = ImGui.Checkbox('Chase MA', ctrl.chase)
             if ctrl.chase then
                 ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                ctrl.chase_dist = ImGui.SliderInt('Chase Range', ctrl.chase_dist or 15, 5, 100)
+                ctrl.chase_dist = ImGui.SliderInt('Chase Range', ctrl.chase_dist or 15, 5, 100, nil, ImGuiSliderFlags.NoInput or 0)
             end
         elseif ctrl.submode == 'Camp' then
             accent(GOLD, 'Assist Camp Location')
@@ -7111,11 +7150,14 @@ function UI.drawControlTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
 function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
+    -- Scroll only the tab body; header bar, action controls, and tab bar stay fixed.
+    ImGui.BeginChild('##SettingsTabScroll', 0, 0)
 
     -- 1. Character Classes & Profile
     UI.drawClassPicker()
@@ -7148,7 +7190,7 @@ function UI.drawSettingsTab()
 
         if ctrl.combat_style == 'Melee' then
             ImGui.SetNextItemWidth(200)
-            local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
+            local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50, nil, ImGuiSliderFlags.NoInput or 0)
             if changed or (newDist and newDist ~= ctrl.melee_dist) then
                 ctrl.melee_dist = newDist
                 saveLoadout(true)
@@ -7160,7 +7202,7 @@ function UI.drawSettingsTab()
             end
         else
             ImGui.SetNextItemWidth(200)
-            local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 5, 200)
+            local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 5, 200, nil, ImGuiSliderFlags.NoInput or 0)
             if changed or (newDist and newDist ~= ctrl.ranged_dist) then
                 ctrl.ranged_dist = newDist
                 saveLoadout(true)
@@ -7187,7 +7229,7 @@ function UI.drawSettingsTab()
 
         accent(GOLD, 'Spell Failures & Lockouts:')
         ImGui.SetNextItemWidth(160)
-        local retriesVal = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10)
+        local retriesVal = ImGui.SliderInt('Max Retries##cmr', ctrl.cast_max_retries or 2, 1, 10, nil, ImGuiSliderFlags.NoInput or 0)
         if retriesVal ~= ctrl.cast_max_retries then
             ctrl.cast_max_retries = retriesVal
             saveLoadout(true)
@@ -7198,7 +7240,7 @@ function UI.drawSettingsTab()
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(160)
-        local lockoutVal = ImGui.SliderInt('Lockout Time##castLockoutSec', ctrl.cast_lockout_sec or 30, 5, 300, '%d s')
+        local lockoutVal = ImGui.SliderInt('Lockout Time##castLockoutSec', ctrl.cast_lockout_sec or 30, 5, 300, '%d s', ImGuiSliderFlags.NoInput or 0)
         if lockoutVal ~= ctrl.cast_lockout_sec then
             ctrl.cast_lockout_sec = lockoutVal
             saveLoadout(true)
@@ -7294,7 +7336,7 @@ function UI.drawSettingsTab()
         end
 
         ImGui.SetNextItemWidth(180)
-        local newRatio = ImGui.SliderFloat('Max Path / Dist Ratio##navMaxPathRatio', ctrl.nav_max_path_ratio or 2.5, 1.2, 5.0, '%.1fx')
+        local newRatio = ImGui.SliderFloat('Max Path / Dist Ratio##navMaxPathRatio', ctrl.nav_max_path_ratio or 2.5, 1.2, 5.0, '%.1fx', ImGuiSliderFlags.NoInput or 0)
         if newRatio and newRatio ~= ctrl.nav_max_path_ratio then
             ctrl.nav_max_path_ratio = newRatio
             saveLoadout(true)
@@ -7305,7 +7347,7 @@ function UI.drawSettingsTab()
 
         ImGui.SameLine()
         ImGui.SetNextItemWidth(180)
-        local newHzRad = ImGui.SliderInt('Hazard Radius##navHazardRadius', ctrl.nav_hazard_radius or 15, 8, 35, '%d units')
+        local newHzRad = ImGui.SliderInt('Hazard Radius##navHazardRadius', ctrl.nav_hazard_radius or 15, 8, 35, '%d units', ImGuiSliderFlags.NoInput or 0)
         if newHzRad and newHzRad ~= ctrl.nav_hazard_radius then
             ctrl.nav_hazard_radius = newHzRad
             saveLoadout(true)
@@ -7365,7 +7407,7 @@ function UI.drawSettingsTab()
         ImGui.SetNextItemWidth(180)
         local curRetargets = ctrl.max_closer_retargets or 1
         local retargetFmt = (curRetargets == 0) and 'Disabled (0)' or '%d retarget(s)'
-        local newMaxRetargets = ImGui.SliderInt('Max Retargets Per Leg##maxCloserRetargets', curRetargets, 0, 5, retargetFmt)
+        local newMaxRetargets = ImGui.SliderInt('Max Retargets Per Leg##maxCloserRetargets', curRetargets, 0, 5, retargetFmt, ImGuiSliderFlags.NoInput or 0)
         if newMaxRetargets and newMaxRetargets ~= ctrl.max_closer_retargets then
             ctrl.max_closer_retargets = newMaxRetargets
             saveLoadout(true)
@@ -7380,7 +7422,7 @@ function UI.drawSettingsTab()
     if ImGui.CollapsingHeader('Resting & Resource Management', ImGuiTreeNodeFlags.DefaultOpen) then
         accent(GOLD, 'Combat Recovery & Pull Thresholds:')
         ImGui.SetNextItemWidth(180)
-        local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%')
+        local minManaVal = ImGui.SliderInt('Min Mana %##mmp', ctrl.min_mana_pct or 0, 0, 95, '%d%%', ImGuiSliderFlags.NoInput or 0)
         if minManaVal ~= ctrl.min_mana_pct then
             ctrl.min_mana_pct = minManaVal
             saveLoadout(true)
@@ -7392,7 +7434,7 @@ function UI.drawSettingsTab()
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(180)
-        local minPullHpVal = ImGui.SliderInt('Min Pull HP %##minPullHpSettings', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%')
+        local minPullHpVal = ImGui.SliderInt('Min Pull HP %##minPullHpSettings', ctrl.pull_min_hp_pct or 0, 0, 95, '%d%%', ImGuiSliderFlags.NoInput or 0)
         if minPullHpVal ~= ctrl.pull_min_hp_pct then
             ctrl.pull_min_hp_pct = minPullHpVal
             saveLoadout(true)
@@ -7423,13 +7465,13 @@ function UI.drawSettingsTab()
                 saveLoadout(true)
             end
             ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-            local mbHpStart = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%')
+            local mbHpStart = ImGui.SliderInt('##mbhpstart', ctrl.medbreak_hp_start or 20, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if mbHpStart ~= ctrl.medbreak_hp_start then
                 ctrl.medbreak_hp_start = mbHpStart
                 saveLoadout(true)
             end
             ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-            local mbHpStop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%')
+            local mbHpStop = ImGui.SliderInt('##mbhpstop', ctrl.medbreak_hp_stop or 90, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if mbHpStop ~= ctrl.medbreak_hp_stop then
                 ctrl.medbreak_hp_stop = mbHpStop
                 saveLoadout(true)
@@ -7441,13 +7483,13 @@ function UI.drawSettingsTab()
                 saveLoadout(true)
             end
             ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-            local mbManaStart = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%')
+            local mbManaStart = ImGui.SliderInt('##mbmanastart', ctrl.medbreak_mana_start or 20, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if mbManaStart ~= ctrl.medbreak_mana_start then
                 ctrl.medbreak_mana_start = mbManaStart
                 saveLoadout(true)
             end
             ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-            local mbManaStop = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%')
+            local mbManaStop = ImGui.SliderInt('##mbmanastop', ctrl.medbreak_mana_stop or 90, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if mbManaStop ~= ctrl.medbreak_mana_stop then
                 ctrl.medbreak_mana_stop = mbManaStop
                 saveLoadout(true)
@@ -7459,13 +7501,13 @@ function UI.drawSettingsTab()
                 saveLoadout(true)
             end
             ImGui.SameLine(); ImGui.TextDisabled('at'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-            local mbEndStart = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%')
+            local mbEndStart = ImGui.SliderInt('##mbendstart', ctrl.medbreak_end_start or 20, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if mbEndStart ~= ctrl.medbreak_end_start then
                 ctrl.medbreak_end_start = mbEndStart
                 saveLoadout(true)
             end
             ImGui.SameLine(); ImGui.TextDisabled('until'); ImGui.SameLine(); ImGui.SetNextItemWidth(120)
-            local mbEndStop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%')
+            local mbEndStop = ImGui.SliderInt('##mbendstop', ctrl.medbreak_end_stop or 90, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if mbEndStop ~= ctrl.medbreak_end_stop then
                 ctrl.medbreak_end_stop = mbEndStop
                 saveLoadout(true)
@@ -7477,7 +7519,7 @@ function UI.drawSettingsTab()
     if trioHasPetClass() or hasActivePet() then
         if ImGui.CollapsingHeader('Pet Management & Discipline', ImGuiTreeNodeFlags.DefaultOpen) then
             ImGui.SetNextItemWidth(180)
-            local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
+            local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
             if petAssistVal ~= ctrl.pet_assist_at then
                 ctrl.pet_assist_at = petAssistVal
                 saveLoadout(true)
@@ -7551,6 +7593,7 @@ function UI.drawSettingsTab()
         end
     end
 
+    ImGui.EndChild()
     ImGui.EndTabItem()
 end
 
@@ -7632,6 +7675,14 @@ local function drawMiniGui()
             UI.setTooltip('Toggle popout Cooldown & Ability Monitor window')
         end
 
+        if ctrl.mode == 'Assist' then
+            ImGui.SetNextItemWidth(110)
+            ctrl.ma_name = ImGui.InputText('MA##miniMAName', ctrl.ma_name or '')
+            if ImGui.IsItemHovered() then
+                UI.setTooltip('Character to assist. Leave blank to assist group leader.')
+            end
+        end
+
         ImGui.Separator()
 
         if not navLoaded() then
@@ -7655,60 +7706,9 @@ local function drawMiniGui()
             end
         end
 
-        -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
-        if ctrl.running then
-            if ImGui.Button('Pause##miniRunBtn', 65, 22) then
-                if ctrl.mode == 'Manual' then
-                    setManualHunterPetHold(true, true)
-                else
-                    setManualHunterPetHold(false, true)
-                end
-                ctrl.running = false
-                if runtime.fullStop then runtime.fullStop() end
-            end
-        else
-            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-            local pCount = 0
-            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then
-                pCount = pCount + 1
-            end
-            if ImGui.Button('START##miniStartBtn', 80, 22) then
-                if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
-                    runtime.setNearestWaypoint()
-                end
-                ctrl.running = true
-                runtime.wasRunning = true
-                if not navLoaded() and ctrl.mode ~= 'Manual' then
-                    mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
-                    print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
-                elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
-                    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-                    mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
-                    print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
-                end
-            end
-            if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
-        end
-
-        ImGui.SameLine()
-        if ctrl.burn then
-            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-            local pCount = 0
-            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.8, 0.2, 0.2, 1.0) then
-                pCount = pCount + 1
-            end
-            if ImGui.Button('BURN ON##miniBurnBtn', 75, 22) then
-                ctrl.burn = false
-            end
-            if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
-        else
-            if ImGui.Button('Burn##miniBurnBtn', 65, 22) then
-                ctrl.burn = true
-            end
-        end
-        if ImGui.IsItemHovered() then
-            UI.setTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
-        end
+        -- Row 2: Action Controls Toolbar (Run/Pause, Burn) -- shared with the full
+        -- window so styling and text always match between the two.
+        UI.drawActionControls(true)
 
         ImGui.Separator()
 
@@ -7811,7 +7811,24 @@ local function drawFullGui()
     UI.popTheme()
 end
 
+-- MacroQuest's ImGui overlay doesn't always clear a widget's active/focused
+-- state when the click that dismisses it lands outside every ImGui window
+-- (e.g. clicking into the 3D world or EQ's own chat box), which can leave a
+-- slider drag or text box "stuck" capturing keyboard input. If a click lands
+-- with nothing ImGui hovered while something is still active/focused, force
+-- it to let go via SetWindowFocus(nil) (the documented way to hand keyboard
+-- capture back to the game).
+local function releaseStuckImGuiFocus()
+    if not (ImGui.IsMouseClicked(0) or ImGui.IsMouseClicked(1)) then return end
+    if not (ImGui.IsAnyItemActive() or ImGui.IsAnyItemFocused()) then return end
+    local overImGui = ImGui.IsWindowHovered(ImGuiHoveredFlags.AnyWindow or 0) or ImGui.IsAnyItemHovered()
+    if not overImGui then
+        ImGui.SetWindowFocus(nil)
+    end
+end
+
 local function draw()
+    releaseStuckImGuiFocus()
     if not open then return end
     if ctrl.compact then
         drawMiniGui()
@@ -8497,7 +8514,7 @@ function UI.renderCooldownContent(idSuffix, isPopout)
         ImGui.SameLine()
         -- Transparency Slider
         ImGui.SetNextItemWidth(55)
-        local newAlpha = ImGui.SliderFloat('##cdAlpha' .. idSuffix, ctrl.cooldown_alpha or 0.90, 0.10, 1.00, '%.2f')
+        local newAlpha = ImGui.SliderFloat('##cdAlpha' .. idSuffix, ctrl.cooldown_alpha or 0.90, 0.10, 1.00, '%.2f', ImGuiSliderFlags.NoInput or 0)
         if newAlpha ~= ctrl.cooldown_alpha then
             ctrl.cooldown_alpha = newAlpha
         end
@@ -8715,7 +8732,7 @@ function UI.renderCooldownContent(idSuffix, isPopout)
                         itm.entry.enabled = enVal
                         if itm.entry.pct ~= nil then
                             ImGui.SameLine(); ImGui.SetNextItemWidth(55)
-                            local spVal = ImGui.SliderInt('##tblPct', tonumber(itm.entry.pct) or 100, 0, 100, '%d%%')
+                            local spVal = ImGui.SliderInt('##tblPct', tonumber(itm.entry.pct) or 100, 0, 100, '%d%%', ImGuiSliderFlags.NoInput or 0)
                             itm.entry.pct = spVal
                         end
                         if itm.entry.burn_only ~= nil then

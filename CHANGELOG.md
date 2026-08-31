@@ -117,6 +117,15 @@
   - **Dynamic Spell Gem Slot Support (`getNumGems`)**: Automatically queries `mq.TLO.Me.NumGems()` to dynamically display 8 to 12 gem slots based on character AAs and server client capabilities.
   - **Unit Tests**: Added test suite in `tests/test_pure_logic.lua` covering preset snapshots and deep-copy isolation, gem slot swapping, `target HP between` windows, aggro triggers, and reagent verification.
 
+- **Main Window UI Cleanup (`triune.lua`).**
+  - **Static Header & Tab Bar**: Wrapped each of the 9 tab bodies (Status, Control, Settings, Spell Gems, Clickies, Abilities, AAs, Disciplines, Help) in its own scrolling `ImGui.BeginChild` region so the header bar, action controls, and tab bar never scroll out of view -- only the active tab's content scrolls now.
+  - **Reordered Header Toolbar**: Moved the `Compact Mode` button to the far left of the toolbar row, ahead of `Open Spellbook`.
+  - **Unified Pause/Burn Styling (`UI.drawActionControls`)**: Added a `compact` parameter so the mini HUD's Pause/Start and Burn buttons render through the same function as the full window, guaranteeing identical colors (green/red state coloring, pulsing red Burn-active animation) and text (`PAUSE`/`START`, `BURN (ON)`/`BURN (OFF)`) instead of a separately maintained, drifted copy.
+  - **Compact Burn Button Width Fix**: Gave the Burn button its own wider slot (95px vs Pause/Start's 65px) in the mini HUD so the longer `BURN (OFF)`/`BURN (ON)` text introduced above no longer gets clipped.
+  - **Compact Mode Assist Character Field**: Added an `MA Name` text box to the mini HUD when in Assist mode, matching the full window's "Character to assist" field (`ctrl.ma_name`) so it can be set without expanding to the full window.
+  - **Sliders Never Capture Keyboard Focus**: Passed `ImGuiSliderFlags.NoInput` to all 47 `SliderInt`/`SliderFloat` calls, disabling the Ctrl+Click/Enter-to-text-input behavior that was the only way a slider could grab keyboard input.
+  - **Stuck Focus Fix on Click-Away (`releaseStuckImGuiFocus`)**: When a click lands outside every ImGui window/item while a text box or other widget is still active or focused (e.g. clicking into the 3D world or EQ's own chat box), force-release ImGui's keyboard/mouse capture via `SetWindowFocus(nil)` so typing reaches the game again instead of a stuck Triune widget.
+
 ---
 
 ## 2026-08-29
