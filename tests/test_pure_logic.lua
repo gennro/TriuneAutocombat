@@ -589,6 +589,14 @@ local EXPECTED_FIELDS = {
     { 'waypoints',               'table' },
     { 'zone_waypoints',          'table' },
     { 'zone_waypoint_presets',   'table' },
+    { 'auto_spend_aa',           'boolean' },
+    { 'auto_spend_aa_threshold', 'number' },
+    { 'auto_spend_aa_id',        'number' },
+    { 'auto_spend_aa_buy_id',    'number' },
+    { 'auto_spend_aa_cost',      'number' },
+    { 'auto_spend_aa_name',      'string' },
+    { 'auto_spend_aa_action',    'string' },
+    { 'auto_summon_fireworks',   'boolean' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -604,6 +612,14 @@ assert_eq(dc.submode, 'Hunt', 'defaultCtrl: submode=Hunt')
 assert_eq(dc.show_cooldowns, false, 'defaultCtrl: show_cooldowns=false')
 assert_eq(dc.cooldown_alpha, 0.90, 'defaultCtrl: cooldown_alpha=0.90')
 assert_eq(dc.cooldown_view_mode, 'table', 'defaultCtrl: cooldown_view_mode=table')
+assert_eq(dc.auto_spend_aa, false, 'defaultCtrl: auto_spend_aa=false')
+assert_eq(dc.auto_spend_aa_threshold, 100, 'defaultCtrl: auto_spend_aa_threshold=100')
+assert_eq(dc.auto_spend_aa_id, 17788, 'defaultCtrl: auto_spend_aa_id=17788')
+assert_eq(dc.auto_spend_aa_buy_id, 0, 'defaultCtrl: auto_spend_aa_buy_id=0')
+assert_eq(dc.auto_spend_aa_cost, 25, 'defaultCtrl: auto_spend_aa_cost=25')
+assert_eq(dc.auto_spend_aa_name, 'Alternately Advanced Fireworks', 'defaultCtrl: auto_spend_aa_name')
+assert_eq(dc.auto_spend_aa_action, 'window', 'defaultCtrl: auto_spend_aa_action=window')
+assert_eq(dc.auto_summon_fireworks, false, 'defaultCtrl: auto_summon_fireworks=false')
 
 -- ============================================================================
 -- 9.  isActionSkill(name) & defaultActionEntry
@@ -2551,9 +2567,9 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '1.7.7', 'triune.lua version is 1.7.7')
-    assert_eq(updaterVer, '1.7.7', 'triune_updater.lua version is 1.7.7')
-    assert_eq(readmeVer, '1.7.7', 'README.md version is 1.7.7')
+    assert_eq(triuneVer, '1.7.8', 'triune.lua version is 1.7.8')
+    assert_eq(updaterVer, '1.7.8', 'triune_updater.lua version is 1.7.8')
+    assert_eq(readmeVer, '1.7.8', 'README.md version is 1.7.8')
 end
 
 -- ============================================================================
@@ -3147,8 +3163,8 @@ do
     -- E. Cooldowns Tab Ordering & Declaration
     local triuneContent = readFile('TAC/lua/triune.lua')
     assert_true(triuneContent:find('function UI.drawCooldownsTab()', 1, true) ~= nil, 'cooldown tab: UI.drawCooldownsTab defined')
-    local tabOrderMatch = triuneContent:find('UI.drawAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawDiscTab%(%)')
-    assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned right after AAs tab in triuneTabs')
+    local tabOrderMatch = triuneContent:find('UI.drawAATab%(%)[%s\r\n]+UI.drawAutoAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawDiscTab%(%)')
+    assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned after Auto AA and before Disc tab in triuneTabs')
 
     -- F. parseDurationSec & parseSpellRecastTime Comprehensive Tests
     local function parseDurationSec(durObj)
@@ -3245,6 +3261,85 @@ do
     activeSec = 90
     actFrac = math.min(1.0, math.max(0.0, activeSec / activeTotalSec))
     assert_eq(actFrac, 0.5, 'progress bar active: Half duration gives 50% (0.5) cyan bar')
+end
+
+-- ============================================================================
+-- Suite 47: Auto AA & Fireworks Point Spender Logic
+-- ============================================================================
+print('--- Auto AA & Fireworks Point Spender Logic ---')
+do
+    -- A. sanitizeModeConfig checks
+    local sanitizeModeConfig = loadFunc(src, 'sanitizeModeConfig', { MODES = MODES })
+    local cfg = { mode = 'Manual' }
+    sanitizeModeConfig(cfg)
+    assert_eq(cfg.auto_spend_aa, false, 'sanitize: auto_spend_aa default is false')
+    assert_eq(cfg.auto_spend_aa_threshold, 100, 'sanitize: auto_spend_aa_threshold default is 100')
+    assert_eq(cfg.auto_spend_aa_id, 17788, 'sanitize: auto_spend_aa_id default is 17788')
+    assert_eq(cfg.auto_spend_aa_buy_id, 0, 'sanitize: auto_spend_aa_buy_id default is 0')
+    assert_eq(cfg.auto_spend_aa_cost, 25, 'sanitize: auto_spend_aa_cost default is 25')
+    assert_eq(cfg.auto_spend_aa_name, 'Alternately Advanced Fireworks', 'sanitize: auto_spend_aa_name default')
+    assert_eq(cfg.auto_spend_aa_action, 'window', 'sanitize: auto_spend_aa_action default is window')
+    assert_eq(cfg.auto_summon_fireworks, false, 'sanitize: auto_summon_fireworks default is false')
+
+    -- B. Preserves user custom config
+    local customCfg = {
+        mode = 'Manual',
+        auto_spend_aa = true,
+        auto_spend_aa_threshold = 50,
+        auto_spend_aa_id = 99999,
+        auto_spend_aa_buy_id = 1234,
+        auto_spend_aa_cost = 10,
+        auto_spend_aa_name = 'Custom AA',
+        auto_spend_aa_action = 'buy',
+        auto_summon_fireworks = true
+    }
+    sanitizeModeConfig(customCfg)
+    assert_eq(customCfg.auto_spend_aa, true, 'sanitize: preserved auto_spend_aa')
+    assert_eq(customCfg.auto_spend_aa_threshold, 50, 'sanitize: preserved auto_spend_aa_threshold')
+    assert_eq(customCfg.auto_spend_aa_id, 99999, 'sanitize: preserved auto_spend_aa_id')
+    assert_eq(customCfg.auto_spend_aa_buy_id, 1234, 'sanitize: preserved auto_spend_aa_buy_id')
+    assert_eq(customCfg.auto_spend_aa_cost, 10, 'sanitize: preserved auto_spend_aa_cost')
+    assert_eq(customCfg.auto_spend_aa_name, 'Custom AA', 'sanitize: preserved auto_spend_aa_name')
+    assert_eq(customCfg.auto_spend_aa_action, 'buy', 'sanitize: preserved auto_spend_aa_action')
+    assert_eq(customCfg.auto_summon_fireworks, true, 'sanitize: preserved auto_summon_fireworks')
+
+    -- C. Auto-spend condition evaluator simulation
+    local function shouldAutoSpend(enabled, unspent, threshold, cost, aaId)
+        if not enabled then return false end
+        threshold = tonumber(threshold) or 100
+        cost = tonumber(cost) or 25
+        aaId = tonumber(aaId) or 17788
+        return (aaId > 0 and cost > 0 and unspent >= threshold and unspent >= cost)
+    end
+
+    assert_eq(shouldAutoSpend(false, 100, 100, 25, 17788), false, 'spend check: disabled -> false')
+    assert_eq(shouldAutoSpend(true, 75, 100, 25, 17788), false, 'spend check: 75 < 100 threshold -> false')
+    assert_eq(shouldAutoSpend(true, 100, 100, 25, 17788), true, 'spend check: 100 >= 100 threshold & >= 25 cost -> true')
+    assert_eq(shouldAutoSpend(true, 25, 25, 25, 17788), true, 'spend check: 25 >= 25 threshold -> true')
+    assert_eq(shouldAutoSpend(true, 20, 20, 25, 17788), false, 'spend check: 20 < 25 cost -> false')
+
+    -- D. Auto-summon fireworks conditions simulation
+    local function shouldAutoSummon(enabled, aaId, isReady, isCasting, isMoving, isCombat, hasXtar)
+        if not enabled then return false end
+        if (tonumber(aaId) or 0) <= 0 then return false end
+        if isCasting or isMoving or isCombat or hasXtar then return false end
+        return not not isReady
+    end
+
+    assert_eq(shouldAutoSummon(false, 17788, true, false, false, false, false), false, 'summon check: disabled -> false')
+    assert_eq(shouldAutoSummon(true, 17788, false, false, false, false, false), false, 'summon check: not ready -> false')
+    assert_eq(shouldAutoSummon(true, 17788, true, true, false, false, false), false, 'summon check: casting -> false')
+    assert_eq(shouldAutoSummon(true, 17788, true, false, true, false, false), false, 'summon check: moving -> false')
+    assert_eq(shouldAutoSummon(true, 17788, true, false, false, true, false), false, 'summon check: combat -> false')
+    assert_eq(shouldAutoSummon(true, 17788, true, false, false, false, true), false, 'summon check: xtarget hostile -> false')
+    assert_eq(shouldAutoSummon(true, 17788, true, false, false, false, false), true, 'summon check: idle, ready, out of combat -> true')
+
+    -- E. Verify Auto AA tab in triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("function UI.drawAutoAATab()") ~= nil, 'triune.lua defines UI.drawAutoAATab')
+    assert_true(triuneContent:find("UI.drawAutoAATab()") ~= nil, 'triune.lua invokes UI.drawAutoAATab in tab bar')
+    assert_true(triuneContent:find("runtime.checkAutoSpendAA()") ~= nil, 'triune.lua includes runtime.checkAutoSpendAA check')
+    assert_true(triuneContent:find("runtime.checkAutoSummonFireworks()") ~= nil, 'triune.lua includes runtime.checkAutoSummonFireworks check')
 end
 
 -- ============================================================================

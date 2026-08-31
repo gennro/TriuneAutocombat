@@ -1,5 +1,21 @@
 # Triune AutoCombat Change Log
 
+## 2026-08-31
+
+- **ImDrawList Function Signature Fix (`triune_map.lua`).**
+  - **MacroQuest Sol3 Argument Compatibility**: Added explicit `numSegments` (0) parameter to all 13 `AddCircleFilled` calls and explicit rounding (0.0) to `AddRectFilled` in `DrawMapCanvas`, preventing sol runtime errors ("no matching function call takes this number of arguments and the specified types") on Dear ImGui canvas rendering.
+  - **New "Auto AA" Tab (`UI.drawAutoAATab`)**: Added a dedicated top-level `Auto AA` tab to Triune (Status -> Control -> Settings -> Spell Gems -> Abilities -> AAs -> **Auto AA** -> Cooldowns -> Disciplines -> Clickies -> Help) dedicated to server AA point cap management and automated fireworks summoning.
+  - **Live AA Point Pool Telemetry**: Renders live unspent AA points with color-coded status badges (`[CAP REACHED!]` in red when at 100/100, `[THRESHOLD MET]` in yellow, or normal status in green) alongside total spent and overall earned points.
+  - **Automated AAWindow UI Interaction & Training Workflow (`findAAInWindowLists`, `runtime.startAATrainWorkflow`, `runtime.processAATrainWorkflow`)**: Fully automated the in-game AA window training workflow via guarded MacroQuest `/notify` commands (`TrainButton`) for progression servers where `/alt buy` is disabled. Triune opens the AA window (`/keypress V` / `/window open AAWindow`), scans tabs 1-5 and UI lists (`AAW_List`, `AAW_GeneralList`, `AAW_ArchetypeList`, etc.) for the ability, selects the matching item (`/nomodkey /notify AAWindow <list> listselect <index>`), triggers the Train button (`/nomodkey /notify AAWindow TrainButton leftmouseup`), and cleanly closes the window when finished.
+  - **Streamlined Notify-Based Auto AA Tab**: Simplified the `Auto AA` tab to eliminate redundant manual `/alt buy` inputs and method radio buttons, focusing purely on automated window-based training, live AA pool diagnostics, and fireworks summoning.
+  - **Auto-Summon Fireworks Engine (`runtime.checkAutoSummonFireworks`)**: Optionally monitors the fireworks summoning ability (ID 17788: *Alternately Advanced Fireworks*) and activates `/alt activate <id>` whenever ready (out of combat and stationary), automatically clearing the summoned firework into inventory bags (`/autoinventory`).
+  - **Interactive Actions**: Added instant action buttons in the UI for `Train AA Now (/notify AAWindow)`, `Summon Fireworks Now (/alt activate 17788)`, and `Clear Cursor (/autoinv)`.
+  - **Slash Commands**: Added slash command control with `/ac autoaa [on|off]`, `/ac autofw [on|off]`, `/ac aatrain` / `/ac spendnow`, `/ac summonnow`, `/ac aathreshold [25-100]`, `/ac aacost [1-50]`, and `/ac aaid [id]`.
+  - **Status Tab UI Streamlining**: Removed the redundant `Popout Cooldowns` button from the top of the Status tab in favor of the dedicated `Cooldowns` tab and header toolbar toggle.
+  - **Project Version Bump (v1.7.8)**: Synchronized version **1.7.8** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+---
+
 ## 2026-08-30
 
 - **Luacheck Warning Elimination (`triune.lua`).**

@@ -8,7 +8,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.7.7'
+local VERSION = '1.7.8'
 local GITHUB_REPO = 'gennro/TriuneAutocombat'
 local API_URL = 'https://api.github.com/repos/' .. GITHUB_REPO .. '/releases/latest'
 local latestTag = nil -- raw git tag from API (e.g. 'V1.3')

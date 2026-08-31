@@ -2126,7 +2126,7 @@ local function DrawMapCanvas(availW, availH)
 
     -- Canvas Background (Dark charcoal / navy)
     local bgCol = ImGui.GetColorU32(0.035, 0.050, 0.075, 1.0)
-    drawList:AddRectFilled(canvasPos, ImVec2(cX + availW, cY + availH), bgCol)
+    drawList:AddRectFilled(canvasPos, ImVec2(cX + availW, cY + availH), bgCol, 0.0)
 
     -- Draw Grid Lines (if enabled)
     if ctrl.showGrid then
@@ -2289,9 +2289,9 @@ local function DrawMapCanvas(availW, availH)
                 if isCurrentWp then
                     local wpPulse = math.sin(os.clock() * 5.0) * 2.0
                     drawList:AddCircle(ImVec2(wsx, wsy), 8.0 + wpPulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.8), 0, 1.8)
-                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 5.5, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0))
+                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 5.5, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0), 0)
                 else
-                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0.15, 0.75, 0.90, 0.9))
+                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0.15, 0.75, 0.90, 0.9), 0)
                     drawList:AddCircle(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
                 end
 
@@ -2309,11 +2309,11 @@ local function DrawMapCanvas(availW, availH)
         local campRadScreen = (td.campRadius or 50) * viewport.zoom
 
         if campRadScreen > 2.0 then
-            drawList:AddCircleFilled(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.10, 0.70, 0.85, 0.08))
+            drawList:AddCircleFilled(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.10, 0.70, 0.85, 0.08), 0)
             drawList:AddCircle(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.20, 0.85, 1.00, 0.60), 0, 1.8)
 
             -- Camp Anchor center pin
-            drawList:AddCircleFilled(ImVec2(csx, csy), 5.0, ImGui.GetColorU32(0.20, 0.90, 1.00, 1.0))
+            drawList:AddCircleFilled(ImVec2(csx, csy), 5.0, ImGui.GetColorU32(0.20, 0.90, 1.00, 1.0), 0)
             drawList:AddCircle(ImVec2(csx, csy), 8.0, ImGui.GetColorU32(1.0, 1.0, 1.0, 0.8), 0, 1.5)
 
             local campText = string.format('Camp (Radius: %dyd)', td.campRadius or 50)
@@ -2345,7 +2345,7 @@ local function DrawMapCanvas(availW, availH)
 
             if searchRadScreen > 2.0 then
                 -- Subtle amber fill + ring
-                drawList:AddCircleFilled(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.80, 0.20, 0.03))
+                drawList:AddCircleFilled(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.80, 0.20, 0.03), 0)
                 drawList:AddCircle(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.75, 0.20, 0.65), 0, 1.5)
 
                 local labelText = isCampAnchor and string.format('Pull Radius (%dyd)', searchYards) or string.format('Search / Roam Radius (%dyd)', searchYards)
@@ -2361,7 +2361,7 @@ local function DrawMapCanvas(availW, availH)
             local hsx, hsy = worldToScreen(hz.x, hz.y, cX, cY, availW, availH)
             if hsx >= cX - 40 and hsx <= cX + availW + 40 and hsy >= cY - 40 and hsy <= cY + availH + 40 then
                 local hzRadScreen = math.max(12.0 * viewport.zoom, 7.0)
-                drawList:AddCircleFilled(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.20, 0.20, 0.20))
+                drawList:AddCircleFilled(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.20, 0.20, 0.20), 0)
                 drawList:AddCircle(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.25, 0.25, 0.75), 0, 1.5)
                 local hzText = string.format('Hazard (%d hits)', hz.hits or 1)
                 drawList:AddText(ImVec2(hsx + 8, hsy - 6), ImGui.GetColorU32(0, 0, 0, 0.9), hzText)
@@ -2385,7 +2385,7 @@ local function DrawMapCanvas(availW, availH)
                 local pulse = math.sin((now - pTime) * 0.008) * 5.0
                 local rRad = math.max(10.0, 16.0 + pulse)
                 drawList:AddCircle(ImVec2(psx, psy), rRad, ImGui.GetColorU32(1.0, 0.85, 0.2, 0.9), 0, 2.5)
-                drawList:AddCircleFilled(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.2, 1.0))
+                drawList:AddCircleFilled(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.2, 1.0), 0)
                 drawList:AddCircle(ImVec2(psx, psy), 5.0, ImGui.GetColorU32(0, 0, 0, 0.9), 0, 1.5)
                 drawList:AddLine(ImVec2(psx - rRad - 4, psy), ImVec2(psx + rRad + 4, psy), ImGui.GetColorU32(1.0, 0.85, 0.2, 0.7), 1.5)
                 drawList:AddLine(ImVec2(psx, psy - rRad - 4), ImVec2(psx, psy + rRad + 4), ImGui.GetColorU32(1.0, 0.85, 0.2, 0.7), 1.5)
@@ -2412,7 +2412,7 @@ local function DrawMapCanvas(availW, availH)
             for _, gm in ipairs(spawns.groupMembers) do
                 local sx, sy = worldToScreen(gm.x, gm.y, cX, cY, availW, availH)
                 if sx >= cX and sx <= cX + availW and sy >= cY and sy <= cY + availH then
-                    drawList:AddCircleFilled(ImVec2(sx, sy), 4.5, grpCol)
+                    drawList:AddCircleFilled(ImVec2(sx, sy), 4.5, grpCol, 0)
                     drawList:AddText(ImVec2(sx + 6, sy - 6), grpCol, gm.name)
                 end
             end
@@ -2452,15 +2452,15 @@ local function DrawMapCanvas(availW, availH)
                         -- Draw Node by Color Mode
                         if ctrl.colorModeIndex == 1 then
                             -- Dual Mode: Con fill with Nav halo
-                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
+                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
                             drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
                         elseif ctrl.colorModeIndex == 2 then
                             -- Navmesh Reachability Only
-                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32)
+                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32, 0)
                             drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
                         else
                             -- Con Colors Only
-                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32)
+                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
                             drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
                         end
 
@@ -2576,7 +2576,7 @@ local function DrawMapCanvas(availW, availH)
                         -- Destination Waypoint Marker (Pulsing Bullseye)
                         local pulse = math.sin(os.clock() * 5.0) * 2.0
                         drawList:AddCircle(ImVec2(dSx, dSy), 11.0 + pulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.6), 0, 2.0)
-                        drawList:AddCircleFilled(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0))
+                        drawList:AddCircleFilled(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0), 0)
                         drawList:AddCircle(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.2)
 
                         -- Distance Text Label
@@ -2634,7 +2634,7 @@ local function DrawMapCanvas(availW, availH)
 
             drawList:AddTriangleFilled(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerFillCol)
             drawList:AddTriangle(ImVec2(tipX, tipY), ImVec2(leftX, leftY), ImVec2(rightX, rightY), playerCol, 1.5)
-            drawList:AddCircleFilled(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(1.0, 1.0, 1.0, 1.0))
+            drawList:AddCircleFilled(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(1.0, 1.0, 1.0, 1.0), 0)
             drawList:AddCircle(ImVec2(psx, psy), 3.5, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.0)
         end
     end

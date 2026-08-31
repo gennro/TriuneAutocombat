@@ -178,6 +178,13 @@ You can control almost everything using simple in-game chat commands:
 | `/ac spellbook` | `/ac book` | Open the Spellbook Browser |
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
+| `/ac autoaa [on\|off]` | `/ac autospendaa`, `/ac fireworks` | Toggle automatic AA point spending (e.g. Fireworks AA ID 17788) |
+| `/ac autofw [on\|off]` | `/ac summonfw` | Toggle automatic fireworks summoning (/alt activate) & autoinventory |
+| `/ac spendnow` | `/ac spendaa`, `/ac spendpoints` | Immediately purchase 1 rank of the configured AA (e.g. 25 AA) |
+| `/ac summonnow` | `/ac summonfireworks` | Immediately summon fireworks via `/alt activate 17788` |
+| `/ac aathreshold [25-100]` | `/ac spendthreshold` | Set unspent AA threshold for automatic purchases (default: 100) |
+| `/ac aacost [1-50]` | `/ac spendcost` | Set AA cost per rank (default: 25) |
+| `/ac aaid [id]` | | Set AA ability ID to purchase and activate (default: 17788) |
 | `/ac clear lockouts` | `/ac clearlockouts`, `/ac unlock` | Clear active spell lockouts, non-stacking buff backoffs, and mob immunities |
 | `/ac preset [save\|load\|del\|list]` | `/ac loadout` | Save, load, list, or delete named spell gem loadout presets |
 | `/ac style [melee\|ranged\|spell]` | | Set combat style |
@@ -228,6 +235,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.7.7**
+Current version: **1.7.8**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.
