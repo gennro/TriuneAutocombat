@@ -3417,8 +3417,8 @@ do
     -- E. Cooldowns Tab Ordering & Declaration
     local triuneContent = readFile('TAC/lua/triune.lua')
     assert_true(triuneContent:find('function UI.drawCooldownsTab()', 1, true) ~= nil, 'cooldown tab: UI.drawCooldownsTab defined')
-    local tabOrderMatch = triuneContent:find('UI.drawAATab%(%)[%s\r\n]+UI.drawAutoAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawDiscTab%(%)')
-    assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned after Auto AA and before Disc tab in triuneTabs')
+    local tabOrderMatch = triuneContent:find('UI.drawAutoAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)')
+    assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned after Auto AA and before Settings tab in triuneTabs')
 
     -- F. parseDurationSec & parseSpellRecastTime Comprehensive Tests
     local function parseDurationSec(durObj)
@@ -3716,8 +3716,10 @@ do
     assert_true(triuneContent:find("ImGui.BeginTabItem%('Pets'%)") ~= nil, 'triune.lua uses Pets as tab label')
     local tabOrderMatch = triuneContent:find("UI.drawControlTab%(%)[%s\r\n]+UI.drawPetControlTab%(%)[%s\r\n]+UI.drawGemTab%(%)")
     assert_true(tabOrderMatch ~= nil, 'triune.lua places UI.drawPetControlTab right next to Control tab and before Gem tab')
-    local settingsTabMatch = triuneContent:find("UI.drawClickieTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)[%s\r\n]+UI.drawHelpTab%(%)")
-    assert_true(settingsTabMatch ~= nil, 'triune.lua places UI.drawSettingsTab between Clickies and Help tabs')
+    local tabOrderMatch2 = triuneContent:find("UI.drawAATab%(%)[%s\r\n]+UI.drawDiscTab%(%)[%s\r\n]+UI.drawClickieTab%(%)[%s\r\n]+UI.drawAutoAATab%(%)")
+    assert_true(tabOrderMatch2 ~= nil, 'triune.lua places Disciplines and Clickies between AAs and Auto AA tabs')
+    local settingsTabMatch = triuneContent:find("UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)[%s\r\n]+UI.drawHelpTab%(%)")
+    assert_true(settingsTabMatch ~= nil, 'triune.lua places UI.drawSettingsTab between Cooldowns and Help tabs')
     assert_true(triuneContent:find("PET_CLASSES%s*=%s*{[^}]*Brd%s*=%s*true") ~= nil, 'triune.lua includes Brd in petState.PET_CLASSES')
     assert_true(triuneContent:find("function UI.drawPetControlTab") ~= nil, 'triune.lua includes drawPetControlTab renderer')
     assert_true(triuneContent:find("sendPetCmd%(") ~= nil, 'triune.lua includes sendPetCmd helper')
@@ -3746,6 +3748,21 @@ do
         'aalist calls EndChild unconditionally outside BeginChild if block')
     assert_true(triuneContent:find("disclist.-end[%s\r\n]+ImGui.EndChild%(%)[%s\r\n]+ImGui.PopStyleVar%(2%)") ~= nil,
         'disclist calls EndChild unconditionally outside BeginChild if block')
+    assert_true(triuneContent:find("clickielist.-end[%s\r\n]+ImGui.EndChild%(%)[%s\r\n]+ImGui.PopStyleVar%(2%)") ~= nil,
+        'clickielist calls EndChild unconditionally outside BeginChild if block')
+
+    -- Clickies compact layout checks
+    local clickieTabBody = triuneContent:match("function UI%.drawClickieTab%(%).-ImGui%.EndTabItem%(%)")
+    assert_true(clickieTabBody ~= nil, 'drawClickieTab body extracted')
+    assert_true(clickieTabBody:find("ImGuiStyleVar%.ItemSpacing,%s*4,%s*3") ~= nil, 'drawClickieTab uses compact ItemSpacing (4, 3)')
+    assert_true(clickieTabBody:find("ImGuiStyleVar%.FramePadding,%s*4,%s*3") ~= nil, 'drawClickieTab uses compact FramePadding (4, 3)')
+    assert_true(clickieTabBody:find("InvisibleButton%('##upDummy',%s*17,%s*19%)") ~= nil, 'drawClickieTab uses InvisibleButton upDummy for slot 1 alignment')
+    assert_true(clickieTabBody:find("InvisibleButton%('##dnDummy',%s*17,%s*19%)") ~= nil, 'drawClickieTab uses InvisibleButton dnDummy for last slot alignment')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(133%)") ~= nil, 'drawClickieTab uses compact 133px Target combo')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(116%)") ~= nil, 'drawClickieTab uses compact 116px When combo')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(57%)") ~= nil, 'drawClickieTab uses compact 57px Threshold slider')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(35%)") ~= nil, 'drawClickieTab uses compact 35px Min XT combo')
+    assert_true(clickieTabBody:find("isDis and 'Off' or '%%d%%%%'") ~= nil, 'drawClickieTab uses Off label for 0% disabled threshold')
 
     -- createCastTracker scoping check
     local trackerBody = triuneContent:match("local function createCastTracker%(%).-return tracker[%s\r\n]+end")
@@ -3871,6 +3888,182 @@ do
     playerHp = 70
     assert_eq(conditionMet('HP <=', 75, 'Mend', 2002, 'Mnk', 'E: Current Target'), true,
         'Mend fires when player is at 70% HP (<= 75%)')
+end
+
+-- ============================================================================
+-- 46. Target Retention During Spell Casting (isTargetRequiredSpell, getActiveTargetRequiredCastingId, setTarget, clearTarget)
+-- ============================================================================
+print('--- Target Retention During Spell Casting ---')
+do
+    local function isTargetRequiredSpell(spell)
+        if not spell then return false end
+        local tt = nil
+        if type(spell) == 'table' and spell.TargetType then
+            tt = spell.TargetType
+        elseif type(spell) == 'string' then
+            local spellMap = {
+                ['Complete Healing'] = 'Single',
+                ['Greater Healing'] = 'Single',
+                ['Chloroplast'] = 'Single',
+                ['Light Healing'] = 'Single',
+                ['Ice Comet'] = 'Single',
+                ['Tashani'] = 'Single',
+                ['Slow'] = 'Single',
+                ['Word of Shadow'] = 'PB AE',
+                ['Color Flux'] = 'PB AE',
+                ['Cannibalize'] = 'Self',
+                ['Armor of Protection'] = 'Self',
+                ['Celestial Elixir'] = 'Group v1',
+                ['Word of Redemption'] = 'Group v2',
+            }
+            tt = spellMap[spell] or 'Single'
+        end
+        if not tt or tt == '' or tt == 'NULL' then return false end
+        local s = tostring(tt):lower()
+        if s == 'self' or s == 'pb ae' or s == 'group v1' or s == 'group v2' or s:find('group') then
+            return false
+        end
+        return true
+    end
+
+    -- 1. isTargetRequiredSpell classification
+    assert_eq(isTargetRequiredSpell('Complete Healing'), true, 'heal Complete Healing requires target')
+    assert_eq(isTargetRequiredSpell('Greater Healing'), true, 'heal Greater Healing requires target')
+    assert_eq(isTargetRequiredSpell('Chloroplast'), true, 'heal Chloroplast requires target')
+    assert_eq(isTargetRequiredSpell('Ice Comet'), true, 'nuke Ice Comet requires target')
+    assert_eq(isTargetRequiredSpell('Tashani'), true, 'debuff Tashani requires target')
+    assert_eq(isTargetRequiredSpell('Cannibalize'), false, 'self spell Cannibalize does not require target')
+    assert_eq(isTargetRequiredSpell('Armor of Protection'), false, 'self buff does not require target')
+    assert_eq(isTargetRequiredSpell('Word of Shadow'), false, 'PB AE spell does not require target')
+    assert_eq(isTargetRequiredSpell('Color Flux'), false, 'PB AE stun does not require target')
+    assert_eq(isTargetRequiredSpell('Celestial Elixir'), false, 'Group heal does not require target')
+    assert_eq(isTargetRequiredSpell('Word of Redemption'), false, 'Group v2 heal does not require target')
+    assert_eq(isTargetRequiredSpell({ TargetType = 'Single' }), true, 'table spell Single requires target')
+    assert_eq(isTargetRequiredSpell({ TargetType = 'Self' }), false, 'table spell Self does not require target')
+    assert_eq(isTargetRequiredSpell({ TargetType = 'PB AE' }), false, 'table spell PB AE does not require target')
+    assert_eq(isTargetRequiredSpell({ TargetType = 'Group v1' }), false, 'table spell Group v1 does not require target')
+
+    -- 2. getActiveTargetRequiredCastingId & Target Retention Simulation
+    local mockState = {
+        isCasting = false,
+        castTracker = {
+            targetRequired = false,
+            activeTargetId = nil,
+            activeSpell = nil,
+            castStartTime = 0,
+            failed = false,
+        },
+        currentTargetId = 0,
+        targetCleared = false,
+    }
+
+    local function isCastingOrStarting()
+        if mockState.isCasting then return true end
+        if mockState.castTracker.activeSpell and not mockState.castTracker.failed and mockState.castTracker.castStartTime > 0 then
+            local elapsed = os.clock() - mockState.castTracker.castStartTime
+            if elapsed >= 0 and elapsed < 0.8 then return true end
+        end
+        return false
+    end
+
+    local function getActiveTargetRequiredCastingId()
+        if not isCastingOrStarting() then return nil end
+        if mockState.castTracker.targetRequired and mockState.castTracker.activeTargetId and mockState.castTracker.activeTargetId > 0 then
+            return mockState.castTracker.activeTargetId
+        end
+        return nil
+    end
+
+    local function setTarget(id)
+        if not id or id == 0 then return false end
+        local reqId = getActiveTargetRequiredCastingId()
+        if reqId and reqId > 0 and id ~= reqId then
+            return false
+        end
+        mockState.currentTargetId = id
+        mockState.targetCleared = false
+        return true
+    end
+
+    local function clearTarget()
+        local reqId = getActiveTargetRequiredCastingId()
+        if reqId and reqId > 0 then
+            return false
+        end
+        mockState.currentTargetId = 0
+        mockState.targetCleared = true
+        return true
+    end
+
+    local function checkAggroSwitch(newMobId)
+        if isCastingOrStarting() or getActiveTargetRequiredCastingId() then
+            return false
+        end
+        return setTarget(newMobId)
+    end
+
+    -- Test Idle state (not casting)
+    assert_eq(getActiveTargetRequiredCastingId(), nil, 'idle: no required casting target')
+    assert_eq(setTarget(1001), true, 'idle: can set target to enemy mob 1001')
+    assert_eq(mockState.currentTargetId, 1001, 'idle: target is 1001')
+    assert_eq(clearTarget(), true, 'idle: can clear target')
+    assert_eq(mockState.currentTargetId, 0, 'idle: target cleared to 0')
+    assert_eq(mockState.targetCleared, true, 'idle: targetCleared flag is true')
+
+    -- Start casting a single-target heal on ally #2002
+    setTarget(2002)
+    assert_eq(mockState.currentTargetId, 2002, 'targeted ally 2002 for heal')
+    mockState.isCasting = true
+    mockState.castTracker.activeSpell = 'Greater Healing'
+    mockState.castTracker.activeTargetId = 2002
+    mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing')
+    mockState.castTracker.castStartTime = os.clock()
+
+    -- Verify active casting target identification
+    assert_eq(getActiveTargetRequiredCastingId(), 2002, 'casting heal: active required target is ally 2002')
+
+    -- Attempt to switch target to attacking enemy mob #1001 while casting heal
+    assert_eq(setTarget(1001), false, 'cannot switch target to enemy mob 1001 while casting heal on 2002')
+    assert_eq(mockState.currentTargetId, 2002, 'target remains firmly on ally 2002')
+
+    -- Attempt to clear target while casting heal
+    assert_eq(clearTarget(), false, 'cannot clear target while casting heal on 2002')
+    assert_eq(mockState.currentTargetId, 2002, 'target was not cleared, remains on 2002')
+
+    -- Attempt aggro switch while casting heal
+    assert_eq(checkAggroSwitch(3003), false, 'aggro switch blocked while casting heal')
+    assert_eq(mockState.currentTargetId, 2002, 'target remains on 2002 after blocked aggro switch')
+
+    -- Re-targeting the same ally 2002 is permitted (re-synchronization)
+    assert_eq(setTarget(2002), true, 're-targeting same ally 2002 succeeds')
+    assert_eq(mockState.currentTargetId, 2002, 'target is 2002')
+
+    -- Finish casting heal
+    mockState.isCasting = false
+    mockState.castTracker.activeSpell = nil
+    mockState.castTracker.activeTargetId = nil
+    mockState.castTracker.targetRequired = false
+    mockState.castTracker.castStartTime = 0
+
+    -- Now that casting finished, target can be switched to combat target (1001)
+    assert_eq(getActiveTargetRequiredCastingId(), nil, 'post-cast: no active casting target')
+    assert_eq(setTarget(1001), true, 'post-cast: can restore target to enemy mob 1001')
+    assert_eq(mockState.currentTargetId, 1001, 'post-cast: target restored to 1001')
+
+    -- Casting a non-targeted spell (e.g. Cannibalize, Self-buff) does NOT lock target
+    mockState.isCasting = true
+    mockState.castTracker.activeSpell = 'Cannibalize'
+    mockState.castTracker.activeTargetId = 1001
+    mockState.castTracker.targetRequired = isTargetRequiredSpell('Cannibalize')
+    mockState.castTracker.castStartTime = os.clock()
+
+    assert_eq(mockState.castTracker.targetRequired, false, 'Cannibalize targetRequired is false')
+    assert_eq(getActiveTargetRequiredCastingId(), nil, 'self spell: getActiveTargetRequiredCastingId returns nil')
+    assert_eq(setTarget(4004), true, 'self spell: target change allowed (not a targeted spell)')
+    assert_eq(mockState.currentTargetId, 4004, 'target changed to 4004')
+
+    mockState.isCasting = false
+    mockState.castTracker.activeSpell = nil
 end
 
 

@@ -2311,6 +2311,90 @@ end
 
 local castTracker = createCastTracker()
 
+local function isCasting()
+    local cid = nil
+    pcall(function() cid = mq.TLO.Me.Casting.ID() end)
+    return cid ~= nil and cid > 0
+end
+runtime.isCasting = isCasting
+
+local function isTargetRequiredSpell(spell)
+    if not spell then return false end
+    local sp = nil
+    if type(spell) == 'string' or type(spell) == 'number' then
+        pcall(function() sp = mq.TLO.Spell(spell) end)
+    else
+        sp = spell
+    end
+    if not sp or not sp() then return false end
+    local tt = nil
+    pcall(function() tt = sp.TargetType() end)
+    if not tt or tt == '' or tt == 'NULL' then return false end
+    local s = tostring(tt):lower()
+    if s == 'self' or s == 'pb ae' or s == 'group v1' or s == 'group v2' or s:find('group') then
+        return false
+    end
+    return true
+end
+runtime.isTargetRequiredSpell = isTargetRequiredSpell
+
+local function isCastingOrStarting()
+    if isCasting() then return true end
+    if castTracker and castTracker.activeSpell and not castTracker.failed and castTracker.castStartTime and castTracker.castStartTime > 0 then
+        local elapsed = os.clock() - castTracker.castStartTime
+        if elapsed >= 0 and elapsed < 0.8 then
+            return true
+        end
+    end
+    return false
+end
+runtime.isCastingOrStarting = isCastingOrStarting
+
+local function getActiveTargetRequiredCastingId()
+    if not isCastingOrStarting() then return nil end
+
+    if castTracker and castTracker.targetRequired and castTracker.activeTargetId and castTracker.activeTargetId > 0 then
+        return castTracker.activeTargetId
+    end
+
+    local activeCasting = false
+    pcall(function()
+        local cid = mq.TLO.Me.Casting.ID()
+        activeCasting = (cid ~= nil and cid > 0)
+    end)
+    if activeCasting then
+        local req = false
+        pcall(function()
+            local c = mq.TLO.Me.Casting
+            if c and c() and isTargetRequiredSpell(c) then
+                req = true
+            end
+        end)
+        if req then
+            local tid = castTracker and castTracker.activeTargetId
+            if not tid or tid <= 0 then
+                pcall(function() tid = mq.TLO.Target.ID() end)
+            end
+            if tid and tid > 0 then
+                return tid
+            end
+        end
+    end
+
+    return nil
+end
+runtime.getActiveTargetRequiredCastingId = getActiveTargetRequiredCastingId
+
+local function clearTarget()
+    local reqTargetId = getActiveTargetRequiredCastingId()
+    if reqTargetId and reqTargetId > 0 then
+        return false
+    end
+    mq.cmd('/target clear')
+    return true
+end
+runtime.clearTarget = clearTarget
+
 local function clearCursor()
     local item = mq.TLO.Cursor
     if not item() or (item.ID() or 0) <= 0 then return false end
@@ -5431,7 +5515,7 @@ function UI.drawClickieTab()
     local curName = hasCursorItem and tostring(curItem.Name() or 'Item') or nil
 
     if not hasCursorItem then ImGui.BeginDisabled() end
-    if ImGui.Button('+ Add Item on Cursor', 170, 24) then
+    if ImGui.Button('+ Add Item on Cursor##addCursorClickie', 150, 20) then
         addClickieFromCursor()
     end
     if not hasCursorItem then ImGui.EndDisabled() end
@@ -5456,6 +5540,10 @@ function UI.drawClickieTab()
 
     ImGui.Separator()
 
+    -- Compact styling inside clickies list: tighter item spacing & frame padding
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 4, 3)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 4, 3)
+
     if ImGui.BeginChild('clickielist', 0, 0) then
         loadout.clickies = loadout.clickies or {}
         local toRemove = nil
@@ -5464,32 +5552,34 @@ function UI.drawClickieTab()
             ImGui.PushID('clk_' .. idx .. '_' .. (c.name or ''))
 
             -- Reorder Up
-            local isFirst = (idx == 1)
-            if isFirst then ImGui.BeginDisabled() end
-            if ImGui.Button('^##up', 20, 20) then
-                local tmp = loadout.clickies[idx]
-                loadout.clickies[idx] = loadout.clickies[idx - 1]
-                loadout.clickies[idx - 1] = tmp
-                saveLoadout(true)
-            end
-            if isFirst then ImGui.EndDisabled() end
-            if ImGui.IsItemHovered() and not isFirst then
-                UI.setTooltip('Move higher in priority order.')
+            if idx > 1 then
+                if ImGui.Button('^##up', 17, 19) then
+                    local tmp = loadout.clickies[idx]
+                    loadout.clickies[idx] = loadout.clickies[idx - 1]
+                    loadout.clickies[idx - 1] = tmp
+                    saveLoadout(true)
+                end
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('Move higher in priority order.')
+                end
+            else
+                ImGui.InvisibleButton('##upDummy', 17, 19)
             end
 
             ImGui.SameLine()
             -- Reorder Down
-            local isLast = (idx == #loadout.clickies)
-            if isLast then ImGui.BeginDisabled() end
-            if ImGui.Button('v##dn', 20, 20) then
-                local tmp = loadout.clickies[idx]
-                loadout.clickies[idx] = loadout.clickies[idx + 1]
-                loadout.clickies[idx + 1] = tmp
-                saveLoadout(true)
-            end
-            if isLast then ImGui.EndDisabled() end
-            if ImGui.IsItemHovered() and not isLast then
-                UI.setTooltip('Move lower in priority order.')
+            if idx < #loadout.clickies then
+                if ImGui.Button('v##dn', 17, 19) then
+                    local tmp = loadout.clickies[idx]
+                    loadout.clickies[idx] = loadout.clickies[idx + 1]
+                    loadout.clickies[idx + 1] = tmp
+                    saveLoadout(true)
+                end
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('Move lower in priority order.')
+                end
+            else
+                ImGui.InvisibleButton('##dnDummy', 17, 19)
             end
 
             ImGui.SameLine()
@@ -5498,12 +5588,18 @@ function UI.drawClickieTab()
             local pCol = 0
             if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.65, 0.15, 0.15, 1.0) then pCol = pCol + 1 end
             if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.85, 0.25, 0.25, 1.0) then pCol = pCol + 1 end
-            if ImGui.Button('X##del', 20, 20) then
+            if ImGui.Button('X##del', 17, 19) then
                 toRemove = idx
             end
             if pCol > 0 then pcall(ImGui.PopStyleColor, pCol) end
             if ImGui.IsItemHovered() then
                 UI.setTooltip(string.format('Remove [%s] from Clickies.', c.name))
+            end
+
+            ImGui.SameLine()
+            ImGui.Text(string.format('%2d', idx))
+            if ImGui.IsItemHovered() then
+                UI.setTooltip(string.format('Clickie Priority #%d', idx))
             end
 
             ImGui.SameLine()
@@ -5513,7 +5609,7 @@ function UI.drawClickieTab()
             end
 
             ImGui.SameLine()
-            accent(GOOD, c.name or 'Item')
+            accent(c.enabled ~= false and GOOD or MUTED, c.name or 'Item')
             if ImGui.IsItemHovered() then
                 UI.setTooltip(string.format('Clickie Item: %s\nSpell Effect: %s', tostring(c.name), tostring(c.spell or 'Unknown')))
             end
@@ -5527,27 +5623,27 @@ function UI.drawClickieTab()
             end
 
             if c.enabled ~= false then
-                ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                ImGui.SameLine(); ImGui.SetNextItemWidth(133)
                 local ti = ImGui.Combo('##ct', idxOf(COMBO_OPTIONS.TARGETS, c.target or 'F: Myself'), COMBO_OPTIONS.TARGETS)
                 if ImGui.IsItemHovered() then
                     UI.setTooltip('Target condition: who or what to use this clickie on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                 end
                 c.target = COMBO_OPTIONS.TARGETS[ti]
 
-                ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                ImGui.SameLine(); ImGui.SetNextItemWidth(116)
                 local wi = ImGui.Combo('##cw', idxOf(COMBO_OPTIONS.WHENS, c.when or 'missing buff'), COMBO_OPTIONS.WHENS)
                 if ImGui.IsItemHovered() then
                     UI.setTooltip('Trigger condition: when this clickie should be used (e.g. missing buff, HP <=, in combat, always).')
                 end
                 c.when = COMBO_OPTIONS.WHENS[wi]
 
-                ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                ImGui.SameLine(); ImGui.SetNextItemWidth(57)
                 local curPct = tonumber(c.pct)
                 if curPct == nil then curPct = 100 end
                 local isDis = (curPct == 0)
                 local pCount = 0
                 if isDis then pCount = UI.pushDisabledSliderStyle() end
-                local cpVal = ImGui.SliderInt('##cp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                local cpVal = ImGui.SliderInt('##cp', curPct, 0, 100, isDis and 'Off' or '%d%%')
                 local isHov = ImGui.IsItemHovered()
                 if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                 c.pct = cpVal
@@ -5559,7 +5655,7 @@ function UI.drawClickieTab()
                     end
                 end
 
-                ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                ImGui.SameLine(); ImGui.SetNextItemWidth(35)
                 local curXt = tonumber(c.min_xtar) or 1
                 if curXt < 1 then curXt = 1 end
                 if curXt > 10 then curXt = 10 end
@@ -5593,6 +5689,7 @@ function UI.drawClickieTab()
         end
     end
     ImGui.EndChild()
+    ImGui.PopStyleVar(2)
     ImGui.EndTabItem()
 end
 
@@ -6499,7 +6596,7 @@ function UI.drawStatusTab()
 
             ImGui.SameLine()
             if ImGui.Button('Clear Target##statClear') then
-                mq.cmd('/squelch /target clear')
+                runtime.clearTarget()
             end
             if ImGui.IsItemHovered() then UI.setTooltip('Clears current target selection.') end
 
@@ -8842,17 +8939,21 @@ local function drawFullGui()
     UI.drawHeaderBar()
     UI.drawActionControls()
 
-    if ImGui.BeginTabBar('triuneTabs') then
+    local tabBarFlags = bit.bor(
+        (ImGuiTabBarFlags and ImGuiTabBarFlags.Reorderable) or 0,
+        (ImGuiTabBarFlags and ImGuiTabBarFlags.FittingPolicyScroll) or 0
+    )
+    if ImGui.BeginTabBar('triuneTabs_v2', tabBarFlags) then
         UI.drawStatusTab()
         UI.drawControlTab()
         UI.drawPetControlTab()
         UI.drawGemTab()
         UI.drawAbilitiesTab()
         UI.drawAATab()
-        UI.drawAutoAATab()
-        UI.drawCooldownsTab()
         UI.drawDiscTab()
         UI.drawClickieTab()
+        UI.drawAutoAATab()
+        UI.drawCooldownsTab()
         UI.drawSettingsTab()
         UI.drawHelpTab()
         ImGui.EndTabBar()
@@ -9906,6 +10007,10 @@ end
 
 function runtime.setTarget(id)
     if not id or id == 0 then return false end
+    local reqTargetId = getActiveTargetRequiredCastingId()
+    if reqTargetId and reqTargetId > 0 and id ~= reqTargetId then
+        return false
+    end
     local s = mq.TLO.Spawn(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
     if mq.TLO.Target.ID() == id then return true end
@@ -10877,12 +10982,6 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
     return true
 end
 
-local function isCasting()
-    local cid = nil
-    pcall(function() cid = mq.TLO.Me.Casting.ID() end)
-    return cid ~= nil and cid > 0
-end
-
 -- ============================================================================
 -- Spell Fail-Count & Lockout System (Target-aware, categorized failure policies)
 -- ============================================================================
@@ -10975,6 +11074,7 @@ function runtime.castGem(i, g, id)
     castTracker.activeSpell    = g.spell
     castTracker.activeTargetId = id
     castTracker.activeKind     = g.kind
+    castTracker.targetRequired = isTargetRequiredSpell(g.spell) or (id and id > 0 and id ~= mq.TLO.Me.ID())
     castTracker.castStartTime  = os.clock()
     clearCursor()
     if ctrl.debug_mode then
@@ -11735,6 +11835,7 @@ runtime.useClickie = function(c, id)
     castTracker.activeSpell    = effName
     castTracker.activeTargetId = id
     castTracker.activeKind     = c.kind
+    castTracker.targetRequired = isTargetRequiredSpell(effName) or (id and id > 0 and id ~= mq.TLO.Me.ID())
     castTracker.castStartTime  = os.clock()
 
     clearCursor()
@@ -12828,7 +12929,7 @@ function runtime.performUnstuck()
                 '\ay[Triune]\ax stuck (Attempt 4) -- all directional maneuvers failed. Abandoning target #%d and searching for a new target.',
                 currentTgtId))
             runtime.markUnreachable(currentTgtId)
-            mq.cmd('/target clear')
+            clearTarget()
         else
             print(
                 '\ay[Triune]\ax stuck (Attempt 4) -- all directional maneuvers failed. Clearing pursuit to find a new target/path.')
@@ -13045,7 +13146,7 @@ runtime.handleCannotSeeTarget = function()
             print(string.format('\ay[Triune]\ax Target #%d obstructed after 4 reposition attempts -- marking unreachable.', tid))
             runtime.markUnreachable(tid)
             stopMoving()
-            mq.cmd('/target clear')
+            clearTarget()
         else
             print(string.format('\ay[Triune]\ax Target #%d still cannot be seen (dist=%.1f) -- performing unstuck recovery.', tid, d))
             runtime.performUnstuck()
@@ -13289,7 +13390,7 @@ function runtime.checkPullHpRest()
             end
             local t = mq.TLO.Target
             if t() and not isXTargetId(t.ID()) then
-                mq.cmd('/target clear')
+                clearTarget()
             end
             print(string.format('\ay[Triune]\ax Puller: HP below %d%% (%d%%) -- resting out of combat until 100%% HP.', minHp, myHp))
             if not isSitting() and not isDucking() and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
@@ -13316,7 +13417,7 @@ function runtime.checkPullHpRest()
                 pursuit.wanderLoc = nil
                 local t = mq.TLO.Target
                 if t() and not isXTargetId(t.ID()) then
-                    mq.cmd('/target clear')
+                    clearTarget()
                 end
                 if not isSitting() and not isDucking() and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
                     mq.cmd('/sit')
@@ -13382,7 +13483,7 @@ function runtime.pullerTick()
                 print(string.format(
                     '\ay[Triune]\ax Puller: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
                     id, tostring(mq.TLO.Target.CleanName())))
-                mq.cmd('/target clear')
+                clearTarget()
                 runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
                 return
             end
@@ -13450,7 +13551,7 @@ function runtime.pullerTick()
             print(string.format(
                 '\ay[Triune]\ax Puller: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
                 runtime.pullTargetId, tostring(mq.TLO.Target.CleanName())))
-            mq.cmd('/target clear')
+            clearTarget()
             runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
         elseif isUnreachable(runtime.pullTargetId) then
             print('\ay[Triune]\ax pull target unreachable -- picking a different mob.')
@@ -13654,6 +13755,7 @@ function runtime.playerIsEngagingTarget(tid)
 end
 
 function runtime.checkAggroSwitch()
+    if isCastingOrStarting() or getActiveTargetRequiredCastingId() then return false end
     if (os.clock() - (runtime.lastAggroSwitchAt or 0)) < 2.0 then return false end
     local cur = mq.TLO.Target
     local curId = (cur() and cur.Type() == 'NPC') and cur.ID() or 0
@@ -13851,6 +13953,9 @@ local function combatTick()
     local hasLoS = runtime.hasLoS
     local isMoveActive = runtime.isMoveActive
     local isCasting = runtime.isCasting
+    local isCastingOrStarting = runtime.isCastingOrStarting
+    local getActiveTargetRequiredCastingId = runtime.getActiveTargetRequiredCastingId
+    local clearTarget = runtime.clearTarget
     local navLoaded = runtime.navLoaded
     local stickLoaded = runtime.stickLoaded
     local hasActivePet = runtime.hasActivePet
@@ -14009,6 +14114,42 @@ local function combatTick()
         petState.lastObservedId = 0
     end
 
+    local isCastingNow = isCastingOrStarting()
+
+    if isCastingNow then
+        castTracker.wasCasting = true
+        local reqTargetId = getActiveTargetRequiredCastingId()
+        if reqTargetId and reqTargetId > 0 and isSpawnAlive(reqTargetId) then
+            if mq.TLO.Target.ID() ~= reqTargetId then
+                mq.cmdf('/target id %d', reqTargetId)
+            end
+        end
+        mq.doevents()
+        return
+    elseif castTracker.wasCasting or (castTracker and castTracker.activeSpell and castTracker.failed) then
+        castTracker.wasCasting = false
+        if stickLoaded() then
+            pcall(function()
+                if mq.TLO.Stick.Status() == 'PAUSED' then mq.cmd('/stick unpause') end
+            end)
+        end
+        if not castTracker.failed then
+            castTracker.recordSuccess(castTracker.activeSpell or castTracker.lastSpell, castTracker.activeTargetId)
+        end
+        castTracker.activeSpell    = nil
+        castTracker.activeTargetId = nil
+        castTracker.activeKind     = nil
+        castTracker.targetRequired = nil
+        clearCursor()
+        if runtime.restoreTargetId and runtime.restoreTargetId > 0 then
+            local rId = runtime.restoreTargetId
+            runtime.restoreTargetId = nil
+            if isSpawnAlive(rId) and mq.TLO.Target.ID() ~= rId then
+                runtime.setTarget(rId)
+            end
+        end
+    end
+
     checkStuck()
     checkCombatStall()
     checkGemMemSync()
@@ -14023,7 +14164,7 @@ local function combatTick()
     if haveNPC and ctrl.mode == 'Puller' then
         if isIgnored(t.CleanName()) then
             haveNPC = false
-            mq.cmd('/target clear')
+            clearTarget()
         elseif not isXTargetId(t.ID()) then
             local isPulling = (ctrl.submode == 'Camp')
             local minL = isPulling and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1)
@@ -14031,7 +14172,7 @@ local function combatTick()
             local lvl = t.Level() or 0
             if lvl > 0 and (lvl < minL or lvl > maxL) then
                 haveNPC = false
-                mq.cmd('/target clear')
+                clearTarget()
             end
         end
     elseif haveNPC and ctrl.mode == 'Manual' then
@@ -14105,12 +14246,12 @@ local function combatTick()
                 local dropDist = hasWps and (maxScan + 35) or (maxScan * 1.3 + 50)
                 if not tspawn() or tspawn.Dead() or tspawn.Type() == 'Corpse' or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
                     haveNPC = false
-                    mq.cmd('/target clear')
+                    clearTarget()
                 elseif isXTargetId(tid) then
                     if distToId(tid) > (maxHuntXtarDist + 20) and not mq.TLO.Me.Combat() then
                         -- XTarget is beyond max chase range + buffer and not actively engaged in melee
                         haveNPC = false
-                        mq.cmd('/target clear')
+                        clearTarget()
                         stopMoving()
                     end
                 elseif not isXTargetId(tid) and not mq.TLO.Me.Combat() then
@@ -14128,7 +14269,7 @@ local function combatTick()
                             tid, tostring(tspawn.CleanName()), reason))
                         markUnreachable(tid)
                         haveNPC = false
-                        mq.cmd('/target clear')
+                        clearTarget()
                     end
                 end
             end
@@ -14153,7 +14294,7 @@ local function combatTick()
                 local curTid = mq.TLO.Target.ID() or 0
                 local isCurXtar = isXTargetId(curTid) or (xtarId and (curTid == xtarId or curTid == 0))
                 if runtime.pullHpRest and not isCurXtar then
-                    mq.cmd('/target clear')
+                    clearTarget()
                     haveNPC = false
                 elseif not isCurXtar and not anyXtarAlive() and not mq.TLO.Me.Combat() and (ctrl.check_closer_mobs == nil or ctrl.check_closer_mobs) then
                     local curId = curTid
@@ -14189,7 +14330,7 @@ local function combatTick()
                         print(string.format(
                             '\ay[Triune]\ax Puller (Hunt): target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
                             id, tostring(mq.TLO.Target.CleanName())))
-                        mq.cmd('/target clear')
+                        clearTarget()
                         pursuit.id = 0
                         return
                     end
@@ -14243,7 +14384,7 @@ local function combatTick()
                     print(string.format(
                         '\ay[Triune]\ax Hunter: target #%d (%s) blocked by Faction Consideration filter -- clearing target.',
                         id, tostring(mq.TLO.Target.CleanName())))
-                    mq.cmd('/target clear')
+                    clearTarget()
                     pursuit.id = 0
                     stopMoving()
                     haveNPC = false
@@ -14450,7 +14591,7 @@ local function combatTick()
                         tid, tostring(mq.TLO.Target.CleanName())))
                     markUnreachable(tid)
                     stopMoving()
-                    mq.cmd('/target clear')
+                    clearTarget()
                     haveNPC = false
                     engage = false
                     pursuit.id = 0
@@ -14820,44 +14961,6 @@ local function combatTick()
     -- for the whole approach ("keeps trying to cast X while pulling"). AAs
     -- above are unaffected (instant, no cast bar, usable on the move). Casts
     mq.doevents()
-
-    if isCasting() then
-        castTracker.wasCasting = true
-    elseif castTracker.wasCasting then
-        castTracker.wasCasting = false
-        if stickLoaded() then
-            pcall(function()
-                if mq.TLO.Stick.Status() == 'PAUSED' then mq.cmd('/stick unpause') end
-            end)
-        end
-        if not castTracker.failed then
-            castTracker.recordSuccess(castTracker.activeSpell or castTracker.lastSpell, castTracker.activeTargetId)
-        end
-        castTracker.activeSpell    = nil
-        castTracker.activeTargetId = nil
-        castTracker.activeKind     = nil
-        clearCursor()
-        if runtime.restoreTargetId and runtime.restoreTargetId > 0 then
-            local rId = runtime.restoreTargetId
-            runtime.restoreTargetId = nil
-            if isSpawnAlive(rId) and mq.TLO.Target.ID() ~= rId then
-                runtime.setTarget(rId)
-            end
-        end
-        local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
-        tid = mq.TLO.Target.ID() or 0
-        local d = (tid > 0) and distToId(tid) or 999
-        local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE)
-        if ctrl and ctrl.combat_style == 'Melee' and haveNPC and not isDraggingToCamp then
-            if d <= maxReach then
-                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-                mq.cmd('/face fast')
-                if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-            elseif not isMoveActive() and tid > 0 then
-                moveToward(tid, desiredRange(tid))
-            end
-        end
-    end
 
     if combatReady and not isCasting() and not isMoveActive() and loadout.clickies and #loadout.clickies > 0 then
         if not isCasting() and runtime.restoreTargetId and runtime.restoreTargetId > 0 then

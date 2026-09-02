@@ -1,5 +1,28 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-02
+
+- **Target Retention During Targeted Spell Casting (`triune.lua`).**
+  - **Spell Target-Requirement Classification (`isTargetRequiredSpell`)**: Introduced a helper that checks spell metadata via `mq.TLO.Spell.TargetType()` to classify whether a spell requires an active target (such as single-target heals, buffs, nukes, debuffs, dots, and lifetaps) versus self-directed or PB/group area-of-effect spells (`Self`, `PB AE`, `Group v1`, `Group v2`).
+  - **Early Top-Level Casting Guard in `combatTick`**: Relocated active casting monitoring from the very end of `combatTick` to the top level (immediately after pet reconciliation and before stuck checks, aggro switches, mode retargeting, and combat movement). When actively casting or during the cast start latency window (`isCastingOrStarting()`), `combatTick` ensures the character stays firmly locked onto the required target (`getActiveTargetRequiredCastingId()`), synchronizes target if desynchronized, processes events, and returns early to prevent mid-cast target switches or navigation interruptions.
+  - **Safe Post-Cast Target Restoration**: Upon casting completion (or failed cast), unpauses stick movement, records cast outcomes, clears cursor items, and cleanly restores the pre-cast target (`runtime.restoreTargetId`) before resuming normal combat execution.
+  - **Target Locking in `runtime.setTarget` and `runtime.clearTarget`**: Updated `runtime.setTarget(id)` to reject any target switch away from the active casting target while casting a targeted spell (`getActiveTargetRequiredCastingId()`), and wrapped all raw `/target clear` commands across hunting, camping, and unstuck routines into `runtime.clearTarget()`, which preserves the active target during spell casts.
+  - **Aggro Switch Suppression (`checkAggroSwitch`)**: Prevented opportunistic aggro switching from running while actively casting or starting a spell, ensuring healer and utility casts on group allies are never aborted by incoming mob aggro.
+  - **Automated Regression Prevention**: Added 38 unit test assertions in `tests/test_pure_logic.lua` covering spell classification, target lock retention during single-target heals, target clear protection, and post-cast target restoration (1,289 tests passing).
+
+- **Clickies Tab Compact Layout & Alignment (`triune.lua`).**
+  - **Scoped Tighter Spacing & Frame Padding**: Applied scoped `ImGuiStyleVar.ItemSpacing (4, 3)` and `FramePadding (4, 3)` across the Clickies child list in `UI.drawClickieTab()`, reducing row heights and visual sprawl.
+  - **Standardized Compact Widget Widths**: Replaced sprawling dropdown and slider widths with standardized compact dimensions matching Spell Gems: Target combo to 133px (was 150px), When combo to 116px (was 140px), Threshold % slider to 57px (was 90px) with `'Off'` label at 0% (was `'Disabled'`), and Min XTarget combo to 35px (was 45px).
+  - **Pixel-Perfect Invisible Dummy Button Alignment**: Replaced disabled button elements on boundary slots (`idx == 1` and `idx == #loadout.clickies`) with `ImGui.InvisibleButton (17, 19)`, ensuring priority numbers, status indicators, and item names stay perfectly aligned vertically down every row.
+  - **Priority Badging & Status Indication**: Added clickie priority numbering (`%2d`) and grayed-out item labels (`MUTED`) when clickies are disabled.
+  - **Streamlined Add Button**: Scaled the `+ Add Item on Cursor` header button down to `(150, 20)` for a tighter header layout.
+
+- **Tab Bar Reordering: Disciplines and Clickies Placement (`triune.lua`).**
+  - **Natural Combat Action Flow**: Moved `UI.drawDiscTab()` and `UI.drawClickieTab()` to sit directly between `UI.drawAATab()` and `UI.drawAutoAATab()`. This groups all active combat loadouts together in natural progression (`Spell Gems -> Abilities -> AAs -> Disciplines -> Clickies`), followed by automation & utility tabs (`Auto AA -> Cooldowns -> Settings -> Help`).
+  - **TabBar ID Reset & Reorder Support (`triuneTabs_v2`)**: Migrated the tab bar ID from `'triuneTabs'` to `'triuneTabs_v2'` with `ImGuiTabBarFlags.Reorderable` and `ImGuiTabBarFlags.FittingPolicyScroll`. This forces Dear ImGui to invalidate any cached tab order preserved in MacroQuest's C++ memory from previous sessions, guaranteeing the new tab order renders immediately, and allows manual tab dragging.
+
+---
+
 ## 2026-09-01
 
 - **Plugin Autoloading & Missing Warnings Suite (`triune.lua`, `triune_map.lua`, `triune_track.lua`).**
