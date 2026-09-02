@@ -650,8 +650,24 @@ local CLASS_ACTIONS = {
     racial = { 'Slam', 'Hide', 'Sneak', 'Forage' },
     universal = { 'Begging', 'Bind Wound', 'Sense Heading' },
 }
+local AUTOSKILL_ABILITIES = {
+    ['Kick']           = true,
+    ['Flying Kick']    = true,
+    ['Dragon Punch']   = true,
+    ['Tail Rake']      = true,
+    ['Eagle Strike']   = true,
+    ['Tiger Claw']     = true,
+    ['Round Kick']     = true,
+    ['Backstab']       = true,
+    ['Bash']           = true,
+    ['Slam']           = true,
+    ['Frenzy']         = true,
+    ['Volley']         = true,
+    ['Frenzied Stabs'] = true,
+}
+local isAutoskillEligible = loadFunc(src, 'isAutoskillEligible', { AUTOSKILL_ABILITIES = AUTOSKILL_ABILITIES })
 local isActionSkill = loadFunc(src, 'isActionSkill', { CLASS_ACTIONS = CLASS_ACTIONS })
-local defaultActionEntry = loadFunc(src, 'defaultActionEntry', {})
+local defaultActionEntry = loadFunc(src, 'defaultActionEntry', { isAutoskillEligible = isAutoskillEligible })
 
 assert_true(isActionSkill('Mend'), 'action: Mend')
 assert_true(isActionSkill('Flying Kick'), 'action: Flying Kick')
@@ -694,6 +710,21 @@ local mendDef = defaultActionEntry('Mend', 'Mnk')
 assert_eq(mendDef.autoskill, false, 'defaultActionEntry: Mend autoskill=false')
 assert_eq(mendDef.kind, 'heal', 'defaultActionEntry: Mend kind=heal')
 assert_eq(mendDef.pct, 75, 'defaultActionEntry: Mend pct=75')
+
+local fdDef = defaultActionEntry('Feign Death', 'Mnk')
+assert_eq(fdDef.autoskill, false, 'defaultActionEntry: Feign Death autoskill=false')
+assert_eq(fdDef.kind, 'heal', 'defaultActionEntry: Feign Death kind=heal')
+assert_eq(fdDef.pct, 25, 'defaultActionEntry: Feign Death pct=25')
+assert_eq(fdDef.when, 'my HP <=', 'defaultActionEntry: Feign Death when=my HP <=')
+assert_eq(fdDef.target, 'F: Myself', 'defaultActionEntry: Feign Death target=F: Myself')
+
+assert_true(isAutoskillEligible('Kick'), 'isAutoskillEligible: Kick is true')
+assert_true(isAutoskillEligible('Flying Kick'), 'isAutoskillEligible: Flying Kick is true')
+assert_true(isAutoskillEligible('Backstab'), 'isAutoskillEligible: Backstab is true')
+assert_eq(isAutoskillEligible('Feign Death'), false, 'isAutoskillEligible: Feign Death is false')
+assert_eq(isAutoskillEligible('Mend'), false, 'isAutoskillEligible: Mend is false')
+assert_eq(isAutoskillEligible('Taunt'), false, 'isAutoskillEligible: Taunt is false')
+assert_eq(isAutoskillEligible('Bind Wound'), false, 'isAutoskillEligible: Bind Wound is false')
 
 local actionClassInfo = loadFunc(src, 'actionClassInfo', { CLASS_ACTIONS = CLASS_ACTIONS, myClasses = { 'Mnk', 'War', 'Clr' } })
 assert_eq(actionClassInfo('Flying Kick'), 'Mnk', 'actionClassInfo: Flying Kick -> Mnk')
@@ -2320,6 +2351,80 @@ local testMeshLoaded3 = loadFunc(src, 'navMeshLoaded', {
 assert_eq(testMeshLoaded3(), false, 'navMeshLoaded: false when MeshLoaded returns false')
 
 -- ============================================================================
+-- 35b. MQ2MoveUtils Plugin Loaded Detection
+-- ============================================================================
+print('--- mq2moveutils loaded detection ---')
+do
+    -- 1. Stick TLO Active/Status returns true
+    local dummyMqStickLoaded = {
+        TLO = {
+            Stick = setmetatable({
+                Status = function() return 'ON' end,
+                Active = function() return true end,
+            }, {
+                __call = function() return true end,
+            }),
+            Plugin = function() return nil end,
+        }
+    }
+    local testStickLoaded1 = loadFunc(src, 'stickLoaded', {
+        mq = dummyMqStickLoaded,
+        pcall = pcall,
+    })
+    assert_eq(testStickLoaded1(), true, 'stickLoaded: true when Stick TLO is active')
+
+    -- 2. Plugin('mq2moveutils').IsLoaded() returns true
+    local dummyMqMoveUtilsPluginLoaded = {
+        TLO = {
+            Stick = nil,
+            Plugin = function(name)
+                if string.lower(name) == 'mq2moveutils' or string.lower(name) == 'moveutils' then
+                    return setmetatable({
+                        IsLoaded = function() return true end,
+                    }, {
+                        __call = function() return 'mq2moveutils' end,
+                    })
+                end
+                return nil
+            end
+        }
+    }
+    local testStickLoaded2 = loadFunc(src, 'stickLoaded', {
+        mq = dummyMqMoveUtilsPluginLoaded,
+        pcall = pcall,
+    })
+    assert_eq(testStickLoaded2(), true, 'stickLoaded: true when Plugin mq2moveutils IsLoaded returns true')
+
+    -- 3. Neither loaded returns false
+    local dummyMqStickUnloaded = {
+        TLO = {
+            Stick = nil,
+            Plugin = function() return nil end,
+        }
+    }
+    local testStickLoaded3 = loadFunc(src, 'stickLoaded', {
+        mq = dummyMqStickUnloaded,
+        pcall = pcall,
+    })
+    assert_eq(testStickLoaded3(), false, 'stickLoaded: false when neither Stick TLO nor Plugin is loaded')
+
+    -- 4. Cross-file standalone validation for triune_track and triune_map
+    local srcTrack = readFile('TAC/lua/triune_track.lua')
+    local testTrackStick = loadFunc(srcTrack, 'stickLoaded', {
+        mq = dummyMqMoveUtilsPluginLoaded,
+        pcall = pcall,
+    })
+    assert_eq(testTrackStick(), true, 'triune_track stickLoaded: true when Plugin mq2moveutils is loaded')
+
+    local srcMap = readFile('TAC/lua/triune_map.lua')
+    local testMapStick = loadFunc(srcMap, 'stickLoaded', {
+        mq = dummyMqMoveUtilsPluginLoaded,
+        pcall = pcall,
+    })
+    assert_eq(testMapStick(), true, 'triune_map stickLoaded: true when Plugin mq2moveutils is loaded')
+end
+
+-- ============================================================================
 -- 36. copyWaypointList (per-zone waypoint routes/presets)
 -- ============================================================================
 print('--- copyWaypointList ---')
@@ -3647,6 +3752,127 @@ do
     assert_true(trackerBody ~= nil, 'createCastTracker function body found')
     assert_true(trackerBody:find("castTracker") == nil, 'createCastTracker function body never references castTracker before declaration')
 end
+
+-- ============================================================================
+-- 43. Ability Health Threshold & Feign Death Evaluation Logic
+-- ============================================================================
+print('--- Ability Health Threshold & Feign Death Evaluation ---')
+do
+    local triuneContent = readFile('TAC/lua/triune.lua')
+
+    -- Verify UI guard ensures Autoskill checkbox is only shown for eligible skills
+    assert_true(triuneContent:find("if isAutoskillEligible%(nm%) then[%s\r\n]+ImGui%.SameLine%(%)[%s\r\n]+local asVal = ImGui%.Checkbox%('Auto##as'") ~= nil,
+        'UI.drawAbilitiesTab guards Auto##as with isAutoskillEligible(nm)')
+
+    -- Verify combatTick autoskill loop checks isAutoskillEligible
+    assert_true(triuneContent:find("act%.autoskill and isAutoskillEligible%(name%)") ~= nil,
+        'combatTick autoskill loop checks isAutoskillEligible(name)')
+
+    -- Mock player and world spawn state
+    local playerHp = 100
+    local targetHp = 15
+    local mockTLO = {
+        Me = {
+            ID = function() return 1001 end,
+            PctHPs = function() return playerHp end,
+            PctMana = function() return 100 end,
+            Combat = function() return true end,
+            Feigning = function() return false end,
+        },
+        Spawn = function(id)
+            if id == 1001 then
+                return setmetatable({ PctHPs = function() return playerHp end }, { __call = function() return true end })
+            elseif id == 2002 then
+                return setmetatable({ PctHPs = function() return targetHp end }, { __call = function() return true end })
+            end
+            return setmetatable({}, { __call = function() return false end })
+        end
+    }
+
+    local pctHPFunc = loadFunc(src, 'pctHP', {
+        mq = { TLO = mockTLO }
+    })
+
+    -- Test pctHP accuracy and safety defaults
+    assert_eq(pctHPFunc(1001), 100, 'pctHP returns player HP when healthy')
+    assert_eq(pctHPFunc(2002), 15, 'pctHP returns target spawn HP')
+    assert_eq(pctHPFunc(0), 100, 'pctHP returns 100 default for 0 id')
+    assert_eq(pctHPFunc(nil), 100, 'pctHP returns 100 default for nil id')
+    assert_eq(pctHPFunc(9999), 100, 'pctHP returns 100 default for missing spawn')
+
+    -- Load conditionMet
+    -- Load isFeignDeathAbility
+    local isFeignDeathAbility = loadFunc(src, 'isFeignDeathAbility', {})
+    assert_true(isFeignDeathAbility('Feign Death'), 'isFeignDeathAbility: Feign Death is true')
+    assert_true(isFeignDeathAbility('Death Peace'), 'isFeignDeathAbility: Death Peace is true')
+    assert_true(isFeignDeathAbility('Imitate Death'), 'isFeignDeathAbility: Imitate Death is true')
+    assert_true(isFeignDeathAbility("Death's Effigy"), "isFeignDeathAbility: Death's Effigy is true")
+    assert_eq(isFeignDeathAbility('Kick'), false, 'isFeignDeathAbility: Kick is false')
+    assert_eq(isFeignDeathAbility('Mend'), false, 'isFeignDeathAbility: Mend is false')
+    assert_eq(isFeignDeathAbility('Harm Touch'), false, 'isFeignDeathAbility: Harm Touch is false')
+
+    -- Load conditionMet
+    local runtime = {}
+    local condEnv = {
+        mq = { TLO = mockTLO },
+        runtime = runtime,
+        pctHP = pctHPFunc,
+        isCombat = function() return true end,
+        baseTok = function(tok) return tok:gsub('^[FESPGAC]:%s*', '') end,
+        buffActive = function() return false end,
+        sungKey = function() return '' end,
+        isFeignDeathAbility = isFeignDeathAbility,
+    }
+    local conditionMet = loadFunc(src, 'conditionMet', condEnv)
+
+    assert_true(conditionMet ~= nil, 'conditionMet loaded successfully')
+
+    -- Scenario A: Player at 100% HP, Target Mob at 15% HP, Feign Death slider at 20%
+    playerHp = 100
+    targetHp = 15
+    assert_eq(conditionMet('my HP <=', 20, 'Feign Death', 2002, 'Mnk', 'F: Myself'), false,
+        'Feign Death (my HP <= 20) does not fire at 100% player HP')
+    assert_eq(conditionMet('HP <=', 20, 'Feign Death', 2002, 'Mnk', 'E: Current Target'), false,
+        'Feign Death (HP <= 20) does not fire when mob is at 15% but player is at 100%')
+    assert_eq(conditionMet('target HP <=', 20, 'Feign Death', 2002, 'Mnk', 'E: Current Target'), false,
+        'Feign Death (target HP <= 20) does not fire when mob is at 15% but player is at 100%')
+
+    -- Scenario B: Death Peace AA (Shadowknight) at 100% player HP
+    assert_eq(conditionMet('my HP <=', 20, 'Death Peace', 2002, 'SK', 'F: Myself'), false,
+        'Death Peace AA does not fire at 100% player HP')
+    assert_eq(conditionMet('HP <=', 20, 'Death Peace', 2002, 'SK', 'E: Current Target'), false,
+        'Death Peace AA does not fire when mob is low HP but player is 100% HP')
+
+    -- Scenario C: Player drops to 20% HP (threshold reached)
+    playerHp = 20
+    targetHp = 50
+    assert_eq(conditionMet('my HP <=', 20, 'Feign Death', 2002, 'Mnk', 'F: Myself'), true,
+        'Feign Death fires when player drops to 20% HP')
+    assert_eq(conditionMet('HP <=', 20, 'Feign Death', 2002, 'Mnk', 'E: Current Target'), true,
+        'Feign Death (HP <= 20) fires when player drops to 20% HP even with enemy target token')
+    assert_eq(conditionMet('HP <=', 20, 'Death Peace', 2002, 'SK', 'E: Current Target'), true,
+        'Death Peace AA fires when player drops to 20% HP')
+    assert_eq(conditionMet('my HP <=', 20, 'Imitate Death', 2002, 'Mnk', 'F: Myself'), true,
+        'Imitate Death AA fires when player drops to 20% HP')
+
+    -- Scenario D: Player drops to 15% HP (emergency)
+    playerHp = 15
+    assert_eq(conditionMet('my HP <=', 20, 'Feign Death', 2002, 'Mnk', 'F: Myself'), true,
+        'Feign Death fires when player drops below 20% HP (15%)')
+    assert_eq(conditionMet('HP <=', 20, 'Death Peace', 2002, 'SK', 'E: Current Target'), true,
+        'Death Peace AA fires when player drops below 20% HP (15%)')
+
+    -- Scenario E: Mend evaluation (threshold 75%)
+    playerHp = 80
+    assert_eq(conditionMet('my HP <=', 75, 'Mend', 1001, 'Mnk', 'F: Myself'), false,
+        'Mend does not fire when player is at 80% HP (> 75%)')
+    assert_eq(conditionMet('HP <=', 75, 'Mend', 2002, 'Mnk', 'E: Current Target'), false,
+        'Mend does not fire when target mob is at 15% but player is at 80%')
+    playerHp = 70
+    assert_eq(conditionMet('HP <=', 75, 'Mend', 2002, 'Mnk', 'E: Current Target'), true,
+        'Mend fires when player is at 70% HP (<= 75%)')
+end
+
 
 -- ============================================================================
 -- Results

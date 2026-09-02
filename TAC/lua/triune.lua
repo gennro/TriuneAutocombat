@@ -1514,9 +1514,21 @@ local function hasLoS(id)
 end
 
 local function pctHP(id)
-    if not id or id <= 0 then return 0 end
-    local hp = 0
-    pcall(function() hp = mq.TLO.Spawn(id).PctHPs() or 0 end)
+    if not id or id <= 0 then return 100 end
+    local meId = nil
+    pcall(function() meId = mq.TLO.Me.ID() end)
+    if meId and id == meId then
+        local meHp = 100
+        pcall(function() meHp = mq.TLO.Me.PctHPs() or 100 end)
+        return meHp
+    end
+    local hp = 100
+    pcall(function()
+        local s = mq.TLO.Spawn(id)
+        if s and s() then
+            hp = s.PctHPs() or 100
+        end
+    end)
     return hp
 end
 
@@ -2757,6 +2769,39 @@ local function isNonCombatSkill(name)
     return name == 'Begging' or name == 'Pick Pockets' or name == 'Hide' or name == 'Sneak' or name == 'Bind Wound' or name == 'Forage' or name == 'Sense Heading'
 end
 
+local AUTOSKILL_ABILITIES = {
+    ['Kick']           = true,
+    ['Flying Kick']    = true,
+    ['Dragon Punch']   = true,
+    ['Tail Rake']      = true,
+    ['Eagle Strike']   = true,
+    ['Tiger Claw']     = true,
+    ['Round Kick']     = true,
+    ['Backstab']       = true,
+    ['Bash']           = true,
+    ['Slam']           = true,
+    ['Frenzy']         = true,
+    ['Volley']         = true,
+    ['Frenzied Stabs'] = true,
+}
+
+local function isAutoskillEligible(name)
+    if not name or type(name) ~= 'string' or name == '' then return false end
+    return AUTOSKILL_ABILITIES[name] == true
+end
+
+local function isFeignDeathAbility(name)
+    if not name or type(name) ~= 'string' or name == '' then return false end
+    local lower = name:lower()
+    return lower == 'feign death'
+        or lower == 'death peace'
+        or lower == 'imitate death'
+        or lower:find('feign death', 1, true) ~= nil
+        or lower:find('death peace', 1, true) ~= nil
+        or lower:find('imitate death', 1, true) ~= nil
+        or lower:find("death's effigy", 1, true) ~= nil
+end
+
 local ABILITY_BASE_COOLDOWNS = {
     ['Kick']          = 6,
     ['Bash']          = 6,
@@ -3288,7 +3333,8 @@ local function defaultActionEntry(name, cls)
         return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = false, boss_only = false, burn_only = false, priority = 80, kind = 'util' }
     else
         -- High-frequency combat melee attacks (Kick, Flying Kick, Dragon Punch, Tail Rake, Eagle Strike, Tiger Claw, Round Kick, Backstab, Bash, Slam, Frenzy, Volley)
-        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = true, boss_only = false, burn_only = false, priority = 50, kind = 'dd' }
+        local auto = isAutoskillEligible(name)
+        return { cls = cls, target = 'E: Current Target', when = 'in combat', enabled = false, pct = 100, autoskill = auto, boss_only = false, burn_only = false, priority = 50, kind = 'dd' }
     end
 end
 
@@ -3464,7 +3510,11 @@ local function applyEntry(e)
             if type(act) == 'table' then
                 local def = defaultActionEntry(nm, act.cls or (myClasses and myClasses[1]) or 'War')
                 if not act.kind then act.kind = def.kind end
-                if act.autoskill == nil then act.autoskill = def.autoskill end
+                if not isAutoskillEligible(nm) then
+                    act.autoskill = false
+                elseif act.autoskill == nil then
+                    act.autoskill = def.autoskill
+                end
             end
         end
     end
@@ -4785,6 +4835,17 @@ function UI.drawHeaderBar()
             UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
         end
     end
+    if not stickLoaded() then
+        accent(WARN,
+            'MQ2MoveUtils plugin is NOT loaded. Melee stick, combat positioning, and unstuck require MQ2MoveUtils.')
+        ImGui.SameLine()
+        if ImGui.Button('Load MQ2MoveUtils##hdrLoadMoveUtils') then
+            mq.cmd('/plugin mq2moveutils')
+        end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Executes /plugin mq2moveutils to load the MQ2MoveUtils plugin.')
+        end
+    end
     ImGui.Separator()
 end
 
@@ -5595,11 +5656,15 @@ function UI.drawAbilitiesTab()
                     ImGui.SetTooltip(string.format('Combat Ability / Skill: %s%s', nm, capStr))
                 end
 
-                ImGui.SameLine()
-                local asVal = ImGui.Checkbox('Auto##as', entry.autoskill or false)
-                entry.autoskill = asVal
-                if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('Autoskill: Automatically fire this ability continuously on cooldown during combat against hostile targets in melee range.')
+                if isAutoskillEligible(nm) then
+                    ImGui.SameLine()
+                    local asVal = ImGui.Checkbox('Auto##as', entry.autoskill or false)
+                    entry.autoskill = asVal
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('Autoskill: Automatically fire this ability continuously on cooldown during combat against hostile targets in melee range.')
+                    end
+                else
+                    entry.autoskill = false
                 end
 
                 if entry.enabled then
@@ -5735,8 +5800,9 @@ function UI.drawAATab()
                             if not tonumber(nm) and (not ctrl.aa_purchased_only or hasAA(nm)) then
                                 any = true
                                 ImGui.PushID('aa_' .. tier .. '_' .. cls .. '_' .. nm)
+                                local isFD = isFeignDeathAbility(nm)
                                 local entry = loadout.aas[nm] or
-                                    { cls = cls, target = 'F: Myself', when = 'in combat', enabled = false, pct = 30, burn_only = false }
+                                    { cls = cls, target = 'F: Myself', when = isFD and 'my HP <=' or 'in combat', enabled = false, pct = isFD and 20 or 30, burn_only = false }
                                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
                                 if ImGui.IsItemHovered() then
                                     ImGui.SetTooltip(string.format('Enable or disable %s.', nm))
@@ -6155,6 +6221,10 @@ function UI.drawActionControls()
                 mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
                 print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
             end
+            if not stickLoaded() and ctrl.mode ~= 'Manual' then
+                mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
+                print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
+            end
         end
 
         if pCount > 0 then
@@ -6502,7 +6572,10 @@ function UI.drawStatusTab()
                     ImGui.TextDisabled('• MoveUtils (Stick): Loaded (Idle)')
                 end
             else
-                ImGui.TextDisabled('• MoveUtils: Not Loaded')
+                accent(WARN, '• MoveUtils: NOT LOADED')
+                if ImGui.Button('Load MQ2MoveUtils##statBtnLoadMoveUtils') then
+                    mq.cmd('/plugin mq2moveutils')
+                end
             end
 
             -- Column 2: Live Navigation State
@@ -8201,6 +8274,16 @@ function UI.drawSettingsTab()
                 UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
             end
         end
+        if not stickLoaded() then
+            accent(WARN, 'MQ2MoveUtils is NOT loaded! Combat positioning and stick require MQ2MoveUtils.')
+            ImGui.SameLine()
+            if ImGui.Button('Load MQ2MoveUtils##settingsLoadMoveUtils') then
+                mq.cmd('/plugin mq2moveutils')
+            end
+            if ImGui.IsItemHovered() then
+                UI.setTooltip('Executes /plugin mq2moveutils to load the MQ2MoveUtils plugin.')
+            end
+        end
 
         local hazVal = ImGui.Checkbox('Auto-Avoid Stuck Hotspots', ctrl.nav_hazard_avoidance ~= false)
         if hazVal ~= (ctrl.nav_hazard_avoidance ~= false) then
@@ -8612,6 +8695,16 @@ local function drawMiniGui()
                 mq.cmd('/nav reload')
             end
         end
+        if not stickLoaded() then
+            accent(WARN, '[!] MQ2MoveUtils is NOT loaded')
+            if ImGui.IsItemHovered() then
+                UI.setTooltip('MQ2MoveUtils plugin is required for melee stick and positioning.\nClick Load MoveUtils or type /plugin mq2moveutils.')
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Load MoveUtils##miniLoadMoveUtils', 105, 20) then
+                mq.cmd('/plugin mq2moveutils')
+            end
+        end
 
         -- Row 2: Action Controls Toolbar (Run/Pause, Burn, Camp)
         if ctrl.running then
@@ -8643,6 +8736,10 @@ local function drawMiniGui()
                     local curZone = mq.TLO.Zone.ShortName() or 'current zone'
                     mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
                     print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+                end
+                if not stickLoaded() and ctrl.mode ~= 'Manual' then
+                    mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
+                    print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
                 end
             end
             if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
@@ -10620,12 +10717,15 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
     if pct <= 0 then return false end
     if when == 'always' then return true end
     if when == 'in combat' or when == 'twist while fighting' then return isCombat() end
+
+    -- Self-preservation and emergency abilities (Feign Death, Death Peace, Imitate Death, Mend, Bind Wound) ALWAYS evaluate the player's own HP
+    if isFeignDeathAbility(spellName) or spellName == 'Mend' or spellName == 'Bind Wound' then
+        if when == 'HP <=' or when == 'target HP <=' or when == 'my HP <=' then
+            return pctHP(mq.TLO.Me.ID()) <= pct
+        end
+    end
+
     if when == 'my Mana <=' then return (mq.TLO.Me.PctMana() or 100) <= pct end
-    -- Lets a lifetap DD/DoT (SK/Necro) target the enemy (E: Current Target,
-    -- for the drain to actually land) while triggering on the CASTER's own
-    -- HP rather than the target's -- "HP <="/"target HP <=" both check
-    -- whatever the entry's own Target resolves to, which can't express
-    -- "attack it, but only because I need the heal."
     if when == 'my HP <=' then return pctHP(mq.TLO.Me.ID()) <= pct end
     if when == 'HP <=' or when == 'target HP <=' then
         if token and baseTok(token) == 'Whole Group' then
@@ -10816,7 +10916,8 @@ mq.event('TriuneNotReady', '#*#not ready#*#', function() onFailureEvent('not rea
 mq.event('TriuneNoMana', '#*#enough mana#*#', function() onFailureEvent('insufficient mana') end)
 
 function runtime.castGem(i, g, id)
-    if isSitting() or isDucking() then
+    local isFD = isFeignDeathAbility(g and g.spell)
+    if not isFD and (isSitting() or isDucking()) then
         mq.cmd('/stand')
         mq.delay(50)
     end
@@ -10861,6 +10962,12 @@ function runtime.castGem(i, g, id)
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not runtime.setTarget(id) then return false end
+
+    local pauseAttack = isFD and wasAttacking
+    if pauseAttack then
+        mq.cmd('/attack off')
+        mq.delay(50, function() return not mq.TLO.Me.Combat() end)
+    end
 
     castTracker.lastSpell      = g.spell
     castTracker.lastTime       = os.clock()
@@ -10932,7 +11039,8 @@ function runtime.castGem(i, g, id)
 end
 
 function runtime.fireAA(name, a, id)
-    if isSitting() or isDucking() then
+    local isFD = isFeignDeathAbility(name)
+    if not isFD and (isSitting() or isDucking()) then
         mq.cmd('/stand')
     end
     if castTracker.isLockedOut(name, id, a and a.kind) then return false end
@@ -10958,6 +11066,13 @@ function runtime.fireAA(name, a, id)
     local wasAttacking = mq.TLO.Me.Combat()
     if not selfCast and not runtime.setTarget(id) then return false end
     clearCursor()
+
+    local pauseAttack = isFD and wasAttacking
+    if pauseAttack then
+        mq.cmd('/attack off')
+        mq.delay(50, function() return not mq.TLO.Me.Combat() end)
+    end
+
     castTracker.lastSpell      = name
     castTracker.lastTime       = now
     castTracker.failed         = false
@@ -10991,7 +11106,7 @@ function runtime.fireAA(name, a, id)
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
-    if (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
+    if not isFD and (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
         mq.cmd('/attack on')
     end
     return true
@@ -11505,7 +11620,8 @@ end
 
 runtime.fireSkill = function(name, a, id)
     if not name or name == '' then return false end
-    if isSitting() or isDucking() then
+    local isFD = isFeignDeathAbility(name)
+    if not isFD and (isSitting() or isDucking()) then
         mq.cmd('/stand')
     end
     if not runtime.isSkillReady(name) then return false end
@@ -11517,8 +11633,8 @@ runtime.fireSkill = function(name, a, id)
     if not selfCast and id and id > 0 and not runtime.setTarget(id) then return false end
     clearCursor()
 
-    -- Abilities like Begging and Pick Pockets require auto-attack to be OFF to execute in EverQuest
-    local pauseAttack = isNonCombatSkill(name) and wasAttacking
+    -- Abilities like Begging, Pick Pockets, and Feign Death require auto-attack to be OFF to execute in EverQuest
+    local pauseAttack = (isNonCombatSkill(name) or isFD) and wasAttacking
     if pauseAttack then
         mq.cmd('/attack off')
         mq.delay(50, function() return not mq.TLO.Me.Combat() end)
@@ -11526,7 +11642,7 @@ runtime.fireSkill = function(name, a, id)
 
     mq.cmdf('/doability "%s"', name)
 
-    if pauseAttack then
+    if pauseAttack and not isFD then
         mq.delay(50)
     end
 
@@ -11563,7 +11679,7 @@ runtime.fireSkill = function(name, a, id)
         mq.delay(60)
         if mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
-    if (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
+    if not isFD and (wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')) and not mq.TLO.Me.Combat() then
         mq.cmd('/attack on')
     end
     return true
@@ -13707,6 +13823,8 @@ runtime.baseTok = baseTok
 runtime.sungKey = sungKey
 runtime.isSpecialSkill = isSpecialSkill
 runtime.isActionSkill = isActionSkill
+runtime.isAutoskillEligible = isAutoskillEligible
+runtime.isFeignDeathAbility = isFeignDeathAbility
 runtime.CLASS_ACTIONS = CLASS_ACTIONS
 runtime.defaultActionEntry = defaultActionEntry
 runtime.hasActionSkill = hasActionSkill
@@ -13786,6 +13904,12 @@ local function combatTick()
             petState.myPets = {}; petState.lastObservedId = 0; petState.lastCastCls = nil
             print('\ar[Triune]\ax character is dead -- paused. Will resume automatically once alive again.')
         end
+        return
+    end
+    local isFeigning = false
+    pcall(function() isFeigning = mq.TLO.Me.Feigning() or false end)
+    if isFeigning then
+        -- Character is feigning death: pause combat loop to remain safely feigned
         return
     end
     if runtime.npcCastCounts and next(runtime.npcCastCounts) ~= nil then
@@ -14602,7 +14726,7 @@ local function combatTick()
             local isDet = isDetrimentalAction(name, act.target, act)
             local minXt = tonumber(act.min_xtar) or 1
             local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
-            if act.enabled and act.autoskill and (not act.burn_only or ctrl.burn) and xtOk then
+            if act.enabled and act.autoskill and isAutoskillEligible(name) and (not act.burn_only or ctrl.burn) and xtOk then
                 local actPct = tonumber(act.pct)
                 if actPct == nil then actPct = 100 end
                 local id = resolveTargetId(act.target, act.cls, act.when, name, actPct)
@@ -14943,6 +15067,10 @@ local function triuneCommand(...)
                 local curZone = mq.TLO.Zone.ShortName() or 'current zone'
                 mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
                 print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+            end
+            if not stickLoaded() and ctrl.mode ~= 'Manual' then
+                mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
+                print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
             end
         end
     elseif cmd == 'pause' or cmd == 'stop' then
@@ -15444,6 +15572,10 @@ runtime.triuneToggle = function()
             mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
             print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
         end
+        if not stickLoaded() and ctrl.mode ~= 'Manual' then
+            mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
+            print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
+        end
     end
 end
 
@@ -15456,10 +15588,21 @@ mq.bind('/triunerun', runtime.triuneToggle)
 mq.unbind('/ac')
 mq.bind('/ac', triuneCommand)
 
-if not navLoaded() then
-    mq.cmd('/plugin mq2nav')
-    mq.delay(250)
+local function autoloadRequiredPlugins()
+    local needWait = false
+    if not navLoaded() then
+        mq.cmd('/plugin mq2nav')
+        needWait = true
+    end
+    if not stickLoaded() then
+        mq.cmd('/plugin mq2moveutils')
+        needWait = true
+    end
+    if needWait and mq.delay then
+        mq.delay(250, function() return navLoaded() and stickLoaded() end)
+    end
 end
+autoloadRequiredPlugins()
 
 -- ============================================================================
 -- Critical Hit Floating Text Overlay
@@ -15727,6 +15870,10 @@ elseif not navMeshLoaded() then
     local curZone = mq.TLO.Zone.ShortName() or 'current zone'
     mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
     print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Pathing and navigation require a valid zone mesh.', curZone))
+end
+if not stickLoaded() then
+    mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded! Load via /plugin mq2moveutils')
+    print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Combat positioning, melee stick, and unstuck require MQ2MoveUtils. Load it using: \ay/plugin mq2moveutils\ax')
 end
 
 -- ============================================================================

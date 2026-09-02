@@ -2,6 +2,25 @@
 
 ## 2026-09-01
 
+- **Plugin Autoloading & Missing Warnings Suite (`triune.lua`, `triune_map.lua`, `triune_track.lua`).**
+  - **Automatic Plugin Load on Startup**: On script initialization, `triune.lua`, `triune_map.lua`, and `triune_track.lua` now automatically detect and attempt to load both `mq2nav` (`/plugin mq2nav`) and `mq2moveutils` (`/plugin mq2moveutils`) if they are not already loaded, waiting briefly for MacroQuest to complete initialization.
+  - **MacroQuest Window & Chat Console Warnings**: If either `mq2nav` or `mq2moveutils` is not found or fails to load, all three scripts print clear color-coded warning notices (`\ar[<Script> WARNING]\ax`) directly to the MacroQuest chat window with instructions on how to load them.
+  - **Enhanced Combat & Action Validation**: Added MoveUtils missing checks and center-screen `/popup` alerts when starting combat (`/ac run`, `/triunerun`, and UI `START` buttons), and validated plugin availability when clicking map coordinates or tracking navigation actions.
+  - **Interactive UI Recovery Buttons**: Added `[Load MQ2MoveUtils]` recovery buttons alongside `[Load MQ2Nav]` across the main Triune window header, Status tab navigation subsystem table, Settings tab under Navigation & Hazard Avoidance, Mini HUD overlay, Triune Map settings, and Triune Track window.
+  - **Suite-Wide Core API Verification**: Audited `triune_buffbot.lua`, `triune_buttons.lua`, `triune_cursor.lua`, `triune_dps.lua`, `triune_spellbook.lua`, and `triune_updater.lua` to verify they operate purely on native MacroQuest core APIs without requiring external plugins.
+  - **Automated Pure Logic Tests**: Added unit tests in `tests/test_pure_logic.lua` covering `stickLoaded` detection across multiple mock states and cross-file standalone validation for `triune_track.lua` and `triune_map.lua` (1,239 tests passing).
+
+- **Abilities & AA Health Threshold & Feign Death Evaluation Fix (`triune.lua`).**
+  - **Universal Feign Death Recognition (`isFeignDeathAbility`)**: Added unified detection covering innate skills, Alternate Advancement abilities (`Death Peace` for Shadowknights, `Imitate Death` for Monks, `Death's Effigy`), and scribed spell gems.
+  - **Strict Self-HP Evaluation in `conditionMet`**: Explicitly routes condition checks for survival abilities (`Feign Death`, `Death Peace`, `Imitate Death`, `Mend`, `Bind Wound`) to compare against the local player's current health (`mq.TLO.Me.PctHPs()`), even when configured with `'HP <='`, `'my HP <='`, or `'target HP <='` or when targeting hostile entities. Setting the health slider to `20%` guarantees it only triggers when the player drops to 20% HP or lower.
+  - **AA Tab Smart Defaults (`UI.drawAATab`)**: Feign Death AAs (e.g. `Death Peace`, `Imitate Death`) now default to `target = 'F: Myself'`, `when = 'my HP <='`, and `pct = 20` when first enabled.
+  - **AA & Spell Posture & Attack Protection (`fireAA`, `castGem`, `fireSkill`)**: Updated `runtime.fireAA` and `runtime.castGem` alongside `runtime.fireSkill` to disengage auto-attack (`/attack off`), omit `/stand` before activation, and suppress automatic `/attack on` re-engagement after firing Feign Death AAs or spells.
+  - **Autoskill Gating (`isAutoskillEligible`)**: Restricted the `Auto##as` ("Autoskill") checkbox on the Abilities tab strictly to genuine high-frequency melee attack skills (`Kick`, `Flying Kick`, `Backstab`, `Bash`, `Slam`, `Frenzy`, etc.). Removed the `Auto` checkbox from non-melee and survival abilities (`Feign Death`, `Mend`, `Taunt`, `Bind Wound`, `Hide`, `Sneak`, etc.) so they are never erroneously scheduled for continuous cooldown execution.
+  - **Loadout Sanitization**: Automatically backfills and sanitizes persisted action entries so `act.autoskill` is forced to `false` for non-autoskill abilities, and guards the `combatTick` autoskill loop with `isAutoskillEligible(name)`.
+  - **Accurate Player Health in `pctHP`**: Enhanced `pctHP(id)` to query `mq.TLO.Me.PctHPs()` directly when checking the local character, and defaulted unresolvable/nil spawn queries to `100%` (safe state) rather than `0%` (which previously produced false emergency triggers).
+  - **Active Feign Combat Protection**: Added an active `Me.Feigning()` check at the top of `combatTick` to pause combat movement and offensive actions while feigning death so posture is not broken prematurely.
+  - **Automated Regression Prevention**: Added 41 test assertions in `tests/test_pure_logic.lua` covering `isAutoskillEligible`, `isFeignDeathAbility`, `pctHP` accuracy and defaults, `Death Peace` and `Imitate Death` AA condition thresholds, and UI autoskill guards (totaling 1,234 tests passing).
+
 - **Tab Bar Reordering (`triune.lua`).**
   - **Settings Tab Relocation**: Moved the `Settings` tab in `drawFullGui()` (`triuneTabs`) between the `Clickies` and `Help` tabs (`... -> Disciplines -> Clickies -> Settings -> Help`), grouping all combat action and loadout tabs (Spell Gems, Abilities, AAs, Auto AA, Cooldowns, Disciplines, Clickies) together immediately following the Pets tab.
 

@@ -365,6 +365,56 @@ local actionQueue = {
 }
 
 -- ============================================================================
+-- PLUGIN DEPENDENCY HELPERS & AUTOLOAD
+-- ============================================================================
+local function navLoaded()
+    local ok, loaded = pcall(function()
+        if mq.TLO.Navigation and (mq.TLO.Navigation() ~= nil or mq.TLO.Navigation.MeshLoaded() ~= nil) then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2nav') or mq.TLO.Plugin('MQ2Nav') or mq.TLO.Plugin('nav')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
+local function navMeshLoaded()
+    if not navLoaded() then return false end
+    local ok, loaded = pcall(function()
+        return mq.TLO.Navigation.MeshLoaded() or false
+    end)
+    return ok and (loaded == true)
+end
+
+local function stickLoaded()
+    local ok, loaded = pcall(function()
+        if mq.TLO.Stick and (mq.TLO.Stick() ~= nil or mq.TLO.Stick.Status() ~= nil) then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2moveutils') or mq.TLO.Plugin('MQ2MoveUtils') or mq.TLO.Plugin('moveutils')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
+local function autoloadRequiredPlugins()
+    local needWait = false
+    if not navLoaded() then
+        mq.cmd('/plugin mq2nav')
+        needWait = true
+    end
+    if not stickLoaded() then
+        mq.cmd('/plugin mq2moveutils')
+        needWait = true
+    end
+    if needWait and mq.delay then
+        mq.delay(250, function() return navLoaded() and stickLoaded() end)
+    end
+end
+
+-- ============================================================================
 -- PERSISTENCE & CONFIGURATION (triune_map_config.lua in mq.configDir)
 -- ============================================================================
 local CONFIG_FILE = mq.configDir and (mq.configDir .. '/triune_map_config.lua') or 'triune_map_config.lua'
@@ -1763,8 +1813,7 @@ local function scanZoneSpawns()
     local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
     if okZone and zoneName then state.currentZoneName = zoneName end
 
-    local okMesh, isMesh = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
-    navState.meshLoaded = (okMesh and isMesh) or false
+    navState.meshLoaded = navMeshLoaded()
 
     local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
     navState.navActive = (okNavAct and isNavAct) or false
@@ -3838,6 +3887,38 @@ local function DrawSettingsTab()
     if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Automatically converts black (0,0,0) and dark map lines/labels to crisp visible silver/white against dark backgrounds') end
 
     ImGui.Spacing()
+    ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Navigation & Plugin Subsystem')
+    ImGui.Separator()
+
+    if navLoaded() then
+        if navMeshLoaded() then
+            ImGui.TextColored(0.2, 0.95, 0.35, 1.0, string.format('• MQ2Nav: Loaded (Mesh: %s)', state.currentZoneShort or 'current zone'))
+        else
+            ImGui.TextColored(0.95, 0.85, 0.20, 1.0, string.format('• MQ2Nav: Loaded (NO MESH: %s)', state.currentZoneShort or 'current zone'))
+            ImGui.SameLine()
+            if ImGui.Button('Reload Mesh##mapSettingsReloadMesh') then
+                mq.cmd('/nav reload')
+            end
+        end
+    else
+        ImGui.TextColored(0.95, 0.25, 0.25, 1.0, '• MQ2Nav: NOT LOADED')
+        ImGui.SameLine()
+        if ImGui.Button('Load MQ2Nav##mapSettingsLoadNav') then
+            mq.cmd('/plugin mq2nav')
+        end
+    end
+
+    if stickLoaded() then
+        ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '• MQ2MoveUtils: Loaded')
+    else
+        ImGui.TextColored(0.95, 0.85, 0.20, 1.0, '• MQ2MoveUtils: NOT LOADED')
+        ImGui.SameLine()
+        if ImGui.Button('Load MQ2MoveUtils##mapSettingsLoadMoveUtils') then
+            mq.cmd('/plugin mq2moveutils')
+        end
+    end
+
+    ImGui.Spacing()
     ImGui.Separator()
     if ImGui.Button('Save Settings & Zoom Now##ManualSaveSettingsBtn') then
         saveConfig(false)
@@ -3973,6 +4054,18 @@ if okZoneShort and zShort then
     loadZoneMap(zShort, false)
 end
 
+autoloadRequiredPlugins()
+
+if not navLoaded() then
+    print('\ar[Triune Map WARNING]\ax MQ2Nav plugin is not loaded! Map click-to-move and path distance require MQ2Nav (/plugin mq2nav).')
+elseif not navMeshLoaded() then
+    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+    print(string.format('\ar[Triune Map WARNING]\ax No NavMesh loaded for zone "%s"! Map pathing requires a valid zone mesh (/nav reload).', curZone))
+end
+if not stickLoaded() then
+    print('\ar[Triune Map WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick movement requires MQ2MoveUtils (/plugin mq2moveutils).')
+end
+
 syncTriuneLoadout()
 scanZoneSpawns()
 mq.imgui.init('TriuneMapUIWindow', DrawTriuneMapUI)
@@ -4037,8 +4130,12 @@ while state.isRunning do
         actionQueue.pendingNavId = 0
         if navState.meshLoaded then
             pcall(function() mq.cmdf('/nav id %d', nid) end)
-        else
+        elseif stickLoaded() then
             pcall(function() mq.cmdf('/stick 10 id %d', nid) end)
+        else
+            state.activeNavSpawnId = 0
+            state.statusMsg = 'Nav failed: missing plugins.'
+            print('\ar[Triune Map WARNING]\ax Neither MQ2Nav nor MQ2MoveUtils is loaded! Cannot navigate to target. Load via \ay/plugin mq2nav\ax or \ay/plugin mq2moveutils\ax.')
         end
     end
 
@@ -4065,6 +4162,9 @@ while state.isRunning do
         if navState.meshLoaded and loc and loc.y and loc.x and loc.z then
             local ly, lx, lz = loc.y, loc.x, loc.z
             pcall(function() mq.cmdf('/nav loc %f %f %f', ly, lx, lz) end)
+        elseif not navState.meshLoaded then
+            state.statusMsg = 'Nav failed: navmesh missing.'
+            print('\ar[Triune Map WARNING]\ax MQ2Nav navmesh not loaded! Cannot navigate to map coordinate (/nav reload).')
         end
     end
 

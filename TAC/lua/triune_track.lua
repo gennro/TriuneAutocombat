@@ -160,6 +160,56 @@ local function getConStyle(conStr)
 end
 
 -- ============================================================================
+-- PLUGIN DEPENDENCY HELPERS & AUTOLOAD
+-- ============================================================================
+local function navLoaded()
+    local ok, loaded = pcall(function()
+        if mq.TLO.Navigation and (mq.TLO.Navigation() ~= nil or mq.TLO.Navigation.MeshLoaded() ~= nil) then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2nav') or mq.TLO.Plugin('MQ2Nav') or mq.TLO.Plugin('nav')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
+local function navMeshLoaded()
+    if not navLoaded() then return false end
+    local ok, loaded = pcall(function()
+        return mq.TLO.Navigation.MeshLoaded() or false
+    end)
+    return ok and (loaded == true)
+end
+
+local function stickLoaded()
+    local ok, loaded = pcall(function()
+        if mq.TLO.Stick and (mq.TLO.Stick() ~= nil or mq.TLO.Stick.Status() ~= nil) then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2moveutils') or mq.TLO.Plugin('MQ2MoveUtils') or mq.TLO.Plugin('moveutils')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
+local function autoloadRequiredPlugins()
+    local needWait = false
+    if not navLoaded() then
+        mq.cmd('/plugin mq2nav')
+        needWait = true
+    end
+    if not stickLoaded() then
+        mq.cmd('/plugin mq2moveutils')
+        needWait = true
+    end
+    if needWait and mq.delay then
+        mq.delay(250, function() return navLoaded() and stickLoaded() end)
+    end
+end
+
+-- ============================================================================
 -- ZONE SPAWN SCANNER & FILTER ENGINE
 -- ============================================================================
 local function scanZoneSpawns()
@@ -335,6 +385,29 @@ local function DrawTrackerUI()
 
         ImGui.Separator()
 
+        if not navLoaded() then
+            ImGui.TextColored(0.95, 0.25, 0.25, 1.0, "[!] MQ2Nav is NOT loaded")
+            ImGui.SameLine()
+            if ImGui.Button("Load MQ2Nav##trackLoadNav") then
+                mq.cmd('/plugin mq2nav')
+            end
+        elseif not navMeshLoaded() then
+            local zShort = ''
+            pcall(function() zShort = mq.TLO.Zone.ShortName() or '' end)
+            ImGui.TextColored(0.95, 0.85, 0.20, 1.0, string.format("[!] No NavMesh for %s", zShort ~= '' and zShort or "zone"))
+            ImGui.SameLine()
+            if ImGui.Button("Reload Mesh##trackReloadMesh") then
+                mq.cmd('/nav reload')
+            end
+        end
+        if not stickLoaded() then
+            ImGui.TextColored(0.95, 0.85, 0.20, 1.0, "[!] MQ2MoveUtils is NOT loaded")
+            ImGui.SameLine()
+            if ImGui.Button("Load MoveUtils##trackLoadMoveUtils") then
+                mq.cmd('/plugin mq2moveutils')
+            end
+        end
+
         -- Filter Controls Bar
         ImGui.PushItemWidth(180)
         local searchVal, searchChanged = ImGui.InputText("Search##SearchBox", state.searchText)
@@ -497,6 +570,18 @@ end
 -- ============================================================================
 -- MAIN ENGINE INITIALIZATION & YIELDABLE LOOP
 -- ============================================================================
+autoloadRequiredPlugins()
+
+if not navLoaded() then
+    print('\ar[Triune Track WARNING]\ax MQ2Nav plugin is not loaded! NPC tracking navigation requires MQ2Nav. Load it using: \ay/plugin mq2nav\ax')
+elseif not navMeshLoaded() then
+    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+    print(string.format('\ar[Triune Track WARNING]\ax No NavMesh loaded for zone "%s"! Tracking navigation requires a valid zone mesh (/nav reload).', curZone))
+end
+if not stickLoaded() then
+    print('\ar[Triune Track WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick movement requires MQ2MoveUtils. Load it using: \ay/plugin mq2moveutils\ax')
+end
+
 scanZoneSpawns()
 mq.imgui.init('TriuneZoneTrackerUI', DrawTrackerUI)
 
@@ -522,11 +607,14 @@ while state.isRunning do
         local nid = state.pendingNavId
         state.pendingNavId = 0
         state.activeNavId = nid
-        local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
-        if meshOk and meshLoaded then
+        if navMeshLoaded() then
             pcall(function() mq.cmdf('/nav id %d', nid) end)
-        else
+        elseif stickLoaded() then
             pcall(function() mq.cmdf('/stick 10 id %d', nid) end)
+        else
+            state.activeNavId = 0
+            state.statusMsg = 'Nav failed: missing plugins.'
+            print('\ar[Triune Track WARNING]\ax Neither MQ2Nav nor MQ2MoveUtils is loaded! Cannot navigate to target. Load via \ay/plugin mq2nav\ax or \ay/plugin mq2moveutils\ax.')
         end
     end
 
