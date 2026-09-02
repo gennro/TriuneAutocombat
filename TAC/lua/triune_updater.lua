@@ -1,6 +1,6 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- Triune AutoCombat — Standalone ImGui Release Updater (v1.7.7)
+-- Triune AutoCombat — Standalone ImGui Release Updater (v1.8.0)
 -- Checks GitHub Releases for updates, displays release notes, and updates
 -- script files on Windows and Linux directly within MacroQuest.
 -- ============================================================================
@@ -8,7 +8,7 @@
 local mq = require('mq')
 local ImGui = require('ImGui')
 
-local VERSION = '1.7.8'
+local VERSION = '1.8.0'
 local GITHUB_REPO = 'gennro/TriuneAutocombat'
 local API_URL = 'https://api.github.com/repos/' .. GITHUB_REPO .. '/releases/latest'
 local latestTag = nil -- raw git tag from API (e.g. 'V1.3')
@@ -870,8 +870,8 @@ local function drawUpdaterWindow()
         ImGui.Text('Release Notes:')
         if ImGui.BeginChild('ReleaseNotesBox', 0, 100, true) then
             ImGui.TextWrapped(releaseNotes)
-            ImGui.EndChild()
         end
+        ImGui.EndChild()
     end
 
     -- Diagnostics Section
@@ -882,8 +882,8 @@ local function drawUpdaterWindow()
                 for _, logLine in ipairs(diagLogs) do
                     ImGui.TextUnformatted(logLine)
                 end
-                ImGui.EndChild()
             end
+            ImGui.EndChild()
         end
     end
 

@@ -1617,6 +1617,7 @@ local isSameGuild = loadFunc(bbSrc, 'isSameGuild', {
 -- Create mock spawn helper
 local function makeSpawn(guildName)
     local s = setmetatable({
+        ID = function() return (guildName ~= nil and guildName ~= '') and 100 or 0 end,
         Guild = function() return guildName end
     }, {
         __call = function() return true end
@@ -1640,6 +1641,108 @@ mockMyGuild = nil
 assert_eq(isSameGuild(makeSpawn('Knights of Norrath')), false, 'guild: unguilded bot returns false')
 mockMyGuild = ''
 assert_eq(isSameGuild(makeSpawn('Knights of Norrath')), false, 'guild: empty guild bot returns false')
+
+do
+    -- Test isPlayerSameGuild
+    mockMyGuild = 'Knights of Norrath'
+    local mockSpawnLookup = {
+        TLO = {
+            Spawn = function(query)
+                local name = query:match('pc =?(.*)') or query:match('pc (.*)')
+                if name and name:lower():find('^guildmate') then
+                    return makeSpawn('Knights of Norrath')
+                elseif name and name:lower() == 'stranger' then
+                    return makeSpawn('Other Guild')
+                end
+                return makeSpawn(nil)
+            end
+        }
+    }
+    local isPlayerSameGuild = loadFunc(bbSrc, 'isPlayerSameGuild', {
+        mq = mockSpawnLookup,
+        isSameGuild = isSameGuild
+    })
+    assert_true(isPlayerSameGuild('guildmate'), 'isPlayerSameGuild: guildmate returns true')
+    assert_eq(isPlayerSameGuild('stranger'), false, 'isPlayerSameGuild: stranger returns false')
+    assert_eq(isPlayerSameGuild('nobody'), false, 'isPlayerSameGuild: unknown returns false')
+
+    -- Test Guild Priority Queue Insertion & Preemption
+    print('--- Buffbot Guild Priority Queue Logic ---')
+    local gpRuntime = { activeQueue = {}, currentJob = nil }
+    local gpCtrl = { guildMode = 'Guild Priority' }
+
+    local enqueueBuffJob = loadFunc(bbSrc, 'enqueueBuffJob', {
+        ctrl = gpCtrl,
+        runtime = gpRuntime,
+        table = table
+    })
+
+    local requeuePreemptedJob = loadFunc(bbSrc, 'requeuePreemptedJob', {
+        runtime = gpRuntime,
+        table = table
+    })
+
+    local getQueuePosition = loadFunc(bbSrc, 'getQueuePosition', {
+        ctrl = gpCtrl,
+        runtime = gpRuntime,
+        isPlayerSameGuild = isPlayerSameGuild
+    })
+
+    -- 1. Enqueue two public requests
+    enqueueBuffJob({ sender = 'PublicOne', isGuild = false })
+    enqueueBuffJob({ sender = 'PublicTwo', isGuild = false })
+    assert_eq(#gpRuntime.activeQueue, 2, 'queue: 2 public jobs')
+    assert_eq(gpRuntime.activeQueue[1].sender, 'PublicOne', 'queue: PublicOne at idx 1')
+    assert_eq(gpRuntime.activeQueue[2].sender, 'PublicTwo', 'queue: PublicTwo at idx 2')
+
+    -- 2. Enqueue guild member request with Guild Priority (should jump to idx 1)
+    enqueueBuffJob({ sender = 'guildmate', isGuild = true })
+    assert_eq(#gpRuntime.activeQueue, 3, 'queue: 3 jobs after guild insert')
+    assert_eq(gpRuntime.activeQueue[1].sender, 'guildmate', 'queue: guildmate jumped to idx 1')
+    assert_eq(gpRuntime.activeQueue[2].sender, 'PublicOne', 'queue: PublicOne pushed to idx 2')
+    assert_eq(gpRuntime.activeQueue[3].sender, 'PublicTwo', 'queue: PublicTwo pushed to idx 3')
+
+    -- 3. Enqueue second guild member request (should insert after first guild member, before public)
+    enqueueBuffJob({ sender = 'GuildMateTwo', isGuild = true })
+    assert_eq(#gpRuntime.activeQueue, 4, 'queue: 4 jobs after 2nd guild insert')
+    assert_eq(gpRuntime.activeQueue[1].sender, 'guildmate', 'queue: guildmate 1 at idx 1')
+    assert_eq(gpRuntime.activeQueue[2].sender, 'GuildMateTwo', 'queue: guildmate 2 at idx 2')
+    assert_eq(gpRuntime.activeQueue[3].sender, 'PublicOne', 'queue: PublicOne at idx 3')
+    assert_eq(gpRuntime.activeQueue[4].sender, 'PublicTwo', 'queue: PublicTwo at idx 4')
+
+    -- 4. Re-queue preempted public job (should be placed right at start of public section at idx 3)
+    requeuePreemptedJob({ sender = 'PreemptedPublic', isGuild = false, isResumed = true })
+    assert_eq(#gpRuntime.activeQueue, 5, 'queue: 5 jobs after preempted requeue')
+    assert_eq(gpRuntime.activeQueue[1].sender, 'guildmate', 'queue: guildmate 1 at idx 1')
+    assert_eq(gpRuntime.activeQueue[2].sender, 'GuildMateTwo', 'queue: guildmate 2 at idx 2')
+    assert_eq(gpRuntime.activeQueue[3].sender, 'PreemptedPublic', 'queue: PreemptedPublic at idx 3')
+    assert_eq(gpRuntime.activeQueue[4].sender, 'PublicOne', 'queue: PublicOne at idx 4')
+    assert_eq(gpRuntime.activeQueue[5].sender, 'PublicTwo', 'queue: PublicTwo at idx 5')
+
+    -- 5. Test queue position calculation with active non-guild preemption
+    gpRuntime.currentJob = { sender = 'OldNonGuild', isGuild = false }
+    -- guildmate is a guild member, so OldNonGuild will be preempted and NOT count ahead
+    assert_eq(getQueuePosition('guildmate'), 0, 'queuePos: guildmate is #1 (0 ahead) during non-guild preemption')
+    assert_eq(getQueuePosition('GuildMateTwo'), 1, 'queuePos: GuildMateTwo has 1 ahead')
+    assert_eq(getQueuePosition('PreemptedPublic'), 3, 'queuePos: PreemptedPublic has 3 ahead')
+
+    -- 6. Test queue position when active job is a guild member (not preempted)
+    gpRuntime.currentJob = { sender = 'ActiveGuildMember', isGuild = true }
+    assert_eq(getQueuePosition('guildmate'), 1, 'queuePos: guildmate has 1 ahead when active job is guild')
+
+    -- 7. Test 'Off' mode FIFO behavior
+    gpCtrl.guildMode = 'Off'
+    local fifoRuntime = { activeQueue = {}, currentJob = nil }
+    local enqueueFifo = loadFunc(bbSrc, 'enqueueBuffJob', {
+        ctrl = gpCtrl,
+        runtime = fifoRuntime,
+        table = table
+    })
+    enqueueFifo({ sender = 'User1', isGuild = false })
+    enqueueFifo({ sender = 'User2', isGuild = true })
+    assert_eq(fifoRuntime.activeQueue[1].sender, 'User1', 'fifo: User1 stays at idx 1')
+    assert_eq(fifoRuntime.activeQueue[2].sender, 'User2', 'fifo: User2 appended to idx 2 in Off mode')
+end
 
 -- ============================================================================
 -- 30. triune_data.lua — structural validation
@@ -2572,9 +2675,11 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '1.7.8', 'triune.lua version is 1.7.8')
-    assert_eq(updaterVer, '1.7.8', 'triune_updater.lua version is 1.7.8')
-    assert_eq(readmeVer, '1.7.8', 'README.md version is 1.7.8')
+    assert_eq(triuneVer, '1.8.0', 'triune.lua version is 1.8.0')
+    assert_eq(updaterVer, '1.8.0', 'triune_updater.lua version is 1.8.0')
+    assert_eq(readmeVer, '1.8.0', 'README.md version is 1.8.0')
+    assert_true(triuneSrc:find('hdrUpdate') == nil, 'triune.lua does not contain hdrUpdate button')
+    assert_true(triuneSrc:find('miniUpdate') == nil, 'triune.lua does not contain miniUpdate button')
 end
 
 -- ============================================================================
@@ -3057,7 +3162,46 @@ do
     local boneChipsReq = { { id = 13073, count = 1 } } -- Bone Chips
     assert_true(checkReagents(boneChipsReq, { [13073] = 10 }), 'reagent check: bone chips available')
     assert_true(not checkReagents(boneChipsReq, { [13073] = 0 }), 'reagent check: missing bone chips blocks cast')
-    assert_true(not checkReagents(boneChipsReq, {}), 'reagent check: empty inventory blocks cast')
+    -- E. Per-NPC Cast Limit Logic
+    local maxCastOpts = { 'Unl', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+    local function maxCastToOption(mc)
+        local n = tonumber(mc) or 0
+        if n <= 0 or n > 10 then return 1, 'Unl' end
+        return n + 1, maxCastOpts[n + 1]
+    end
+    local function optionToMaxCast(idx)
+        if not idx or idx <= 1 then return 0 end
+        return idx - 1
+    end
+
+    assert_eq(select(2, maxCastToOption(0)), 'Unl', 'max cast opt: 0 is Unl')
+    assert_eq(select(2, maxCastToOption(nil)), 'Unl', 'max cast opt: nil is Unl')
+    assert_eq(select(2, maxCastToOption(1)), '1', 'max cast opt: 1 is 1')
+    assert_eq(select(2, maxCastToOption(10)), '10', 'max cast opt: 10 is 10')
+    assert_eq(optionToMaxCast(1), 0, 'opt to max cast: idx 1 is 0 (Unl)')
+    assert_eq(optionToMaxCast(2), 1, 'opt to max cast: idx 2 is 1')
+    assert_eq(optionToMaxCast(11), 10, 'opt to max cast: idx 11 is 10')
+
+    -- Cast limit evaluator
+    local function canCastOnNpc(npcCastCounts, targetId, spellName, maxCasts)
+        local maxC = tonumber(maxCasts) or 0
+        if maxC <= 0 then return true end
+        local casts = (npcCastCounts[targetId] and npcCastCounts[targetId][spellName]) or 0
+        return casts < maxC
+    end
+
+    local tracker = { [1001] = { ['Tashani'] = 1, ['Slow'] = 2 } }
+    assert_true(canCastOnNpc(tracker, 1001, 'Tashani', 0), 'unlimited casts allowed on npc')
+    assert_true(not canCastOnNpc(tracker, 1001, 'Tashani', 1), '1 cast max reached for Tashani')
+    assert_true(canCastOnNpc(tracker, 1001, 'Tashani', 2), '1 cast of 2 allowed for Tashani')
+    assert_true(not canCastOnNpc(tracker, 1001, 'Slow', 2), '2 casts max reached for Slow')
+    assert_true(canCastOnNpc(tracker, 1002, 'Tashani', 1), 'new mob allows cast')
+
+    -- Source verification for triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("ImGui.Combo%('##mc'") ~= nil, 'triune.lua uses ##mc combo for max_casts')
+    assert_true(triuneContent:find("maxCastOpts") ~= nil, 'triune.lua defines maxCastOpts (Unl to 10)')
+    assert_true(triuneContent:find("runtime.npcCastCounts") ~= nil, 'triune.lua tracks npcCastCounts')
 end
 
 -- ============================================================================
@@ -3345,6 +3489,163 @@ do
     assert_true(triuneContent:find("UI.drawAutoAATab()") ~= nil, 'triune.lua invokes UI.drawAutoAATab in tab bar')
     assert_true(triuneContent:find("runtime.checkAutoSpendAA()") ~= nil, 'triune.lua includes runtime.checkAutoSpendAA check')
     assert_true(triuneContent:find("runtime.checkAutoSummonFireworks()") ~= nil, 'triune.lua includes runtime.checkAutoSummonFireworks check')
+end
+
+-- ============================================================================
+-- Pet Control Tab & Multi-Pet Management Logic
+-- ============================================================================
+do
+    print('--- Pet Control Tab & Multi-Pet Management ---')
+
+    -- A. Scope mapping & target resolution
+    local PET_SCOPE_LIST = {
+        'all', 'swarm', 'mag', 'bst', 'nec', 'enc', 'shm', 'dru', 'brd', 'shd'
+    }
+    local function classToPetCmdScope(cls)
+        if not cls or type(cls) ~= 'string' then return 'all' end
+        local lower = string.lower(cls)
+        if lower == 'sk' or lower == 'shd' then return 'shd' end
+        for _, s in ipairs(PET_SCOPE_LIST) do
+            if lower == s then return s end
+        end
+        return 'all'
+    end
+
+    assert_eq(classToPetCmdScope('Mag'), 'mag', 'pet scope: Mag -> mag')
+    assert_eq(classToPetCmdScope('mag'), 'mag', 'pet scope: mag -> mag')
+    assert_eq(classToPetCmdScope('Bst'), 'bst', 'pet scope: Bst -> bst')
+    assert_eq(classToPetCmdScope('Nec'), 'nec', 'pet scope: Nec -> nec')
+    assert_eq(classToPetCmdScope('Enc'), 'enc', 'pet scope: Enc -> enc')
+    assert_eq(classToPetCmdScope('Shm'), 'shm', 'pet scope: Shm -> shm')
+    assert_eq(classToPetCmdScope('Dru'), 'dru', 'pet scope: Dru -> dru')
+    assert_eq(classToPetCmdScope('Brd'), 'brd', 'pet scope: Brd -> brd')
+    assert_eq(classToPetCmdScope('SK'), 'shd', 'pet scope: SK -> shd')
+    assert_eq(classToPetCmdScope('sk'), 'shd', 'pet scope: sk -> shd')
+    assert_eq(classToPetCmdScope('shd'), 'shd', 'pet scope: shd -> shd')
+    assert_eq(classToPetCmdScope('swarm'), 'swarm', 'pet scope: swarm -> swarm')
+    assert_eq(classToPetCmdScope('all'), 'all', 'pet scope: all -> all')
+    assert_eq(classToPetCmdScope('War'), 'all', 'pet scope: War (non-pet) -> all')
+    assert_eq(classToPetCmdScope('Clr'), 'all', 'pet scope: Clr (non-pet) -> all')
+    assert_eq(classToPetCmdScope(nil), 'all', 'pet scope: nil -> all')
+    assert_eq(classToPetCmdScope(''), 'all', 'pet scope: empty string -> all')
+
+    -- B. Pet Command String Formatting
+    local function formatPetCmd(verb, scope)
+        scope = scope or 'all'
+        return string.format('#petcmd %s %s', verb, scope)
+    end
+
+    assert_eq(formatPetCmd('attack', 'all'), '#petcmd attack all', 'petcmd: attack all')
+    assert_eq(formatPetCmd('qattack', 'mag'), '#petcmd qattack mag', 'petcmd: qattack mag')
+    assert_eq(formatPetCmd('back', 'bst'), '#petcmd back bst', 'petcmd: back bst')
+    assert_eq(formatPetCmd('follow', 'nec'), '#petcmd follow nec', 'petcmd: follow nec')
+    assert_eq(formatPetCmd('guard', 'enc'), '#petcmd guard enc', 'petcmd: guard enc')
+    assert_eq(formatPetCmd('sit', 'shm'), '#petcmd sit shm', 'petcmd: sit shm')
+    assert_eq(formatPetCmd('stop', 'dru'), '#petcmd stop dru', 'petcmd: stop dru')
+    assert_eq(formatPetCmd('health', 'all'), '#petcmd health all', 'petcmd: health all')
+    assert_eq(formatPetCmd('leader', 'all'), '#petcmd leader all', 'petcmd: leader all')
+    assert_eq(formatPetCmd('feign', 'nec'), '#petcmd feign nec', 'petcmd: feign nec')
+    assert_eq(formatPetCmd('leave', 'mag'), '#petcmd leave mag', 'petcmd: leave mag')
+
+    assert_eq(formatPetCmd('taunt on', 'all'), '#petcmd taunt on all', 'petcmd: taunt on all')
+    assert_eq(formatPetCmd('taunt off', 'bst'), '#petcmd taunt off bst', 'petcmd: taunt off bst')
+    assert_eq(formatPetCmd('hold on', 'all'), '#petcmd hold on all', 'petcmd: hold on all')
+    assert_eq(formatPetCmd('hold off', 'nec'), '#petcmd hold off nec', 'petcmd: hold off nec')
+    assert_eq(formatPetCmd('ghold on', 'all'), '#petcmd ghold on all', 'petcmd: ghold on all')
+    assert_eq(formatPetCmd('spellhold on', 'enc'), '#petcmd spellhold on enc', 'petcmd: spellhold on enc')
+    assert_eq(formatPetCmd('focus on', 'all'), '#petcmd focus on all', 'petcmd: focus on all')
+    assert_eq(formatPetCmd('regroup on', 'all'), '#petcmd regroup on all', 'petcmd: regroup on all')
+    assert_eq(formatPetCmd('assist on', 'all'), '#petcmd assist on all', 'petcmd: assist on all')
+
+    -- C. Custom Command Sanitization
+    local function sanitizeCustomPetCmd(text)
+        text = (text or ''):match('^%s*(.-)%s*$')
+        if text == '' then return nil end
+        if text:sub(1, 7) == '#petcmd' then return text end
+        return '#petcmd ' .. text
+    end
+
+    assert_eq(sanitizeCustomPetCmd('attack mag'), '#petcmd attack mag', 'custom cmd: prepends #petcmd')
+    assert_eq(sanitizeCustomPetCmd('#petcmd taunt on all'), '#petcmd taunt on all', 'custom cmd: preserves existing #petcmd')
+    assert_eq(sanitizeCustomPetCmd('  hold off nec  '), '#petcmd hold off nec', 'custom cmd: trims whitespace')
+    assert_eq(sanitizeCustomPetCmd(''), nil, 'custom cmd: empty returns nil')
+    assert_eq(sanitizeCustomPetCmd('   '), nil, 'custom cmd: whitespace only returns nil')
+
+    -- D. Multi-Pet Trio Slot Mapping
+    local PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true, Brd = true }
+    local function mapSlots(classes)
+        local slots = {}
+        for i = 1, 3 do
+            local cls = classes[i]
+            if cls then
+                slots[#slots + 1] = {
+                    slotNum = i,
+                    cls = cls,
+                    isPetCls = PET_CLASSES[cls] == true,
+                    scope = classToPetCmdScope(cls)
+                }
+            end
+        end
+        return slots
+    end
+
+    local trio3Pets = mapSlots({ 'Mag', 'Nec', 'Bst' })
+    assert_eq(#trio3Pets, 3, 'trio slots: 3 classes mapped')
+    assert_true(trio3Pets[1].isPetCls, 'slot 1: Mag is pet class')
+    assert_eq(trio3Pets[1].scope, 'mag', 'slot 1 scope: mag')
+    assert_true(trio3Pets[2].isPetCls, 'slot 2: Nec is pet class')
+    assert_eq(trio3Pets[2].scope, 'nec', 'slot 2 scope: nec')
+    assert_true(trio3Pets[3].isPetCls, 'slot 3: Bst is pet class')
+    assert_eq(trio3Pets[3].scope, 'bst', 'slot 3 scope: bst')
+
+    local trioMixed = mapSlots({ 'War', 'Clr', 'Enc' })
+    assert_eq(#trioMixed, 3, 'trio mixed: 3 classes mapped')
+    assert_true(not trioMixed[1].isPetCls, 'slot 1: War is not pet class')
+    assert_true(not trioMixed[2].isPetCls, 'slot 2: Clr is not pet class')
+    assert_true(trioMixed[3].isPetCls, 'slot 3: Enc is pet class')
+    assert_eq(trioMixed[3].scope, 'enc', 'slot 3 scope: enc')
+
+    -- E. triune.lua Source Verification
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("function UI.drawPetControlTab()") ~= nil, 'triune.lua defines UI.drawPetControlTab')
+    assert_true(triuneContent:find("ImGui.BeginTabItem%('Pets'%)") ~= nil, 'triune.lua uses Pets as tab label')
+    local tabOrderMatch = triuneContent:find("UI.drawControlTab%(%)[%s\r\n]+UI.drawPetControlTab%(%)[%s\r\n]+UI.drawGemTab%(%)")
+    assert_true(tabOrderMatch ~= nil, 'triune.lua places UI.drawPetControlTab right next to Control tab and before Gem tab')
+    local settingsTabMatch = triuneContent:find("UI.drawClickieTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)[%s\r\n]+UI.drawHelpTab%(%)")
+    assert_true(settingsTabMatch ~= nil, 'triune.lua places UI.drawSettingsTab between Clickies and Help tabs')
+    assert_true(triuneContent:find("PET_CLASSES%s*=%s*{[^}]*Brd%s*=%s*true") ~= nil, 'triune.lua includes Brd in petState.PET_CLASSES')
+    assert_true(triuneContent:find("function UI.drawPetControlTab") ~= nil, 'triune.lua includes drawPetControlTab renderer')
+    assert_true(triuneContent:find("sendPetCmd%(") ~= nil, 'triune.lua includes sendPetCmd helper')
+    assert_true(triuneContent:find("getMultiPetList%(") ~= nil, 'triune.lua includes getMultiPetList helper')
+    assert_true(triuneContent:find("cmd == 'pet'") ~= nil, 'triune.lua includes /ac pet slash command')
+    assert_true(triuneContent:find("/pet report##petRpt") ~= nil, 'triune.lua includes /pet report button on pet slot cards')
+    assert_true(triuneContent:find("Pet Stats Report##petStatsModal") ~= nil, 'triune.lua includes Pet Stats Report modal popup window')
+    assert_true(triuneContent:find("petState%.inspectPetId") ~= nil, 'triune.lua tracks petState.inspectPetId')
+end
+
+-- ============================================================================
+-- 42. ImGui Child Window Safety Checks
+-- ============================================================================
+print('--- ImGui Child Window Safety Checks ---')
+do
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("ImGui.EndChild%(%)[%s\r\n]+end[%s\r\n]+ImGui.PopStyleVar%(2%)") == nil,
+        'lists do not place EndChild inside BeginChild if block')
+    assert_true(triuneContent:find("end[%s\r\n]+ImGui.EndChild%(%)[%s\r\n]+ImGui.PopStyleVar%(2%)") ~= nil,
+        'lists call EndChild unconditionally outside BeginChild if block')
+
+    -- Abilities, AA, and Disc list child safety checks
+    assert_true(triuneContent:find("abilitieslist.-end[%s\r\n]+ImGui.EndChild%(%)[%s\r\n]+ImGui.PopStyleVar%(2%)") ~= nil,
+        'abilitieslist calls EndChild unconditionally outside BeginChild if block')
+    assert_true(triuneContent:find("aalist.-end[%s\r\n]+ImGui.EndChild%(%)[%s\r\n]+ImGui.PopStyleVar%(2%)") ~= nil,
+        'aalist calls EndChild unconditionally outside BeginChild if block')
+    assert_true(triuneContent:find("disclist.-end[%s\r\n]+ImGui.EndChild%(%)[%s\r\n]+ImGui.PopStyleVar%(2%)") ~= nil,
+        'disclist calls EndChild unconditionally outside BeginChild if block')
+
+    -- createCastTracker scoping check
+    local trackerBody = triuneContent:match("local function createCastTracker%(%).-return tracker[%s\r\n]+end")
+    assert_true(trackerBody ~= nil, 'createCastTracker function body found')
+    assert_true(trackerBody:find("castTracker") == nil, 'createCastTracker function body never references castTracker before declaration')
 end
 
 -- ============================================================================

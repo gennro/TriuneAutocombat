@@ -1,7 +1,73 @@
 # Triune AutoCombat Change Log
 
-## 2026-08-31
+## 2026-09-01
 
+- **Tab Bar Reordering (`triune.lua`).**
+  - **Settings Tab Relocation**: Moved the `Settings` tab in `drawFullGui()` (`triuneTabs`) between the `Clickies` and `Help` tabs (`... -> Disciplines -> Clickies -> Settings -> Help`), grouping all combat action and loadout tabs (Spell Gems, Abilities, AAs, Auto AA, Cooldowns, Disciplines, Clickies) together immediately following the Pets tab.
+
+- **Spell Gems Tab Compact Layout & Alignment (`triune.lua`).**
+  - **Horizontal Width Optimization**: Optimized widget widths across all gem rows (Class combo from 62px to 46px, Spell combo from 185px to 142px, Target combo from 140px to 105px, When/Condition combo from 138px to 105px, HP% slider from 75px to 52px, Min XT combo from 42px to 32px, and reduced item spacing to 4px), saving ~190px of horizontal sprawl and completely eliminating horizontal scrollbars within the standard 720px window.
+  - **Pixel-Perfect Slot Swap Alignment**: Replaced single-space text placeholders with equal-sized invisible dummy buttons (`ImGui.InvisibleButton`) on boundary slots (`i == 1` and `i == maxGems`), aligning slot numbers, status badges, and dropdowns vertically down every row.
+  - **Compact Slider Label**: Replaced `'Disabled'` on 0% threshold sliders with `'Off'` (preserving full explanation in hover tooltips), preventing text clipping inside compact sliders.
+  - **Streamlined Two-Row Header**: Consolidated filters and automation toggles (Level range, Scribed, Auto-mem, Rebuff threshold, Import Bar, Mem All) onto Row 1, and dedicated Row 2 cleanly to Preset management (Load dropdown, Name input, Save, Delete).
+  - **Tighter Row Padding**: Applied scoped `ImGuiStyleVar.ItemSpacing (4, 3)` and `FramePadding (4, 2)` inside `UI.drawGemList()`, reducing row height and allowing full gem sets (up to 12 slots) to fit comfortably on screen with minimal vertical scrolling.
+
+- **Per-NPC Cast Limit Dropdown (`triune.lua`).**
+  - **Replaced Boss Checkbox with Cast Limit**: Removed the `Boss` checkbox from the Spell Gems tab and replaced it with a compact dropdown (`##mc`) controlling how many times a spell can be cast on a specific NPC target (`Unl`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`).
+  - **Dynamic Cast Gating (`runtime.npcCastCounts`)**: Tracks successful spell casts per target spawn ID. When a spell reaches its configured `max_casts` limit on an NPC, the spell is cleanly gated and no longer cast on that target, allowing debuffs, slows, snares, and initial nukes/DoTs to land a designated number of times without mob spam.
+  - **Fizzle & Interrupt Recovery**: Decrements target cast count if a cast fails due to fizzle or interruption, ensuring spells reliably reach the desired cast limit.
+  - **Auto-Pruning & State Management**: Automatically prunes dead target IDs from `runtime.npcCastCounts` during combat and wipes tracking on zoning or character death.
+
+- **Spell Gems Tab +10% Scale Enhancement (`triune.lua`).**
+  - **10% Larger Controls**: Increased button, slider, and dropdown widths across all gem rows by ~10% (When combo to 116px, HP% slider to 57px, Min XT to 35px, and Max Casts combo to 48px; swap buttons to 17x19px), with increased frame padding `(4, 3)` for noticeably improved legibility and clickability.
+  - **Expanded Identity Combos (+15%)**: Further broadened the primary identification dropdowns on each gem row (Class combo to 59px, Spell combo to 180px, and Target combo to 133px) and raised default window width to 830px to provide ample room for longer spell names and target descriptors without clipping.
+  - **Header & Window Sizing**: Scaled header inputs (level range, rebuff slider, preset dropdown and text field) by +10% and adjusted default window width from 720px to 830px to accommodate the larger row elements comfortably.
+
+- **Compact Layout Applied to Abilities, AAs, and Disciplines Tabs (`triune.lua`).**
+  - **Scoped Tighter Spacing & Frame Padding**: Applied scoped `ImGuiStyleVar.ItemSpacing (4, 3)` and `FramePadding (4, 3)` to the child lists in `UI.drawAbilitiesTab()`, `UI.drawAATab()`, and `UI.drawDiscTab()`, eliminating vertical padding bloat and keeping row height streamlined.
+  - **Standardized Compact Widget Widths**: Replaced sprawling dropdown and slider widths across all three tabs to match the unified design system: Target dropdown to 133px (was 150px), When dropdown to 116px (was 140px), Threshold % slider to 57px (was 90px) with `'Off'` format for 0%, Min XTarget combo to 35px (was 45px), and Priority slider to 70px (was 80px).
+  - **Compact Labels**: Shortened `Boss Only##bo` to `Boss##bo` in the Disciplines tab for clean single-row fitting without line wrapping.
+  - **Automated Regression Prevention**: Added child window safety assertions for `abilitieslist`, `aalist`, and `disclist` in `tests/test_pure_logic.lua`.
+
+- **Cast Tracker Scoping Bug Fix (`triune.lua`).**
+  - **Fixed `attempt to index global 'castTracker' (a nil value)`**: In `createCastTracker()`, the tracker instance is declared as `local tracker = {}` inside the function, whereas `castTracker` is declared as a file-scoped local after the factory function. Replaced an accidental forward-reference to `castTracker` in `recordFailure()` with the proper local `tracker` instance, preventing a runtime nil crash during spell fizzle or interrupt handling.
+
+- **ImGui Child Window Lifetime & Crash Fix (`triune.lua`, `triune_buffbot.lua`, `triune_updater.lua`).**
+  - **Fixed `Must call EndChild() and not End()!` Crash**: In Dear ImGui, `ImGui.BeginChild()` pushes a child window to the stack regardless of whether it returns true or false. Moved all `ImGui.EndChild()` calls outside of `if ImGui.BeginChild(...) then ... end` conditional blocks across `UI.drawGemList()`, `petModalBuffsChild`, `##TriuneCooldownCardsList`, `LogChild`, and `ReleaseNotesBox`/`DiagBox`, ensuring child windows are never left unclosed when culled or clipped.
+  - **Added Regression Prevention Unit Tests**: Added automated child window safety checks in `tests/test_pure_logic.lua` and documented the lifetime rule in `.agents/AGENTS.md`.
+
+- **Spellbook Browser UI Layout Redesign & Loadout Tab Removal (`triune_spellbook.lua`).**
+  - **Vertical Right-Hand Spell Gem Bar**: Moved the spell gem loadout slots from the cramped horizontal top bar into a dedicated vertical sidebar pane on the right-hand side of the window (`##SpellGemsPane`).
+  - **Full Unabbreviated Spell Names**: Eliminated the 9-character truncation (`displayLabel:sub(1, 9)`), allowing full spell names to be read clearly across all active gem buttons (`G%d: <Spell Name>`).
+  - **Selected Spell & Queue Visibility**: Added a prominent "Selected Spell" indicator with a `[Clear]` button directly above the gem slots showing which spell is targeted for memorization, plus dynamic `(Memming)` labels for queued spells.
+  - **Removed Loadouts / Presets Tab**: Removed the unused "Loadouts / Presets" tab and purged unused preset store structures from the state table.
+  - **Removed Gestalt Options Menu Bar**: Removed the top grey menu bar (`ImGui.BeginMenuBar()` / `Gestalt Options`) and replaced it with a sleek inline `[Re-detect]` button next to the active gestalt class buttons.
+  - **Removed Unmem All Gems Button**: Removed the bulk "Unmem All Gems" button from the spell gems pane to avoid accidental spell wiping.
+  - **Right-Click Spell Info Inspection**: Right-clicking any spell row in the Spellbook Browser table triggers MacroQuest's native in-game inspection (`mq.TLO.Spell(name).Inspect()`), displaying the full EverQuest spell details window (mana, cast time, duration, and effects), accompanied by informative hover tooltips.
+  - **Side-by-Side Two-Pane Layout**: The Spellbook Browser (category buttons, level filters, scribed-only toggle, search filter, and full-height scrollable spell table) and vertical spell gem bar now sit side-by-side, maximizing vertical space and providing a clean, responsive interface.
+
+- **Dedicated Pets Tab & Multi-Pet Management (`triune.lua`, v1.8.0).**
+  - **"Pets" Tab (`UI.drawPetControlTab`)**: Updated top-level tab label to **`Pets`** positioned immediately next to `Control` in the main Triune window (`Status -> Control -> Pets -> Settings -> ...`), unifying multi-pet telemetry and server command dispatch in a clean interface.
+  - **In-Game `/pet report` & Detailed Stats Inspector Window**: Added a `/pet report` button to each active trio pet slot, swarm pet card, and the global toolbar. Clicking it issues `/pet report` in chat, targets the pet, dispatches `#petcmd health <scope>`, and pops up a comprehensive modal inspection window (`Pet Stats Report##petStatsModal`) presenting full identity, loc coords, heading, speed, posture, color-graded HP & Mana bars, target telemetry, active buffs list, and quick action buttons.
+  - **Multi-Pet Telemetry for Trio Setups (`getMultiPetList`, `getPetSpawnInfo`)**: Added real-time tracking for up to 3 simultaneous pets across the player's gestalt trio classes (Magician, Beastlord, Necromancer, Enchanter, Shaman, Druid, Bard, Shadowknight) plus active swarm pets. Displays live color-graded HP progress bars, current/max HP values, target engagement telemetry (target name, target HP%, distance), and active buff lists with hover tooltips.
+  - **Server `#petcmd` Protocol Integration (`sendPetCmd`, `classToPetCmdScope`)**: Fully implemented the server's `#petcmd` multi-pet command system, routed via `/say #petcmd` to ensure EQEMU chat command handler execution without leading slashes. Supports all server verbs (`attack`, `qattack`, `follow`, `guard`, `sit`, `stop`, `taunt (on/off)`, `hold (on/off)`, `ghold (on/off)`, `spellhold (on/off)`, `focus (on/off)`, `back`, `regroup (on/off)`, `assist (on/off)`, `health`, `leader`, `feign`, `leave`) across all valid scopes (`all`, `swarm`, `mag`, `bst`, `nec`, `enc`, `shm`, `dru`, `brd`, `shd`).
+  - **Global & Individual Command Surfaces**: Provides a prominent global action toolbar with scope filtering, dual `[ON] [OFF]` stance toggle buttons, and a custom `#petcmd` execution runner, as well as per-pet card action buttons (`Attack`, `Back`, `Follow`, `Guard`, `Sit`, `Stop`, `Leave`, `/pet report`, and stance toggles) automatically scoped to that specific pet's class.
+  - **Smart Multi-Pet Reconcile (`reconcilePets`, `detectPetClassFromSpawn`)**: Enhanced zone pet scanning to detect pet class archetypes (Warder -> Bst, Elemental -> Mag, Skeleton/Spectre -> Nec, Animation -> Enc, Spirit Wolf -> Shm) and accurately map existing pets to trio slots without relying on arbitrary spawn index proximity.
+  - **Embedded Automation & Discipline Settings**: Embedded the `Pet Assist At %` HP threshold slider and `Enable Pet Hold` out-of-combat toggle directly into the tab alongside live automation state feedback (`[HOLD ACTIVE]` vs `[ENGAGED]`).
+  - **Compact Pets Tab Layout & UI Streamlining**: Removed redundant controls (`feign`, `regroup`, `qattack`, custom `#petcmd` text input/button, target scope dropdown, and global health report) and refactored action buttons into a single clean line (`Attack All`, `Back Off`, `Follow`, `Stop`, `Guard`, `Sit`, `Dismiss All`). Moved the `Pet Assist At %` slider, `Auto Pet Hold` toggle, and live Auto Hold telemetry status directly to the top of the tab for immediate visibility, eliminating lower-window scrolling.
+  - **New Slash Commands**: Added `/ac pet <verb> [scope]`, `/ac pet status`, `/ac pet report`, `/ac petscan`, `/ac pethold [on|off]`, and `/ac petassist [1-100]`.
+  - **Project Version Bump (v1.8.0)**: Synchronized version **1.8.0** across `triune.lua`, `triune_updater.lua`, and `README.md`.
+- **LuaLS Type Safety Fix (`triune_buffbot.lua`).**
+  - **Type-Safe Boolean Assignment (`isPlayerSameGuild`)**: Replaced a short-circuit expression on `valid` with an explicit conditional assignment block, preventing LuaLS static type conversion warnings where `nil` could be inferred for boolean variables.
+
+---
+
+- **Guild Priority Buffing Policy & Cast Preemption (`triune_buffbot.lua`, v1.7).**
+  - **Guild Policy Selector (`ctrl.guildMode`)**: Added a 3-way Guild Policy option (`Off`, `Guild Priority`, `Guild Only`) replacing the binary guild toggle.
+  - **Active Cast Preemption (`/stopcast`)**: When `Guild Priority` is active and a guild member requests buffs while a non-guild player is currently receiving buffs, Buffbot immediately cancels the ongoing spellcast (`/stopcast` + `/interrupt`), sends a polite notification tell to the paused requester (`ctrl.guildPriorityPauseMsg`), prioritizes and buffs the guild member first, and seamlessly resumes the non-guild player's remaining uncast spells afterwards (`ctrl.guildPriorityResumeMsg`).
+  - **Priority Queue Insertion (`enqueueBuffJob`, `requeuePreemptedJob`)**: Guild member buff jobs automatically jump ahead of all non-guild requesters in `runtime.activeQueue` while preserving strict FIFO ordering within each tier. Preempted non-guild jobs retain their exact remaining spell lists and re-queue at the front of the non-guild pool.
+  - **Live Queue & Policy UI**: Updated the `Controls` tab with Guild Policy radio buttons, live guild name telemetry (`(Your Guild: <Name>)`), and customizable tell message inputs. Enhanced the `Activity Log` queue table with a dedicated `Tier` column (`Guild` vs `Public` vs `Resuming`).
+  - **Character Config Persistence & Migration**: Automatically persists `guildMode`, `guildPriorityPauseMsg`, and `guildPriorityResumeMsg` per character in `triune_buffbot_config.lua` with backward-compatible migration for legacy `guildOnly` configs.
 - **ImDrawList Function Signature Fix (`triune_map.lua`).**
   - **MacroQuest Sol3 Argument Compatibility**: Added explicit `numSegments` (0) parameter to all 13 `AddCircleFilled` calls and explicit rounding (0.0) to `AddRectFilled` in `DrawMapCanvas`, preventing sol runtime errors ("no matching function call takes this number of arguments and the specified types") on Dear ImGui canvas rendering.
   - **New "Auto AA" Tab (`UI.drawAutoAATab`)**: Added a dedicated top-level `Auto AA` tab to Triune (Status -> Control -> Settings -> Spell Gems -> Abilities -> AAs -> **Auto AA** -> Cooldowns -> Disciplines -> Clickies -> Help) dedicated to server AA point cap management and automated fireworks summoning.
@@ -11,6 +77,9 @@
   - **Auto-Summon Fireworks Engine (`runtime.checkAutoSummonFireworks`)**: Optionally monitors the fireworks summoning ability (ID 17788: *Alternately Advanced Fireworks*) and activates `/alt activate <id>` whenever ready (out of combat and stationary), automatically clearing the summoned firework into inventory bags (`/autoinventory`).
   - **Interactive Actions**: Added instant action buttons in the UI for `Train AA Now (/notify AAWindow)`, `Summon Fireworks Now (/alt activate 17788)`, and `Clear Cursor (/autoinv)`.
   - **Slash Commands**: Added slash command control with `/ac autoaa [on|off]`, `/ac autofw [on|off]`, `/ac aatrain` / `/ac spendnow`, `/ac summonnow`, `/ac aathreshold [25-100]`, `/ac aacost [1-50]`, and `/ac aaid [id]`.
+- **Removed Auto Updater UI Buttons (`triune.lua`).**
+  - **Main Toolbar & Mini HUD Streamlining**: Removed the `Updater` button from the top header toolbar (`UI.drawHeaderBar`) and the `Update` button from the Compact Mini HUD toolbar (`drawMiniGui`), decluttering the primary navigation surfaces. Standalone update checks remain accessible via `/ac update` and `/lua run triune_updater`.
+  - **Project Version Bump (v1.7.9)**: Synchronized version **1.7.9** across `triune.lua`, `triune_updater.lua`, and `README.md`.
 - **Class Detection Zoning Reset & Parsing Fix (`triune.lua`, `triune_spellbook.lua`).**
   - **Eliminated Erroneous Zoning Class Reset**: Removed destructive `classesFromInventoryWindow()` calls from `runtime.onZoned()`. Player classes are loaded on character login/switch or configured via the Class Picker UI and should not be re-scanned or overwritten during zone changes.
   - **Fixed UI Text Substring False Positives (`parseClassLine`)**: Removed prefix-slice checks (`sub(1, 3)` and `sub(1, 2)`) that erroneously matched arbitrary Inventory Window UI labels and buttons to classes (such as "Skills" matching "SK" and "Magic Resist" matching "Mag", which caused `myClasses` to reset to `{"SK", "Mag"}`). `parseClassLine` now strictly validates entire cleaned strings or whole-word tokens against the canonical `MQSHORT` table.

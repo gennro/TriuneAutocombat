@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.7.8'
+local VERSION           = '1.8.0'
 local open              = true
 local cfg               = mq.configDir
 
@@ -419,6 +419,8 @@ local runtime = {
     lastGemDiagAt = 0,
     lastAssistCmdAt = 0,
     sungBuffs = {},
+    npcCastCounts = {},
+    lastNpcCastPruneAt = 0,
     lastMapDraw = { active = false, type = nil, key = '' },
     trackStartTime = nil,
     startAA = nil,
@@ -458,7 +460,13 @@ local petState = {
     manualHunterHold = nil,
     petHoldActive = false, -- true when we issued /pet hold waiting for HP threshold
     holdIssuedForId = 0,   -- target ID for which a hold was issued
-    PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true }
+    PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true, Brd = true },
+    selectedScope = 'all',
+    lastPetCmdSent = '',
+    lastPetCmdTime = 0,
+    inspectPetId = nil,
+    inspectSlot = nil,
+    cachedPetBuffs = {}
 }
 
 local pursuit = {
@@ -1108,6 +1116,340 @@ local function hasActivePet()
     local pets = getAllMyPets()
     return #pets > 0
 end
+
+local PET_SCOPE_LIST = {
+    'all', 'swarm', 'mag', 'bst', 'nec', 'enc', 'shm', 'dru', 'brd', 'shd'
+}
+local function classToPetCmdScope(cls)
+    if not cls or type(cls) ~= 'string' then return 'all' end
+    local lower = string.lower(cls)
+    if lower == 'sk' or lower == 'shd' then return 'shd' end
+    for _, s in ipairs(PET_SCOPE_LIST) do
+        if lower == s then return s end
+    end
+    return 'all'
+end
+
+local function sendPetCmd(verb, scope)
+    if not verb or verb == '' then return end
+    scope = scope or petState.selectedScope or 'all'
+    local fullCmd = string.format('#petcmd %s %s', verb, scope)
+    mq.cmdf('/say %s', fullCmd)
+    petState.lastPetCmdSent = fullCmd
+    petState.lastPetCmdTime = os.clock()
+    print(string.format('\ag[Triune Pet]\ax Issued: \at%s\ax', fullCmd))
+end
+
+local function detectPetClassFromSpawn(s)
+    if not s or not s() then return nil end
+    local cname = ''
+    local race = ''
+    pcall(function()
+        cname = string.lower(s.CleanName() or '')
+        race = string.lower(s.Race() or '')
+    end)
+    if cname:find('warder', 1, true) then return 'Bst' end
+    if race:find('animation', 1, true) or cname:find('animation', 1, true) then return 'Enc' end
+    if race:find('elemental', 1, true) then return 'Mag' end
+    if race:find('skeleton', 1, true) or race:find('spectre', 1, true) or race:find('zombie', 1, true) then return 'Nec' end
+    if cname:find('spirit wolf', 1, true) then return 'Shm' end
+    return nil
+end
+
+local function reconcilePets()
+    local petClassList = {}
+    for _, c in ipairs(myClasses) do
+        if petState.PET_CLASSES[c] then petClassList[#petClassList + 1] = c end
+    end
+    if #petClassList == 0 then return end
+
+    local assigned = 0
+    local allLivingPets = getAllMyPets()
+    local assignedIds = {}
+
+    -- Pass 1: match by detected class archetype
+    for _, pid in ipairs(allLivingPets) do
+        if assigned >= #petClassList then break end
+        local s = mq.TLO.Spawn(pid)
+        if s and s() and not assignedIds[pid] then
+            local detCls = detectPetClassFromSpawn(s)
+            if detCls and petState.PET_CLASSES[detCls] then
+                for _, c in ipairs(petClassList) do
+                    if c == detCls and not petState.myPets[c] then
+                        petState.myPets[c] = pid
+                        assignedIds[pid] = true
+                        assigned = assigned + 1
+                        petState.lastObservedId = pid
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Pass 2: assign remaining pets in order to remaining unassigned pet classes
+    for _, pid in ipairs(allLivingPets) do
+        if assigned >= #petClassList then break end
+        if not assignedIds[pid] then
+            for _, c in ipairs(petClassList) do
+                if not petState.myPets[c] then
+                    petState.myPets[c] = pid
+                    assignedIds[pid] = true
+                    assigned = assigned + 1
+                    petState.lastObservedId = pid
+                    break
+                end
+            end
+        end
+    end
+
+    if assigned > 0 then
+        print('\ag[Triune]\ax found ' .. assigned .. ' existing pet(s) -- tracking ' .. assigned .. ' pet(s).')
+    end
+end
+
+local function getMultiPetList()
+    local petSlots = {}
+    local seenIds = {}
+
+    if petState and type(petState.myPets) == 'table' then
+        for k, pid in pairs(petState.myPets) do
+            if not pid or pid <= 0 or not isSpawnAlive(pid) then
+                petState.myPets[k] = nil
+            end
+        end
+    end
+
+    local allLivingPets = getAllMyPets()
+
+    for i = 1, 3 do
+        local cls = myClasses[i]
+        if cls then
+            local isPetCls = petState.PET_CLASSES[cls] == true
+            local petId = petState.myPets[cls]
+            if petId and petId > 0 and isSpawnAlive(petId) then
+                seenIds[petId] = true
+            else
+                petId = nil
+            end
+
+            if isPetCls and not petId then
+                for _, pid in ipairs(allLivingPets) do
+                    if not seenIds[pid] then
+                        petId = pid
+                        seenIds[pid] = true
+                        petState.myPets[cls] = pid
+                        break
+                    end
+                end
+            end
+
+            table.insert(petSlots, {
+                slotNum = i,
+                cls = cls,
+                scope = classToPetCmdScope(cls),
+                isPetCls = isPetCls,
+                petId = petId
+            })
+        end
+    end
+
+    local extraPets = {}
+    for _, pid in ipairs(allLivingPets) do
+        if not seenIds[pid] then
+            table.insert(extraPets, pid)
+        end
+    end
+
+    return petSlots, extraPets
+end
+
+local function getPetSpawnInfo(petId)
+    local info = {
+        id = petId or 0,
+        name = 'Pet',
+        cleanName = 'Pet',
+        level = 0,
+        class = 'Pet',
+        race = 'Unknown',
+        hpPct = 0,
+        curHp = 0,
+        maxHp = 0,
+        manaPct = 0,
+        curMana = 0,
+        maxMana = 0,
+        endPct = 0,
+        curEnd = 0,
+        maxEnd = 0,
+        dist = 999,
+        x = 0,
+        y = 0,
+        z = 0,
+        heading = 0,
+        speed = 0,
+        state = 'STAND',
+        sitting = false,
+        feigning = false,
+        stunned = false,
+        levitating = false,
+        targetName = 'None',
+        targetHpPct = 0,
+        targetDist = 0,
+        buffCount = 0,
+        buffs = {},
+        buffDetails = {}
+    }
+    if not petId or petId <= 0 then return info end
+    pcall(function()
+        local s = mq.TLO.Spawn(petId)
+        if s and s() and s.ID() and s.ID() > 0 then
+            info.cleanName = s.CleanName() or 'Pet'
+            info.name = s.Name() or info.cleanName
+            info.level = s.Level() or 0
+            info.class = s.Class.ShortName() or s.Class() or 'Pet'
+            info.race = s.Race() or 'Pet'
+            info.hpPct = s.PctHPs() or 0
+            info.curHp = s.CurrentHPs() or 0
+            info.maxHp = s.MaxHPs() or 0
+            info.manaPct = s.PctMana() or 0
+            info.curMana = s.CurrentMana() or 0
+            info.maxMana = s.MaxMana() or 0
+            info.endPct = s.PctEndurance() or 0
+            info.curEnd = s.CurrentEndurance() or 0
+            info.maxEnd = s.MaxEndurance() or 0
+            info.dist = s.Distance() or 0
+            info.x = s.X() or 0
+            info.y = s.Y() or 0
+            info.z = s.Z() or 0
+            if s.Heading and s.Heading() then
+                info.heading = s.Heading.Degrees() or 0
+            end
+            info.speed = s.Speed() or 0
+            info.state = s.State() or 'STAND'
+            info.sitting = s.Sitting() or false
+            info.feigning = s.Feigning() or false
+            info.stunned = s.Stunned() or false
+            info.levitating = s.Levitating() or false
+
+            local t = s.Target
+            if t and t() and t.ID() and t.ID() > 0 then
+                info.targetName = t.CleanName() or 'Target'
+                info.targetHpPct = t.PctHPs() or 0
+                info.targetDist = t.Distance() or 0
+            end
+
+            -- 1. Try Me.Pet buffs if this is the player's primary pet
+            local myPetId = 0
+            pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+            if myPetId > 0 and myPetId == petId then
+                for b = 1, 30 do
+                    pcall(function()
+                        local pb = mq.TLO.Me.Pet.Buff(b)
+                        if pb then
+                            local bName = nil
+                            if type(pb) == 'string' and pb ~= '' then
+                                bName = pb
+                            elseif pb() and type(pb()) == 'string' and pb() ~= '' then
+                                bName = pb()
+                            elseif pb.Name and pb.Name() and pb.Name() ~= '' then
+                                bName = pb.Name()
+                            end
+                            if bName and bName ~= '' and bName ~= 'NONE' then
+                                local durSec = 0
+                                pcall(function()
+                                    local dur = mq.TLO.Me.Pet.BuffDuration(b) or 0
+                                    if type(dur) == 'number' then
+                                        durSec = math.floor(dur / 1000)
+                                    end
+                                end)
+                                table.insert(info.buffs, bName)
+                                table.insert(info.buffDetails, { slot = b, name = bName, duration = durSec })
+                            end
+                        end
+                    end)
+                end
+            end
+
+            -- 2. Try Target buffs if this pet is currently targeted
+            local curTargId = 0
+            pcall(function() curTargId = mq.TLO.Target.ID() or 0 end)
+            if curTargId == petId and #info.buffs == 0 then
+                local tbc = 0
+                pcall(function() tbc = mq.TLO.Target.BuffCount() or 0 end)
+                if tbc > 0 then
+                    for b = 1, math.min(tbc, 30) do
+                        pcall(function()
+                            local tb = mq.TLO.Target.Buff(b)
+                            if tb and tb() then
+                                local bName = (tb.Name and tb.Name()) or tb()
+                                if bName and bName ~= '' and bName ~= 'NONE' then
+                                    local durSec = 0
+                                    pcall(function()
+                                        if tb.Duration and tb.Duration.TotalSeconds then
+                                            durSec = tb.Duration.TotalSeconds() or 0
+                                        end
+                                    end)
+                                    table.insert(info.buffs, bName)
+                                    table.insert(info.buffDetails, { slot = b, name = bName, duration = durSec })
+                                end
+                            end
+                        end)
+                    end
+                end
+            end
+
+            -- 3. Try Spawn CachedBuffs
+            if #info.buffs == 0 then
+                local sbc = 0
+                pcall(function()
+                    sbc = (s.CachedBuffCount and s.CachedBuffCount()) or (s.BuffCount and s.BuffCount()) or 0
+                end)
+                if sbc > 0 then
+                    for b = 1, math.min(sbc, 30) do
+                        pcall(function()
+                            local sb = s.Buff(b)
+                            if sb and sb() then
+                                local bName = (sb.Name and sb.Name()) or (sb.Spell and sb.Spell.Name and sb.Spell.Name()) or sb()
+                                if bName and bName ~= '' and bName ~= 'NONE' then
+                                    local durSec = 0
+                                    pcall(function()
+                                        if sb.Duration and sb.Duration.TotalSeconds then
+                                            durSec = sb.Duration.TotalSeconds() or 0
+                                        end
+                                    end)
+                                    table.insert(info.buffs, bName)
+                                    table.insert(info.buffDetails, { slot = b, name = bName, duration = durSec })
+                                end
+                            end
+                        end)
+                    end
+                end
+            end
+
+            -- 4. Cache or fallback to cached buffs in petState
+            if #info.buffs > 0 then
+                petState.cachedPetBuffs[petId] = {
+                    time = os.clock(),
+                    buffs = info.buffs,
+                    buffDetails = info.buffDetails
+                }
+            elseif petState.cachedPetBuffs[petId] and (os.clock() - (petState.cachedPetBuffs[petId].time or 0)) < 300 then
+                info.buffs = petState.cachedPetBuffs[petId].buffs or {}
+                info.buffDetails = petState.cachedPetBuffs[petId].buffDetails or {}
+            end
+
+            info.buffCount = #info.buffs
+        end
+    end)
+    return info
+end
+
+-- Export to runtime for testability
+runtime.classToPetCmdScope = classToPetCmdScope
+runtime.sendPetCmd = sendPetCmd
+runtime.getMultiPetList = getMultiPetList
+runtime.getPetSpawnInfo = getPetSpawnInfo
+runtime.reconcilePets = reconcilePets
 
 local function distToId(id)
     if not id or id <= 0 then return 9999 end
@@ -1823,6 +2165,13 @@ local function createCastTracker()
             end
 
         elseif rLow == 'fizzled' or rLow == 'interrupted' then
+            local failTid = (tid and tid > 0 and tid) or (tracker and tracker.activeTargetId)
+            local failSpell = (spellName and spellName ~= '' and spellName) or (tracker and tracker.activeSpell)
+            if failTid and failTid > 0 and failSpell and failSpell ~= '' then
+                if runtime and runtime.npcCastCounts and runtime.npcCastCounts[failTid] and (runtime.npcCastCounts[failTid][failSpell] or 0) > 0 then
+                    runtime.npcCastCounts[failTid][failSpell] = runtime.npcCastCounts[failTid][failSpell] - 1
+                end
+            end
             -- Transient combat mechanics: retry on gem refresh.
             -- Only back off if severely repeating on detrimental spell (e.g. 4+ consecutive failures within 15s)
             local threshold = math.max(mRetries * 2, 4)
@@ -3977,7 +4326,7 @@ local function loadoutSig()
                 '~' ..
                 tostring(g.pct) ..
                 '~' ..
-                tostring(g.boss_only) ..
+                tostring(g.max_casts or 0) ..
                 '~' .. tostring(g.burn_only) .. '~' .. tostring(g.priority) .. '~' .. tostring(g.max_xtargets)
         end
     end
@@ -4395,13 +4744,6 @@ function UI.drawHeaderBar()
         ImGui.SetTooltip('Launches or closes the standalone Triune Cursor Item Manager.')
     end
     ImGui.SameLine()
-    if ImGui.Button('Updater##hdrUpdate') then
-        toggleTool('triune_updater')
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Launches or closes the standalone Triune Release Updater interface.')
-    end
-    ImGui.SameLine()
     local cdActive = ctrl.show_cooldowns
     local cdPop = 0
     if cdActive then
@@ -4609,15 +4951,20 @@ end
 function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
     if allowBurn == nil then allowBurn = true end
     local maxGems = getNumGems()
+
+    -- Compact styling inside gem list: scaled +10% for improved readability
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 4, 3)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 4, 3)
+
     if ImGui.BeginChild('gemlist_' .. idPrefix, 0, 0) then
         for i = 1, maxGems do
             ImGui.PushID(idPrefix .. i)
             local g = gemsTable[i]
             local cls = g and g.cls or nil
 
-            -- 1-click Gem Slot Move / Swap Buttons (▲ / ▼)
+            -- 1-click Gem Slot Move / Swap Buttons (^ / v)
             if i > 1 then
-                if ImGui.SmallButton('^##u') then
+                if ImGui.Button('^##u', 17, 19) then
                     local tmp = gemsTable[i - 1]
                     gemsTable[i - 1] = gemsTable[i]
                     gemsTable[i] = tmp
@@ -4629,11 +4976,11 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                 end
                 if ImGui.IsItemHovered() then ImGui.SetTooltip('Move slot UP (swap with slot %d).', i - 1) end
             else
-                ImGui.TextDisabled(' ')
+                ImGui.InvisibleButton('##uDummy', 17, 19)
             end
             ImGui.SameLine()
             if i < maxGems then
-                if ImGui.SmallButton('v##d') then
+                if ImGui.Button('v##d', 17, 19) then
                     local tmp = gemsTable[i + 1]
                     gemsTable[i + 1] = gemsTable[i]
                     gemsTable[i] = tmp
@@ -4645,7 +4992,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                 end
                 if ImGui.IsItemHovered() then ImGui.SetTooltip('Move slot DOWN (swap with slot %d).', i + 1) end
             else
-                ImGui.TextDisabled(' ')
+                ImGui.InvisibleButton('##dDummy', 17, 19)
             end
             ImGui.SameLine()
 
@@ -4667,7 +5014,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
             local classOpts = { '--' }
             for _, c in ipairs(myClasses) do classOpts[#classOpts + 1] = c end
             local curCi = cls and idxOf(classOpts, cls) or 1
-            ImGui.SetNextItemWidth(62)
+            ImGui.SetNextItemWidth(59)
             local ci = ImGui.Combo('##c', curCi, classOpts)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Select class for slot (or "--" to clear).')
@@ -4692,12 +5039,11 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     local names, lookup = filteredSpells(cls)
                     local spOpts = { '-- choose --' }
                     for _, n in ipairs(names) do spOpts[#spOpts + 1] = n end
-                    -- find current selection index
                     local curSi = 1
                     if g.spell then
                         for k, lu in pairs(lookup) do if lu.name == g.spell then curSi = k + 1 end end
                     end
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(185)
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(180)
                     local si = ImGui.Combo('##s', curSi, spOpts)
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('Select spell to assign to this gem slot.')
@@ -4712,7 +5058,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     end
 
                     -- target
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(133)
                     local ti = ImGui.Combo('##t', idxOf(COMBO_OPTIONS.TARGETS, g.target or 'F: Myself'), COMBO_OPTIONS.TARGETS)
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('Target: who to cast on (Myself, Tank, Target, MA Target, Pet).')
@@ -4720,21 +5066,21 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                     g.target = COMBO_OPTIONS.TARGETS[ti]
 
                     -- when
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(138)
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(116)
                     local wi = ImGui.Combo('##w', idxOf(COMBO_OPTIONS.WHENS, g.when or 'always'), COMBO_OPTIONS.WHENS)
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('Trigger: condition to cast (HP <=, target HP between, missing buff, has Curse, in combat).')
                     end
                     g.when = COMBO_OPTIONS.WHENS[wi]
 
-                    -- percent: draggable slider that shows the value (0% = Disabled)
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(75)
+                    -- percent: draggable slider that shows the value (0% = Off)
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(57)
                     local curPct = tonumber(g.pct)
                     if curPct == nil then curPct = 100 end
                     local isDis = (curPct == 0)
                     local pCount = 0
                     if isDis then pCount = UI.pushDisabledSliderStyle() end
-                    local newPct = ImGui.SliderInt('##p', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                    local newPct = ImGui.SliderInt('##p', curPct, 0, 100, isDis and 'Off' or '%d%%')
                     local isHov = ImGui.IsItemHovered()
                     if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                     g.pct = newPct
@@ -4748,9 +5094,9 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
 
                     -- If 'target HP between', show Min HP threshold slider
                     if g.when == 'target HP between' then
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(62)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(48)
                         local minHp = tonumber(g.min_hp) or 20
-                        local newMinHp = ImGui.SliderInt('##minhp', minHp, 0, 100, '%d%% min')
+                        local newMinHp = ImGui.SliderInt('##minhp', minHp, 0, 100, '%d%%>')
                         g.min_hp = newMinHp
                         if ImGui.IsItemHovered() then
                             UI.setTooltip(string.format('Min Target HP%%: %d%% (Cast when target is between %d%% and %d%% HP).', newMinHp, newMinHp, newPct))
@@ -4759,7 +5105,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                 end
 
                 if allowBurn then
-                    ImGui.SameLine(); ImGui.SetNextItemWidth(42)
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(35)
                     local curXt = tonumber(g.min_xtar) or 1
                     if curXt < 1 then curXt = 1 end
                     if curXt > 10 then curXt = 10 end
@@ -4770,11 +5116,22 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                         ImGui.SetTooltip('Min active NPCs on XTarget required.')
                     end
 
-                    ImGui.SameLine()
-                    local bossVal = ImGui.Checkbox('Boss##gbo', g.boss_only or false)
-                    g.boss_only = bossVal
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(48)
+                    local maxCastOpts = { 'Unl', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10' }
+                    local curMc = tonumber(g.max_casts) or 0
+                    if curMc < 0 or curMc > 10 then curMc = 0 end
+                    local newMci = ImGui.Combo('##mc', curMc + 1, maxCastOpts)
+                    local newMc = (newMci == 1) and 0 or (newMci - 1)
+                    if newMc ~= curMc then
+                        g.max_casts = newMc
+                        saveLoadout(true)
+                    end
                     if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('Only cast on Named / Boss mobs.')
+                        if newMc == 0 then
+                            UI.setTooltip('Per-NPC Cast Limit: Unlimited (Unl). Triune will cast this spell whenever conditions are met.')
+                        else
+                            UI.setTooltip(string.format('Per-NPC Cast Limit: Max %d cast(s) per NPC. Once cast %d time(s) on a target, Triune will not cast it on that NPC again.', newMc, newMc))
+                        end
                     end
 
                     ImGui.SameLine()
@@ -4789,19 +5146,21 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
         end
     end
     ImGui.EndChild()
+    ImGui.PopStyleVar(2)
 end
 
 -- Header controls for the Spell Gems tab: level band, auto-mem, import, presets, and "Mem All to Bar".
 function UI.drawGemTabHeader(gemsTable)
+    -- Row 1: Filters, Automation & Bar Actions
     ImGui.TextDisabled('Lvl:')
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Filter available spells by character level range.') end
-    ImGui.SameLine(); ImGui.SetNextItemWidth(36)
+    ImGui.SameLine(); ImGui.SetNextItemWidth(29)
     local newLvlMin = ImGui.InputInt('##lmin', lvlMin, 0, 0)
     if newLvlMin < 1 then newLvlMin = 1 end
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Minimum spell level.') end
     if newLvlMin ~= lvlMin then lvlMin = newLvlMin; clearFilteredSpellsCache() end
-    ImGui.SameLine(); ImGui.Text('to')
-    ImGui.SameLine(); ImGui.SetNextItemWidth(36)
+    ImGui.SameLine(); ImGui.TextDisabled('-')
+    ImGui.SameLine(); ImGui.SetNextItemWidth(29)
     local playerMaxLvl = (mq.TLO.Me and mq.TLO.Me.Level and (tonumber(mq.TLO.Me.Level()) or 65)) or 65
     if playerMaxLvl < 1 then playerMaxLvl = 65 end
     local newLvlMax = ImGui.InputInt('##lmax', lvlMax, 0, 0)
@@ -4826,6 +5185,16 @@ function UI.drawGemTabHeader(gemsTable)
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Auto-memorize spells when chosen.')
     end
+
+    ImGui.SameLine(); ImGui.TextDisabled('| Rebuff:')
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Pre-refresh buffs out of combat when remaining duration falls below this threshold.') end
+    ImGui.SameLine(); ImGui.SetNextItemWidth(60)
+    local curRefSec = tonumber(ctrl.buff_refresh_sec) or 45
+    local newRefSec = ImGui.SliderInt('##refsec', curRefSec, 0, 300, '%ds')
+    ctrl.buff_refresh_sec = newRefSec
+    if ImGui.IsItemHovered() then UI.setTooltip(string.format('Pre-refresh buffs out of combat if remaining duration <= %d seconds (0s = only when expired).', newRefSec)) end
+
+    ImGui.SameLine(); ImGui.TextDisabled('|')
 
     ImGui.SameLine()
     if ImGui.SmallButton('Import Bar') then
@@ -4852,13 +5221,13 @@ function UI.drawGemTabHeader(gemsTable)
         ImGui.SetTooltip('Memorizes all gems to your bar (out of combat).')
     end
     if pendingCount > 0 then
-        ImGui.SameLine(); accent(WARN, string.format('memming... %d', pendingCount))
+        ImGui.SameLine(); accent(WARN, string.format('memming (%d)', pendingCount))
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(string.format('%d spell(s) queued to memorize.', pendingCount))
         end
     end
 
-    -- Row 2: Spell Gem Presets & Multi-Spec Profiles Toolbar
+    -- Row 2: Spell Gem Presets Toolbar
     ImGui.TextDisabled('Preset:')
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Manage named Spell Gem loadout presets.') end
     ImGui.SameLine()
@@ -4871,7 +5240,7 @@ function UI.drawGemTabHeader(gemsTable)
             return a:lower() < b:lower()
         end)
     end
-    ImGui.SetNextItemWidth(140)
+    ImGui.SetNextItemWidth(143)
     local pChoice = ImGui.Combo('##presetCombo', 1, presetNames)
     if pChoice > 1 then
         local pName = presetNames[pChoice]
@@ -4879,7 +5248,7 @@ function UI.drawGemTabHeader(gemsTable)
     end
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Select a saved preset to load and auto-memorize.') end
 
-    ImGui.SameLine(); ImGui.SetNextItemWidth(115)
+    ImGui.SameLine(); ImGui.SetNextItemWidth(121)
     runtime.presetInput = ImGui.InputText('##pnameInput', runtime.presetInput or '', 32)
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Type a name to save current gems as a preset.') end
 
@@ -4902,14 +5271,6 @@ function UI.drawGemTabHeader(gemsTable)
         end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Delete selected preset: "%s"', presetNames[pChoice]) end
     end
-
-    ImGui.SameLine(); ImGui.TextDisabled('| Rebuff:')
-    if ImGui.IsItemHovered() then ImGui.SetTooltip('Pre-refresh buffs out of combat when remaining duration falls below this threshold.') end
-    ImGui.SameLine(); ImGui.SetNextItemWidth(65)
-    local curRefSec = tonumber(ctrl.buff_refresh_sec) or 45
-    local newRefSec = ImGui.SliderInt('##refsec', curRefSec, 0, 300, '%ds')
-    ctrl.buff_refresh_sec = newRefSec
-    if ImGui.IsItemHovered() then UI.setTooltip(string.format('Pre-refresh buffs out of combat if remaining duration <= %d seconds (0s = only when expired).', newRefSec)) end
 
     ImGui.Separator()
 end
@@ -5195,6 +5556,10 @@ function UI.drawAbilitiesTab()
     end
     ImGui.Separator()
 
+    -- Compact styling inside abilities list: tighter item spacing & frame padding
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 4, 3)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 4, 3)
+
     if ImGui.BeginChild('abilitieslist', 0, 0) then
         local clientAbilities = getClientAbilities()
         local anyAction = false
@@ -5244,7 +5609,7 @@ function UI.drawAbilitiesTab()
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Autoskill active: Fires whenever ready during melee combat without condition checks.')
                         end
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(35)
                         local curXt = tonumber(entry.min_xtar) or 1
                         if curXt < 1 then curXt = 1 end
                         if curXt > 10 then curXt = 10 end
@@ -5261,25 +5626,25 @@ function UI.drawAbilitiesTab()
                             ImGui.SetTooltip('Only fire when Burn Mode is ON.')
                         end
                     else
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(133)
                         local ti = ImGui.Combo('##actt', idxOf(COMBO_OPTIONS.TARGETS, entry.target), COMBO_OPTIONS.TARGETS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Target condition: who or what to use this ability on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                         end
                         entry.target = COMBO_OPTIONS.TARGETS[ti]
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(116)
                         local wi = ImGui.Combo('##actw', idxOf(COMBO_OPTIONS.WHENS, entry.when), COMBO_OPTIONS.WHENS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Trigger condition: when this ability should be used (e.g. in combat, my HP <=, always).')
                         end
                         entry.when = COMBO_OPTIONS.WHENS[wi]
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(57)
                         local curPct = tonumber(entry.pct)
                         if curPct == nil then curPct = 100 end
                         local isDis = (curPct == 0)
                         local pCount = 0
                         if isDis then pCount = UI.pushDisabledSliderStyle() end
-                        local spVal = ImGui.SliderInt('##actp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                        local spVal = ImGui.SliderInt('##actp', curPct, 0, 100, isDis and 'Off' or '%d%%')
                         local isHov = ImGui.IsItemHovered()
                         if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                         entry.pct = spVal
@@ -5290,7 +5655,7 @@ function UI.drawAbilitiesTab()
                                 UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this ability).', spVal))
                             end
                         end
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(35)
                         local curXt = tonumber(entry.min_xtar) or 1
                         if curXt < 1 then curXt = 1 end
                         if curXt > 10 then curXt = 10 end
@@ -5306,7 +5671,7 @@ function UI.drawAbilitiesTab()
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Only fires when Burn Mode is ON.')
                         end
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(80)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(70)
                         local priVal = ImGui.SliderInt('##actpri', entry.priority or 50, 1, 99, 'Pri %d')
                         entry.priority = priVal
                         if ImGui.IsItemHovered() then
@@ -5327,6 +5692,7 @@ function UI.drawAbilitiesTab()
         end
     end
     ImGui.EndChild()
+    ImGui.PopStyleVar(2)
     ImGui.EndTabItem()
 end
 
@@ -5351,6 +5717,10 @@ function UI.drawAATab()
         ImGui.SetTooltip('Opens the standalone popout Cooldown & Ability Monitor window.')
     end
     ImGui.Separator()
+
+    -- Compact styling inside AA list: tighter item spacing & frame padding
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 4, 3)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 4, 3)
 
     if ImGui.BeginChild('aalist', 0, 0) then
         local TIER_ORDER = { 'short', 'mid', 'burn' }
@@ -5384,25 +5754,25 @@ function UI.drawAATab()
                                     ImGui.SetTooltip(string.format('Cooldown: %s (Tier: %s)', fmtSec(secNum), tier))
                                 end
                                 if entry.enabled then
-                                    ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(133)
                                     local ti = ImGui.Combo('##aat', idxOf(COMBO_OPTIONS.TARGETS, entry.target), COMBO_OPTIONS.TARGETS)
                                     if ImGui.IsItemHovered() then
                                         ImGui.SetTooltip('Target condition: who or what to cast this ability on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                                     end
                                     entry.target = COMBO_OPTIONS.TARGETS[ti]
-                                    ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(116)
                                     local wi = ImGui.Combo('##aaw', idxOf(COMBO_OPTIONS.WHENS, entry.when), COMBO_OPTIONS.WHENS)
                                     if ImGui.IsItemHovered() then
                                         ImGui.SetTooltip('Trigger condition: when this ability should be cast (e.g. in combat, HP <=, my Mana <=, missing buff, always).')
                                     end
                                     entry.when = COMBO_OPTIONS.WHENS[wi]
-                                    ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(57)
                                     local curPct = tonumber(entry.pct)
                                     if curPct == nil then curPct = 30 end
                                     local isDis = (curPct == 0)
                                     local pCount = 0
                                     if isDis then pCount = UI.pushDisabledSliderStyle() end
-                                    local newPct = ImGui.SliderInt('##aap', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                                    local newPct = ImGui.SliderInt('##aap', curPct, 0, 100, isDis and 'Off' or '%d%%')
                                     local isHov = ImGui.IsItemHovered()
                                     if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                                     entry.pct = newPct
@@ -5413,7 +5783,7 @@ function UI.drawAATab()
                                             UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this ability).', newPct))
                                         end
                                     end
-                                    ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(35)
                                     local curXt = tonumber(entry.min_xtar) or 1
                                     if curXt < 1 then curXt = 1 end
                                     if curXt > 10 then curXt = 10 end
@@ -5442,6 +5812,7 @@ function UI.drawAATab()
         end
     end
     ImGui.EndChild()
+    ImGui.PopStyleVar(2)
     ImGui.EndTabItem()
 end
 
@@ -5612,6 +5983,10 @@ function UI.drawDiscTab()
         ImGui.SetTooltip('Opens the standalone popout Cooldown & Ability Monitor window.')
     end
     ImGui.Separator()
+    -- Compact styling inside disciplines list: tighter item spacing & frame padding
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 4, 3)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 4, 3)
+
     if ImGui.BeginChild('disclist', 0, 0) then
         local anyDisc = false
         for _, cls in ipairs(myClasses) do
@@ -5639,25 +6014,25 @@ function UI.drawDiscTab()
                         ImGui.SetTooltip(string.format('Required Level: %s', tostring(lv)))
                     end
                     if entry.enabled then
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(150)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(133)
                         local ti = ImGui.Combo('##dt', idxOf(COMBO_OPTIONS.TARGETS, entry.target), COMBO_OPTIONS.TARGETS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Target condition: who or what to use this discipline on (e.g. Myself, Tank, Current Target, MA Target, Pet).')
                         end
                         entry.target = COMBO_OPTIONS.TARGETS[ti]
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(140)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(116)
                         local wi = ImGui.Combo('##dw', idxOf(COMBO_OPTIONS.WHENS, entry.when), COMBO_OPTIONS.WHENS)
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip('Trigger condition: when this discipline should be used (e.g. HP <=, in combat, my Mana <=, always).')
                         end
                         entry.when = COMBO_OPTIONS.WHENS[wi]
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(90)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(57)
                         local curPct = tonumber(entry.pct)
                         if curPct == nil then curPct = 30 end
                         local isDis = (curPct == 0)
                         local pCount = 0
                         if isDis then pCount = UI.pushDisabledSliderStyle() end
-                        local dpVal = ImGui.SliderInt('##dp', curPct, 0, 100, isDis and 'Disabled' or '%d%%')
+                        local dpVal = ImGui.SliderInt('##dp', curPct, 0, 100, isDis and 'Off' or '%d%%')
                         local isHov = ImGui.IsItemHovered()
                         if pCount > 0 then UI.popDisabledSliderStyle(pCount) end
                         entry.pct = dpVal
@@ -5668,7 +6043,7 @@ function UI.drawDiscTab()
                                 UI.setTooltip(string.format('Threshold: %d%% (Set to 0%% to disable this discipline).', dpVal))
                             end
                         end
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(45)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(35)
                         local curXt = tonumber(entry.min_xtar) or 1
                         if curXt < 1 then curXt = 1 end
                         if curXt > 10 then curXt = 10 end
@@ -5680,7 +6055,7 @@ function UI.drawDiscTab()
                                 'Minimum number of active NPCs on XTarget required for this discipline to fire.')
                         end
                         ImGui.SameLine()
-                        local dboVal = ImGui.Checkbox('Boss Only##bo', entry.boss_only)
+                        local dboVal = ImGui.Checkbox('Boss##bo', entry.boss_only)
                         entry.boss_only = dboVal
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip(
@@ -5693,7 +6068,7 @@ function UI.drawDiscTab()
                             ImGui.SetTooltip(
                                 'Only fires when Burn Mode is ON.')
                         end
-                        ImGui.SameLine(); ImGui.SetNextItemWidth(80)
+                        ImGui.SameLine(); ImGui.SetNextItemWidth(70)
                         local priVal = ImGui.SliderInt('##pri', entry.priority or 50, 1, 99, 'Pri %d')
                         entry.priority = priVal
                         if ImGui.IsItemHovered() then
@@ -5714,6 +6089,7 @@ function UI.drawDiscTab()
         end
     end
     ImGui.EndChild()
+    ImGui.PopStyleVar(2)
     ImGui.EndTabItem()
 end
 
@@ -7259,6 +7635,443 @@ function UI.drawControlTab()
     ImGui.EndTabItem()
 end
 
+function UI.drawPetControlTab()
+    if not ImGui.BeginTabItem('Pets') then return end
+
+    local petSlots, extraPets = getMultiPetList()
+
+    -- 1. Global Pet Command Center (Compact Header & Telemetry)
+    accent(GOLD, 'Pet Command Center')
+    ImGui.SameLine()
+    if ImGui.SmallButton('Re-Scan Pets##rescanGlobal') then
+        reconcilePets()
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Re-scan zone for active pets belonging to your character and update tracking.')
+    end
+    ImGui.SameLine()
+    ImGui.TextDisabled('|')
+    ImGui.SameLine()
+    if petState.petHoldActive then
+        accent(WARN, string.format('Auto Hold: ACTIVE (Holding until target HP <= %d%%)', ctrl.pet_assist_at or 100))
+    else
+        accent(GOOD, 'Auto Hold: DISENGAGED / ENGAGED')
+    end
+
+    -- Pet Assist Slider & Auto Hold Toggle at Top
+    local petHoldVal = ImGui.Checkbox('Auto Pet Hold##petCtrlHold', ctrl.pet_hold_enabled ~= false)
+    if petHoldVal ~= (ctrl.pet_hold_enabled ~= false) then
+        ctrl.pet_hold_enabled = petHoldVal
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s',
+            'Hold pets via "#petcmd hold all" whenever out of combat or prior\n'
+            .. 'to reaching the Pet Assist HP threshold, releasing them on attack.')
+    end
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(160)
+    local petAssistVal = ImGui.SliderInt('Pet Assist At %##petCtrlAssist', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
+    if petAssistVal ~= ctrl.pet_assist_at then
+        ctrl.pet_assist_at = petAssistVal
+        saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s',
+            'Send pets to attack once the target drops to or below this HP threshold\n'
+            .. 'AND player is engaging. 100% = send immediately upon engagement.')
+    end
+
+    -- Primary Combat Actions (all on one line)
+    if ImGui.Button('Attack All##atkGlobal') then sendPetCmd('attack', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Send all pets to attack current target (#petcmd attack all).') end
+    ImGui.SameLine()
+    if ImGui.Button('Back Off##backGlobal') then sendPetCmd('back', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Call all pets back to your side (#petcmd back all).') end
+    ImGui.SameLine()
+    if ImGui.Button('Follow##flwGlobal') then sendPetCmd('follow', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Order all pets to follow master (#petcmd follow all).') end
+    ImGui.SameLine()
+    if ImGui.Button('Stop##stopGlobal') then sendPetCmd('stop', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Stop all pets movement in place (#petcmd stop all).') end
+    ImGui.SameLine()
+    if ImGui.Button('Guard##guardGlobal') then sendPetCmd('guard', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Order all pets to guard current location (#petcmd guard all).') end
+    ImGui.SameLine()
+    if ImGui.Button('Sit##sitGlobal') then sendPetCmd('sit', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Order all pets to sit (#petcmd sit all).') end
+    ImGui.SameLine()
+    if ImGui.Button('Dismiss All##leaveGlobal') then sendPetCmd('leave', 'all') end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Dismiss all active pets (#petcmd leave all).') end
+
+    -- Stance Toggles (compact 2-row layout)
+    ImGui.TextDisabled('All Stances:')
+    ImGui.SameLine()
+    ImGui.Text('Taunt')
+    ImGui.SameLine()
+    if ImGui.SmallButton('ON##tntOnGlobal') then sendPetCmd('taunt on', 'all') end
+    ImGui.SameLine()
+    if ImGui.SmallButton('OFF##tntOffGlobal') then sendPetCmd('taunt off', 'all') end
+    ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+    ImGui.Text('Hold')
+    ImGui.SameLine()
+    if ImGui.SmallButton('ON##hldOnGlobal') then sendPetCmd('hold on', 'all') end
+    ImGui.SameLine()
+    if ImGui.SmallButton('OFF##hldOffGlobal') then sendPetCmd('hold off', 'all') end
+    ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+    ImGui.Text('GHold')
+    ImGui.SameLine()
+    if ImGui.SmallButton('ON##ghldOnGlobal') then sendPetCmd('ghold on', 'all') end
+    ImGui.SameLine()
+    if ImGui.SmallButton('OFF##ghldOffGlobal') then sendPetCmd('ghold off', 'all') end
+
+    ImGui.Text('SpellHold')
+    ImGui.SameLine()
+    if ImGui.SmallButton('ON##sphOnGlobal') then sendPetCmd('spellhold on', 'all') end
+    ImGui.SameLine()
+    if ImGui.SmallButton('OFF##sphOffGlobal') then sendPetCmd('spellhold off', 'all') end
+    ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+    ImGui.Text('Focus')
+    ImGui.SameLine()
+    if ImGui.SmallButton('ON##fcsOnGlobal') then sendPetCmd('focus on', 'all') end
+    ImGui.SameLine()
+    if ImGui.SmallButton('OFF##fcsOffGlobal') then sendPetCmd('focus off', 'all') end
+    ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+    ImGui.Text('Assist')
+    ImGui.SameLine()
+    if ImGui.SmallButton('ON##astOnGlobal') then sendPetCmd('assist on', 'all') end
+    ImGui.SameLine()
+    if ImGui.SmallButton('OFF##astOffGlobal') then sendPetCmd('assist off', 'all') end
+
+    ImGui.Separator()
+
+    -- 2. Trio Pet Telemetry & Individual Cards
+    accent(GOLD, 'Active Trio Pet Telemetry')
+    for _, slot in ipairs(petSlots) do
+        local slotHeader = string.format('Slot %d: [%s] ', slot.slotNum, slot.cls)
+        local info = getPetSpawnInfo(slot.petId)
+
+        if slot.petId then
+            slotHeader = slotHeader .. string.format('%s (Lvl %d %s, ID: %d)', info.cleanName, info.level, info.race, info.id)
+        elseif slot.isPetCls then
+            slotHeader = slotHeader .. '(Pet Missing / Not Summoned)'
+        else
+            slotHeader = slotHeader .. '(Non-Pet Class)'
+        end
+
+        local headerOpen = ImGui.CollapsingHeader(slotHeader .. '###slotHeader' .. slot.slotNum, ImGuiTreeNodeFlags.DefaultOpen)
+        if headerOpen then
+            if slot.petId then
+                -- Row 1: Status badge line & action buttons
+                accent(GOLD, string.format('[%s] %s', slot.cls, info.cleanName))
+                ImGui.SameLine()
+                if info.targetName ~= 'None' and info.targetName ~= '' then
+                    accent(WARN, '[ENGAGED]')
+                elseif petState.petHoldActive then
+                    accent(GOLD, '[HOLD]')
+                else
+                    accent(GOOD, '[ALIVE]')
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton('Target##targPet' .. slot.slotNum) then
+                    mq.cmdf('/target id %d', info.id)
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', 'Target this pet in-game (/target id)')
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton('/pet report##petRpt' .. slot.slotNum) then
+                    petState.inspectPetId = slot.petId
+                    petState.inspectSlot = slot
+                    mq.cmdf('/target id %d', info.id)
+                    mq.cmd('/pet report')
+                    sendPetCmd('health', slot.scope)
+                    ImGui.OpenPopup('Pet Stats Report##petStatsModal')
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', 'Issue /pet report in chat & pop up detailed pet stats window')
+                end
+
+                -- Row 2: Target & Distance info
+                ImGui.TextDisabled(string.format('Lvl %d %s (%.1fm)', info.level, info.race, info.dist))
+                ImGui.SameLine()
+                if info.targetName ~= 'None' and info.targetName ~= '' then
+                    accent(ARC, string.format('Tgt: %s (%d%%)', info.targetName, info.targetHpPct))
+                else
+                    accent(MUTED, 'Tgt: None')
+                end
+
+                -- Row 3: Live HP Progress Bar
+                local hpFrac = math.max(0, math.min(1.0, info.hpPct / 100.0))
+                local r, g, b = 0.35, 0.75, 0.45
+                if info.hpPct <= 25 then
+                    r, g, b = 0.95, 0.35, 0.35
+                elseif info.hpPct <= 50 then
+                    r, g, b = 0.95, 0.75, 0.30
+                end
+                local hpBarText = string.format('HP: %d%% (%d / %d)', info.hpPct, info.curHp, info.maxHp)
+                if info.maxHp == 0 then hpBarText = string.format('HP: %d%%', info.hpPct) end
+                drawStatusProgressBar(hpFrac, -1, 14, hpBarText, r, g, b, 1.0)
+
+                -- Row 4: Buffs info
+                if info.buffCount > 0 then
+                    accent(ARC, string.format('Buffs (%d): ', info.buffCount))
+                    ImGui.SameLine()
+                    local buffStr = table.concat(info.buffs, ', ')
+                    if #buffStr > 40 then
+                        ImGui.Text(buffStr:sub(1, 37) .. '...')
+                    else
+                        ImGui.Text(buffStr)
+                    end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('%s', table.concat(info.buffs, '\n'))
+                    end
+                else
+                    accent(MUTED, 'Buffs (0): ')
+                    ImGui.SameLine()
+                    ImGui.TextDisabled('None active')
+                end
+
+                -- Row 5: Individual Actions
+                if ImGui.SmallButton(string.format('Attack##atk%d', slot.slotNum)) then
+                    sendPetCmd('attack', slot.scope)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Back##back%d', slot.slotNum)) then
+                    sendPetCmd('back', slot.scope)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Follow##flw%d', slot.slotNum)) then
+                    sendPetCmd('follow', slot.scope)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Stop##stp%d', slot.slotNum)) then
+                    sendPetCmd('stop', slot.scope)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Guard##grd%d', slot.slotNum)) then
+                    sendPetCmd('guard', slot.scope)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Sit##sit%d', slot.slotNum)) then
+                    sendPetCmd('sit', slot.scope)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Dismiss##lve%d', slot.slotNum)) then
+                    sendPetCmd('leave', slot.scope)
+                end
+
+                -- Row 6: Individual Stances (compact 2-row layout)
+                ImGui.TextDisabled(string.format('%s Stances:', slot.cls))
+                ImGui.SameLine()
+                ImGui.Text('Taunt')
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('ON##tntOn%d', slot.slotNum)) then sendPetCmd('taunt on', slot.scope) end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('OFF##tntOff%d', slot.slotNum)) then sendPetCmd('taunt off', slot.scope) end
+                ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+                ImGui.Text('Hold')
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('ON##hldOn%d', slot.slotNum)) then sendPetCmd('hold on', slot.scope) end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('OFF##hldOff%d', slot.slotNum)) then sendPetCmd('hold off', slot.scope) end
+                ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+                ImGui.Text('GHold')
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('ON##ghldOn%d', slot.slotNum)) then sendPetCmd('ghold on', slot.scope) end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('OFF##ghldOff%d', slot.slotNum)) then sendPetCmd('ghold off', slot.scope) end
+
+                ImGui.Text('SpellHold')
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('ON##sphOn%d', slot.slotNum)) then sendPetCmd('spellhold on', slot.scope) end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('OFF##sphOff%d', slot.slotNum)) then sendPetCmd('spellhold off', slot.scope) end
+                ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+                ImGui.Text('Focus')
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('ON##fcsOn%d', slot.slotNum)) then sendPetCmd('focus on', slot.scope) end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('OFF##fcsOff%d', slot.slotNum)) then sendPetCmd('focus off', slot.scope) end
+                ImGui.SameLine(); ImGui.TextDisabled('|'); ImGui.SameLine()
+                ImGui.Text('Assist')
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('ON##astOn%d', slot.slotNum)) then sendPetCmd('assist on', slot.scope) end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('OFF##astOff%d', slot.slotNum)) then sendPetCmd('assist off', slot.scope) end
+            else
+                accent(MUTED, string.format('No active pet detected for %s (%s).', slot.cls, slot.isPetCls and 'Pet-capable class' or 'Non-pet class'))
+                if slot.isPetCls then
+                    ImGui.SameLine()
+                    if ImGui.SmallButton(string.format('Scan for Pet##scanSlot%d', slot.slotNum)) then
+                        reconcilePets()
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Extra / Swarm Pets
+    if #extraPets > 0 then
+        accent(GOLD, string.format('Additional Active Pets / Swarms (%d)', #extraPets))
+        for idx, epid in ipairs(extraPets) do
+            local einfo = getPetSpawnInfo(epid)
+            ImGui.Text(string.format('[#%d] %s (Lvl %d, %.1fm)', idx, einfo.cleanName, einfo.level, einfo.dist))
+            ImGui.SameLine()
+            if ImGui.SmallButton(string.format('Target##extraTarg%d', idx)) then
+                mq.cmdf('/target id %d', einfo.id)
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton(string.format('/pet report##extraRpt%d', idx)) then
+                petState.inspectPetId = epid
+                petState.inspectSlot = { slotNum = idx, cls = 'Swarm', scope = 'swarm', isPetCls = true, petId = epid }
+                mq.cmdf('/target id %d', einfo.id)
+                mq.cmd('/pet report')
+                sendPetCmd('health', 'swarm')
+                ImGui.OpenPopup('Pet Stats Report##petStatsModal')
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('%s', 'Issue /pet report & pop up detailed pet stats window')
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton(string.format('Attack##extraAtk%d', idx)) then
+                sendPetCmd('attack', 'swarm')
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton(string.format('Back##extraBack%d', idx)) then
+                sendPetCmd('back', 'swarm')
+            end
+            local eHpFrac = math.max(0, math.min(1.0, einfo.hpPct / 100.0))
+            drawStatusProgressBar(eHpFrac, -1, 12, string.format('HP: %d%%', einfo.hpPct), 0.35, 0.75, 0.45, 1.0)
+        end
+    end
+
+
+    -- 4. Pet Stats Report Modal Popup Window
+    local _, petStatsModalDraw = ImGui.BeginPopupModal('Pet Stats Report##petStatsModal', true,
+        ImGuiWindowFlags.AlwaysAutoResize)
+    if petStatsModalDraw then
+        local inspectId = petState.inspectPetId or 0
+        local slot = petState.inspectSlot or { cls = 'Pet', scope = 'all', slotNum = 1 }
+        local pinfo = getPetSpawnInfo(inspectId)
+
+        if inspectId > 0 and isSpawnAlive(inspectId) then
+            accent(GOLD, string.format('Pet Telemetry & Stat Report: [%s] %s', slot.cls, pinfo.cleanName))
+            ImGui.Separator()
+
+            -- Two-column layout for clean, readable stats
+            ImGui.Columns(2, 'petStatsInspectCols', true)
+            ImGui.SetColumnWidth(0, 250)
+
+            -- Column 1: Identity & Physical Attributes
+            accent(ARC, 'Identity & Position:')
+            ImGui.Text(string.format('Clean Name: %s', pinfo.cleanName))
+            ImGui.Text(string.format('Full Name: %s', pinfo.name))
+            ImGui.Text(string.format('Trio Class: %s (Scope: %s)', slot.cls, slot.scope or 'all'))
+            ImGui.Text(string.format('Race / Model: %s', pinfo.race))
+            ImGui.Text(string.format('Spawn Class: %s', pinfo.class))
+            ImGui.Text(string.format('Level: %d', pinfo.level))
+            ImGui.Text(string.format('Spawn ID: %d', pinfo.id))
+            ImGui.Text(string.format('Distance: %.1fm', pinfo.dist))
+            ImGui.Text(string.format('Loc (Y, X, Z): %.1f, %.1f, %.1f', pinfo.y, pinfo.x, pinfo.z))
+            ImGui.Text(string.format('Heading: %.0f°', pinfo.heading))
+            ImGui.Text(string.format('Move Speed: %.1f', pinfo.speed))
+
+            ImGui.NextColumn()
+
+            -- Column 2: Vitals & Combat State
+            accent(ARC, 'Vitals & Combat Engagement:')
+            local hpBarText = string.format('HP: %d%% (%d / %d)', pinfo.hpPct, pinfo.curHp, pinfo.maxHp)
+            if pinfo.maxHp == 0 then hpBarText = string.format('HP: %d%%', pinfo.hpPct) end
+            local hpFrac = math.max(0, math.min(1.0, pinfo.hpPct / 100.0))
+            local hr, hg, hb = 0.35, 0.75, 0.45
+            if pinfo.hpPct <= 25 then
+                hr, hg, hb = 0.95, 0.35, 0.35
+            elseif pinfo.hpPct <= 50 then
+                hr, hg, hb = 0.95, 0.75, 0.30
+            end
+            drawStatusProgressBar(hpFrac, -1, 15, hpBarText, hr, hg, hb, 1.0)
+
+            if pinfo.maxMana and pinfo.maxMana > 0 then
+                local manaFrac = math.max(0, math.min(1.0, pinfo.manaPct / 100.0))
+                drawStatusProgressBar(manaFrac, -1, 13, string.format('Mana: %d%% (%d / %d)', pinfo.manaPct, pinfo.curMana, pinfo.maxMana), 0.25, 0.60, 0.95, 1.0)
+            end
+
+            if pinfo.targetName ~= 'None' and pinfo.targetName ~= '' then
+                accent(WARN, string.format('Engaged Target: %s', pinfo.targetName))
+                ImGui.Text(string.format('Target HP: %d%% | Target Dist: %.1fm', pinfo.targetHpPct, pinfo.targetDist))
+            else
+                accent(GOOD, 'Target: None (Idle / Following Master)')
+            end
+
+            ImGui.Text(string.format('Animation State: %s', pinfo.state))
+            if pinfo.feigning then accent(WARN, 'Posture: Feigning Death') end
+            if pinfo.sitting then accent(ARC, 'Posture: Sitting') end
+            if pinfo.stunned then accent(ERR, 'Affliction: Stunned') end
+            if pinfo.levitating then accent(ARC, 'Effect: Levitating') end
+
+            -- Stance information if available from TLO Me.Pet
+            pcall(function()
+                if mq.TLO.Pet.ID() == pinfo.id then
+                    local stance = mq.TLO.Pet.Stance()
+                    if stance and stance ~= '' then
+                        ImGui.Text(string.format('Master Pet Stance: %s', stance))
+                    end
+                end
+            end)
+
+            ImGui.Columns(1)
+            ImGui.Separator()
+
+            -- Active Buffs
+            accent(ARC, string.format('Active Buffs & Effects (%d):', pinfo.buffCount))
+            if pinfo.buffCount > 0 and #pinfo.buffs > 0 then
+                if ImGui.BeginChild('petModalBuffsChild', 500, 70, true) then
+                    for bIdx, bName in ipairs(pinfo.buffs) do
+                        ImGui.Text(string.format('%d. %s', bIdx, bName))
+                    end
+                end
+                ImGui.EndChild()
+            else
+                ImGui.TextDisabled('No active beneficial spells or buffs detected on pet.')
+            end
+
+            ImGui.Separator()
+
+            -- Action buttons in popup
+            if ImGui.Button('Target Pet##popupTargetBtn') then
+                mq.cmdf('/target id %d', pinfo.id)
+            end
+            ImGui.SameLine()
+            if ImGui.Button('/pet report##popupRptBtn') then
+                mq.cmdf('/target id %d', pinfo.id)
+                mq.cmd('/pet report')
+                sendPetCmd('health', slot.scope or 'all')
+            end
+            ImGui.SameLine()
+            if ImGui.Button(string.format('Attack (%s)##popupAtkBtn', slot.scope or 'all')) then
+                sendPetCmd('attack', slot.scope or 'all')
+            end
+            ImGui.SameLine()
+            if ImGui.Button(string.format('Back (%s)##popupBackBtn', slot.scope or 'all')) then
+                sendPetCmd('back', slot.scope or 'all')
+            end
+            ImGui.SameLine()
+            if ImGui.Button('Close##closePetModalBtn') then
+                ImGui.CloseCurrentPopup()
+            end
+        else
+            accent(ERR, 'Selected pet is no longer alive or not found in zone.')
+            if ImGui.Button('Close##closePetModalDeadBtn') then
+                ImGui.CloseCurrentPopup()
+            end
+        end
+        ImGui.EndPopup()
+    end
+
+    ImGui.EndTabItem()
+end
+
 function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
 
@@ -7913,12 +8726,6 @@ local function drawMiniGui()
             toggleTool('triune_cursor')
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes standalone Cursor Manager') end
-
-        ImGui.SameLine()
-        if ImGui.Button('Update##miniUpdate', 58, 22) then
-            toggleTool('triune_updater')
-        end
-        if ImGui.IsItemHovered() then UI.setTooltip('Launches or closes Release Updater window') end
     end
 
     ImGui.End()
@@ -7928,7 +8735,7 @@ end
 local function drawFullGui()
     if not open or ctrl.compact then return end
     UI.pushTheme()
-    ImGui.SetNextWindowSize(720, 640, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(830, 640, ImGuiCond.FirstUseEver)
     local show
     open, show = ImGui.Begin('Triune AutoCombat##triune', open)
     if not show then
@@ -7941,7 +8748,7 @@ local function drawFullGui()
     if ImGui.BeginTabBar('triuneTabs') then
         UI.drawStatusTab()
         UI.drawControlTab()
-        UI.drawSettingsTab()
+        UI.drawPetControlTab()
         UI.drawGemTab()
         UI.drawAbilitiesTab()
         UI.drawAATab()
@@ -7949,6 +8756,7 @@ local function drawFullGui()
         UI.drawCooldownsTab()
         UI.drawDiscTab()
         UI.drawClickieTab()
+        UI.drawSettingsTab()
         UI.drawHelpTab()
         ImGui.EndTabBar()
     end
@@ -8943,8 +9751,8 @@ function UI.renderCooldownContent(idSuffix, isPopout)
 
                 ImGui.PopID()
             end
-            ImGui.EndChild()
         end
+        ImGui.EndChild()
     end
 end
 
@@ -9775,7 +10583,7 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct)
 end
 
 mq.event('TriuneZone', 'You have entered #*#', function()
-    runtime.sungBuffs = {}; if runtime.onZoned then runtime.onZoned() end
+    runtime.sungBuffs = {}; runtime.npcCastCounts = {}; if runtime.onZoned then runtime.onZoned() end
 end)
 
 local function reconcileSungBuffs()
@@ -9804,27 +10612,6 @@ local function reconcileSungBuffs()
     scanGemTable(loadout.gems)
     if found > 0 then
         print('\ag[Triune]\ax found ' .. found .. ' bard buff(s) already active -- wont re-sing them.')
-    end
-end
-
-local function reconcilePets()
-    local petClassList = {}
-    for _, c in ipairs(myClasses) do if petState.PET_CLASSES[c] then petClassList[#petClassList + 1] = c end end
-    if #petClassList == 0 then return end
-    local n = 0
-    pcall(function() n = mq.TLO.SpawnCount('pet radius 150')() or 0 end)
-    local assigned = 0
-    for i = 1, n do
-        if assigned >= #petClassList then break end
-        local s = mq.TLO.NearestSpawn(i, 'pet radius 150')
-        if s and s() and s.ID() and isSpawnMyPet(s) then
-            assigned = assigned + 1
-            petState.myPets[petClassList[assigned]] = s.ID()
-            petState.lastObservedId = s.ID()
-        end
-    end
-    if assigned > 0 then
-        print('\ag[Triune]\ax found ' .. assigned .. ' existing pet(s) -- tracking ' .. assigned .. ' pet(s).')
     end
 end
 
@@ -10034,6 +10821,11 @@ function runtime.castGem(i, g, id)
         mq.delay(50)
     end
     if castTracker.isLockedOut(g.spell, id, g.kind) then return false end
+    local maxC = tonumber(g and g.max_casts) or 0
+    if maxC > 0 and id and id > 0 then
+        local currentCasts = (runtime.npcCastCounts and runtime.npcCastCounts[id] and runtime.npcCastCounts[id][g.spell]) or 0
+        if currentCasts >= maxC then return false end
+    end
     if not hasSpellReagents(g.spell) then
         if ctrl.debug_mode and (os.clock() - (runtime.lastReagentDiagAt or 0)) > 10.0 then
             runtime.lastReagentDiagAt = os.clock()
@@ -10091,6 +10883,11 @@ function runtime.castGem(i, g, id)
     end
     mq.cmdf('/cast "%s"', g.spell)
     runtime.lastCast[key] = os.clock()
+    if id and id > 0 and g and g.spell and g.spell ~= '' then
+        runtime.npcCastCounts = runtime.npcCastCounts or {}
+        runtime.npcCastCounts[id] = runtime.npcCastCounts[id] or {}
+        runtime.npcCastCounts[id][g.spell] = ((runtime.npcCastCounts[id][g.spell]) or 0) + 1
+    end
     if g.when == 'missing pet' or g.kind == 'pet' then
         petState.lastCastCls = g.cls
     end
@@ -12983,12 +13780,23 @@ local function combatTick()
             runtime.deathGuardFired = true
             fullStop()
             runtime.sungBuffs = {}
+            runtime.npcCastCounts = {}
             runtime.discExpires = {}
             runtime.discCooldown = {}
             petState.myPets = {}; petState.lastObservedId = 0; petState.lastCastCls = nil
             print('\ar[Triune]\ax character is dead -- paused. Will resume automatically once alive again.')
         end
         return
+    end
+    if runtime.npcCastCounts and next(runtime.npcCastCounts) ~= nil then
+        if (os.clock() - (runtime.lastNpcCastPruneAt or 0)) > 5.0 then
+            runtime.lastNpcCastPruneAt = os.clock()
+            for tid in pairs(runtime.npcCastCounts) do
+                if not isSpawnAlive(tid) then
+                    runtime.npcCastCounts[tid] = nil
+                end
+            end
+        end
     end
     if ctrl.auto_spend_aa and runtime.checkAutoSpendAA then
         runtime.checkAutoSpendAA()
@@ -13989,12 +14797,15 @@ local function combatTick()
                     if not lockedOut then
                         local condOk = id and conditionMet(g.when, pctVal, g.spell, id, g.cls, g.target, g)
                         if condOk then
-                            local bossOk = true
-                            if g.boss_only then
-                                local s = mq.TLO.Spawn(id)
-                                bossOk = not not (s() and s.Named())
+                            local castLimitOk = true
+                            local maxC = tonumber(g.max_casts) or 0
+                            if maxC > 0 and id and id > 0 then
+                                local currentCasts = (runtime.npcCastCounts and runtime.npcCastCounts[id] and runtime.npcCastCounts[id][g.spell]) or 0
+                                if currentCasts >= maxC then
+                                    castLimitOk = false
+                                end
                             end
-                            if bossOk then
+                            if castLimitOk then
                                 local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
                                 if targetValid and castGem(i, g, id) then
                                     if g.when == 'missing buff' then
@@ -14199,9 +15010,87 @@ local function triuneCommand(...)
         print('  \ag/ac aathreshold [25-100]\ax - Set AA auto-spend trigger threshold')
         print('  \ag/ac aacost [1-50]\ax - Set AA point cost per rank')
         print('  \ag/ac aaid [id]\ax - Set AA ability ID to purchase/activate (default 17788)')
+        print('  \ag/ac pet <verb> [scope]\ax - Dispatch server #petcmd (attack, back, follow, hold on, taunt off, etc.)')
+        print('  \ag/ac pet status\ax - Print active pet status for all trio classes')
+        print('  \ag/ac petscan\ax - Re-scan zone for active pets belonging to player')
+        print('  \ag/ac pethold [on|off]\ax - Toggle automatic out-of-combat Pet Hold')
+        print('  \ag/ac petassist [1-100]\ax - Set mob HP % threshold for sending pets to attack')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
+    elseif cmd == 'pet' or cmd == 'petcmd' then
+        local verb = args[2] and string.lower(args[2]) or 'status'
+        local scope = args[3] and string.lower(args[3]) or nil
+        if verb == 'status' or verb == 'list' then
+            local slots, extra = getMultiPetList()
+            print('\ag[Triune Pet Status]\ax:')
+            for _, s in ipairs(slots) do
+                if s.petId then
+                    local pinfo = getPetSpawnInfo(s.petId)
+                    print(string.format('  Slot %d [%s]: \ag%s\ax (Lvl %d %s, HP: %d%%, Target: %s)',
+                        s.slotNum, s.cls, pinfo.cleanName, pinfo.level, pinfo.race, pinfo.hpPct, pinfo.targetName))
+                else
+                    print(string.format('  Slot %d [%s]: \ay%s\ax', s.slotNum, s.cls, s.isPetCls and 'Missing/Not Summoned' or 'Non-pet class'))
+                end
+            end
+            if #extra > 0 then
+                print(string.format('  Additional/Swarm Pets: %d active', #extra))
+            end
+        elseif verb == 'scan' or verb == 'rescan' or verb == 'reconcile' then
+            reconcilePets()
+        elseif verb == 'report' or verb == 'health' then
+            mq.cmd('/pet report')
+            sendPetCmd('health', scope)
+        elseif verb == 'hold' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('hold ' .. scope, targetScope)
+        elseif verb == 'ghold' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('ghold ' .. scope, targetScope)
+        elseif verb == 'taunt' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('taunt ' .. scope, targetScope)
+        elseif verb == 'spellhold' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('spellhold ' .. scope, targetScope)
+        elseif verb == 'focus' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('focus ' .. scope, targetScope)
+        elseif verb == 'regroup' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('regroup ' .. scope, targetScope)
+        elseif verb == 'assist' and (scope == 'on' or scope == 'off') then
+            local targetScope = args[4] and string.lower(args[4]) or nil
+            sendPetCmd('assist ' .. scope, targetScope)
+        else
+            sendPetCmd(verb, scope)
+        end
+    elseif cmd == 'petscan' or cmd == 'petreconcile' then
+        reconcilePets()
+    elseif cmd == 'pethold' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' then
+            ctrl.pet_hold_enabled = true
+            saveLoadout(true)
+            print('\ag[Triune]\ax Auto Pet Hold: ENABLED.')
+        elseif sub == 'off' or sub == '0' then
+            ctrl.pet_hold_enabled = false
+            saveLoadout(true)
+            print('\ag[Triune]\ax Auto Pet Hold: DISABLED.')
+        else
+            ctrl.pet_hold_enabled = (ctrl.pet_hold_enabled == false)
+            saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Auto Pet Hold: %s.', ctrl.pet_hold_enabled and 'ENABLED' or 'DISABLED'))
+        end
+    elseif cmd == 'petassist' or cmd == 'petassistat' then
+        local pct = tonumber(args[2])
+        if pct and pct >= 1 and pct <= 100 then
+            ctrl.pet_assist_at = pct
+            saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Pet Assist threshold set to: \ag%d%%\ax.', pct))
+        else
+            print(string.format('\ay[Triune]\ax Current Pet Assist threshold: %d%% (Usage: /ac petassist [1-100])', ctrl.pet_assist_at or 100))
+        end
     elseif cmd == 'cd' or cmd == 'cds' or cmd == 'cooldown' or cmd == 'cooldowns' or cmd == 'cooldownui' or cmd == 'cooldownwin' then
         ctrl.show_cooldowns = not ctrl.show_cooldowns
         saveLoadout(true)

@@ -114,15 +114,7 @@ local state = {
     pendingQueue = {}, -- [gemSlot] = "Spell Name"
     statusMsg = "System Ready.",
     debugLogging = true,
-    bypassScribedCheck = false,
-
-    -- Loadout Presets Store
-    presetNames = { "Solo / DPS", "Group Healing", "Buff Suite" },
-    presets = {
-        ["Solo / DPS"] = {},
-        ["Group Healing"] = {},
-        ["Buff Suite"] = {}
-    }
+    bypassScribedCheck = false
 }
 
 -- ============================================================================
@@ -887,6 +879,45 @@ local function processQueue()
     end
 end
 
+local function showSpellInfo(name)
+    if not name or name == "" then return end
+    local inspected = false
+    pcall(function()
+        local sp = mq.TLO.Spell(name)
+        if sp and sp() then
+            sp.Inspect()
+            inspected = true
+            return
+        end
+        local clean = cleanSpellName(name)
+        if clean ~= "" and clean ~= name then
+            sp = mq.TLO.Spell(clean)
+            if sp and sp() then
+                sp.Inspect()
+                inspected = true
+                return
+            end
+        end
+        local bookSlot = getSpellBookSlot(name) or (clean ~= "" and getSpellBookSlot(clean))
+        if bookSlot and bookSlot > 0 then
+            local bsp = mq.TLO.Me.Book(bookSlot)
+            if bsp and bsp() then
+                bsp.Inspect()
+                inspected = true
+                return
+            end
+        end
+    end)
+    if inspected then
+        state.statusMsg = "Showing spell info: " .. name
+        if state.debugLogging then
+            print(string.format("\ag[Spellbook DBG]\ax Inspected spell [%s]", name))
+        end
+    else
+        state.statusMsg = "Could not inspect: " .. name
+    end
+end
+
 local MQSHORT = {
     WARRIOR = 'War', WAR = 'War', WARRIORS = 'War',
     CLERIC = 'Clr', CLR = 'Clr', CLERICS = 'Clr',
@@ -1085,10 +1116,10 @@ local function DrawTriuneUI()
 
     pushTheme()
 
-    ImGui.SetNextWindowSize(820, 560, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(880, 580, ImGuiCond.FirstUseEver)
     local windowFlags = 0
     if ImGuiWindowFlags then
-        windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding, ImGuiWindowFlags.MenuBar) ---@diagnostic disable-line: deprecated
+        windowFlags = ImGuiWindowFlags.AlwaysUseWindowPadding ---@diagnostic disable-line: deprecated
     end
     local open = ImGui.Begin('Triune Spellbook Engine##Main', openGUI, windowFlags)
     if not open then
@@ -1097,104 +1128,6 @@ local function DrawTriuneUI()
         ImGui.End()
         popTheme()
         return
-    end
-
-    if ImGui.BeginMenuBar() then
-        if ImGui.BeginMenu("Gestalt Options") then
-            if ImGui.MenuItem("Re-detect Classes") then
-                state.myClasses = detectClasses()
-            end
-            if ImGui.MenuItem("Clear Pending Queue") then
-                state.pendingQueue = {}
-                state.statusMsg = "Queue cleared."
-            end
-            ImGui.Separator()
-            state.debugLogging = ImGui.MenuItem("Enable Console Debug Logging", nil, state.debugLogging)
-            state.bypassScribedCheck = ImGui.MenuItem("Bypass Scribed Book Check", nil, state.bypassScribedCheck)
-            ImGui.Separator()
-            if ImGui.MenuItem("Dump Diagnostics to MQ Console") then
-                print("\ay================ SPELLBOOK DIAGNOSTICS ================\ax")
-                print(string.format("Character: %s | Level: %s | Class: %s", tostring(mq.TLO.Me.CleanName()),
-                    tostring(mq.TLO.Me.Level()), tostring(mq.TLO.Me.Class.ShortName())))
-                print(string.format("Detected Trio Classes: %s", table.concat(state.myClasses, ", ")))
-                print(string.format("Num Gems: %s", tostring(mq.TLO.Me.NumGems())))
-                for g = 1, mq.TLO.Me.NumGems() or 8 do
-                    print(string.format("  Gem %d: %s", g, tostring(mq.TLO.Me.Gem(g).Name())))
-                end
-                print("Pending Queue:")
-                for k, v in pairs(state.pendingQueue) do
-                    print(string.format("  Gem %d => %s", k, tostring(v)))
-                end
-                print("\ay========================================================\ax")
-            end
-            if ImGui.MenuItem("Dump Spellbook Reading to MQ Console") then
-                print("\ay================ SPELLBOOK READ DUMP ================\ax")
-                print(string.format("Character: %s | Level: %s | Class: %s", tostring(mq.TLO.Me.CleanName()),
-                    tostring(mq.TLO.Me.Level()), tostring(mq.TLO.Me.Class.ShortName())))
-                print(string.format("Detected Trio Classes: %s", table.concat(state.myClasses or {}, ", ")))
-
-                print("\ay--- DATABASE & CLASS KEYS --- \ax")
-                if DATA and DATA.spells then
-                    local keys = {}
-                    for k, v in pairs(DATA.spells) do
-                        table.insert(keys, string.format("%s (%d spells)", tostring(k), type(v) == 'table' and #v or 0))
-                    end
-                    print("Class Keys in DATA.spells: " .. table.concat(keys, ", "))
-                else
-                    print("\arDATA.spells is nil or not loaded!\ax")
-                end
-
-                local bstSpells = getClassSpells('BST')
-                print(string.format("Beastlord (BST) Spells in DB: %d", #bstSpells))
-
-                print("\ay--- LIVE SPELLBOOK SLOTS (1..720) --- \ax")
-                local count = 0
-                for slot = 1, 720 do
-                    local name = nil
-                    local id = nil
-                    local lvl = nil
-                    pcall(function() name = mq.TLO.Me.Book(slot).Name() end)
-                    pcall(function() id = mq.TLO.Me.Book(slot).ID() end)
-                    pcall(function() lvl = mq.TLO.Me.Book(slot).Level() end)
-                    if not name or name == "" or name == "NULL" then
-                        pcall(function()
-                            local res = mq.TLO.Me.Book(slot)()
-                            if type(res) == "string" and res ~= "" and res ~= "NULL" then name = res end
-                        end)
-                    end
-                    if name and name ~= "" and name ~= "NULL" then
-                        count = count + 1
-                        local sp = mq.TLO.Me.Book(slot)
-                        local cat, subcat, kind = "-", "-", "-"
-                        pcall(function() cat = tostring(sp.Category() or '-') end)
-                        pcall(function() subcat = tostring(sp.Subcategory() or '-') end)
-                        pcall(function() kind = mapTLOCategoryToKind(sp) end)
-
-                        print(string.format("  [Slot %3d] %-30s (ID: %-5s, Lvl: %-2s, Cat: %s / %s, Kind: %s)",
-                            slot, tostring(name), tostring(id or '-'), tostring(lvl or '-'), cat, subcat, kind:upper()))
-                    end
-                end
-                print(string.format("Total Scribed Spells Found: %d", count))
-
-                print("\ay--- BST SPELL SCRIBED CHECK DIAGNOSTICS --- \ax")
-                if #bstSpells == 0 then
-                    print("\arNo Beastlord (BST) spells found in DATA.spells to test!\ax")
-                else
-                    for _, row in ipairs(bstSpells) do
-                        local sName, sLvl, _, sKind = row[1], row[2], row[3], row[4]
-                        local slotFound = getSpellBookSlot(sName)
-                        local scribedStatus = slotFound and string.format("\ag[Scribed in Slot %d]\ax", slotFound) or
-                            "\ar[Unscribed]\ax"
-                        print(string.format("  Lvl %3d [%-4s] %-30s => %s", tonumber(sLvl) or 0, tostring(sKind or ""),
-                            tostring(sName), scribedStatus))
-                    end
-                end
-                print("\ay========================================================\ax")
-                state.statusMsg = "Dumped spellbook reading diagnostics to console."
-            end
-            ImGui.EndMenu()
-        end
-        ImGui.EndMenuBar()
     end
 
     ImGui.TextColored(0.4, 0.8, 1.0, 1.0, "ACTIVE GESTALT TRIO:")
@@ -1219,194 +1152,218 @@ local function DrawTriuneUI()
         if i < 3 then ImGui.SameLine() end
     end
 
-    ImGui.SameLine(ImGui.GetWindowWidth() - 140)
-    if ImGui.Button("Unmem All Gems", 125, 26) then
-        mq.cmd('/clearspellsauto')
-        state.statusMsg = "Cleared all spell gems."
+    ImGui.SameLine()
+    if ImGui.SmallButton("Re-detect##Classes") then
+        state.myClasses = detectClasses()
+        state.statusMsg = "Re-detected character classes."
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', "Re-scan player gestalt classes from inventory or config")
     end
 
     ImGui.Separator()
 
-    ImGui.TextDisabled("CURRENT GEM LOADOUT (CLICK SLOT TO ASSIGN SELECTED SPELL)")
+    local availW, availH = ImGui.GetContentRegionAvail()
+    local bottomBarH = 26
+    local contentH = math.max(100, availH - bottomBarH)
+    local rightW = 280
+    local leftW = math.max(260, availW - rightW - 8)
 
-    local numGems = mq.TLO.Me.NumGems() or 8
-    local availWidth = ImGui.GetContentRegionAvail()
-    local gemBtnWidth = math.floor((availWidth - ((numGems - 1) * 4)) / numGems)
+    -- Left Pane: Spellbook Browser
+    if ImGui.BeginChild('##SpellbookBrowserPane', leftW, contentH, false) then
+        local cats = { 'ALL', 'dd', 'dot', 'debuff', 'buff', 'heal', 'pet', 'util' }
+        for i, c in ipairs(cats) do
+            local isCat = (state.selectedCategory == c)
+            if isCat then ImGui.PushStyleColor(ImGuiCol.Button, 0.3, 0.6, 0.9, 1.0) end
 
-    for g = 1, numGems do
-        local currentSpell = mq.TLO.Me.Gem(g).Name() or "Empty"
-        local isPending = state.pendingQueue[g] ~= nil
-        local displayLabel = isPending and "Memming..." or currentSpell
+            if ImGui.Button((KIND_LABELS[c] or c:upper()) .. "##cat_" .. c, 56, 22) then
+                state.selectedCategory = c
+            end
 
-        if isPending then
-            ImGui.PushStyleColor(ImGuiCol.Button, 0.8, 0.5, 0.1, 0.8)
-        elseif currentSpell ~= "Empty" then
-            ImGui.PushStyleColor(ImGuiCol.Button, 0.1, 0.4, 0.2, 0.8)
-        else
-            ImGui.PushStyleColor(ImGuiCol.Button, 0.2, 0.2, 0.2, 0.6)
+            if isCat then ImGui.PopStyleColor() end
+            if i < #cats then ImGui.SameLine() end
         end
 
-        if ImGui.Button(string.format("G%d\n%s##GemBar_%d", g, displayLabel:sub(1, 9), g), gemBtnWidth, 42) then
-            if state.selectedSpell then
-                state.pendingQueue[g] = state.selectedSpell.name
-                if state.debugLogging then
-                    print(string.format("\ag[Spellbook DBG]\ax Queued [%s] for Gem %d", state.selectedSpell.name, g))
+        ImGui.Spacing()
+
+        ImGui.SetNextItemWidth(65)
+        state.lvlMin = ImGui.SliderInt("Min##Lvl", state.lvlMin or 1, 1, 125)
+        ImGui.SameLine()
+
+        ImGui.SetNextItemWidth(65)
+        state.lvlMax = ImGui.SliderInt("Max##Lvl", state.lvlMax or 125, 1, 125)
+        ImGui.SameLine()
+
+        state.scribedOnly = ImGui.Checkbox("Scribed Only", state.scribedOnly)
+        ImGui.SameLine()
+
+        ImGui.Text("Search:")
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(-1)
+        state.searchFilter = ImGui.InputText("##SearchFilter", state.searchFilter or '')
+
+        local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.ScrollY)
+        if ImGui.BeginTable("SpellTable", 4, tableFlags, 0, 0) then
+            ImGui.TableSetupColumn("Level", ImGuiTableColumnFlags.WidthFixed, 45)
+            ImGui.TableSetupColumn("Type", ImGuiTableColumnFlags.WidthFixed, 55)
+            ImGui.TableSetupColumn("Spell Name", ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 85)
+            ImGui.TableHeadersRow()
+
+            local activeClass = state.myClasses[state.activeClassTab] or 'WAR'
+            local classSpells = getActiveClassSpells(activeClass)
+
+            local minLvl = tonumber(state.lvlMin) or 1
+            local maxLvl = tonumber(state.lvlMax) or 125
+            local currentFilter = tostring(state.searchFilter or ''):lower()
+
+            for _, item in ipairs(classSpells) do
+                local name = item.name
+                local lvl = item.level
+                local bene = item.bene
+                local kind = item.kind
+                local scribed = item.scribed
+
+                local passCat = (state.selectedCategory == 'ALL')
+                    or (kind == state.selectedCategory)
+                    or (state.selectedCategory == 'other' and (not kind or kind == '' or not KIND_LABELS[kind]))
+                local passLvl = (type(lvl) == 'number' and lvl >= minLvl and lvl <= maxLvl)
+                local passScribed = (not state.scribedOnly or scribed)
+                local passText = (currentFilter == '' or name:lower():find(currentFilter, 1, true) ~= nil)
+
+                if passCat and passLvl and passScribed and passText then
+                    ImGui.TableNextRow()
+
+                    ImGui.TableSetColumnIndex(0)
+                    ImGui.Text(tostring(lvl))
+
+                    ImGui.TableSetColumnIndex(1)
+                    ImGui.TextColored(0.8, 0.8, 0.2, 1.0,
+                        KIND_LABELS[kind] or (kind and kind ~= '' and kind:upper()) or 'Other')
+
+                    ImGui.TableSetColumnIndex(2)
+                    local isSel = (state.selectedSpell and state.selectedSpell.name == name)
+                    if ImGui.Selectable(name .. "##sel_" .. name, isSel, ImGuiSelectableFlags.SpanAllColumns) then
+                        state.selectedSpell = { name = name, level = lvl, kind = kind, bene = bene }
+                    end
+                    if ImGui.IsItemClicked(1) then
+                        showSpellInfo(name)
+                    end
+                    if ImGui.IsItemHovered() then
+                        local tip = string.format("%s (Level %s %s)\n- Left-click: Select for memorizing\n- Right-click: Show spell info in EQ",
+                            name, tostring(lvl), KIND_LABELS[kind] or (kind and kind ~= '' and kind:upper()) or 'Spell')
+                        ImGui.SetTooltip('%s', tip)
+                    end
+
+                    ImGui.TableSetColumnIndex(3)
+                    if scribed then
+                        ImGui.TextColored(0.2, 0.9, 0.3, 1.0, "[Scribed]")
+                    else
+                        ImGui.TextDisabled("[Unscribed]")
+                    end
                 end
+            end
+            ImGui.EndTable()
+        end
+    end
+    ImGui.EndChild()
+
+    ImGui.SameLine(0, 8)
+
+    -- Right Pane: Current Gem Loadout
+    if ImGui.BeginChild('##SpellGemsPane', rightW, contentH, true) then
+        local numGems = 8
+        pcall(function() numGems = mq.TLO.Me.NumGems() or 8 end)
+
+        ImGui.TextColored(0.4, 0.8, 1.0, 1.0, "SPELL GEMS")
+        ImGui.SameLine()
+        ImGui.TextDisabled(string.format("(%d Slots)", numGems))
+
+        ImGui.Separator()
+
+        if state.selectedSpell then
+            ImGui.TextColored(1.0, 0.85, 0.3, 1.0, "Selected:")
+            ImGui.SameLine()
+            if ImGui.SmallButton("Clear##ClearSel") then
+                state.selectedSpell = nil
+            end
+            ImGui.TextColored(0.2, 0.9, 0.4, 1.0, tostring(state.selectedSpell.name))
+            ImGui.TextDisabled("Click a gem slot below to memorize.")
+        else
+            ImGui.TextDisabled("Click spell to assign, or")
+            ImGui.TextDisabled("right-click gem to inspect.")
+        end
+
+        ImGui.Separator()
+
+        for g = 1, numGems do
+            local currentSpell = "Empty"
+            pcall(function()
+                local val = mq.TLO.Me.Gem(g).Name()
+                if val and val ~= "" and val ~= "NULL" then
+                    currentSpell = val
+                end
+            end)
+
+            local pendingSpell = state.pendingQueue[g]
+            local isPending = (pendingSpell ~= nil)
+
+            local displayLabel
+            if isPending then
+                displayLabel = string.format("G%d: %s (Memming)", g, pendingSpell)
+            elseif currentSpell ~= "Empty" then
+                displayLabel = string.format("G%d: %s", g, currentSpell)
             else
+                displayLabel = string.format("G%d: <Empty>", g)
+            end
+
+            if isPending then
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.8, 0.5, 0.1, 0.85)
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0.9, 0.6, 0.2, 1.0)
+            elseif currentSpell ~= "Empty" then
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.38, 0.22, 0.85)
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0.18, 0.50, 0.30, 1.0)
+            else
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.20, 0.24, 0.60)
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0.25, 0.28, 0.32, 0.80)
+            end
+
+            local btnW = ImGui.GetContentRegionAvail()
+            if ImGui.Button(displayLabel .. "##GemSlot_" .. g, btnW, 28) then
+                if state.selectedSpell then
+                    state.pendingQueue[g] = state.selectedSpell.name
+                    if state.debugLogging then
+                        print(string.format("\ag[Spellbook DBG]\ax Queued [%s] for Gem %d", state.selectedSpell.name, g))
+                    end
+                else
+                    mq.cmdf('/notify CastSpellWnd CSPW_Spell%d rightmouseup', g - 1)
+                end
+            end
+
+            if ImGui.IsItemClicked(1) then
                 mq.cmdf('/notify CastSpellWnd CSPW_Spell%d rightmouseup', g - 1)
             end
-        end
-        ImGui.PopStyleColor()
 
-        if g < numGems then ImGui.SameLine(0, 4) end
+            ImGui.PopStyleColor(2)
+
+            if ImGui.IsItemHovered() then
+                local tip
+                if isPending then
+                    tip = string.format("Gem %d: Queued for memorization: %s", g, pendingSpell)
+                elseif currentSpell ~= "Empty" then
+                    tip = string.format("Gem %d: %s\n- Left-click with selected spell to replace\n- Right-click to inspect/unmem in EQ", g, currentSpell)
+                else
+                    tip = string.format("Gem %d: (Empty)\n- Select a spell on the left, then click here to memorize", g)
+                end
+                ImGui.SetTooltip('%s', tip)
+            end
+
+            if g < numGems then
+                ImGui.Spacing()
+            end
+        end
     end
-
-    ImGui.Spacing()
-    ImGui.Separator()
-
-    if ImGui.BeginTabBar("MainWorkspaceTabs") then
-        if ImGui.BeginTabItem("Spellbook Browser##Tab") then
-            local cats = { 'ALL', 'dd', 'dot', 'debuff', 'buff', 'heal', 'pet', 'util' }
-            for _, c in ipairs(cats) do
-                local isCat = (state.selectedCategory == c)
-                if isCat then ImGui.PushStyleColor(ImGuiCol.Button, 0.3, 0.6, 0.9, 1.0) end
-
-                if ImGui.Button((KIND_LABELS[c] or c:upper()) .. "##cat_" .. c, 60, 22) then
-                    state.selectedCategory = c
-                end
-
-                if isCat then ImGui.PopStyleColor() end
-                ImGui.SameLine()
-            end
-
-            ImGui.Spacing()
-
-            ImGui.SetNextItemWidth(120)
-            state.lvlMin = ImGui.SliderInt("Min Lvl", state.lvlMin or 1, 1, 125)
-            ImGui.SameLine()
-
-            ImGui.SetNextItemWidth(120)
-            state.lvlMax = ImGui.SliderInt("Max Lvl", state.lvlMax or 125, 1, 125)
-            ImGui.SameLine()
-
-            state.scribedOnly = ImGui.Checkbox("Scribed Only", state.scribedOnly)
-            ImGui.SameLine()
-
-            ImGui.SetNextItemWidth(180)
-            state.searchFilter = ImGui.InputText("Search##Filter", state.searchFilter or '')
-
-            local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.ScrollY)
-            if ImGui.BeginTable("SpellTable", 4, tableFlags, 0, -35) then
-                ImGui.TableSetupColumn("Level", ImGuiTableColumnFlags.WidthFixed, 50)
-                ImGui.TableSetupColumn("Type", ImGuiTableColumnFlags.WidthFixed, 60)
-                ImGui.TableSetupColumn("Spell Name", ImGuiTableColumnFlags.WidthStretch)
-                ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 90)
-                ImGui.TableHeadersRow()
-
-                local activeClass = state.myClasses[state.activeClassTab] or 'WAR'
-                local classSpells = getActiveClassSpells(activeClass)
-
-                local minLvl = tonumber(state.lvlMin) or 1
-                local maxLvl = tonumber(state.lvlMax) or 125
-                local currentFilter = tostring(state.searchFilter or ''):lower()
-
-                for _, item in ipairs(classSpells) do
-                    local name = item.name
-                    local lvl = item.level
-                    local bene = item.bene
-                    local kind = item.kind
-                    local scribed = item.scribed
-
-                    local passCat = (state.selectedCategory == 'ALL')
-                        or (kind == state.selectedCategory)
-                        or (state.selectedCategory == 'other' and (not kind or kind == '' or not KIND_LABELS[kind]))
-                    local passLvl = (type(lvl) == 'number' and lvl >= minLvl and lvl <= maxLvl)
-                    local passScribed = (not state.scribedOnly or scribed)
-                    local passText = (currentFilter == '' or name:lower():find(currentFilter, 1, true) ~= nil)
-
-                    if passCat and passLvl and passScribed and passText then
-                        ImGui.TableNextRow()
-
-                        ImGui.TableSetColumnIndex(0)
-                        ImGui.Text(tostring(lvl))
-
-                        ImGui.TableSetColumnIndex(1)
-                        ImGui.TextColored(0.8, 0.8, 0.2, 1.0,
-                            KIND_LABELS[kind] or (kind and kind ~= '' and kind:upper()) or 'Other')
-
-                        ImGui.TableSetColumnIndex(2)
-                        local isSel = (state.selectedSpell and state.selectedSpell.name == name)
-                        if ImGui.Selectable(name .. "##sel_" .. name, isSel, ImGuiSelectableFlags.SpanAllColumns) then
-                            state.selectedSpell = { name = name, level = lvl, kind = kind, bene = bene }
-                        end
-
-                        ImGui.TableSetColumnIndex(3)
-                        if scribed then
-                            ImGui.TextColored(0.2, 0.9, 0.3, 1.0, "[Scribed]")
-                        else
-                            ImGui.TextDisabled("[Unscribed]")
-                        end
-                    end
-                end
-                ImGui.EndTable()
-            end
-
-            ImGui.EndTabItem()
-        end
-
-        if ImGui.BeginTabItem("Loadouts / Presets##Tab") then
-            ImGui.Text("Save or load full gem set loadouts for quick switching:")
-            ImGui.Spacing()
-
-            for _, presetName in ipairs(state.presetNames) do
-                local savedGems = state.presets[presetName] or {}
-                if ImGui.CollapsingHeader(presetName .. "##Header") then
-                    if ImGui.Button("Load Preset: " .. presetName) then
-                        local loadedCount = 0
-                        local gemCount = mq.TLO.Me.NumGems() or 8
-                        for g = 1, gemCount do
-                            local s = savedGems[g]
-                            if s and s ~= "" and s ~= "Empty" then
-                                state.pendingQueue[g] = s
-                                loadedCount = loadedCount + 1
-                            end
-                        end
-                        state.statusMsg = string.format("Queued %d spells from preset: %s", loadedCount, presetName)
-                    end
-                    ImGui.SameLine()
-                    if ImGui.Button("Save Current Gems to " .. presetName) then
-                        local gemCount = mq.TLO.Me.NumGems() or 8
-                        state.presets[presetName] = {}
-                        local savedCount = 0
-                        for g = 1, gemCount do
-                            local gemSpell = mq.TLO.Me.Gem(g).Name()
-                            if gemSpell and gemSpell ~= "Empty" then
-                                state.presets[presetName][g] = gemSpell
-                                savedCount = savedCount + 1
-                            end
-                        end
-                        state.statusMsg = string.format("Saved %d gems to preset: %s", savedCount, presetName)
-                    end
-
-                    if next(savedGems) then
-                        ImGui.TextDisabled("Saved Loadout:")
-                        local gemCount = mq.TLO.Me.NumGems() or 8
-                        for g = 1, gemCount do
-                            if savedGems[g] then
-                                ImGui.BulletText(string.format("Gem %d: %s", g, savedGems[g]))
-                            end
-                        end
-                    else
-                        ImGui.TextDisabled("No spells saved in this preset yet.")
-                    end
-                end
-            end
-
-            ImGui.EndTabItem()
-        end
-
-        ImGui.EndTabBar()
-    end
+    ImGui.EndChild()
 
     ImGui.Separator()
 

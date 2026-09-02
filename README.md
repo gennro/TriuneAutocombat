@@ -112,10 +112,21 @@ Triune keeps things simple with **3 main combat modes**:
 
 ---
 
-### 🐾 Smart Pet Control
-- **No Early Aggro**: Pets stay on hold until you actually start hitting the mob, keeping them from pulling accidental adds.
-- **Pet Assist %**: Tell your pet to wait until the mob's HP drops to a certain percentage before engaging.
-- **Pet Pulling**: Command your pet to tag distant mobs and bring them back to you.
+### 🐾 Smart Pet Control & Dedicated "Pets" Tab
+- **Dedicated "Pets" Tab**: Positioned directly next to **Control** in the main Triune window (`Status -> Control -> Pets -> Spell Gems -> ...`) for live monitoring and complete command of all active pets.
+- **Multi-Pet Management (Up to 3 Pets)**: Full support for multi-class trio setups where characters can summon up to 3 simultaneous pets (e.g. Magician, Beastlord, Necromancer, Enchanter, Shaman, Druid, Bard, Shadowknight) plus swarm pets.
+- **Interactive `/pet report` & Stats Inspector**: Click the **`[/pet report]`** button on any pet card to issue `/pet report` in game, target the pet, send `#petcmd health <scope>`, and pop up a dedicated **Pet Stats Report** window showing detailed coordinates, heading, speed, level, race, posture, color-graded HP/Mana bars, target engagement, active buff lists, and quick command buttons.
+- **Live Status Telemetry**: Live HP progress bars, current/max HP values, target tracking (target name, target HP%, target distance), and active buff lists with hover tooltips for each individual pet.
+- **Server `#petcmd` Command Center**: Full integration with the server's `#petcmd` multi-pet control protocol:
+  - **Direct Actions**: Attack, Quick Attack (`qattack`), Back Off, Follow, Stop, Guard, Sit, Feign Death, and Dismiss (`leave`).
+  - **Stance & Discipline Toggles**: One-click toggles for `Taunt (on/off)`, `Hold (on/off)`, `GHold (on/off)`, `SpellHold (on/off)`, `Focus (on/off)`, `Regroup (on/off)`, and `Assist (on/off)`.
+  - **Scope Filtering**: Target commands to `all` pets, `swarm` pets, or specific class pets (`mag`, `bst`, `nec`, `enc`, `shm`, `dru`, `brd`, `shd`).
+  - **Custom Command Runner**: Send any arbitrary `#petcmd` string directly from the UI.
+- **Pet Automation & Discipline**:
+  - **No Early Aggro**: Pets automatically stay on hold until you start hitting the mob, preventing accidental add pulls.
+  - **Pet Assist %**: Configurable HP threshold slider (`ctrl.pet_assist_at`) so pets only engage after the target drops below a set percentage.
+  - **Pet Pulling**: Command pets to tag distant targets and drag them to camp.
+  - **Re-Scan / Reconcile Engine**: One-click button to re-sync pet detection if pets are summoned or rezzed outside combat.
 
 ---
 
@@ -185,6 +196,12 @@ You can control almost everything using simple in-game chat commands:
 | `/ac aathreshold [25-100]` | `/ac spendthreshold` | Set unspent AA threshold for automatic purchases (default: 100) |
 | `/ac aacost [1-50]` | `/ac spendcost` | Set AA cost per rank (default: 25) |
 | `/ac aaid [id]` | | Set AA ability ID to purchase and activate (default: 17788) |
+| `/ac pet <verb> [scope]` | `/ac petcmd` | Dispatch server `#petcmd` (attack, back, follow, guard, sit, feign, leave, hold on/off, taunt on/off, etc.) |
+| `/ac pet status` | | Print live status, HP, target, and class for all active trio pets |
+| `/ac pet report [scope]` | `/ac pethealth` | Issue `/pet report` in chat and request `#petcmd health` for active pets |
+| `/ac petscan` | `/ac petreconcile` | Re-scan zone for active pets belonging to player and re-sync tracking |
+| `/ac pethold [on\|off]` | | Toggle automatic out-of-combat Pet Hold |
+| `/ac petassist [1-100]` | `/ac petassistat` | Set target HP % threshold before releasing pets to attack |
 | `/ac clear lockouts` | `/ac clearlockouts`, `/ac unlock` | Clear active spell lockouts, non-stacking buff backoffs, and mob immunities |
 | `/ac preset [save\|load\|del\|list]` | `/ac loadout` | Save, load, list, or delete named spell gem loadout presets |
 | `/ac style [melee\|ranged\|spell]` | | Set combat style |
@@ -235,6 +252,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.7.8**
+Current version: **1.8.0**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.
