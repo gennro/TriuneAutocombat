@@ -12,7 +12,10 @@
   - **Comprehensive Quick Start Guide**: Updated setup steps to guide users through downloading the latest RoF2 MacroQuest release from GitHub releases, downloading the latest Triune AutoCombat full release, extracting the `TAC` contents directly into the root MacroQuest folder (merging `lua/`, `config/`, and `resources/`), launching MacroQuest, and logging into the EMU server.
   - **Tab Flow & Loadouts Documentation**: Documented the natural 12-tab interface progression (`Status -> Control -> Pets -> Spell Gems -> Abilities -> AAs -> Disciplines -> Clickies -> Auto AA -> Cooldowns -> Settings -> Help`), including the Spell Gems `Mem All` button with queue count badging and the Auto AA progression browser.
   - **Complete Bonus Tools & Slash Commands Index**: Added the standalone `triune_buttons.lua` hot button toolbar to the bonus tools table, added missing slash commands (`/ac huntz`, `/ac zplane`, `/ac aaname`, `/lua run triune_buttons`), and updated the project file structure to include `triune_buttons.lua` and `TAC/resources/` (ItemDB, Zones.ini, and MQ2Nav meshes).
-  - **Helpful Links**: Added direct link to RoF2 MacroQuest GitHub releases alongside Triune AutoCombat releases and Project Triune PTDex.
+- **Window Title & Header Layout Modernization (`triune.lua`).**
+  - **Dynamic Title Bar Header**: Moved character name, TAC version, and detected gestalt trio classes directly into the primary window title bar (`TAC v<VERSION> - <PlayerName> (<Classes>)###triune`), freeing up interior window vertical space and keeping character context visible across all tab views.
+  - **Compact Status Page Layout**: Integrated the Session Tracker (duration, AA/hr, Plat/hr, and one-click `Reset` button) directly into a streamlined, single-line overview header (`Overview | <Time> | AA/hr: X (+Y) | Plat/hr: Z (+W) [Reset]`) with rich hover tooltips, eliminating the redundant second table and saving over 75 pixels of vertical space so combat targets and vitals are immediately visible.
+  - **Clean Top-Level Toolbar**: The main window content now opens cleanly with the primary quick-action tool buttons (`Open Spellbook`, `Map`, `DPS Parser`, `Compact Mode`, `Cursor Manager`, `Cooldowns`) as the top line.
 
 ---
 

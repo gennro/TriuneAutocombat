@@ -5132,53 +5132,9 @@ function UI.toggleTool(scriptName, stopCmd)
 end
 
 function UI.drawHeaderBar()
-    UI.drawEmblem(22)
-    ImGui.SameLine()
-    UI.accent(ARC, myName or '(no character)')
-    ImGui.SameLine(); ImGui.TextDisabled(string.format('| %s / %s / %s',
-        myClasses[1] or '?', myClasses[2] or '?', myClasses[3] or '?'))
-    ImGui.SameLine(); ImGui.TextDisabled(string.format('| PoP exp %d | v%s',
-        DATA.era_expansion or 5, VERSION))
-
     UI.updateTracker()
-    local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
-    local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
-    local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or 0
-    local aaRate = (elapsedHrs > 0.0001) and (aaGained / elapsedHrs) or 0.0
-    local platGained = (runtime.startPlat and runtime.currentPlat) and (runtime.currentPlat - runtime.startPlat) or 0
-    local platRate = (elapsedHrs > 0.0001) and (platGained / elapsedHrs) or 0.0
 
-    ImGui.SameLine(); ImGui.TextDisabled(string.format('| AA/hr: %.1f | Plat/hr: %.1f',
-        aaRate, platRate))
-    if ImGui.IsItemHovered() then
-        local m = math.floor(elapsedSec / 60)
-        local s = elapsedSec % 60
-        local h = math.floor(m / 60)
-        m = m % 60
-        local timeStr = h > 0 and string.format('%dh %dm %ds', h, m, s) or string.format('%dm %ds', m, s)
-        UI.setTooltip(string.format(
-            "Session Tracker (%s):\n" ..
-            "-------------------------------\n" ..
-            "AA/hr Rate:   %.2f / hr\n" ..
-            "Total AA:     %+.2f gained (Current: %.2f | Start: %.2f)\n" ..
-            "-------------------------------\n" ..
-            "Plat/hr Rate: %.1f p/hr\n" ..
-            "Total Plat:   %+d p gained (Current: %dp | Start: %dp)\n" ..
-            "-------------------------------\n" ..
-            "Click 'Reset' to restart session.",
-            timeStr, aaRate, aaGained, runtime.currentAA or 0, runtime.startAA or 0,
-            platRate, platGained, runtime.currentPlat or 0, runtime.startPlat or 0
-        ))
-    end
-    ImGui.SameLine()
-    if ImGui.Button('Reset##hdrResetTrack') then
-        UI.resetTracker()
-    end
-    if ImGui.IsItemHovered() then
-        UI.setTooltip('Resets AA and Platinum session tracking values to 0.')
-    end
-
-    -- Toolbar buttons (on line below script info and trackers)
+    -- Toolbar buttons
     if ImGui.Button('Open Spellbook##hdrBook') then
         UI.toggleTool('triune_spellbook')
     end
@@ -7031,9 +6987,47 @@ end
 function UI.drawStatusTab()
     if not ImGui.BeginTabItem('Status') then return end
 
-    -- 1. Live Engine & Mode Overview Banner
+    -- 1. Live Engine & Mode Overview with Integrated Session Tracker
     local inCombat = hasActualNPCXtarget()
-    accent(GOLD, 'Engine Status & Mode Overview')
+    local elapsedSec = os.time() - (runtime.trackStartTime or os.time())
+    local elapsedHrs = math.max(elapsedSec / 3600.0, 0)
+    local aaGained = (runtime.startAA and runtime.currentAA) and math.max(0, runtime.currentAA - runtime.startAA) or 0
+    local aaRate = (elapsedHrs > 0.0001) and (aaGained / elapsedHrs) or 0.0
+    local platGained = (runtime.startPlat and runtime.currentPlat) and (runtime.currentPlat - runtime.startPlat) or 0
+    local platRate = (elapsedHrs > 0.0001) and (platGained / elapsedHrs) or 0.0
+
+    local m = math.floor(elapsedSec / 60)
+    local s = elapsedSec % 60
+    local h = math.floor(m / 60)
+    m = m % 60
+    local timeStr = h > 0 and string.format('%dh %dm %ds', h, m, s) or string.format('%dm %ds', m, s)
+
+    accent(GOLD, 'Overview')
+    ImGui.SameLine(); ImGui.TextDisabled('|')
+    ImGui.SameLine(); accent(ARC, timeStr)
+    ImGui.SameLine(); ImGui.TextDisabled('|')
+    ImGui.SameLine(); accent(GOOD, string.format('AA/hr: %.1f (%+.2f)', aaRate, aaGained))
+    ImGui.SameLine(); ImGui.TextDisabled('|')
+    ImGui.SameLine(); accent(GOLD, string.format('Plat/hr: %.1f p (%+d p)', platRate, platGained))
+    ImGui.SameLine()
+    if ImGui.Button('Reset##statResetTrack', 46, 18) then
+        UI.resetTracker()
+    end
+    if ImGui.IsItemHovered() then
+        UI.setTooltip(string.format(
+            "Session Tracker (%s):\n" ..
+            "-------------------------------\n" ..
+            "AA/hr Rate:   %.2f / hr\n" ..
+            "Total AA:     %+.2f gained (Current: %.2f | Start: %.2f)\n" ..
+            "-------------------------------\n" ..
+            "Plat/hr Rate: %.1f p/hr\n" ..
+            "Total Plat:   %+d p gained (Current: %dp | Start: %dp)\n" ..
+            "-------------------------------\n" ..
+            "Click 'Reset' to restart session.",
+            timeStr, aaRate, aaGained, runtime.currentAA or 0, runtime.startAA or 0,
+            platRate, platGained, runtime.currentPlat or 0, runtime.startPlat or 0
+        ))
+    end
 
     local statusTableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
     if ImGui.BeginTable('##StatusOverviewTable', 4, statusTableFlags) then
@@ -7100,7 +7094,6 @@ function UI.drawStatusTab()
 
         ImGui.EndTable()
     end
-
 
     -- 2. Current Target & Threat Card
     if UI.drawCollapsingStatusHeader('target', 'Current Target & Threat', 'statusTarget') then
@@ -9613,7 +9606,17 @@ function UI.drawFullGui()
     ImGui.SetNextWindowSize(830, 640, ImGuiCond.FirstUseEver)
     local winFlags = ImGuiWindowFlags and ImGuiWindowFlags.HorizontalScrollbar or 0
     local show
-    open, show = ImGui.Begin('Triune AutoCombat##triune', open, winFlags)
+    local clsList = {}
+    for i = 1, 3 do
+        local c = myClasses and myClasses[i]
+        if c and c ~= '' and c ~= '-- None --' then
+            table.insert(clsList, c)
+        end
+    end
+    local clsText = #clsList > 0 and table.concat(clsList, ' / ') or '?'
+    local charName = myName or (mq.TLO.Me.CleanName and mq.TLO.Me.CleanName()) or '(no character)'
+    local winTitle = string.format('TAC v%s - %s (%s)###triune', VERSION, charName, clsText)
+    open, show = ImGui.Begin(winTitle, open, winFlags)
     if not show then
         ImGui.End(); UI.popTheme(); return
     end
