@@ -2,6 +2,86 @@
 
 ## 2026-09-02
 
+- **Auto AA Tab Overhaul & Priority-Based AA Training Engine (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **Comprehensive Character AA Scanner (`runtime.scanPlayerAAs`)**: Scans all available character Alternate Advancement abilities by crawling in-game `AAWindow` listboxes, class combat abilities from `DATA.aas`, common archetype/general Norrath AAs, and the MacroQuest `AltAbility` database index (`mq.TLO.AltAbility(i)`). Dynamically records ability names, current ranks, max ranks, next rank point costs, trainability, and points spent.
+  - **Real-Time Filtering & Multi-Criteria Sorting (`runtime.getFilteredSortedAAs`)**:
+    - **Search Box**: Instant, case-insensitive substring search with one-click clear button.
+    - **Multi-Criteria Sorting**: Sort by **Name** (A-Z / Z-A), **Cost** (cheapest first / highest cost first, with fully trained abilities cleanly placed at the end), or **Fully Trained** status (in-progress/untrained first vs maxed first). Built using strict comparator logic to prevent Lua order function errors.
+    - **View Filters**: Instant toggle checkboxes to **Hide Maxed** abilities and show **Prioritized Only** abilities.
+  - **Prioritized Auto-Purchase Engine (`runtime.checkAutoSpendAA`)**:
+    - Per-ability priority checkboxes `[x]` to queue specific abilities for automatic training.
+    - Evaluates unspent AA points against prioritized ability costs (`unspent >= cost`).
+    - Configurable **Priority Order** combo: **Cheapest First** (trains the lowest-cost prioritized ability available) vs **Alphabetical** (processes prioritized abilities in alphabetical order).
+    - Safely executes training via in-game AA window automation (`runtime.startAATrainWorkflow`), opening the window, navigating tabs/search, selecting the ability, and triggering the Train button.
+    - Preserves fallback cap protection (fireworks) when the unspent pool hits the configured cap threshold (default: 100 AA).
+  - **Interactive AA Progression Table (`UI.drawAutoAATab`)**:
+    - Built using Dear ImGui tables (`##AutoAABrowserTable`) with columns for Priority Checkbox, Ability Name (with hover tooltip for rank/cost/spent stats), Current Rank (`X / Y` or green `MAX`), Cost (green when affordable, yellow when unaffordable, `-` when maxed), Training Status (`Can Train`, `Need X AA`, `Max Rank`), and instant manual `Train` action button.
+    - Added quick-action buttons: **Refresh AAs** and **Clear Priorities**.
+    - Retained full Fireworks auto-summoning and inventory dumping controls in a neat, expandable collapsing header.
+  - **Special Tab AA Discovery & Window Inspection (`runtime.scanPlayerAAs`, `runtime.findAAInWindowLists`)**:
+    - Expanded scanning to fully inspect Special tab listboxes (`AAW_SpecialList`, `AA_SpecialList`, `SpecialList`, `Special_List`, `AAW_SpecList`, `AAW_SpecialTabPage`), including subwindows and tab page containers.
+    - Added comprehensive discovery of Veteran Rewards (Lesson of the Devoted, Infusion of the Faithful, Expedient Recovery, etc.), Glyphs (Destruction, Frantic Fertility, Arcane Secrets, etc.), and Special utilities/spenders.
+    - Updated TLO crawling to probe special ID ranges (`4000..4060`, `5000..5150`, `17780..17800`) without terminating prematurely on nil gaps.
+  - **Compact, High-Density 2-Row Header Layout (`UI.drawAutoAATab`)**:
+    - Cleaned up and compacted the top of the Auto AA page by eliminating verbose multi-line text banners and spreading separators.
+    - Row 1 combines live AA pool status (`Unspent: XX AA (Spent: YY)`), master Auto-Spend checkbox, Priority Buy Order combo, Cap threshold slider, `↻ Refresh` button, and `Clear Prios` button.
+    - Row 2 provides real-time search input, one-click `X` clear, sort criteria combo, `▲ Asc / ▼ Desc` toggle, `Hide Maxed` checkbox, `Prio Only` checkbox, and live count badge `(X listed | Y prio)`.
+  - **Dynamic Full-Window Table Sizing (`UI.drawAutoAATab`)**:
+    - Replaced fixed child window dimensions (`290px`) with dynamic stretch sizing (`ImGui.BeginChild(..., 0, 0, false, ...)`).
+    - Enabled `ImGuiTableFlags.SizingStretchProp` so the table and its columns expand and contract smoothly in both width and height to fill any resized window size.
+    - Relocated the Fireworks Spender collapsible header inside the scrolling child window to guarantee it is always accessible without clipping or restricting table growth.
+  - **New Slash Commands**: Added `/ac aascan` to force a full re-scan of character AAs, and `/ac aaprio <name>` to toggle priority status for any AA directly via chat.
+
+- **Spell Gems "Mem All" Toolbar Button & Slash Command (`triune.lua`, `README.md`).**
+  - **Mem All Toolbar Button**: Added a dedicated `Mem All` button to `UI.drawGemTabHeader()` right next to `+ Add Spell`. When clicked, it evaluates all physical gem slots (1 to 12) and queues any slot that is empty or memorized with the wrong spell back to its designated priority spell. Dynamically displays the pending queue count (e.g. `Mem All (3)`).
+  - **Sequential Numerical Draining**: Updated the background queue drain loop in the main script to process slots in strict numerical order (1..12) and respect active aggro threats before opening the spellbook.
+  - **Slash Command Integration**: Added `/ac memall` (aliases: `/ac mem`, `/ac remem`) to queue all missing or mismatched priority spells directly via chat command.
+
+- **Out-of-Combat Priority Spell Rememming & Aggro Threat Safety (`triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Remem Priority Spells When Lower Priority Spells Not Needed**: Updated `runtime.processDowntimeBuffing()` so that when not in combat, any gem slot whose priority combat spell (the first configured spell in the loadout list for that gem, e.g. a Lifetap for G12) is not currently memorized will be automatically rememorized back once lower-priority spells (e.g. downtime buffs) are completed or not currently needed.
+  - **Decouple Downtime Processing from `combatReady`**: Moved out-of-combat spell swapping and priority restoration outside the `if combatReady` gate in `combatTick()`. Downtime spell restoration now runs reliably whenever out of combat even if a peaceful, distant, or unengaged NPC is targeted.
+  - **Aggro Threat Detection Precision**: Refined `runtime.hasDowntimeAggroThreat()` to verify real combat states (`Me.Combat()`, `CombatState() == 'COMBAT'`, active haters on XTarget, or target aggro `PctAggro > 0`) instead of incorrectly treating any selected hostile-type mob in the zone as active combat.
+
+- **Status Page Layout & Collapsing State Persistence, Mode Indicator on Action Bar (`triune.lua`).**
+  - **Mode Indicator Next to Burn Button**: Added a dedicated live status badge next to the Burn button in `UI.drawActionControls()`, displaying the active combat mode (e.g. `Manual`, `Puller (Camp)`, `Assist (Backline)`) along with a color-coded `[RUNNING]` (green) or `[PAUSED]` (amber) tag.
+  - **Status Page Vitals Reordering**: Moved the **Player, Gestalt Trio & Pet Vitals** card above the **Navigation & MQ2Nav Subsystem** card on the Status tab so immediate health/mana/endurance and pet telemetry is visible directly below the Current Target card.
+  - **Persistent Collapsing State (`UI.drawCollapsingStatusHeader`)**: Integrated `status_collapsed` tracking into `ctrl` and wrapped all Status cards (`target`, `vitals`, `nav`, `xtar`) in `UI.drawCollapsingStatusHeader()`. The open/collapsed state of each card is automatically remembered, saved to configuration, and restored seamlessly across sessions and reloads.
+  - **Multi-Pet HP & Vitals Telemetry**: Expanded the Pet Vitals section inside the Vitals card from a single `Me.Pet` access to full multi-pet tracking via `getMultiPetList()`. The card now iterates every active pet across the trio classes, any extra/swarm pets, and primary pets, rendering dedicated class badges (`[Mag]`, `[Nec]`, `[Bst]`), pet names, levels, targets, target distances, and individual color-coded health bars showing both current/max HP and percentage.
+
+- **Horizontal Scrollbars Across All Pages & Panes (`triune.lua`, `triune_spellbook.lua`).**
+  - **Main Window & Tab Lists (`triune.lua`)**: Added `ImGuiWindowFlags.HorizontalScrollbar` to `UI.drawFullGui` and all tab child list frames (`gemlist_`, `clickielist`, `abilitieslist`, `aalist`, `disclist`, and cooldown card HUD). Users can now smoothly scroll horizontally across wide rows and tables on every page.
+  - **Spellbook Engine Panes (`triune_spellbook.lua`)**: Added `ImGuiWindowFlags.HorizontalScrollbar` to the main window flags, `##SpellbookBrowserPane`, and `##SpellGemsPane`.
+
+- **Fix Spurious Auto-Attack Engagement in Manual Mode & Ability Triggers (`triune.lua`).**
+  - **Ability Auto-Attack Restoration Fix**: Fixed a bug where `fireAA`, `fireSkill`, `fireDisc`, `useClickie`, and `castGem` (for Bard) were unconditionally issuing `/attack on` after firing any ability due to `(wasAttacking or (ctrl and (ctrl.combat_style or 'Melee') == 'Melee'))`. Replaced with `wasAttacking and not mq.TLO.Me.Combat()`, ensuring auto-attack is ONLY resumed if the character was already attacking prior to using the ability.
+  - **Combat Stall Watchdog Guard (`runtime.checkCombatStall`)**: Added strict combat checks (`inCombat = Me.Combat() or CombatState() == 'COMBAT' or anyXtarAlive(true)`) to `checkCombatStall()`, and required the target in Manual mode to be on XTarget or attacking. This stops the stall watchdog from firing `/attack on` during downtime or simply because a player selected an NPC in melee reach.
+  - **Manual Mode Engage Qualification (`combatTick`)**: Corrected `autoAttackOk` in `combatTick` so it defaults to `false`. In Manual mode, auto-attack now only engages if the player is actively engaged, in combat, or the target is an active hostile on XTarget. Also prevented unwanted auto-navigation re-closing when out of reach in Manual mode.
+
+- **Main Chunk Local Variables Reduction & Limit Enforcement (`triune.lua`, `tests/test_pure_logic.lua`, `.github/workflows/ci.yml`).**
+  - **Local Variables Consolidation**: Refactored 30+ top-level helper and UI functions (`saveLoadout`, `getPrimarySpellForGem`, `hasDowntimeAggroThreat`, `drawMiniGui`, `drawFullGui`, `draw`, `drawCooldownWindow`, `drawCritOverlay`, `spawnCritFloater`, `addClickieFromCursor`, `toggleTool`, `drawStatusProgressBar`, `getConColorRgb`, `savePreset`, `loadPreset`, `deletePreset`, `listPresets`, `collectEntry`, `applyEntry`, `deepCopyTable`, `importCurrentGems`, `upsertZonePreset`, `isPullAllowed`, `isConAllowed`, `isPullListed`, `addPull`, `removePull`, `addIgnore`, `removeIgnore`, `syncCurrentZoneWaypoints`, `loadAll`, `onCharacterChanged`) to be attached directly to the structured `runtime` and `UI` tables.
+  - **Main Chunk Register Reduction**: Reduced the main function's active local register count in `triune.lua` from 201+ down to 174 slots (safely below the Lua 5.1/LuaJIT 200-local `MAXVARS` limit, providing a 26-slot safety buffer).
+  - **Encapsulated Plugin Warning Logic**: Relocated file-level startup plugin warnings into `runtime.checkStartupPluginStatus()` to eliminate un-encapsulated block locals in the main chunk.
+  - **Automated Regression Suite (Suite 50)**: Added Suite 50 to `tests/test_pure_logic.lua` that executes `luac -l -p` across all 9 suite Lua scripts, asserting that bytecode compilation passes without exceeding the 200 local limit and that `triune.lua` maintains <= 185 slots (1,325 tests passing).
+  - **CI Bytecode Enforcement**: Updated `.github/workflows/ci.yml` to install `lua5.1` and compile all repository scripts using both `luajit -bl` and `luac -p` in the CI pipeline, preventing any future regressions.
+
+
+- **Decoupled Spell Gems Loadout & Dynamic Downtime Buff Swapping (`triune.lua`, `triune_updater.lua`).**
+  - **Decoupled Spell Gems Loadout (`loadout.gems`)**: Replaced the fixed 1-to-1 array coupling between spell lines and physical gem bar slots with an arbitrary-length, priority-ordered spell configuration list. Users can now configure any number of spells (exceeding the standard 12 gems).
+  - **Per-Spell Gem Dropdown Selector**: Each spell row in the Spell Gems tab now features an individual `G1` through `G12` dropdown combo (scaled to a compact 50px width). Multiple spells can share the same physical gem (e.g. G12 can hold a combat nuke and multiple downtime buffs).
+  - **Streamlined Spell Gems Header**: Relocated `+ Add Spell` to the very front of the toolbar directly in front of the level range inputs, and removed the Auto-mem checkbox, Import Bar button, Mem All button, and preset management controls (preset combo, name input, Save button, and Del button) to produce a unified, single-row header.
+  - **Dynamic Spell Management & Priority Ordering**: Added `+ Add Spell` button in the tab header to append new customizable spell lines, along with `^` (move up) and `v` (move down) priority reordering buttons, and an `X` delete button per row (removed redundant priority numbers since list order is evaluated strictly top to bottom).
+  - **Downtime Buff Swapping & Reliable Memorization (`runtime.processDowntimeBuffing`, `runtime.tryMem`, `runtime.unmemGem`)**: Introduced an automated downtime spell swapping engine based on `triune_spellbook.lua`:
+    - **Reliable Unmemorization (`runtime.unmemGem`)**: Replaced non-existent `/unmemspell` commands with EQ gem right-clicks (`/notify CastSpellWnd CSPW_Spell%d rightmouseup`), waiting for the slot to clear.
+    - **Simulated Spellbook Memorization (`runtime.tryMem`)**: Bypasses EMU server Fast-Mem detection by opening `SpellBookWnd`, finding the scribed slot (`runtime.getSpellBookSlot`), paging to the spell, lifting it (`SBW_Spell%d leftmouseup`), and dropping it onto the gem (`CSPW_Spell%d leftmouseup`).
+    - **Progress & Aggro Monitoring**: Actively tracks `CastingWindow` memorization duration while continually checking for aggro threats to abort cleanly if attacked.
+    - **Primary Spell Restoral**: Once missing buffs are satisfied, Triune restores the primary combat spell back into that gem using the same reliable simulated routine.
+  - **Immediate Aggro Interruption & State Recovery**: If aggro is detected (`Me.Combat()`, `isCombat()`, `anyXtarAlive(true)`, or `countNPCXtarget() > 0`) at any point during spell swapping or recharge polling, Triune immediately aborts the swap (closes the spellbook window with `/book 0`, stands up), records the interrupted swap context (`runtime.interruptedSwap`), switches to combat mode, and engages all hostile targets on XTarget. Once combat ends and XTarget clears, Triune resumes the interrupted swap and finishes buffing.
+  - **In-Combat Gem Safety**: `combatTick` restricts casting strictly to spells that are already memorized on the physical bar, preventing mid-combat spellbook locks or disruption.
+  - **Primary Spell Resolution**: Added `getPrimarySpellForGem(slot)` helper to identify the primary combat spell for each physical slot, ensuring `Mem All`, preset loading, puller spell selection, and stale gem synchronization (`checkGemMemSync`) operate on the designated primary spells.
+  - **Cooldowns Tab & Live Status Badging**: Updated `UI.getGemStatusBadge` and the Cooldowns tab to reflect `g.gem`, display `[MEM*]` when actively swapping or queued, and show clear `[UNMEM]` status with tooltips indicating downtime swap readiness.
+  - **Version Bump**: Bumped version to `1.9.0` across `triune.lua`, `triune_updater.lua`, and `README.md`.
+
+
 - **Target Retention During Targeted Spell Casting (`triune.lua`).**
   - **Spell Target-Requirement Classification (`isTargetRequiredSpell`)**: Introduced a helper that checks spell metadata via `mq.TLO.Spell.TargetType()` to classify whether a spell requires an active target (such as single-target heals, buffs, nukes, debuffs, dots, and lifetaps) versus self-directed or PB/group area-of-effect spells (`Self`, `PB AE`, `Group v1`, `Group v2`).
   - **Early Top-Level Casting Guard in `combatTick`**: Relocated active casting monitoring from the very end of `combatTick` to the top level (immediately after pet reconciliation and before stuck checks, aggro switches, mode retargeting, and combat movement). When actively casting or during the cast start latency window (`isCastingOrStarting()`), `combatTick` ensures the character stays firmly locked onto the required target (`getActiveTargetRequiredCastingId()`), synchronizes target if desynchronized, processes events, and returns early to prevent mid-cast target switches or navigation interruptions.

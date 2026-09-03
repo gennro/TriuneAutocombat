@@ -2780,9 +2780,9 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '1.8.0', 'triune.lua version is 1.8.0')
-    assert_eq(updaterVer, '1.8.0', 'triune_updater.lua version is 1.8.0')
-    assert_eq(readmeVer, '1.8.0', 'README.md version is 1.8.0')
+    assert_eq(triuneVer, '1.9.0', 'triune.lua version is 1.9.0')
+    assert_eq(updaterVer, '1.9.0', 'triune_updater.lua version is 1.9.0')
+    assert_eq(readmeVer, '1.9.0', 'README.md version is 1.9.0')
     assert_true(triuneSrc:find('hdrUpdate') == nil, 'triune.lua does not contain hdrUpdate button')
     assert_true(triuneSrc:find('miniUpdate') == nil, 'triune.lua does not contain miniUpdate button')
 end
@@ -3534,6 +3534,13 @@ do
     assert_eq(cfg.auto_spend_aa_name, 'Alternately Advanced Fireworks', 'sanitize: auto_spend_aa_name default')
     assert_eq(cfg.auto_spend_aa_action, 'window', 'sanitize: auto_spend_aa_action default is window')
     assert_eq(cfg.auto_summon_fireworks, false, 'sanitize: auto_summon_fireworks default is false')
+    assert_eq(type(cfg.auto_aa_priorities), 'table', 'sanitize: auto_aa_priorities default is table')
+    assert_eq(cfg.auto_aa_sort_by, 'name', 'sanitize: auto_aa_sort_by default is name')
+    assert_eq(cfg.auto_aa_sort_asc, true, 'sanitize: auto_aa_sort_asc default is true')
+    assert_eq(cfg.auto_aa_search, '', 'sanitize: auto_aa_search default is empty string')
+    assert_eq(cfg.auto_aa_hide_maxed, false, 'sanitize: auto_aa_hide_maxed default is false')
+    assert_eq(cfg.auto_aa_only_prioritized, false, 'sanitize: auto_aa_only_prioritized default is false')
+    assert_eq(cfg.auto_aa_buy_order, 'cost', 'sanitize: auto_aa_buy_order default is cost')
 
     -- B. Preserves user custom config
     local customCfg = {
@@ -3545,7 +3552,14 @@ do
         auto_spend_aa_cost = 10,
         auto_spend_aa_name = 'Custom AA',
         auto_spend_aa_action = 'buy',
-        auto_summon_fireworks = true
+        auto_summon_fireworks = true,
+        auto_aa_priorities = { ['Combat Agility'] = true, ['Run Speed'] = true },
+        auto_aa_sort_by = 'cost',
+        auto_aa_sort_asc = false,
+        auto_aa_search = 'combat',
+        auto_aa_hide_maxed = true,
+        auto_aa_only_prioritized = true,
+        auto_aa_buy_order = 'list'
     }
     sanitizeModeConfig(customCfg)
     assert_eq(customCfg.auto_spend_aa, true, 'sanitize: preserved auto_spend_aa')
@@ -3556,8 +3570,147 @@ do
     assert_eq(customCfg.auto_spend_aa_name, 'Custom AA', 'sanitize: preserved auto_spend_aa_name')
     assert_eq(customCfg.auto_spend_aa_action, 'buy', 'sanitize: preserved auto_spend_aa_action')
     assert_eq(customCfg.auto_summon_fireworks, true, 'sanitize: preserved auto_summon_fireworks')
+    assert_eq(customCfg.auto_aa_priorities['Combat Agility'], true, 'sanitize: preserved auto_aa_priorities')
+    assert_eq(customCfg.auto_aa_sort_by, 'cost', 'sanitize: preserved auto_aa_sort_by')
+    assert_eq(customCfg.auto_aa_sort_asc, false, 'sanitize: preserved auto_aa_sort_asc')
+    assert_eq(customCfg.auto_aa_search, 'combat', 'sanitize: preserved auto_aa_search')
+    assert_eq(customCfg.auto_aa_hide_maxed, true, 'sanitize: preserved auto_aa_hide_maxed')
+    assert_eq(customCfg.auto_aa_only_prioritized, true, 'sanitize: preserved auto_aa_only_prioritized')
+    assert_eq(customCfg.auto_aa_buy_order, 'list', 'sanitize: preserved auto_aa_buy_order')
 
-    -- C. Auto-spend condition evaluator simulation
+    -- C. AA Filtering Logic Simulation
+    local sampleAAs = {
+        { name = 'Combat Agility', rank = 3, maxRank = 5, cost = 5, fullyTrained = false },
+        { name = 'Combat Stability', rank = 5, maxRank = 5, cost = 0, fullyTrained = true },
+        { name = 'Innate Run Speed', rank = 1, maxRank = 3, cost = 2, fullyTrained = false },
+        { name = 'Planar Power', rank = 0, maxRank = 5, cost = 3, fullyTrained = false }
+    }
+    local prios = { ['Combat Agility'] = true, ['Innate Run Speed'] = true }
+
+    local function filterAAs(items, search, hideMax, onlyPrio, pMap)
+        local out = {}
+        local q = (search or ''):lower():match('^%s*(.-)%s*$')
+        for _, itm in ipairs(items) do
+            local keep = true
+            if hideMax and itm.fullyTrained then keep = false end
+            if keep and onlyPrio and not pMap[itm.name] then keep = false end
+            if keep and q ~= '' and not itm.name:lower():find(q, 1, true) then keep = false end
+            if keep then out[#out + 1] = itm end
+        end
+        return out
+    end
+
+    local f1 = filterAAs(sampleAAs, '', false, false, prios)
+    assert_eq(#f1, 4, 'filter: no filters returns all 4')
+
+    local fSearch = filterAAs(sampleAAs, 'Combat', false, false, prios)
+    assert_eq(#fSearch, 2, 'filter: search "Combat" matches 2')
+
+    local fHideMax = filterAAs(sampleAAs, '', true, false, prios)
+    assert_eq(#fHideMax, 3, 'filter: hideMaxed excludes Combat Stability')
+
+    local fPrioOnly = filterAAs(sampleAAs, '', false, true, prios)
+    assert_eq(#fPrioOnly, 2, 'filter: onlyPrioritized matches 2')
+
+    local fCombo = filterAAs(sampleAAs, 'combat', true, true, prios)
+    assert_eq(#fCombo, 1, 'filter: combo matches only Combat Agility')
+    assert_eq(fCombo[1].name, 'Combat Agility', 'filter: combo match is Combat Agility')
+
+    -- D. AA Sorting Logic Simulation
+    local function sortAAs(items, sortBy, asc)
+        local copy = {}
+        for _, itm in ipairs(items) do copy[#copy + 1] = itm end
+        table.sort(copy, function(a, b)
+            if sortBy == 'cost' then
+                local costA = a.fullyTrained and 999999 or (a.cost or 0)
+                local costB = b.fullyTrained and 999999 or (b.cost or 0)
+                if costA ~= costB then
+                    if asc then return costA < costB else return costA > costB end
+                end
+                return a.name:lower() < b.name:lower()
+            elseif sortBy == 'trained' then
+                local tA = a.fullyTrained and 1 or 0
+                local tB = b.fullyTrained and 1 or 0
+                if tA ~= tB then
+                    if asc then return tA < tB else return tA > tB end
+                end
+                return a.name:lower() < b.name:lower()
+            else
+                local nA = a.name:lower()
+                local nB = b.name:lower()
+                if nA ~= nB then
+                    if asc then return nA < nB else return nA > nB end
+                end
+                return (a.cost or 0) < (b.cost or 0)
+            end
+        end)
+        return copy
+    end
+
+    local sNameAsc = sortAAs(sampleAAs, 'name', true)
+    assert_eq(sNameAsc[1].name, 'Combat Agility', 'sort name asc: 1st is Combat Agility')
+    assert_eq(sNameAsc[4].name, 'Planar Power', 'sort name asc: 4th is Planar Power')
+
+    local sCostAsc = sortAAs(sampleAAs, 'cost', true)
+    assert_eq(sCostAsc[1].name, 'Innate Run Speed', 'sort cost asc: lowest cost is Run Speed (2 AA)')
+    assert_eq(sCostAsc[2].name, 'Planar Power', 'sort cost asc: 2nd is Planar Power (3 AA)')
+    assert_eq(sCostAsc[3].name, 'Combat Agility', 'sort cost asc: 3rd is Combat Agility (5 AA)')
+    assert_eq(sCostAsc[4].name, 'Combat Stability', 'sort cost asc: fully trained goes to end')
+
+    local sTrainedAsc = sortAAs(sampleAAs, 'trained', true)
+    assert_eq(sTrainedAsc[4].name, 'Combat Stability', 'sort trained asc: maxed ability is last')
+
+    -- E. Prioritized Purchase Selection Simulation
+    local function selectPriorityToBuy(priorities, aaMap, unspent, buyOrder)
+        local candidates = {}
+        for nm, enabled in pairs(priorities) do
+            if enabled and aaMap[nm] then
+                local itm = aaMap[nm]
+                if not itm.fullyTrained and itm.cost > 0 and unspent >= itm.cost then
+                    candidates[#candidates + 1] = itm
+                end
+            end
+        end
+        if #candidates == 0 then return nil end
+        if buyOrder == 'list' then
+            table.sort(candidates, function(a, b) return a.name:lower() < b.name:lower() end)
+        else
+            table.sort(candidates, function(a, b)
+                if a.cost ~= b.cost then return a.cost < b.cost end
+                return a.name:lower() < b.name:lower()
+            end)
+        end
+        return candidates[1].name
+    end
+
+    local testMap = {
+        ['Combat Agility'] = { name = 'Combat Agility', rank = 3, maxRank = 5, cost = 5, fullyTrained = false },
+        ['Innate Run Speed'] = { name = 'Innate Run Speed', rank = 1, maxRank = 3, cost = 2, fullyTrained = false },
+        ['Combat Stability'] = { name = 'Combat Stability', rank = 5, maxRank = 5, cost = 0, fullyTrained = true }
+    }
+    local activePrios = {
+        ['Combat Agility'] = true,
+        ['Innate Run Speed'] = true,
+        ['Combat Stability'] = true
+    }
+
+    -- With 1 AA: can afford neither
+    assert_eq(selectPriorityToBuy(activePrios, testMap, 1, 'cost'), nil, 'prio buy: 1 AA cannot afford 2 or 5')
+
+    -- With 3 AA: can afford Innate Run Speed (2 AA), but not Combat Agility (5 AA)
+    assert_eq(selectPriorityToBuy(activePrios, testMap, 3, 'cost'), 'Innate Run Speed', 'prio buy: 3 AA buys Run Speed')
+
+    -- With 10 AA and buyOrder 'cost': buys cheapest first (Run Speed)
+    assert_eq(selectPriorityToBuy(activePrios, testMap, 10, 'cost'), 'Innate Run Speed', 'prio buy: 10 AA with cost order chooses cheapest')
+
+    -- With 10 AA and buyOrder 'list': buys alphabetical first (Combat Agility)
+    assert_eq(selectPriorityToBuy(activePrios, testMap, 10, 'list'), 'Combat Agility', 'prio buy: 10 AA with list order chooses alphabetical')
+
+    -- Combat Stability is fully trained: should never be selected
+    local maxedOnlyPrio = { ['Combat Stability'] = true }
+    assert_eq(selectPriorityToBuy(maxedOnlyPrio, testMap, 100, 'cost'), nil, 'prio buy: fully trained never selected')
+
+    -- F. Auto-spend condition evaluator simulation
     local function shouldAutoSpend(enabled, unspent, threshold, cost, aaId)
         if not enabled then return false end
         threshold = tonumber(threshold) or 100
@@ -3572,7 +3725,7 @@ do
     assert_eq(shouldAutoSpend(true, 25, 25, 25, 17788), true, 'spend check: 25 >= 25 threshold -> true')
     assert_eq(shouldAutoSpend(true, 20, 20, 25, 17788), false, 'spend check: 20 < 25 cost -> false')
 
-    -- D. Auto-summon fireworks conditions simulation
+    -- G. Auto-summon fireworks conditions simulation
     local function shouldAutoSummon(enabled, aaId, isReady, isCasting, isMoving, isCombat, hasXtar)
         if not enabled then return false end
         if (tonumber(aaId) or 0) <= 0 then return false end
@@ -3588,11 +3741,40 @@ do
     assert_eq(shouldAutoSummon(true, 17788, true, false, false, false, true), false, 'summon check: xtarget hostile -> false')
     assert_eq(shouldAutoSummon(true, 17788, true, false, false, false, false), true, 'summon check: idle, ready, out of combat -> true')
 
-    -- E. Verify Auto AA tab in triune.lua
+    -- H. Special Tab AA Recognition Simulation
+    local specialCatalog = {
+        'Lesson of the Devoted',
+        'Expedient Recovery',
+        'Infusion of the Faithful',
+        'Chaotic Jester',
+        'Steadfast Servant',
+        'Staunch Recovery',
+        'Intensity of the Resolute',
+        'Armor of Experience',
+        'Glyph of Destruction',
+        'Glyph of Frantic Fertility',
+        'Glyph of Arcane Secrets',
+        'Alternately Advanced Fireworks',
+        'Throne of Heroes',
+        'Origin'
+    }
+    local specialMap = {}
+    for _, nm in ipairs(specialCatalog) do specialMap[nm] = true end
+    assert_true(specialMap['Lesson of the Devoted'] == true, 'special aa: veteran lesson recognised')
+    assert_true(specialMap['Glyph of Destruction'] == true, 'special aa: glyph recognised')
+    assert_true(specialMap['Alternately Advanced Fireworks'] == true, 'special aa: fireworks recognised')
+
+    -- I. Verify Auto AA tab & functions in triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
     assert_true(triuneContent:find("function UI.drawAutoAATab()") ~= nil, 'triune.lua defines UI.drawAutoAATab')
     assert_true(triuneContent:find("UI.drawAutoAATab()") ~= nil, 'triune.lua invokes UI.drawAutoAATab in tab bar')
     assert_true(triuneContent:find("runtime.checkAutoSpendAA()") ~= nil, 'triune.lua includes runtime.checkAutoSpendAA check')
+    assert_true(triuneContent:find("runtime.scanPlayerAAs") ~= nil, 'triune.lua defines runtime.scanPlayerAAs')
+    assert_true(triuneContent:find("runtime.getFilteredSortedAAs") ~= nil, 'triune.lua defines runtime.getFilteredSortedAAs')
+    assert_true(triuneContent:find("runtime.findAAInWindowLists") ~= nil, 'triune.lua defines runtime.findAAInWindowLists')
+    assert_true(triuneContent:find("AAW_SpecialList") ~= nil, 'triune.lua scans AAW_SpecialList')
+    assert_true(triuneContent:find("Lesson of the Devoted") ~= nil, 'triune.lua recognizes Lesson of the Devoted')
+    assert_true(triuneContent:find("Glyph of Destruction") ~= nil, 'triune.lua recognizes Glyph of Destruction')
     assert_true(triuneContent:find("runtime.checkAutoSummonFireworks()") ~= nil, 'triune.lua includes runtime.checkAutoSummonFireworks check')
 end
 
@@ -4066,6 +4248,168 @@ do
     mockState.castTracker.activeSpell = nil
 end
 
+-- ============================================================================
+-- Suite 49: Decoupled Spell Gems & Downtime Buff Swapping Logic
+-- ============================================================================
+print('--- Decoupled Spell Gems & Downtime Buff Swapping Logic ---')
+do
+    -- 1. getPrimarySpellForGem resolution
+    local decoupledGems = {
+        { gem = 1, spell = 'Heal', when = 'HP <=', pct = 50 },
+        { gem = 12, spell = 'Ice Comet', when = 'in combat', pct = 100 },
+        { gem = 12, spell = 'Armor of Protection', when = 'missing buff', pct = 100 },
+        { gem = 12, spell = 'Shield of Fire', when = 'missing buff', pct = 100 },
+        { gem = 4, spell = 'Slow', when = 'in combat', pct = 100 },
+    }
+
+    local function getPrimarySpellForGem(slot, gems)
+        slot = tonumber(slot) or 1
+        for _, g in ipairs(gems) do
+            if g and (tonumber(g.gem) or 1) == slot and g.spell and g.spell ~= '' then
+                return g.spell
+            end
+        end
+        return nil
+    end
+
+    assert_eq(getPrimarySpellForGem(1, decoupledGems), 'Heal', 'gem 1 primary spell is Heal')
+    assert_eq(getPrimarySpellForGem(12, decoupledGems), 'Ice Comet', 'gem 12 primary spell is Ice Comet (first configured for gem 12)')
+    assert_eq(getPrimarySpellForGem(4, decoupledGems), 'Slow', 'gem 4 primary spell is Slow')
+    assert_eq(getPrimarySpellForGem(2, decoupledGems), nil, 'gem 2 has no configured spells')
+
+    -- 2. Sanitization of decoupled loadout entries
+    local rawLoadout = {
+        gems = {
+            { spell = 'Spell A' },             -- default to gem 1
+            { gem = 12, spell = 'Spell B' },
+            { gem = 99, spell = 'Spell C' },    -- clamped to 12
+            { gem = 0, spell = 'Spell D' },     -- clamped to 1
+        }
+    }
+    local sanitizedGems = {}
+    for i, g in ipairs(rawLoadout.gems) do
+        local entry = { gem = tonumber(g.gem) or math.min(i, 12), spell = g.spell }
+        if entry.gem < 1 then entry.gem = 1 end
+        if entry.gem > 12 then entry.gem = 12 end
+        table.insert(sanitizedGems, entry)
+    end
+    assert_eq(#sanitizedGems, 4, '4 sanitized gems')
+    assert_eq(sanitizedGems[1].gem, 1, 'entry 1 defaulted to gem 1')
+    assert_eq(sanitizedGems[2].gem, 12, 'entry 2 kept gem 12')
+    assert_eq(sanitizedGems[3].gem, 12, 'entry 3 clamped to gem 12')
+    assert_eq(sanitizedGems[4].gem, 1, 'entry 4 clamped to gem 1')
+
+    -- 3. Downtime Aggro Detection logic
+    local function hasDowntimeAggroThreat(combat, isCombatFn, anyXtarFn, countXtarFn)
+        if combat then return true end
+        if isCombatFn and isCombatFn() then return true end
+        if anyXtarFn and anyXtarFn(true) then return true end
+        if countXtarFn and countXtarFn() > 0 then return true end
+        return false
+    end
+
+    assert_eq(hasDowntimeAggroThreat(false, function() return false end, function() return false end, function() return 0 end), false, 'no aggro threat')
+    assert_eq(hasDowntimeAggroThreat(true, function() return false end, function() return false end, function() return 0 end), true, 'Me.Combat() detects aggro')
+    assert_eq(hasDowntimeAggroThreat(false, function() return true end, function() return false end, function() return 0 end), true, 'isCombat() detects aggro')
+    assert_eq(hasDowntimeAggroThreat(false, function() return false end, function() return true end, function() return 0 end), true, 'anyXtarAlive(true) detects aggro')
+    assert_eq(hasDowntimeAggroThreat(false, function() return false end, function() return false end, function() return 2 end), true, 'countNPCXtarget() > 0 detects aggro')
+
+    -- 4. In-combat gem filtering: only cast memorized spells
+    local physicalBar = { [1] = 'Heal', [12] = 'Ice Comet' }
+    local function isGemMatching(slot, spName)
+        return physicalBar[slot] == spName
+    end
+
+    local castableCombatSpells = {}
+    for i, g in ipairs(decoupledGems) do
+        local slot = tonumber(g.gem) or i
+        if isGemMatching(slot, g.spell) then
+            table.insert(castableCombatSpells, g.spell)
+        end
+    end
+    assert_eq(#castableCombatSpells, 2, 'only 2 spells memorized on physical bar')
+    assert_eq(castableCombatSpells[1], 'Heal', 'Heal is castable in combat')
+    assert_eq(castableCombatSpells[2], 'Ice Comet', 'Ice Comet is castable in combat')
+
+    -- 5. Priority spell selection and out-of-combat restoration
+    local multiGems = {
+        { gem = 12, spell = 'Touch of the Cursed', target = 'E: Target', when = 'HP <= 80', pct = 80 }, -- Priority 1 (top of list)
+        { gem = 12, spell = 'Voice of the Berserker', target = 'M: Self', when = 'missing buff', pct = 100 }, -- Priority 2 (buff)
+    }
+    local function getPrimarySpellForGem(slot, gemList)
+        for _, g in ipairs(gemList) do
+            if g and (tonumber(g.gem) or 1) == slot and g.spell and g.spell ~= '' then
+                local pctVal = tonumber(g.pct)
+                if pctVal == nil or pctVal > 0 then
+                    return g.spell, g
+                end
+            end
+        end
+        return nil
+    end
+
+    local pSpell = getPrimarySpellForGem(12, multiGems)
+    assert_eq(pSpell, 'Touch of the Cursed', 'G12 priority spell is Touch of the Cursed (lifetap at top of list)')
+
+    -- Test restoration decision:
+    -- Scenario A: Voice of the Berserker is currently memmed in Gem 12, and buff is already active (not needed)
+    local physicalBar2 = { [12] = 'Voice of the Berserker' }
+    local function evaluateRestoreNeeded(slot, gemList, currentBar, buffNeededFn)
+        local primary = getPrimarySpellForGem(slot, gemList)
+        if not primary or currentBar[slot] == primary then return false end
+        local lowerNeeded = false
+        for _, g in ipairs(gemList) do
+            if g and (tonumber(g.gem) or 1) == slot and g.spell and g.spell ~= '' and g.spell ~= primary then
+                if buffNeededFn(g) then
+                    lowerNeeded = true
+                    break
+                end
+            end
+        end
+        return not lowerNeeded
+    end
+
+    local shouldRememLifetap = evaluateRestoreNeeded(12, multiGems, physicalBar2, function(g) return false end)
+    assert_true(shouldRememLifetap, 'Gem 12 should remem priority lifetap back when buff is not needed')
+
+    -- Scenario B: Buff is missing and needed
+    local shouldKeepBuff = evaluateRestoreNeeded(12, multiGems, physicalBar2, function(g) return true end)
+    assert_eq(shouldKeepBuff, false, 'Gem 12 should not remem priority spell while lower priority buff is still needed')
+end
+
+
+
+-- ============================================================================
+-- Suite 50: Lua 5.1 Main Chunk 200 Local Variables Limit Verification
+-- ============================================================================
+print('--- Main Chunk Local Variables Limit Verification ---')
+do
+    local files = {
+        'TAC/lua/triune.lua',
+        'TAC/lua/triune_buttons.lua',
+        'TAC/lua/triune_buffbot.lua',
+        'TAC/lua/triune_cursor.lua',
+        'TAC/lua/triune_dps.lua',
+        'TAC/lua/triune_map.lua',
+        'TAC/lua/triune_spellbook.lua',
+        'TAC/lua/triune_track.lua',
+        'TAC/lua/triune_updater.lua',
+    }
+
+    for _, filePath in ipairs(files) do
+        local handle = io.popen(string.format('luac -l -p %s 2>&1', filePath))
+        if handle then
+            local out = handle:read('*a')
+            local ok = handle:close()
+            assert_true(ok == true or ok == 0, string.format('luac syntax check passes for %s (no 200 local limit error)', filePath))
+            assert_true(not out:find('too many local variables'), string.format('%s does not exceed 200 local variables limit', filePath))
+            local slots = tonumber(out:match('(%d+)%s+slots'))
+            if slots and filePath == 'TAC/lua/triune.lua' then
+                assert_true(slots <= 185, string.format('triune.lua main chunk slots (%d) has comfortable buffer under 200 limit (<= 185)', slots))
+            end
+        end
+    end
+end
 
 -- ============================================================================
 -- Results

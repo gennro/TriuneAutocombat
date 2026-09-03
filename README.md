@@ -31,7 +31,7 @@ Getting started takes less than two minutes:
 2. **Start MacroQuest** and log into Everquest.
 3. **Open Triune**: Triune starts automatically on login. If the window is closed, type `/ac` or `/lua run triune`.
 4. **Verify Your Classes**: In the **Character Classes & Loadout** section, verify your 3 classes (or click **Re-Detect** to let Triune detect them automatically).
-5. **Set Up Your Spells**: Go to the **Spell Gems** tab and choose what each gem slot should do (e.g. *Heal when HP < 50%*, *Snare on incoming mobs*, *Nuke in combat*).
+5. **Set Up Your Spells**: Go to the **Spell Gems** tab and configure your combat spells and downtime buffs. Each spell has its own **Gem** dropdown selector (allowing multiple spells to share the same physical gem), along with trigger conditions and priority controls.
 6. **Pick a Mode & Go**: On the **Control** tab, pick your mode (**Manual**, **Puller**, or **Assist**) and click **Start**!
 
 ---
@@ -138,6 +138,16 @@ Want to clear up screen clutter while playing?
 
 ---
 
+### 🔮 Decoupled Spell Gems & Downtime Buff Swapping
+- **Unlimited Decoupled Spell List**: Configure as many spells as you need beyond the physical 12-gem limit.
+- **Per-Spell Gem Dropdown**: Assign each spell line to any physical gem slot (Gem 1 to Gem 12). Multiple spells can share the same physical gem (e.g., a primary combat nuke and several long-duration buffs sharing Gem 12).
+- **Dynamic Spell Management**: 1-click `+ Add Spell` button to append new lines, `^` and `v` priority buttons to reorder evaluation order, and `X` button to delete lines.
+- **Automated Downtime Buff Swapping**: When out of combat, stationary, and not casting, Triune automatically swaps missing buffs into their assigned gems, waits for recharge, and casts them.
+- **Instant Aggro Interruption**: If aggro is detected at any point during a swap, Triune instantly stands up, closes the spellbook, engages combat, and kills all enemies on XTarget before safely resuming the swap.
+- **Primary Combat Spell Restoration**: Once all downtime buffs for a shared gem are cast, Triune automatically re-memorizes the primary combat spell back to that gem so your combat bar is always ready.
+
+---
+
 ### ⏱️ Cooldown & Ability Monitor
 Keep track of every enabled combat ability, activated AA, discipline, spell gem, and clickie item in real time:
 - **Dedicated Tab & Popout Window**: Access directly via the **Cooldowns** tab in the main window (positioned right after AAs) or float as a standalone window using the `Popout Window` button, `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD.
@@ -147,6 +157,14 @@ Keep track of every enabled combat ability, activated AA, discipline, spell gem,
 - **1-Click Execution**: Interactive **`[ Use ]`** buttons allow manual firing of any ready ability directly from the monitor.
 - **Dual View Modes & HUD Overlay**: Switch between a detailed Table View and a sleek horizontal HUD Cards View with background transparency opacity slider and window position lock.
 - **In-Place Loadout Tuning**: Optional inline editing controls enabling live adjustment of `Enabled`, threshold `HP %`, and `Burn Only` toggles directly from the monitor.
+
+### 🌟 Alternate Advancement (AA) Progression & Auto-Training
+Keep your character progressing without wasting unspent AA points:
+- **Comprehensive AA Browser**: Automatically scans and lists all available character Alternate Advancement abilities, displaying real-time ranks, max ranks, point costs, training eligibility, and total points spent.
+- **Instant Search & Multi-Sort**: Search abilities by name in real time, sort by **Name** (A-Z / Z-A), **Cost** (cheapest first), or **Fully Trained** status, and filter with one-click **Hide Maxed** and **Prioritized Only** checkboxes.
+- **Priority-Based Auto-Training**: Check the priority box `[x]` next to any abilities you want Triune to train. As soon as enough unspent AA points are accumulated, Triune automatically opens the in-game AA window and purchases the next rank.
+- **Custom Buy Order**: Choose between **Cheapest First** (maximize quick rank gains by buying lowest cost abilities first) or **Alphabetical** order.
+- **Cap Protection & Fireworks Dump**: Automatically protects against the server AA cap by dumping surplus points into fireworks (or any configured ability) when your pool reaches the cap threshold (default: 100 AA).
 
 ---
 
@@ -177,6 +195,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac run` | `/ac start` | Start autocombat |
 | `/ac pause` | `/ac stop` | Pause autocombat and stop moving |
 | `/ac burn [on\|off]` | `/ac burnon`, `/ac burnoff` | Toggle Burn mode on/off |
+| `/ac memall` | `/ac mem`, `/ac remem` | Queue all missing or mismatched priority spells to memorization bar |
 | `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |
 | `/ac compact` | `/ac mini`, `/ac hud` | Toggle the compact Mini HUD |
 | `/ac cd` | `/ac cooldowns`, `/ac cds` | Toggle the popout Cooldown & Ability Monitor window |
@@ -189,7 +208,9 @@ You can control almost everything using simple in-game chat commands:
 | `/ac spellbook` | `/ac book` | Open the Spellbook Browser |
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
-| `/ac autoaa [on\|off]` | `/ac autospendaa`, `/ac fireworks` | Toggle automatic AA point spending (e.g. Fireworks AA ID 17788) |
+| `/ac autoaa [on\|off]` | `/ac autospendaa`, `/ac autospend`, `/ac fireworks` | Toggle automatic AA priority training & cap protection |
+| `/ac aascan` | `/ac scanaa`, `/ac aarefresh` | Re-scan all character Alternate Advancement abilities |
+| `/ac aaprio <name>` | `/ac prioritizeaa` | Toggle priority auto-training for a specific AA ability |
 | `/ac autofw [on\|off]` | `/ac summonfw` | Toggle automatic fireworks summoning (/alt activate) & autoinventory |
 | `/ac spendnow` | `/ac spendaa`, `/ac spendpoints` | Immediately purchase 1 rank of the configured AA (e.g. 25 AA) |
 | `/ac summonnow` | `/ac summonfireworks` | Immediately summon fireworks via `/alt activate 17788` |
@@ -252,6 +273,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.8.0**
+Current version: **1.9.0**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

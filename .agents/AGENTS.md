@@ -179,6 +179,16 @@ All runtime state is stored in **four structured tables** (not bare locals):
 
 When adding new state, always add it to the appropriate table — never add a bare top-level local (Lua 5.1 main chunk has a 200-local limit that was already hit once in this project).
 
+### MANDATORY: Lua 5.1 Main Chunk 200 Local Variables Limit Rule
+
+**In Lua 5.1 / LuaJIT, the main chunk (and any function) cannot exceed 200 local variables (`MAXVARS`).**
+- Top-level `local function name(...)` statements count as local variables in the main chunk.
+- Top-level `local var = ...` statements count as local variables in the main chunk.
+- Block locals at the file level (e.g. inside file-level `if ... end` blocks) count against the main chunk's active register slots.
+- **NEVER define bare top-level functions or state when extending `triune.lua`.** Attach functions and state to `runtime` (e.g., `function runtime.myHelper(...)`), `UI` (e.g., `function UI.myWindow(...)`), or other structured tables.
+- **ALWAYS verify local variable counts with `luac -l -p TAC/lua/triune.lua`**: Verify that the main chunk slots count is well below 200 (target `<= 185`). CI automatically enforces `luac -p` compilation and unit tests verify this threshold.
+
+
 ---
 
 ## Code Style

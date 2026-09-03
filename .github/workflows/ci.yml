@@ -12,15 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LuaJIT
-        run: sudo apt-get update && sudo apt-get install -y luajit
+      - name: Install Lua and LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit lua5.1
 
-      - name: Bytecode-compile all Lua files
+      - name: Bytecode-compile all Lua files (LuaJIT and Lua 5.1 luac)
         run: |
           fail=0
           while IFS= read -r f; do
             if ! luajit -bl "$f" > /dev/null 2>err.log; then
               echo "::error file=$f::LuaJIT syntax error"
+              cat err.log
+              fail=1
+            elif ! luac -p "$f" > /dev/null 2>err.log; then
+              echo "::error file=$f::luac syntax error (exceeds 200 locals or syntax failure)"
               cat err.log
               fail=1
             else
@@ -75,8 +79,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LuaJIT
-        run: sudo apt-get update && sudo apt-get install -y luajit
+      - name: Install Lua and LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit lua5.1
 
       - name: Run unit tests
         run: luajit tests/test_pure_logic.lua

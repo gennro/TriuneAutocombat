@@ -1119,7 +1119,10 @@ local function DrawTriuneUI()
     ImGui.SetNextWindowSize(880, 580, ImGuiCond.FirstUseEver)
     local windowFlags = 0
     if ImGuiWindowFlags then
-        windowFlags = ImGuiWindowFlags.AlwaysUseWindowPadding ---@diagnostic disable-line: deprecated
+        windowFlags = bit.bor(
+            ImGuiWindowFlags.AlwaysUseWindowPadding or 0,
+            ImGuiWindowFlags.HorizontalScrollbar or 0
+        ) ---@diagnostic disable-line: deprecated
     end
     local open = ImGui.Begin('Triune Spellbook Engine##Main', openGUI, windowFlags)
     if not open then
@@ -1170,7 +1173,7 @@ local function DrawTriuneUI()
     local leftW = math.max(260, availW - rightW - 8)
 
     -- Left Pane: Spellbook Browser
-    if ImGui.BeginChild('##SpellbookBrowserPane', leftW, contentH, false) then
+    if ImGui.BeginChild('##SpellbookBrowserPane', leftW, contentH, false, ImGuiWindowFlags and ImGuiWindowFlags.HorizontalScrollbar or 0) then
         local cats = { 'ALL', 'dd', 'dot', 'debuff', 'buff', 'heal', 'pet', 'util' }
         for i, c in ipairs(cats) do
             local isCat = (state.selectedCategory == c)
@@ -1271,7 +1274,7 @@ local function DrawTriuneUI()
     ImGui.SameLine(0, 8)
 
     -- Right Pane: Current Gem Loadout
-    if ImGui.BeginChild('##SpellGemsPane', rightW, contentH, true) then
+    if ImGui.BeginChild('##SpellGemsPane', rightW, contentH, true, ImGuiWindowFlags and ImGuiWindowFlags.HorizontalScrollbar or 0) then
         local numGems = 8
         pcall(function() numGems = mq.TLO.Me.NumGems() or 8 end)
 
