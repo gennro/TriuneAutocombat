@@ -44,17 +44,12 @@ jobs:
 
           ### 🆕 New Installation
           1. Go here and grab the latest macroquest release https://github.com/macroquest/macroquest/releases and extract under your user folder.
-          2. Download TriuneAutocombat-full.zip below and extract contents to the same folder you extract macroquest to.
+          2. Download TriuneAutocombat-full.zip below and extract contents of TAC into the root of your macroquest folder.
           3. Start **`MacroQuest.exe`** before launching EverQuest.
 
-          ### 🔄 Updating an Existing Install
-          - **Option 1 (Recommended — Easiest)**: **In-Game Updater**
-            - Click the **[Updater]** button on the top window header or type `/ac update` in chat.
-            - Click **Check for Updates**, then **Update Now** to update and reload all scripts automatically without leaving the game.
-            - Alternatively, run **`update.bat`** (Windows) or **`update.sh`** (Linux) from your `TAC/` folder.
-          - **Option 2 (Manual Update)**:
+          - **Existing install
             - Download **`TriuneAutocombat-Update.zip`** from the Assets below.
-            - Extract and overwrite the files into your existing MacroQuest directory.
+            - Extract the TAC folder to the root of your macroquest folder.
             - *Note: Your personal settings and saved loadouts in `triune_loadout.lua` are preserved and will never be overwritten.*
           '''
 

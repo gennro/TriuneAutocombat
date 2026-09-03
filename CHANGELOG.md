@@ -8,6 +8,12 @@
   - **Accurate Control Names & Notification Targets**: Corrected UI control names to match the EverQuest client's `EQUI_AAWindow.xml` definitions (`AAW_TrainButton`, `AAW_SpecialList`, `AAW_ArchList`), and updated button clicking to trigger both `btn.LeftMouseUp()` and `/notify AAWindow AAW_TrainButton leftmouseup`.
   - **Fuzzy Target Matching & Guaranteed Fallback**: Implemented sanitized string comparison to seamlessly match typos and variations (e.g. `Alternatly ADvanced fireworks` vs `Alternately Advanced Fireworks`), and added automatic `/alt buy <ID>` secondary execution to ensure abilities train successfully across all server configurations.
 
+- **Quick Start Guide & README Documentation Overhaul (`README.md`).**
+  - **Comprehensive Quick Start Guide**: Updated setup steps to guide users through downloading the latest RoF2 MacroQuest release from GitHub releases, downloading the latest Triune AutoCombat full release, extracting the `TAC` contents directly into the root MacroQuest folder (merging `lua/`, `config/`, and `resources/`), launching MacroQuest, and logging into the EMU server.
+  - **Tab Flow & Loadouts Documentation**: Documented the natural 12-tab interface progression (`Status -> Control -> Pets -> Spell Gems -> Abilities -> AAs -> Disciplines -> Clickies -> Auto AA -> Cooldowns -> Settings -> Help`), including the Spell Gems `Mem All` button with queue count badging and the Auto AA progression browser.
+  - **Complete Bonus Tools & Slash Commands Index**: Added the standalone `triune_buttons.lua` hot button toolbar to the bonus tools table, added missing slash commands (`/ac huntz`, `/ac zplane`, `/ac aaname`, `/lua run triune_buttons`), and updated the project file structure to include `triune_buttons.lua` and `TAC/resources/` (ItemDB, Zones.ini, and MQ2Nav meshes).
+  - **Helpful Links**: Added direct link to RoF2 MacroQuest GitHub releases alongside Triune AutoCombat releases and Project Triune PTDex.
+
 ---
 
 ## 2026-09-02

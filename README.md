@@ -23,16 +23,21 @@ Just type `/ac run` (or click **Start** in the UI) and let your character go to 
 
 ## Quick Start Guide
 
-> 📥 **Download the latest version here**: [**GitHub Releases (Latest)**](https://github.com/gennro/TriuneAutocombat/releases/latest)
+> 📥 **Download the latest versions here**:
+> - **MacroQuest (RoF2)**: [**MacroQuest GitHub Releases**](https://github.com/macroquest/macroquest/releases)
+> - **Triune AutoCombat (Full Release)**: [**Triune AutoCombat GitHub Releases (Latest)**](https://github.com/gennro/TriuneAutocombat/releases/latest)
 
 Getting started takes less than two minutes:
 
-1. **Download & Extract**: Grab the latest release from the link above and extract it into a folder under your user directory (for example, `Documents\MacroQuest`).
-2. **Start MacroQuest** and log into Everquest.
-3. **Open Triune**: Triune starts automatically on login. If the window is closed, type `/ac` or `/lua run triune`.
-4. **Verify Your Classes**: In the **Character Classes & Loadout** section, verify your 3 classes (or click **Re-Detect** to let Triune detect them automatically).
-5. **Set Up Your Spells**: Go to the **Spell Gems** tab and configure your combat spells and downtime buffs. Each spell has its own **Gem** dropdown selector (allowing multiple spells to share the same physical gem), along with trigger conditions and priority controls.
-6. **Pick a Mode & Go**: On the **Control** tab, pick your mode (**Manual**, **Puller**, or **Assist**) and click **Start**!
+1. **Download MacroQuest**: Download the latest **RoF2** release of MacroQuest from the [MacroQuest Releases page](https://github.com/macroquest/macroquest/releases) (e.g. `MacroQuest-RoF2.zip`) and extract it to your chosen directory (such as `C:\MacroQuest` or `Documents\MacroQuest`).
+2. **Download Triune AutoCombat**: Download the latest **Triune AutoCombat full release** archive from [Triune AutoCombat Releases](https://github.com/gennro/TriuneAutocombat/releases/latest).
+3. **Extract TAC to MacroQuest**: Extract the contents of the `TAC` folder directly into your root `MacroQuest` directory. This automatically merges the `lua/`, `config/`, and `resources/` directories into MacroQuest so that all scripts, databases, and zone navmeshes are placed where MacroQuest expects them.
+4. **Run MacroQuest**: Launch `MacroQuest.exe`.
+5. **Log Into Your EMU Server**: Start your EverQuest RoF2 client and log into your **[Project Triune](https://nms.bestemu.com/)** server account.
+6. **Open Triune**: Triune automatically starts on login. If the window is closed or you need to re-open it, type `/ac` or `/lua run triune` in the chat bar.
+7. **Verify Your Trio Classes**: On the main window, verify your 3 detected multiclass roles (or click **Re-Detect** to let Triune scan them automatically).
+8. **Configure Your Loadout**: Set up your combat spells and downtime buffs in **Spell Gems**, innate skills in **Abilities**, activated AAs in **AAs**, disciplines in **Disciplines**, and clickies in **Clickies**.
+9. **Pick a Mode & Go**: On the **Control** tab, select your combat mode (**Manual**, **Puller**, or **Assist**) and click **Start** (or type `/ac run`)!
 
 ---
 
@@ -75,13 +80,14 @@ Triune keeps things simple with **3 main combat modes**:
 - **Map Path Lines**: Your waypoint route and arrival circles are drawn directly on your in-game EverQuest map so you can see exactly where your character will walk.
 - **Pause & Resume**: Whenever a mob is spotted, patrol pauses to fight. Once the mob dies, patrol picks right back up where it left off.
 - **Easy Setup**: Click **Add Current Location** to drop waypoints as you walk, or use chat commands like `/ac wp add`.
-- **Per-Zone Saving & Named Presets**: Your route and settings auto-save per zone and reload the next time you enter it. Save named presets (e.g. `<name> - <zone>`) from a dropdown to keep multiple routes per zone and switch between them with Load/Edit/Delete.
 - **Export & Share Routes**: Export a named preset as a copy/paste string to share with guildmates; Import pastes one back in, filed under whichever zone it was made for.
 
 ---
 
 ### 🔮 Simple & Powerful Loadouts & Autoskill
-- **12 Spell Gem Slots + Innate Abilities + AAs + Disciplines**: Set up spells, combat actions, activated AA abilities, and combat disciplines from all 3 of your classes in dedicated tabs.
+- **Streamlined Tabbed Interface**: All combat loadouts and settings are organized logically across dedicated tabs:
+  `Status` ➔ `Control` ➔ `Pets` ➔ `Spell Gems` ➔ `Abilities` ➔ `AAs` ➔ `Disciplines` ➔ `Clickies` ➔ `Auto AA` ➔ `Cooldowns` ➔ `Settings` ➔ `Help`
+- **12 Spell Gem Slots + Innate Abilities + AAs + Disciplines + Clickies**: Set up spells, combat actions, activated AA abilities, combat disciplines, and clickable items from all 3 of your classes in dedicated tabs.
 - **Dedicated Abilities Tab & Autoskill**: Full automation for innate class combat actions (Kick, Bash, Slam, Mend, Backstab, Monk special strikes, Taunt, Disarm, Frenzy, Intimidation, Feign Death, etc.) with a continuous **Autoskill** toggle that automatically fires melee attacks on cooldown during combat without blocking spells.
 - **Dedicated AAs Tab**: Manage Activated Alternate Advancements grouped by cooldown tiers (Short, Mid, Burn) with live purchased-rank filtering.
 - **Combat Disciplines Tab**: Configure `/disc` disciplines with priority ordering, Boss Only Named mob gates, and Burn mode support.
@@ -89,7 +95,7 @@ Triune keeps things simple with **3 main combat modes**:
 - **No Wasted Mana**: Triune automatically checks if a DoT, snare, slow, or debuff is already on the mob before casting, so you never double-cast or waste mana.
 - **Burn Mode**: Tag big cooldowns and nukes as **Burn Only**, then toggle Burn on when fighting named mobs or big pulls (`/ac burn`).
 - **Min XTarget Gate**: Set heavy abilities or area-of-effect nukes to only fire when you have multiple enemies on you (e.g. *Only cast if 3+ mobs on XTarget*).
-- **Auto-Memorize**: Triune remembers your setup in `triune_loadout.lua` and will automatically memorize missing spells when you're out of combat.
+- **Auto-Memorize & Mem All**: Triune remembers your setup in `triune_loadout.lua` and will automatically memorize missing spells when you're out of combat.
 
 ---
 
@@ -142,6 +148,7 @@ Want to clear up screen clutter while playing?
 - **Unlimited Decoupled Spell List**: Configure as many spells as you need beyond the physical 12-gem limit.
 - **Per-Spell Gem Dropdown**: Assign each spell line to any physical gem slot (Gem 1 to Gem 12). Multiple spells can share the same physical gem (e.g., a primary combat nuke and several long-duration buffs sharing Gem 12).
 - **Dynamic Spell Management**: 1-click `+ Add Spell` button to append new lines, `^` and `v` priority buttons to reorder evaluation order, and `X` button to delete lines.
+- **1-Click "Mem All" Restoral**: The `Mem All` toolbar button (and `/ac memall` command) scans all 12 physical slots, shows a pending queue count badge (e.g. `Mem All (3)`), and systematically rememorizes missing or mismatched priority combat spells in strict numerical order.
 - **Automated Downtime Buff Swapping**: When out of combat, stationary, and not casting, Triune automatically swaps missing buffs into their assigned gems, waits for recharge, and casts them.
 - **Instant Aggro Interruption**: If aggro is detected at any point during a swap, Triune instantly stands up, closes the spellbook, engages combat, and kills all enemies on XTarget before safely resuming the swap.
 - **Primary Combat Spell Restoration**: Once all downtime buffs for a shared gem are cast, Triune automatically re-memorizes the primary combat spell back to that gem so your combat bar is always ready.
@@ -150,7 +157,7 @@ Want to clear up screen clutter while playing?
 
 ### ⏱️ Cooldown & Ability Monitor
 Keep track of every enabled combat ability, activated AA, discipline, spell gem, and clickie item in real time:
-- **Dedicated Tab & Popout Window**: Access directly via the **Cooldowns** tab in the main window (positioned right after AAs) or float as a standalone window using the `Popout Window` button, `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD.
+- **Dedicated Tab & Popout Window**: Access directly via the **Cooldowns** tab in the main window (positioned right after Auto AA) or float as a standalone window using the `Popout Window` button, `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD.
 - **Active Duration Tracking**: Glowing cyan progress bars show remaining active buff/stance duration (e.g. *Defensive Discipline*, *Harmshield*, *Furious*) before transitioning to cooldown.
 - **Smart Readiness Diagnostics**: Instant feedback on why abilities are gated: `[READY]`, `[LOW END]`, `[LOW MANA]`, `[NEED BURN]`, `[NEED BOSS]`, `[MIN XTAR]`, or `[LOCKED]`.
 - **EverQuest Timer Groups**: Badges display EQ shared timer banks (`[T1]`, `[T2]`, `[T4]`) to clarify shared cooldown lockouts.
@@ -158,10 +165,13 @@ Keep track of every enabled combat ability, activated AA, discipline, spell gem,
 - **Dual View Modes & HUD Overlay**: Switch between a detailed Table View and a sleek horizontal HUD Cards View with background transparency opacity slider and window position lock.
 - **In-Place Loadout Tuning**: Optional inline editing controls enabling live adjustment of `Enabled`, threshold `HP %`, and `Burn Only` toggles directly from the monitor.
 
+---
+
 ### 🌟 Alternate Advancement (AA) Progression & Auto-Training
-Keep your character progressing without wasting unspent AA points:
+Keep your character progressing without wasting unspent AA points with the dedicated **Auto AA** tab:
 - **Comprehensive AA Browser**: Automatically scans and lists all available character Alternate Advancement abilities, displaying real-time ranks, max ranks, point costs, training eligibility, and total points spent.
-- **Instant Search & Multi-Sort**: Search abilities by name in real time, sort by **Name** (A-Z / Z-A), **Cost** (cheapest first), or **Fully Trained** status, and filter with one-click **Hide Maxed** and **Prioritized Only** checkboxes.
+- **Compact Two-Row Header Layout**: Real-time unspent/spent pool metrics, master auto-spend toggle, buy order dropdown, cap threshold slider, instant search box with `X` clear, sort criteria combo, `▲ Asc / ▼ Desc` toggle, `Hide Maxed` filter, `Prio Only` filter, and live ability count badge.
+- **Instant Search & Multi-Sort**: Search abilities by name in real time, sort by **Name** (A-Z / Z-A), **Cost** (cheapest first / highest first), or **Fully Trained** status, and filter with one-click **Hide Maxed** and **Prioritized Only** checkboxes.
 - **Priority-Based Auto-Training**: Check the priority box `[x]` next to any abilities you want Triune to train. As soon as enough unspent AA points are accumulated, Triune automatically opens the in-game AA window and purchases the next rank.
 - **Custom Buy Order**: Choose between **Cheapest First** (maximize quick rank gains by buying lowest cost abilities first) or **Alphabetical** order.
 - **Cap Protection & Fireworks Dump**: Automatically protects against the server AA cap by dumping surplus points into fireworks (or any configured ability) when your pool reaches the cap threshold (default: 100 AA).
@@ -175,6 +185,7 @@ Triune comes packed with handy standalone tools you can open right from the main
 | Tool | Chat Command | What It Does |
 |---|---|---|
 | ⏱️ **Cooldown Monitor** | `/ac cd` | Standalone popout live ability, AA, and discipline cooldown monitor with active buff duration countdowns, smart diagnostics, timer groups, next-up forecast, and 1-click execution. |
+| 🎛️ **Hot Buttons Toolbar** | `/lua run triune_buttons` | Standalone ImGui tabbed hot button toolbar (ButtonMaster-style) replacing EQ's default hotbars with tabs, icon animations, live cooldown overlays, 1-click button creation from cursor, and multi-line macro execution. |
 | 🗺️ **2D Map & Norrath Atlas** | `/ac map` | Interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, and Point of Interest locator. |
 | 🧙 **Spellbook Browser** | `/ac spellbook` | Browse and search all spells across all 3 of your character's classes, filter by level or type, and assign them to your loadout with one click. |
 | 🖱️ **Cursor Manager** | `/ac cursorui` | Displays what's on your cursor and can automatically dump items into your bags (`/ac clearcursor`). |
@@ -203,8 +214,10 @@ You can control almost everything using simple in-game chat commands:
 | `/ac help` | `/ac ?` | Show command help in chat |
 | `/ac <mode> [submode]` | | Switch mode (e.g. `/ac manual`, `/ac puller camp`, `/ac assist chase`, `/ac backline`) |
 | `/ac pullhp [0-95]` | `/ac minhp` | Set minimum HP % threshold before pausing pulling to rest until 100% |
-| `/ac pullcon [preset]` | `/ac con` | Set faction filters (e.g. `/ac pullcon preset hostile`) |
-| `/ac wp [add\|clear\|del\|on\|off\|list]` | `/ac waypoint` | Manage waypoint patrol routes |
+| `/ac pullcon [preset\|con]` | `/ac con`, `/ac confilter` | Configure faction filters (`hostile`, `indifferent`, `all`, `none`) or toggle single considerations |
+| `/ac wp [add\|clear\|del\|on\|off\|list]` | `/ac waypoint`, `/ac waypoints` | Manage waypoint patrol routes, arrival radius, and scan distance |
+| `/ac huntz [10-300]` | `/ac z` | Configure Hunter Tier 2 max vertical height difference (default: 75) |
+| `/ac zplane [5-100]` | `/ac huntplane`, `/ac floorz` | Configure Hunter Tier 1 same-floor / Z plane height threshold (default: 15) |
 | `/ac spellbook` | `/ac book` | Open the Spellbook Browser |
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
@@ -212,27 +225,29 @@ You can control almost everything using simple in-game chat commands:
 | `/ac aascan` | `/ac scanaa`, `/ac aarefresh` | Re-scan all character Alternate Advancement abilities |
 | `/ac aaprio <name>` | `/ac prioritizeaa` | Toggle priority auto-training for a specific AA ability |
 | `/ac autofw [on\|off]` | `/ac summonfw` | Toggle automatic fireworks summoning (/alt activate) & autoinventory |
-| `/ac spendnow` | `/ac spendaa`, `/ac spendpoints` | Immediately purchase 1 rank of the configured AA (e.g. 25 AA) |
+| `/ac spendnow` | `/ac spendaa`, `/ac spendpoints`, `/ac aatrain` | Immediately purchase 1 rank of the configured AA (e.g. 25 AA) |
 | `/ac summonnow` | `/ac summonfireworks` | Immediately summon fireworks via `/alt activate 17788` |
 | `/ac aathreshold [25-100]` | `/ac spendthreshold` | Set unspent AA threshold for automatic purchases (default: 100) |
 | `/ac aacost [1-50]` | `/ac spendcost` | Set AA cost per rank (default: 25) |
-| `/ac aaid [id]` | | Set AA ability ID to purchase and activate (default: 17788) |
+| `/ac aaid [id]` | `/ac spendaaid` | Set AA ability ID to purchase and activate (default: 17788) |
+| `/ac aaname [name]` | `/ac setaaname` | Set AA ability name to search and purchase (default: 'Alternately Advanced Fireworks') |
 | `/ac pet <verb> [scope]` | `/ac petcmd` | Dispatch server `#petcmd` (attack, back, follow, guard, sit, feign, leave, hold on/off, taunt on/off, etc.) |
-| `/ac pet status` | | Print live status, HP, target, and class for all active trio pets |
+| `/ac pet status` | `/ac pet list` | Print live status, HP, target, and class for all active trio pets |
 | `/ac pet report [scope]` | `/ac pethealth` | Issue `/pet report` in chat and request `#petcmd health` for active pets |
 | `/ac petscan` | `/ac petreconcile` | Re-scan zone for active pets belonging to player and re-sync tracking |
 | `/ac pethold [on\|off]` | | Toggle automatic out-of-combat Pet Hold |
 | `/ac petassist [1-100]` | `/ac petassistat` | Set target HP % threshold before releasing pets to attack |
 | `/ac clear lockouts` | `/ac clearlockouts`, `/ac unlock` | Clear active spell lockouts, non-stacking buff backoffs, and mob immunities |
 | `/ac preset [save\|load\|del\|list]` | `/ac loadout` | Save, load, list, or delete named spell gem loadout presets |
-| `/ac style [melee\|ranged\|spell]` | | Set combat style |
-| `/ac range [dist]` | `/ac meleerange` | Set melee (5-50) or ranged (5-200) distance |
+| `/ac style [melee\|ranged\|spell]` | `/ac combatstyle` | Set combat style |
+| `/ac range [dist]` | `/ac meleerange`, `/ac dist` | Set melee (5-50) or ranged (5-200) distance |
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |
 | `/ac track` | `/ac zone` | Open the Zone NPC Tracker |
-| `/ac map` | `/ac mapui` | Open the 2D Map & Navmesh Reachability Tracker |
-| `/ac update` | `/ac checkupdate` | Check for updates |
+| `/ac map` | `/ac mapui` | Open the 2D Map & Norrath Zone Atlas |
+| `/ac update` | `/ac checkupdate` | Check for updates via in-game release updater |
 | `/dps` | `/triunedps` | Open/toggle the DPS parser |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
+| `/lua run triune_buttons` | `/lua stop triune_buttons` | Launch or stop the standalone Hot Buttons toolbar |
 
 ---
 
@@ -246,6 +261,7 @@ TriuneAutocombat/
 │   ├── update.sh            # Linux updater launcher
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
+│   │   ├── triune_buttons.lua   # Standalone ImGui hot button toolbar
 │   │   ├── triune_map.lua       # Standalone 2D in-game map, Norrath Zone Atlas & NPC tracker
 │   │   ├── triune_track.lua     # Zone NPC tracker & navigation tool
 │   │   ├── triune_updater.lua   # In-game updater window
@@ -254,8 +270,12 @@ TriuneAutocombat/
 │   │   ├── triune_buffbot.lua   # Automated tell buffbot
 │   │   └── triune_dps.lua       # Standalone DPS parser
 │   ├── config/
-│   │   └── triune_data.lua      # Spell and ability database
-├── README.md                # This guide!
+│   │   └── triune_data.lua      # Era-correct spell and ability database
+│   └── resources/
+│       ├── ItemDB.txt           # Item database lookup
+│       ├── Zones.ini            # Zone configuration metadata
+│       └── MQ2Nav/              # Pre-packaged zone navigation meshes (.nav)
+├── README.md                # User guide & documentation
 └── CHANGELOG.md             # Detailed update and change history
 ```
 
@@ -265,7 +285,8 @@ TriuneAutocombat/
 
 ## Helpful Links
 
-- **GitHub Releases (Latest Downloads)**: [https://github.com/gennro/TriuneAutocombat/releases/latest](https://github.com/gennro/TriuneAutocombat/releases/latest)
+- **MacroQuest GitHub Releases (RoF2)**: [https://github.com/macroquest/macroquest/releases](https://github.com/macroquest/macroquest/releases)
+- **Triune AutoCombat Releases (Latest)**: [https://github.com/gennro/TriuneAutocombat/releases/latest](https://github.com/gennro/TriuneAutocombat/releases/latest)
 - **Project Triune Website & Database (PTDex)**: [https://nms.bestemu.com/](https://nms.bestemu.com/)
 - **MacroQuest**: [https://macroquest.org/](https://macroquest.org/)
 
