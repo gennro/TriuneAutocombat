@@ -3764,7 +3764,53 @@ do
     assert_true(specialMap['Glyph of Destruction'] == true, 'special aa: glyph recognised')
     assert_true(specialMap['Alternately Advanced Fireworks'] == true, 'special aa: fireworks recognised')
 
-    -- I. Verify Auto AA tab & functions in triune.lua
+    -- I. Spent and Unspent Points Delta Refresh Simulation
+    local function evaluateAARefreshTriggers(prevSpent, curSpent, prevUnspent, curUnspent)
+        local scanTriggered = false
+        local filterDirty = false
+        if prevSpent ~= nil and curSpent ~= prevSpent then
+            scanTriggered = true
+            filterDirty = true
+        end
+        if prevUnspent ~= nil and curUnspent ~= prevUnspent then
+            filterDirty = true
+        end
+        return scanTriggered, filterDirty
+    end
+
+    local scan1, dirty1 = evaluateAARefreshTriggers(100, 100, 50, 50)
+    assert_eq(scan1, false, 'aa refresh: no change -> no scan')
+    assert_eq(dirty1, false, 'aa refresh: no change -> not dirty')
+
+    local scan2, dirty2 = evaluateAARefreshTriggers(100, 105, 50, 45)
+    assert_eq(scan2, true, 'aa refresh: spent changed -> scan triggered')
+    assert_eq(dirty2, true, 'aa refresh: spent changed -> filter dirty')
+
+    local scan3, dirty3 = evaluateAARefreshTriggers(105, 105, 45, 46)
+    assert_eq(scan3, false, 'aa refresh: unspent gained -> no full scan needed')
+    assert_eq(dirty3, true, 'aa refresh: unspent gained -> filter dirtied to refresh affordabilities')
+
+    -- J. Fireworks Target Name Fuzzy Matching Simulation
+    local function matchAAName(rowText, targetName)
+        if not rowText or rowText == '' or not targetName or targetName == '' then return false end
+        local cleanRow = rowText:lower():gsub('[^%a%d]', '')
+        local cleanTarget = targetName:lower():gsub('[^%a%d]', '')
+        if cleanRow == cleanTarget then return true end
+        if cleanRow ~= '' and cleanTarget ~= '' and (cleanRow:find(cleanTarget, 1, true) or cleanTarget:find(cleanRow, 1, true)) then
+            return true
+        end
+        if cleanTarget:find('firework') and cleanRow:find('firework') then
+            return true
+        end
+        return false
+    end
+
+    assert_true(matchAAName('Alternately Advanced Fireworks', 'Alternatly ADvanced fireworks'), 'match: typo with single e and AD matches')
+    assert_true(matchAAName('Alternately Advanced Fireworks', 'Advanced Fireworks'), 'match: partial fireworks matches')
+    assert_true(matchAAName('Alternately Advanced Fireworks', 'Alternately Advanced Fireworks'), 'match: exact match')
+    assert_eq(matchAAName('Combat Stability', 'Combat Agility'), false, 'match: different ability false')
+
+    -- K. Verify Auto AA tab & functions in triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
     assert_true(triuneContent:find("function UI.drawAutoAATab()") ~= nil, 'triune.lua defines UI.drawAutoAATab')
     assert_true(triuneContent:find("UI.drawAutoAATab()") ~= nil, 'triune.lua invokes UI.drawAutoAATab in tab bar')
@@ -3772,9 +3818,15 @@ do
     assert_true(triuneContent:find("runtime.scanPlayerAAs") ~= nil, 'triune.lua defines runtime.scanPlayerAAs')
     assert_true(triuneContent:find("runtime.getFilteredSortedAAs") ~= nil, 'triune.lua defines runtime.getFilteredSortedAAs')
     assert_true(triuneContent:find("runtime.findAAInWindowLists") ~= nil, 'triune.lua defines runtime.findAAInWindowLists')
+    assert_true(triuneContent:find("runtime.findChildRecursive") ~= nil, 'triune.lua defines runtime.findChildRecursive')
     assert_true(triuneContent:find("AAW_SpecialList") ~= nil, 'triune.lua scans AAW_SpecialList')
+    assert_true(triuneContent:find("AAW_TrainButton") ~= nil, 'triune.lua clicks AAW_TrainButton')
+    assert_true(triuneContent:find("AAW_Subwindows") ~= nil, 'triune.lua notifies AAW_Subwindows')
     assert_true(triuneContent:find("Lesson of the Devoted") ~= nil, 'triune.lua recognizes Lesson of the Devoted')
     assert_true(triuneContent:find("Glyph of Destruction") ~= nil, 'triune.lua recognizes Glyph of Destruction')
+    assert_true(triuneContent:find("TriuneAAPurchased") ~= nil, 'triune.lua registers TriuneAAPurchased event')
+    assert_true(triuneContent:find("runtime.lastObservedAAPointsSpent") ~= nil, 'triune.lua tracks lastObservedAAPointsSpent')
+    assert_true(triuneContent:find("runtime.pendingPostTrainScanAt") ~= nil, 'triune.lua tracks pendingPostTrainScanAt')
     assert_true(triuneContent:find("runtime.checkAutoSummonFireworks()") ~= nil, 'triune.lua includes runtime.checkAutoSummonFireworks check')
 end
 

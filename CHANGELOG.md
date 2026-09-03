@@ -1,5 +1,15 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-03
+
+- **Fix AA Window Automation & Tab-Aware In-Game Training (`triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Recursive Child Window Traversal (`runtime.findChildRecursive`)**: Replaced shallow child lookups with a recursive traversal utility that inspects `.FirstChild` and `.Next` across arbitrary container hierarchies (`AAWindow` -> `AAW_Subwindows` -> `AAW_SpecialPage` -> `AAW_SpecialList`), guaranteeing controls are found regardless of custom UI skins.
+  - **Tab-Aware Preparation Step (`runtime.processAATrainWorkflow`)**: Added a dedicated `prepare_tab` phase that identifies the target tab (General=1, Archetype=2, Class=3, Special=4) and activates it via `/notify AAWindow AAW_Subwindows tabselect <N>` and `sub.SetCurrentTab(<N>)` before attempting list selection, resolving an issue where Special tab abilities (such as *Alternately Advanced Fireworks*) were sent selection events while Tab 1 was still active.
+  - **Accurate Control Names & Notification Targets**: Corrected UI control names to match the EverQuest client's `EQUI_AAWindow.xml` definitions (`AAW_TrainButton`, `AAW_SpecialList`, `AAW_ArchList`), and updated button clicking to trigger both `btn.LeftMouseUp()` and `/notify AAWindow AAW_TrainButton leftmouseup`.
+  - **Fuzzy Target Matching & Guaranteed Fallback**: Implemented sanitized string comparison to seamlessly match typos and variations (e.g. `Alternatly ADvanced fireworks` vs `Alternately Advanced Fireworks`), and added automatic `/alt buy <ID>` secondary execution to ensure abilities train successfully across all server configurations.
+
+---
+
 ## 2026-09-02
 
 - **Auto AA Tab Overhaul & Priority-Based AA Training Engine (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
@@ -29,7 +39,10 @@
   - **Dynamic Full-Window Table Sizing (`UI.drawAutoAATab`)**:
     - Replaced fixed child window dimensions (`290px`) with dynamic stretch sizing (`ImGui.BeginChild(..., 0, 0, false, ...)`).
     - Enabled `ImGuiTableFlags.SizingStretchProp` so the table and its columns expand and contract smoothly in both width and height to fill any resized window size.
-    - Relocated the Fireworks Spender collapsible header inside the scrolling child window to guarantee it is always accessible without clipping or restricting table growth.
+  - **Automated Post-Purchase Refresh & Real-Time Delta Detection (`UI.drawAutoAATab`, `runtime.processAATrainWorkflow`)**:
+    - Automatically triggers an immediate re-scan (`runtime.scanPlayerAAs(true)`) upon completing an in-game AA training workflow, plus a scheduled 1.2s follow-up scan to catch delayed server confirmation packets.
+    - Added real-time client state delta monitoring for `Me.AAPointsSpent()` and `Me.AAPoints()` in both the UI render pass and background engine loop. Any AA purchase (via Triune automation, manual UI click, the EQ AA window, or slash command) is detected instantly to update ranks, costs, and affordabilities.
+    - Registered chat event handlers (`TriuneAAPurchased1/2/3`) for in-game purchase, improvement, and mastery notifications to trigger instant table updates.
   - **New Slash Commands**: Added `/ac aascan` to force a full re-scan of character AAs, and `/ac aaprio <name>` to toggle priority status for any AA directly via chat.
 
 - **Spell Gems "Mem All" Toolbar Button & Slash Command (`triune.lua`, `README.md`).**

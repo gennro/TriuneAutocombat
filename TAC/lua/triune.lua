@@ -471,6 +471,9 @@ local runtime = {
     lastAAScanAt = 0,
     filteredSortedAAs = nil,
     aaFilterDirty = true,
+    lastObservedAAPointsSpent = nil,
+    lastObservedAAPoints = nil,
+    pendingPostTrainScanAt = nil,
     knownDiscSet = nil,
     discExpires = {},
     discCooldown = {},
@@ -4694,6 +4697,21 @@ mq.event('TriuneConAmiable', '#*#amiably#*#', function(line) runtime.recordTarge
 mq.event('TriuneConKindly', '#*#kindly#*#', function(line) runtime.recordTargetCon('Kindly', line) end)
 mq.event('TriuneConWarmly', '#*#warmly#*#', function(line) runtime.recordTargetCon('Warmly', line) end)
 mq.event('TriuneConAlly', '#*#an ally#*#', function(line) runtime.recordTargetCon('Ally', line) end)
+mq.event('TriuneAAPurchased1', '#*#You have purchased #*#', function()
+    runtime.lastAAScanAt = 0
+    runtime.aaFilterDirty = true
+    if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+end)
+mq.event('TriuneAAPurchased2', '#*#You have improved #*#', function()
+    runtime.lastAAScanAt = 0
+    runtime.aaFilterDirty = true
+    if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+end)
+mq.event('TriuneAAPurchased3', '#*#You have mastered #*#', function()
+    runtime.lastAAScanAt = 0
+    runtime.aaFilterDirty = true
+    if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+end)
 
 function runtime.isConAllowed(s)
     if not s or not s() then return false end
@@ -6345,6 +6363,22 @@ function UI.drawAutoAATab()
         spentAA = tonumber(mq.TLO.Me.AAPointsSpent() or 0) or 0
         totalAA = tonumber(mq.TLO.Me.AAPointsTotal() or 0) or (unspentAA + spentAA)
     end)
+
+    if runtime.lastObservedAAPointsSpent ~= nil and spentAA ~= runtime.lastObservedAAPointsSpent then
+        runtime.lastObservedAAPointsSpent = spentAA
+        runtime.lastAAScanAt = 0
+        runtime.aaFilterDirty = true
+        if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+    else
+        runtime.lastObservedAAPointsSpent = spentAA
+    end
+
+    if runtime.lastObservedAAPoints ~= nil and unspentAA ~= runtime.lastObservedAAPoints then
+        runtime.lastObservedAAPoints = unspentAA
+        runtime.aaFilterDirty = true
+    else
+        runtime.lastObservedAAPoints = unspentAA
+    end
 
     accent(GOLD, 'Alternate Advancement (AA) Progression & Auto-Training')
 
@@ -11866,105 +11900,111 @@ end
 
 
 
+function runtime.findChildRecursive(parent, targetName)
+    if not parent or not parent() or not targetName or targetName == '' then return nil end
+    local tLower = targetName:lower()
+
+    -- Try direct Child lookup first
+    local direct = nil
+    pcall(function() direct = parent.Child(targetName) end)
+    if direct and direct() then return direct end
+
+    -- Check immediate children by iterating FirstChild -> Next
+    local curr = nil
+    pcall(function() curr = parent.FirstChild end)
+    local safety = 0
+    while curr and curr() and safety < 120 do
+        safety = safety + 1
+        local match = false
+        pcall(function()
+            local nm = curr.Name and curr.Name()
+            local sid = curr.ScreenID and curr.ScreenID()
+            if (nm and nm:lower() == tLower) or (sid and sid:lower() == tLower) then
+                match = true
+            end
+        end)
+        if match then return curr end
+
+        -- Recurse into child if it has children
+        local hasChildren = false
+        pcall(function() hasChildren = curr.Children and (curr.Children() == true) end)
+        if hasChildren then
+            local found = runtime.findChildRecursive(curr, targetName)
+            if found and found() then return found end
+        end
+
+        local nextSibling = nil
+        pcall(function() nextSibling = curr.Next end)
+        curr = nextSibling
+    end
+    return nil
+end
+
 function runtime.findAAInWindowLists(targetName)
     local win = nil
     pcall(function()
         local w = mq.TLO.Window('AAWindow')
-        if w and w() and w.Open and w.Open() then win = w end
+        if w and w() then win = w end
     end)
-    if not win then return nil, nil end
+    if not win then return nil, nil, nil, nil end
 
-    local listNames = {
-        'AAW_SpecialList',
-        'AA_SpecialList',
-        'SpecialList',
-        'Special_List',
-        'AAW_Special_List',
-        'AA_Special_List',
-        'AAW_SpecList',
-        'AA_SpecList',
-        'AAW_List',
-        'AA_List',
-        'AAW_GeneralList',
-        'AAW_ArchetypeList',
-        'AAW_ClassList',
-        'AAW_FocusList',
-        'AA_GeneralList',
-        'AA_ArchetypeList',
-        'AA_ClassList',
-        'AA_FocusList',
-        'AAW_SearchResultList',
-        'AA_SearchResultList'
+    local listCandidates = {
+        { name = 'AAW_SpecialList', tab = 4 },
+        { name = 'AAW_ClassList', tab = 3 },
+        { name = 'AAW_ArchList', tab = 2 },
+        { name = 'AAW_GeneralList', tab = 1 },
+        { name = 'AA_SpecialList', tab = 4 },
+        { name = 'AA_ClassList', tab = 3 },
+        { name = 'AA_ArchetypeList', tab = 2 },
+        { name = 'AA_GeneralList', tab = 1 },
+        { name = 'SpecialList', tab = 4 },
+        { name = 'ClassList', tab = 3 },
+        { name = 'ArchList', tab = 2 },
+        { name = 'GeneralList', tab = 1 },
+        { name = 'AAW_List', tab = 1 },
+        { name = 'AA_List', tab = 1 }
     }
 
-    local targetVariants = {
-        targetName or '',
-        (targetName or ''):lower(),
-        '=' .. (targetName or ''),
-        'Alternately Advanced Fireworks',
-        '=Alternately Advanced Fireworks',
-        'Alternatly advanced fireworks',
-        '=Alternatly advanced fireworks',
-        'Alternate Advanced Fireworks',
-        '=Alternate Advanced Fireworks',
-        'Advanced Fireworks',
-        '=Advanced Fireworks'
-    }
+    local cleanTarget = tostring(targetName or ''):lower():gsub('[^%a%d]', '')
+    local isFireworks = cleanTarget:find('firework') ~= nil
 
-    local tabParents = { 'AAW_Subwindows', 'AA_Subwindows', 'AA_SubWnd', 'AAW_SpecialTabPage', 'AA_SpecialTabPage' }
-
-    for _, listName in ipairs(listNames) do
-        local child = nil
-        pcall(function()
-            child = win.Child(listName)
-            if not child or not child() then
-                for _, tp in ipairs(tabParents) do
-                    local p = win.Child(tp)
-                    if p and p() then
-                        local sc = p.Child(listName)
-                        if sc and sc() then child = sc; break end
-                    end
-                end
-            end
+    -- If searching for Fireworks, prioritize Special tab listbox
+    if isFireworks then
+        table.sort(listCandidates, function(a, b)
+            if a.tab == 4 and b.tab ~= 4 then return true end
+            if b.tab == 4 and a.tab ~= 4 then return false end
+            return a.tab > b.tab
         end)
-        if child and child() and child.List then
-            for _, tVar in ipairs(targetVariants) do
-                if tVar ~= '' then
-                    local idx = nil
-                    pcall(function() idx = child.List(tVar)() end)
-                    if not idx or idx == 0 then
-                        pcall(function() idx = child.List(tVar, 1)() end)
-                    end
-                    if not idx or idx == 0 then
-                        pcall(function() idx = child.List(tVar, 2)() end)
-                    end
-                    idx = tonumber(idx or 0) or 0
-                    if idx > 0 then
-                        return listName, idx
-                    end
-                end
-            end
+    end
 
+    for _, cand in ipairs(listCandidates) do
+        local child = runtime.findChildRecursive(win, cand.name)
+        if child and child() and child.Items then
             local count = 0
             pcall(function() count = tonumber(child.Items() or 0) or 0 end)
             if count > 0 and count <= 500 then
                 for row = 1, count do
                     local rowText = nil
-                    pcall(function() rowText = child.List(row, 1)() or child.List(row, 2)() or child.List(row)() end)
+                    pcall(function() rowText = child.List(row, 1)() or child.List(row)() end)
                     if rowText and type(rowText) == 'string' and rowText ~= '' then
-                        local lowerRow = rowText:lower()
-                        for _, tVar in ipairs(targetVariants) do
-                            local cleanVar = tVar:gsub('^=', ''):lower()
-                            if cleanVar ~= '' and lowerRow:find(cleanVar, 1, true) then
-                                return listName, row
-                            end
+                        local cleanRow = rowText:lower():gsub('[^%a%d]', '')
+                        local matched = false
+                        if cleanRow == cleanTarget then
+                            matched = true
+                        elseif cleanRow ~= '' and cleanTarget ~= '' and (cleanRow:find(cleanTarget, 1, true) or cleanTarget:find(cleanRow, 1, true)) then
+                            matched = true
+                        elseif isFireworks and cleanRow:find('firework') then
+                            matched = true
+                        end
+                        if matched then
+                            return cand.name, row, cand.tab, child
                         end
                     end
                 end
             end
         end
     end
-    return nil, nil
+    return nil, nil, nil, nil
 end
 
 function runtime.recordScannedAA(list, foundMap, name)
@@ -12240,16 +12280,52 @@ end
 function runtime.startAATrainWorkflow(targetName)
     if runtime.pendingAATrain then return false end
     targetName = targetName or ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
+
+    local aaId = 0
+    local aaType = 0
+    pcall(function()
+        local ma = mq.TLO.Me.AltAbility(targetName)
+        if ma and ma() then
+            if ma.ID then aaId = tonumber(ma.ID() or 0) or 0 end
+            if ma.Type then aaType = tonumber(ma.Type() or 0) or 0 end
+        end
+        if aaId == 0 or aaType == 0 then
+            local ga = mq.TLO.AltAbility(targetName)
+            if ga and ga() then
+                if aaId == 0 and ga.ID then aaId = tonumber(ga.ID() or 0) or 0 end
+                if aaType == 0 and ga.Type then aaType = tonumber(ga.Type() or 0) or 0 end
+            end
+        end
+    end)
+    if aaId == 0 and (targetName:lower():find('firework') or targetName == (ctrl.auto_spend_aa_name or '')) then
+        aaId = tonumber(ctrl.auto_spend_aa_id or 17788) or 17788
+        aaType = 4
+    end
+
+    local prefTab = 1
+    if aaType == 4 or targetName:lower():find('firework') then
+        prefTab = 4
+    elseif aaType == 3 then
+        prefTab = 3
+    elseif aaType == 2 then
+        prefTab = 2
+    elseif aaType == 1 then
+        prefTab = 1
+    end
+
     runtime.pendingAATrain = {
         name = targetName,
+        aaId = aaId,
+        aaType = aaType,
+        targetTab = prefTab,
         step = 'open',
-        tab = 1,
-        maxTabs = 5,
+        tab = prefTab,
+        maxTabs = 4,
         openedByUs = false,
         nextStepAt = os.clock(),
         retries = 0
     }
-    print(string.format('\ag[Triune]\ax Initiating AA Window train sequence for "%s"...', targetName))
+    print(string.format('\ag[Triune]\ax Initiating AA Window train sequence for "%s" (ID: %d, Tab: %d)...', targetName, aaId, prefTab))
     return true
 end
 
@@ -12267,14 +12343,13 @@ function runtime.processAATrainWorkflow()
         end)
         if not isOpen then
             task.openedByUs = true
-            mq.cmd('/nomodkey /keypress V')
             mq.cmd('/window open AAWindow')
-            task.nextStepAt = now + 0.4
+            task.nextStepAt = now + 0.35
             task.step = 'wait_open'
             return
         else
-            task.step = 'search_tab'
-            task.nextStepAt = now + 0.1
+            task.step = 'prepare_tab'
+            task.nextStepAt = now + 0.05
             return
         end
 
@@ -12285,8 +12360,8 @@ function runtime.processAATrainWorkflow()
             if w and w() and w.Open and w.Open() then isOpen = true end
         end)
         if isOpen or (task.retries and task.retries > 3) then
-            task.step = 'search_tab'
-            task.nextStepAt = now + 0.15
+            task.step = 'prepare_tab'
+            task.nextStepAt = now + 0.1
         else
             task.retries = (task.retries or 0) + 1
             mq.cmd('/window open AAWindow')
@@ -12294,93 +12369,70 @@ function runtime.processAATrainWorkflow()
         end
         return
 
-    elseif task.step == 'search_tab' then
+    elseif task.step == 'prepare_tab' then
         local win = nil
         pcall(function() win = mq.TLO.Window('AAWindow') end)
-        local listName, listIdx = runtime.findAAInWindowLists(task.name)
-        if listName and listIdx and listIdx > 0 then
-            mq.cmdf('/nomodkey /notify AAWindow %s listselect %d', listName, listIdx)
-            mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', listName)
-            task.step = 'click_train'
-            task.nextStepAt = now + 0.25
-            return
-        else
-            task.tab = (task.tab or 1) + 1
-            if task.tab <= task.maxTabs then
-                if win and win() then
-                    local tabChildren = { 'AAW_Subwindows', 'AA_Subwindows', 'AA_SubWnd' }
-                    for _, tabName in ipairs(tabChildren) do
-                        local child = nil
-                        pcall(function() child = win.Child(tabName) end)
-                        if child and child() then
-                            mq.cmdf('/nomodkey /notify AAWindow %s tabselect %d', tabName, task.tab)
-                            break
-                        end
-                    end
-                else
-                    mq.cmdf('/nomodkey /notify AAWindow AAW_Subwindows tabselect %d', task.tab)
-                end
-                task.nextStepAt = now + 0.25
-                return
-            else
-                task.step = 'search_box'
-                task.nextStepAt = now + 0.1
-                return
-            end
-        end
+        local targetTab = task.targetTab or task.tab or 1
 
-    elseif task.step == 'search_box' then
-        local win = nil
-        pcall(function() win = mq.TLO.Window('AAWindow') end)
-        if win and win() then
-            local searchEditNames = { 'AAW_SearchEditBox', 'AA_SearchEditBox', 'SearchEditBox' }
-            for _, editName in ipairs(searchEditNames) do
-                local child = nil
-                pcall(function() child = win.Child(editName) end)
-                if child and child() then
-                    mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', editName)
-                    mq.cmdf('/nomodkey /notify AAWindow %s settext "%s"', editName, task.name)
-                    local searchBtnNames = { 'AAW_SearchButton', 'AA_SearchButton', 'SearchButton' }
-                    for _, btnName in ipairs(searchBtnNames) do
-                        local bChild = nil
-                        pcall(function() bChild = win.Child(btnName) end)
-                        if bChild and bChild() then
-                            mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', btnName)
-                            break
-                        end
-                    end
-                    break
-                end
+        -- Select the target tab page first so its listbox is active
+        mq.cmdf('/nomodkey /notify AAWindow AAW_Subwindows tabselect %d', targetTab)
+        pcall(function()
+            if win and win() then
+                local sub = runtime.findChildRecursive(win, 'AAW_Subwindows')
+                if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(targetTab) end
             end
-        end
-        task.step = 'after_search'
-        task.nextStepAt = now + 0.35
+        end)
+
+        task.step = 'select_item'
+        task.nextStepAt = now + 0.3
         return
 
-    elseif task.step == 'after_search' then
-        local listName, listIdx = runtime.findAAInWindowLists(task.name)
+    elseif task.step == 'select_item' then
+        local listName, listIdx, _, listObj = runtime.findAAInWindowLists(task.name)
+
         if listName and listIdx and listIdx > 0 then
+            -- Found the ability row! Select it
+            pcall(function()
+                if listObj and listObj() then
+                    if listObj.Select then listObj.Select(listIdx) end
+                    if listObj.LeftMouseUp then listObj.LeftMouseUp() end
+                end
+            end)
             mq.cmdf('/nomodkey /notify AAWindow %s listselect %d', listName, listIdx)
             mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', listName)
             task.step = 'click_train'
             task.nextStepAt = now + 0.25
             return
         else
-            task.step = 'click_train'
-            task.nextStepAt = now + 0.1
-            return
+            -- If not found on current tab, try next tab
+            task.tab = (task.tab or 1) + 1
+            if task.tab <= (task.maxTabs or 4) then
+                task.targetTab = task.tab
+                task.step = 'prepare_tab'
+                task.nextStepAt = now + 0.1
+                return
+            else
+                -- Fallback directly to /alt buy if ID is known
+                if task.aaId and task.aaId > 0 then
+                    mq.cmdf('/alt buy %d', task.aaId)
+                    print(string.format('\ag[Triune]\ax Issued fallback /alt buy %d for "%s"...', task.aaId, task.name))
+                end
+                task.step = 'finish'
+                task.nextStepAt = now + 0.4
+                return
+            end
         end
 
     elseif task.step == 'click_train' then
         local win = nil
         pcall(function() win = mq.TLO.Window('AAWindow') end)
-        local candidateButtons = { 'TrainButton', 'AAW_TrainButton', 'AA_TrainButton' }
+        local trainButtons = { 'AAW_TrainButton', 'TrainButton', 'AA_TrainButton' }
         local clicked = false
         if win and win() then
-            for _, btnName in ipairs(candidateButtons) do
-                local child = nil
-                pcall(function() child = win.Child(btnName) end)
-                if child and child() then
+            for _, btnName in ipairs(trainButtons) do
+                local btn = runtime.findChildRecursive(win, btnName)
+                if btn and btn() then
+                    pcall(function() if btn.LeftMouseUp then btn.LeftMouseUp() end end)
                     mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', btnName)
                     clicked = true
                     break
@@ -12388,8 +12440,15 @@ function runtime.processAATrainWorkflow()
             end
         end
         if not clicked then
+            mq.cmd('/nomodkey /notify AAWindow AAW_TrainButton leftmouseup')
             mq.cmd('/nomodkey /notify AAWindow TrainButton leftmouseup')
         end
+
+        -- Also issue /alt buy <id> as a secondary fallback to guarantee purchase
+        if task.aaId and task.aaId > 0 then
+            mq.cmdf('/alt buy %d', task.aaId)
+        end
+
         print(string.format('\ag[Triune]\ax Clicked Train Button in AA Window for "%s".', task.name))
         task.step = 'finish'
         task.nextStepAt = now + 0.4
@@ -12398,12 +12457,16 @@ function runtime.processAATrainWorkflow()
     elseif task.step == 'finish' then
         if task.openedByUs then
             mq.cmd('/window close AAWindow')
-            mq.cmd('/nomodkey /keypress V')
+            pcall(function()
+                local w = mq.TLO.Window('AAWindow')
+                if w and w() and w.DoClose then w.DoClose() end
+            end)
         end
         runtime.pendingAATrain = nil
         runtime.lastAAScanAt = 0
         runtime.aaFilterDirty = true
         if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+        runtime.pendingPostTrainScanAt = now + 1.2
         runtime.saveLoadout(true)
         return
     end
@@ -17489,6 +17552,20 @@ local function runMainLoop()
         end
         if runtime.pendingAATrain and runtime.processAATrainWorkflow then
             runtime.processAATrainWorkflow()
+        end
+        if runtime.pendingPostTrainScanAt and os.clock() >= runtime.pendingPostTrainScanAt then
+            runtime.pendingPostTrainScanAt = nil
+            runtime.lastAAScanAt = 0
+            runtime.aaFilterDirty = true
+            if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+        end
+        local currentSpentAA = nil
+        pcall(function() currentSpentAA = tonumber(mq.TLO.Me.AAPointsSpent() or 0) or 0 end)
+        if currentSpentAA and runtime.lastObservedAAPointsSpent ~= nil and currentSpentAA ~= runtime.lastObservedAAPointsSpent then
+            runtime.lastObservedAAPointsSpent = currentSpentAA
+            runtime.lastAAScanAt = 0
+            runtime.aaFilterDirty = true
+            if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
         end
         if ctrl.auto_spend_aa and runtime.checkAutoSpendAA then
             runtime.checkAutoSpendAA()
