@@ -136,6 +136,24 @@ Triune keeps things simple with **3 main combat modes**:
 
 ---
 
+### 🤝 Auto-Accept & Social Automation (Settings Sub-Page)
+Triune includes a dedicated **Auto-Accept** sub-page located directly under the **Settings** tab:
+- **Auto-Accept Group Invites**: Automatically accepts incoming party invites via `/invite` and dialog confirmation when received from an authorized player.
+- **Auto-Accept Trades**: Automatically clicks the Trade accept button when the other party is ready and authorized.
+- **Auto-Accept Dynamic Zone / Expedition Invites (DZAdd)**: Automatically accepts expedition (`/dzaccept`), dynamic zone, and task addition invites from authorized players.
+- **Flexible Authorization Rules**:
+  - **Accept from Anyone**: Accept requests from any player unconditionally.
+  - **Always accept from Group Members**: Authorize trades and expedition requests from current group members.
+  - **Accept from all Guild Members**: Authorize requests from any player in the same guild (`Me.Guild()`).
+- **Interactive Whitelist Management with Player IDs**:
+  - Add players by **Name or Player ID** manually with Enter key submission.
+  - One-click **`+ Add Target`** button to instantly whitelist your currently targeted player character with both character name and player ID.
+  - Dedicated **`Remove`** button in the top toolbar to remove the selected player or currently targeted player.
+  - Structured 3-column table (`Player Name`, `Player ID`, `Action`) with row selection and per-row **`Remove`** buttons.
+  - **`Clear All`** button to quickly wipe the whitelist.
+
+---
+
 ### 📱 Compact Mini HUD
 Want to clear up screen clutter while playing?
 - Switch to the **Mini HUD** (`/ac compact` or click the **Compact** button).

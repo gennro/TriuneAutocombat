@@ -398,6 +398,13 @@ local function defaultCtrl()
         auto_aa_buy_order        = 'cost',
         downtime_buffing         = true,
         pause_on_zone            = true,
+        auto_group               = false,
+        auto_trade               = false,
+        auto_dzadd               = false,
+        auto_accept_anyone       = false,
+        auto_accept_guild        = false,
+        auto_accept_group        = false,
+        auto_accept_names        = {},
         status_collapsed         = {
             target = false,
             vitals = false,
@@ -455,6 +462,8 @@ local runtime = {
     lastAssistCmdAt = 0,
     sungBuffs = {},
     npcCastCounts = {},
+    npcSpellApplied = {},
+    npcSpellLastCast = {},
     lastNpcCastPruneAt = 0,
     lastMapDraw = { active = false, type = nil, key = '' },
     trackStartTime = nil,
@@ -2339,6 +2348,9 @@ local function createCastTracker()
                 targetLockouts[tid] = targetLockouts[tid] or {}
                 targetLockouts[tid][spellName] = os.clock() + backoff
                 resetFailCount(spellName)
+                if runtime and runtime.npcSpellApplied and runtime.npcSpellApplied[tid] then
+                    runtime.npcSpellApplied[tid][spellName] = nil
+                end
                 print(string.format('\ay[Triune]\ax Detrimental spell "%s" did not take hold on target #%d -- backing off on this target (%ds).', spellName, tid, backoff))
             else
                 lockouts[spellName] = os.clock() + lSec
@@ -2346,6 +2358,11 @@ local function createCastTracker()
             end
 
         elseif rLow == 'resisted' then
+            if tid and tid > 0 and spellName and spellName ~= '' then
+                if runtime and runtime.npcSpellApplied and runtime.npcSpellApplied[tid] then
+                    runtime.npcSpellApplied[tid][spellName] = nil
+                end
+            end
             -- Resists:
             -- If kind is direct damage ('dd') or damage over time ('dot'), NEVER lock out on resists!
             if k == 'dd' or k == 'dot' then
@@ -2373,6 +2390,9 @@ local function createCastTracker()
             if failTid and failTid > 0 and failSpell and failSpell ~= '' then
                 if runtime and runtime.npcCastCounts and runtime.npcCastCounts[failTid] and (runtime.npcCastCounts[failTid][failSpell] or 0) > 0 then
                     runtime.npcCastCounts[failTid][failSpell] = runtime.npcCastCounts[failTid][failSpell] - 1
+                end
+                if runtime and runtime.npcSpellApplied and runtime.npcSpellApplied[failTid] then
+                    runtime.npcSpellApplied[failTid][failSpell] = nil
                 end
             end
             -- Transient combat mechanics: retry on gem refresh.
@@ -4101,6 +4121,13 @@ function runtime.applyEntry(e)
         if ctrl.buff_refresh_sec == nil then ctrl.buff_refresh_sec = 45 end
         if ctrl.ma_id == nil then ctrl.ma_id = 0 end
         if type(ctrl.custom_ma_list) ~= 'table' then ctrl.custom_ma_list = {} end
+        if ctrl.auto_group == nil then ctrl.auto_group = false end
+        if ctrl.auto_trade == nil then ctrl.auto_trade = false end
+        if ctrl.auto_dzadd == nil then ctrl.auto_dzadd = false end
+        if ctrl.auto_accept_anyone == nil then ctrl.auto_accept_anyone = false end
+        if ctrl.auto_accept_guild == nil then ctrl.auto_accept_guild = false end
+        if ctrl.auto_accept_group == nil then ctrl.auto_accept_group = false end
+        if type(ctrl.auto_accept_names) ~= 'table' then ctrl.auto_accept_names = {} end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -4368,6 +4395,373 @@ function runtime.removePull(name)
     end
     runtime.saveLoadout(true)
     print('\ag[Triune]\ax removed from pull list: ' .. name)
+end
+
+-- ============================================================================
+-- Auto-Accept (group / trade / dzadd) whitelist and authorization helpers
+-- ============================================================================
+function runtime.getAutoAcceptPlayerInfo(entry)
+    if type(entry) == 'table' then
+        return tostring(entry.name or ''), tonumber(entry.id) or 0
+    else
+        return tostring(entry or ''), 0
+    end
+end
+
+function runtime.isAutoAcceptListed(nameOrId)
+    if not nameOrId or nameOrId == '' or nameOrId == 0 then return false end
+    if not ctrl or not ctrl.auto_accept_names or type(ctrl.auto_accept_names) ~= 'table' then
+        if ctrl then ctrl.auto_accept_names = {} end
+        return false
+    end
+    local targetNum = tonumber(nameOrId)
+    local targetStr = tostring(nameOrId):lower():gsub('^%s+', ''):gsub('%s+$', '')
+    for _, entry in ipairs(ctrl.auto_accept_names) do
+        local eName, eId = runtime.getAutoAcceptPlayerInfo(entry)
+        if targetNum and targetNum > 0 and eId > 0 and eId == targetNum then
+            return true
+        end
+        if targetStr ~= '' and eName ~= '' and eName:lower() == targetStr then
+            return true
+        end
+    end
+    return false
+end
+
+function runtime.addAutoAcceptName(nameOrId, optionalId)
+    if not nameOrId then return end
+    local s = tostring(nameOrId):gsub('^%s+', ''):gsub('%s+$', '')
+    if s == '' then return end
+
+    local name = s
+    local id = tonumber(optionalId) or 0
+
+    local num = tonumber(s)
+    if num and num > 0 and id == 0 then
+        id = num
+        name = ''
+    end
+
+    if mq and mq.TLO and mq.TLO.Spawn then
+        pcall(function()
+            if id > 0 and name == '' then
+                local sp = mq.TLO.Spawn(string.format('id %d', id))
+                if sp and sp() and sp.Type() == 'PC' then
+                    name = sp.CleanName() or ''
+                end
+            elseif name ~= '' and id == 0 then
+                local sp = mq.TLO.Spawn(string.format('pc =%s', name))
+                if not (sp and sp() and (sp.ID() or 0) > 0) then
+                    sp = mq.TLO.Spawn(string.format('pc %s', name))
+                end
+                if sp and sp() and sp.Type() == 'PC' then
+                    id = sp.ID() or 0
+                end
+            end
+        end)
+    end
+
+    if name == '' and id > 0 then
+        name = string.format('Player_%d', id)
+    end
+
+    if name == '' and id == 0 then return end
+
+    if not ctrl.auto_accept_names or type(ctrl.auto_accept_names) ~= 'table' then
+        ctrl.auto_accept_names = {}
+    end
+
+    local found = false
+    for _, entry in ipairs(ctrl.auto_accept_names) do
+        local eName, eId = runtime.getAutoAcceptPlayerInfo(entry)
+        if (id > 0 and eId > 0 and eId == id) or (name ~= '' and eName ~= '' and eName:lower() == name:lower()) then
+            if type(entry) == 'table' then
+                if id > 0 then entry.id = id end
+                if name ~= '' and (entry.name == '' or entry.name:find('^Player_')) then entry.name = name end
+            end
+            found = true
+            break
+        end
+    end
+
+    if not found then
+        table.insert(ctrl.auto_accept_names, { name = name, id = id })
+        table.sort(ctrl.auto_accept_names, function(a, b)
+            local aName = runtime.getAutoAcceptPlayerInfo(a)
+            local bName = runtime.getAutoAcceptPlayerInfo(b)
+            return aName:lower() < bName:lower()
+        end)
+    end
+
+    runtime.saveLoadout(true)
+    if id > 0 then
+        print(string.format('\ag[Triune Auto-Accept]\ax Added to auto-accept list: \ay%s\ax (ID: \at%d\ax)', name, id))
+    else
+        print(string.format('\ag[Triune Auto-Accept]\ax Added to auto-accept list: \ay%s\ax', name))
+    end
+end
+
+function runtime.removeAutoAcceptName(nameOrIdOrEntry)
+    if not nameOrIdOrEntry or not ctrl.auto_accept_names then return false end
+    local targetNum = nil
+    local targetStr = nil
+
+    if type(nameOrIdOrEntry) == 'table' then
+        targetNum = tonumber(nameOrIdOrEntry.id)
+        targetStr = nameOrIdOrEntry.name and tostring(nameOrIdOrEntry.name):lower():gsub('^%s+', ''):gsub('%s+$', '')
+    else
+        targetNum = tonumber(nameOrIdOrEntry)
+        targetStr = tostring(nameOrIdOrEntry):lower():gsub('^%s+', ''):gsub('%s+$', '')
+    end
+
+    local removedInfo = nil
+    for i, entry in ipairs(ctrl.auto_accept_names) do
+        local eName, eId = runtime.getAutoAcceptPlayerInfo(entry)
+        if (targetNum and targetNum > 0 and eId > 0 and eId == targetNum) or
+           (targetStr and targetStr ~= '' and eName ~= '' and eName:lower() == targetStr) then
+            removedInfo = { name = eName, id = eId }
+            table.remove(ctrl.auto_accept_names, i)
+            break
+        end
+    end
+
+    if removedInfo then
+        runtime.saveLoadout(true)
+        if removedInfo.id > 0 then
+            print(string.format('\ag[Triune Auto-Accept]\ax Removed from auto-accept list: \ay%s\ax (ID: \at%d\ax)', removedInfo.name, removedInfo.id))
+        else
+            print(string.format('\ag[Triune Auto-Accept]\ax Removed from auto-accept list: \ay%s\ax', removedInfo.name))
+        end
+        return true
+    end
+    return false
+end
+
+function runtime.clearAutoAcceptNames()
+    ctrl.auto_accept_names = {}
+    runtime.saveLoadout(true)
+    print('\ag[Triune Auto-Accept]\ax Cleared all names from auto-accept list.')
+end
+
+function runtime.isAutoAcceptAllowed(senderName, senderId)
+    if (not senderName or senderName == '') and (not senderId or senderId == 0) then return false end
+    if senderName then
+        senderName = tostring(senderName):gsub('^%s+', ''):gsub('%s+$', '')
+    end
+
+    -- 1. Accept from anyone
+    if ctrl.auto_accept_anyone then return true end
+
+    -- 2. Whitelist match (by ID or case-insensitive Name)
+    if senderId and senderId > 0 and runtime.isAutoAcceptListed(senderId) then return true end
+    if senderName and senderName ~= '' and runtime.isAutoAcceptListed(senderName) then return true end
+
+    local sLower = senderName and senderName:lower() or ''
+    local sIdNum = tonumber(senderId) or 0
+
+    -- If senderId was not passed but senderName is given, attempt resolving in zone
+    if sIdNum == 0 and senderName and senderName ~= '' and mq and mq.TLO and mq.TLO.Spawn then
+        pcall(function()
+            local sp = mq.TLO.Spawn(string.format('pc =%s', senderName))
+            if not (sp and sp() and (sp.ID() or 0) > 0) then
+                sp = mq.TLO.Spawn(string.format('pc %s', senderName))
+            end
+            if sp and sp() and (sp.ID() or 0) > 0 then
+                sIdNum = sp.ID()
+                if runtime.isAutoAcceptListed(sIdNum) then return true end
+            end
+        end)
+    end
+
+    -- 3. Group member match
+    if ctrl.auto_accept_group and mq and mq.TLO and mq.TLO.Group then
+        local isGrp = false
+        pcall(function()
+            local memCount = mq.TLO.Group.Members() or 0
+            for i = 1, memCount do
+                local mem = mq.TLO.Group.Member(i)
+                if mem and mem() then
+                    local mId = mem.ID and mem.ID() or 0
+                    local mName = mem.CleanName and mem.CleanName() or ''
+                    if (sIdNum > 0 and mId > 0 and mId == sIdNum) or
+                       (sLower ~= '' and mName ~= '' and mName:lower() == sLower) then
+                        isGrp = true
+                        break
+                    end
+                end
+            end
+        end)
+        if isGrp then return true end
+    end
+
+    -- 4. Guild member match
+    if ctrl.auto_accept_guild and mq and mq.TLO and mq.TLO.Me then
+        local isGld = false
+        pcall(function()
+            local myG = mq.TLO.Me.Guild
+            local myGuild = (myG and myG() and myG() ~= '') and myG() or nil
+            if myGuild then
+                local sp = nil
+                if sIdNum > 0 then
+                    sp = mq.TLO.Spawn(string.format('id %d', sIdNum))
+                end
+                if not (sp and sp() and (sp.ID() or 0) > 0) and senderName and senderName ~= '' then
+                    sp = mq.TLO.Spawn(string.format('pc =%s', senderName))
+                    if not (sp and sp() and (sp.ID() or 0) > 0) then
+                        sp = mq.TLO.Spawn(string.format('pc %s', senderName))
+                    end
+                end
+                if sp and sp() and sp.Guild then
+                    local theirG = sp.Guild()
+                    if theirG and theirG ~= '' and theirG:lower() == myGuild:lower() then
+                        isGld = true
+                    end
+                end
+            end
+        end)
+        if isGld then return true end
+    end
+
+    return false
+end
+
+function runtime.checkAutoAccept()
+    if not ctrl.auto_group and not ctrl.auto_trade and not ctrl.auto_dzadd then return end
+    local now = os.clock()
+    if runtime.lastAutoAcceptCheckAt and (now - runtime.lastAutoAcceptCheckAt) < 0.3 then return end
+    runtime.lastAutoAcceptCheckAt = now
+
+    -- 1. Auto Group Invite
+    if ctrl.auto_group and mq and mq.TLO and mq.TLO.Me then
+        local isInvited = false
+        pcall(function() isInvited = mq.TLO.Me.Invited() end)
+        if isInvited then
+            local inviter = nil
+            local inviterId = 0
+            pcall(function() inviter = mq.TLO.Me.Inviter() end)
+            if inviter and inviter ~= '' then
+                pcall(function()
+                    local sp = mq.TLO.Spawn(string.format('pc =%s', inviter))
+                    if sp and sp() then inviterId = sp.ID() or 0 end
+                end)
+                if runtime.isAutoAcceptAllowed(inviter, inviterId) then
+                    if not runtime.lastAutoGroupAcceptAt or (now - runtime.lastAutoGroupAcceptAt) > 2.0 then
+                        runtime.lastAutoGroupAcceptAt = now
+                        mq.cmd('/timed 5 /invite')
+                        if inviterId > 0 then
+                            print(string.format('\ag[Triune Auto-Accept]\ax Accepted group invite from \ay%s\ax (ID: \at%d\ax).', inviter, inviterId))
+                        else
+                            print(string.format('\ag[Triune Auto-Accept]\ax Accepted group invite from \ay%s\ax.', inviter))
+                        end
+                        local confOpen = false
+                        pcall(function() confOpen = mq.TLO.Window('ConfirmationDialogBox').Open() end)
+                        if confOpen then
+                            pcall(function() mq.cmd('/notify ConfirmationDialogBox Yes_Button leftmouseup') end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Auto Trade
+    if ctrl.auto_trade and mq and mq.TLO and mq.TLO.Window then
+        local tradeOpen = false
+        pcall(function() tradeOpen = mq.TLO.Window('TradeWnd').Open() end)
+        if tradeOpen then
+            local hisReady = false
+            local myReady = false
+            pcall(function()
+                hisReady = mq.TLO.Window('TradeWnd').HisTradeReady()
+                myReady = mq.TLO.Window('TradeWnd').MyTradeReady()
+            end)
+            if hisReady and not myReady then
+                local traderName = nil
+                local traderId = 0
+                pcall(function()
+                    local lbl = mq.TLO.Window('TradeWnd').Child('TRDW_HisName')
+                    if lbl and lbl() then traderName = lbl.Text() end
+                end)
+                pcall(function()
+                    local tgt = mq.TLO.Target
+                    if tgt and tgt() and tgt.Type() == 'PC' then
+                        if not traderName or traderName == '' then traderName = tgt.CleanName() end
+                        traderId = tgt.ID() or 0
+                    end
+                end)
+                if traderName and traderName ~= '' and traderId == 0 then
+                    pcall(function()
+                        local sp = mq.TLO.Spawn(string.format('pc =%s', traderName))
+                        if sp and sp() then traderId = sp.ID() or 0 end
+                    end)
+                end
+                if ((traderName and traderName ~= '') or traderId > 0) and runtime.isAutoAcceptAllowed(traderName, traderId) then
+                    if not runtime.lastAutoTradeAcceptAt or (now - runtime.lastAutoTradeAcceptAt) > 1.5 then
+                        runtime.lastAutoTradeAcceptAt = now
+                        mq.cmd('/notify TradeWnd TRDW_Trade_Button leftmouseup')
+                        if traderId > 0 then
+                            print(string.format('\ag[Triune Auto-Accept]\ax Accepted trade from \ay%s\ax (ID: \at%d\ax).', traderName or 'Unknown', traderId))
+                        else
+                            print(string.format('\ag[Triune Auto-Accept]\ax Accepted trade from \ay%s\ax.', traderName))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Auto DZAdd / Expedition / Task Confirmation
+    if ctrl.auto_dzadd and mq and mq.TLO and mq.TLO.Window then
+        local confOpen = false
+        pcall(function() confOpen = mq.TLO.Window('ConfirmationDialogBox').Open() end)
+        if confOpen then
+            local text = ''
+            pcall(function()
+                local out = mq.TLO.Window('ConfirmationDialogBox').Child('CD_TextOutput')
+                if out and out() then text = out.Text() or '' end
+            end)
+            local tLower = text:lower()
+            -- Ignore rez prompts or fellowship removals
+            if not tLower:find('percent') and not tLower:find('corpse') and not tLower:find('resurrect') and not tLower:find('remove') then
+                if tLower:find('expedition') or tLower:find('dynamic zone') or tLower:find('task') or tLower:find('dzadd') or tLower:find('dz') then
+                    local candidateName = text:match('^([%a%d]+)%s+has%s+invited%s+you') or text:match('^([%a%d]+)%s+invites%s+you')
+                    local candidateId = 0
+                    if candidateName and candidateName ~= '' then
+                        pcall(function()
+                            local sp = mq.TLO.Spawn(string.format('pc =%s', candidateName))
+                            if sp and sp() then candidateId = sp.ID() or 0 end
+                        end)
+                    end
+                    local allowed = false
+                    if ctrl.auto_accept_anyone then
+                        allowed = true
+                    elseif candidateName and candidateName ~= '' then
+                        allowed = runtime.isAutoAcceptAllowed(candidateName, candidateId)
+                    elseif ctrl.auto_accept_names and #ctrl.auto_accept_names > 0 then
+                        for _, n in ipairs(ctrl.auto_accept_names) do
+                            local eName, eId = runtime.getAutoAcceptPlayerInfo(n)
+                            if (eName ~= '' and tLower:find(eName:lower(), 1, true)) or
+                               (eId > 0 and tLower:find(tostring(eId), 1, true)) then
+                                allowed = true
+                                candidateName = eName
+                                candidateId = eId
+                                break
+                            end
+                        end
+                    end
+                    if allowed then
+                        if not runtime.lastAutoDzAcceptAt or (now - runtime.lastAutoDzAcceptAt) > 1.5 then
+                            runtime.lastAutoDzAcceptAt = now
+                            mq.cmd('/notify ConfirmationDialogBox Yes_Button leftmouseup')
+                            mq.cmd('/dzaccept')
+                            local who = candidateName or (candidateId > 0 and tostring(candidateId)) or 'sender'
+                            print(string.format('\ag[Triune Auto-Accept]\ax Accepted expedition / dynamic zone invite from \ay%s\ax.', who))
+                        end
+                    end
+                end
+            end
+        end
+    end
 end
 
 -- Waypoint Patrol helpers for Puller mode (attached to runtime table to respect 200 local limit)
@@ -4867,6 +5261,57 @@ mq.event('TriuneAAPurchased3', '#*#You have mastered #*#', function()
     runtime.lastAAScanAt = 0
     runtime.aaFilterDirty = true
     if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+end)
+
+mq.event('TriuneAutoGroupInvite1', '#1# invites you to join a group#*#', function(_, inviter)
+    if ctrl and ctrl.auto_group and inviter and runtime.isAutoAcceptAllowed and runtime.isAutoAcceptAllowed(inviter) then
+        local now = os.clock()
+        if not runtime.lastAutoGroupAcceptAt or (now - runtime.lastAutoGroupAcceptAt) > 2.0 then
+            runtime.lastAutoGroupAcceptAt = now
+            mq.cmd('/timed 5 /invite')
+            print(string.format('\ag[Triune Auto-Accept]\ax Accepted group invite from \ay%s\ax.', inviter))
+        end
+    end
+end)
+mq.event('TriuneAutoGroupInvite2', '#1# has invited you to join a group#*#', function(_, inviter)
+    if ctrl and ctrl.auto_group and inviter and runtime.isAutoAcceptAllowed and runtime.isAutoAcceptAllowed(inviter) then
+        local now = os.clock()
+        if not runtime.lastAutoGroupAcceptAt or (now - runtime.lastAutoGroupAcceptAt) > 2.0 then
+            runtime.lastAutoGroupAcceptAt = now
+            mq.cmd('/timed 5 /invite')
+            print(string.format('\ag[Triune Auto-Accept]\ax Accepted group invite from \ay%s\ax.', inviter))
+        end
+    end
+end)
+mq.event('TriuneAutoDZInvite1', '#1# has invited you to join #*# expedition#*#', function(_, inviter)
+    if ctrl and ctrl.auto_dzadd and inviter and runtime.isAutoAcceptAllowed and runtime.isAutoAcceptAllowed(inviter) then
+        local now = os.clock()
+        if not runtime.lastAutoDzAcceptAt or (now - runtime.lastAutoDzAcceptAt) > 1.5 then
+            runtime.lastAutoDzAcceptAt = now
+            mq.cmd('/dzaccept')
+            print(string.format('\ag[Triune Auto-Accept]\ax Accepted expedition invite from \ay%s\ax.', inviter))
+        end
+    end
+end)
+mq.event('TriuneAutoDZInvite2', '#1# invites you to join an expedition#*#', function(_, inviter)
+    if ctrl and ctrl.auto_dzadd and inviter and runtime.isAutoAcceptAllowed and runtime.isAutoAcceptAllowed(inviter) then
+        local now = os.clock()
+        if not runtime.lastAutoDzAcceptAt or (now - runtime.lastAutoDzAcceptAt) > 1.5 then
+            runtime.lastAutoDzAcceptAt = now
+            mq.cmd('/dzaccept')
+            print(string.format('\ag[Triune Auto-Accept]\ax Accepted expedition invite from \ay%s\ax.', inviter))
+        end
+    end
+end)
+mq.event('TriuneAutoDZInvite3', '#1# has invited you to join a Dynamic Zone#*#', function(_, inviter)
+    if ctrl and ctrl.auto_dzadd and inviter and runtime.isAutoAcceptAllowed and runtime.isAutoAcceptAllowed(inviter) then
+        local now = os.clock()
+        if not runtime.lastAutoDzAcceptAt or (now - runtime.lastAutoDzAcceptAt) > 1.5 then
+            runtime.lastAutoDzAcceptAt = now
+            mq.cmd('/dzaccept')
+            print(string.format('\ag[Triune Auto-Accept]\ax Accepted Dynamic Zone invite from \ay%s\ax.', inviter))
+        end
+    end
 end)
 
 function runtime.isConAllowed(s)
@@ -5465,6 +5910,75 @@ function UI.drawHelpTab()
                     ImGui.TableNextColumn()
                     ImGui.TextWrapped(MODES.DESC[primaryName] or '')
                 end
+            end
+            ImGui.EndTable()
+        end
+    end
+
+    if ImGui.CollapsingHeader('Spell & Ability Target Filters', ImGuiTreeNodeFlags.DefaultOpen) then
+        accent(GOLD, 'Target Resolution Options (Spell Gems, Clickies, AAs, Discs, Actions):')
+        local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
+        if ImGui.BeginTable('##HelpTargetTable', 2, tableFlags) then
+            ImGui.TableSetupColumn('Target Option', ImGuiTableColumnFlags.WidthFixed, 180)
+            ImGui.TableSetupColumn('Targeting Behavior & Resolution', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableHeadersRow()
+
+            local targets = {
+                { opt = 'E: All Enemies',     color = ERR,  desc = 'Multi-Target mode: Evaluates ALL hostile enemies on your Extended Target (XTarget) window. For duration spells (DoTs, debuffs, snares, mes), sequentially casts on each enemy missing the effect and yields once all have it. For nukes/direct damage, round-robins casts evenly across all XTarget enemies. Honors per-mob max_casts and skips locked-out/immune mobs.' },
+                { opt = 'E: Current Target',  color = ERR,  desc = 'Casts directly on your currently active game target (Target TLO). Does not switch targets automatically.' },
+                { opt = 'E: Assist Target',   color = ERR,  desc = 'Targets the hostile mob currently targeted by your configured Main Assist. If MA has no target and Assist Self-Defense is on, falls back to your direct attacker.' },
+                { opt = 'E: Nearest Add',     color = ERR,  desc = 'Targets the first hostile NPC add on your Extended Target window within vertical height limits. If XTarget has no adds, falls back to the nearest hostile NPC within camp/hunt radius.' },
+                { opt = 'E: Unmezzed Add',    color = ERR,  desc = 'Targets the first hostile add on your Extended Target window that is NOT mesmerized. Ideal for Enchanter, Bard, or Necromancer crowd control (Mez) rotations.' },
+                { opt = 'F: Myself',          color = GOOD, desc = 'Always targets and casts on your own character. Standard for self-buffs, personal emergency heals, and Feign Death.' },
+                { opt = 'F: Main Assist',     color = GOOD, desc = 'Targets the designated Main Assist character for single-target buffs, heals, or utility.' },
+                { opt = 'F: Tank',            color = GOOD, desc = 'Targets the designated Tank character for targeted heals, protective buffs, or damage mitigation.' },
+                { opt = 'F: Lowest-HP Ally',  color = GOOD, desc = 'Scans yourself and all group members, automatically targeting the ally with the lowest current HP percentage. Ideal for reactive heals.' },
+                { opt = 'F: Whole Group',     color = GOOD, desc = 'Targets your character to cast group-wide spells (group heals, group buffs, group auras).' },
+                { opt = 'F: Pet',             color = GOOD, desc = 'Targets your summoned pet. On multi-class trio characters with multiple pets, prioritizes the pet class matching the spell, lowest HP pet, or pet missing the buff.' },
+            }
+
+            for _, entry in ipairs(targets) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                accent(entry.color, entry.opt)
+                ImGui.TableNextColumn()
+                ImGui.TextWrapped(entry.desc)
+            end
+            ImGui.EndTable()
+        end
+
+        ImGui.Spacing()
+        accent(GOLD, 'Cast Conditions ("When" Triggers):')
+        if ImGui.BeginTable('##HelpWhenTable', 2, tableFlags) then
+            ImGui.TableSetupColumn('Condition', ImGuiTableColumnFlags.WidthFixed, 180)
+            ImGui.TableSetupColumn('Activation Criteria', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableHeadersRow()
+
+            local conditions = {
+                { when = 'always',               desc = 'Casts whenever the spell gem or ability is ready and off cooldown (respects mana and reagent requirements).' },
+                { when = 'in combat',            desc = 'Casts whenever your character or group is actively engaged in combat.' },
+                { when = 'twist while fighting', desc = 'Continuously sings the song while in combat without waiting for buff duration to expire (Bard songs).' },
+                { when = 'target HP <=',         desc = 'Casts when the target\'s HP percentage drops to or below the configured slider threshold.' },
+                { when = 'target HP between',    desc = 'Casts only when target HP is between the configured minimum HP and percentage threshold (e.g. DoTs between 20% and 90%).' },
+                { when = 'my HP <=',             desc = 'Casts when your own character\'s HP percentage drops to or below threshold (heals, defensives, Feign Death, Mend).' },
+                { when = 'my Mana <=',           desc = 'Casts when your character\'s Mana percentage drops to or below threshold (Cannibalize, mana taps, rods).' },
+                { when = 'missing buff',         desc = 'Casts only when the target does not currently have this buff or debuff active.' },
+                { when = 'missing pet',          desc = 'Casts to summon a class pet when your pet is dead or missing.' },
+                { when = 'has Poison/Disease',   desc = 'Casts cure spells when the target is afflicted with poison or disease counters.' },
+                { when = 'has Curse',            desc = 'Casts cure spells when the target is afflicted with curse counters.' },
+                { when = 'has Corruption',       desc = 'Casts cure spells when the target is afflicted with corruption counters.' },
+                { when = 'Aggro on Me',          desc = 'Casts when an enemy mob currently has primary aggro on your character.' },
+                { when = 'my Aggro >=',          desc = 'Casts when your secondary aggro percentage meets or exceeds threshold (fade, jolt, de-aggro).' },
+                { when = 'ally is Dead',         desc = 'Casts resurrection spells when a group member is dead/corpse.' },
+                { when = 'add is loose',         desc = 'Casts when an unmezzed or uncontrolled add is detected on your Extended Target list.' },
+            }
+
+            for _, entry in ipairs(conditions) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                accent(ARC, entry.when)
+                ImGui.TableNextColumn()
+                ImGui.TextWrapped(entry.desc)
             end
             ImGui.EndTable()
         end
@@ -9518,11 +10032,238 @@ function UI.drawPetControlTab()
     ImGui.EndTabItem()
 end
 
+function UI.drawAutoAcceptSettings()
+    accent(GOLD, 'Social & Group Automation')
+    ImGui.TextDisabled('Automatically accept group invites, trades, and expedition (DZ) requests based on configured rules.')
+    ImGui.Separator()
+
+    -- Automation Actions
+    accent(GOLD, 'Automation Actions:')
+    local grpVal = ImGui.Checkbox('Auto-Accept Group Invites##aaGrp', ctrl.auto_group or false)
+    if grpVal ~= (ctrl.auto_group or false) then
+        ctrl.auto_group = grpVal
+        runtime.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Automatically joins group when invited by an authorized player.')
+    end
+
+    local trdVal = ImGui.Checkbox('Auto-Accept Trades##aaTrd', ctrl.auto_trade or false)
+    if trdVal ~= (ctrl.auto_trade or false) then
+        ctrl.auto_trade = trdVal
+        runtime.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Automatically clicks trade accept when incoming trade partner has clicked their trade button and is authorized.')
+    end
+
+    local dzVal = ImGui.Checkbox('Auto-Accept Dynamic Zone / Expedition Invites (DZAdd)##aaDz', ctrl.auto_dzadd or false)
+    if dzVal ~= (ctrl.auto_dzadd or false) then
+        ctrl.auto_dzadd = dzVal
+        runtime.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Automatically accepts expedition (/dzaccept), dynamic zone, and task addition invites from authorized players.')
+    end
+
+    ImGui.Separator()
+
+    -- Authorization Rules
+    accent(GOLD, 'Authorization Rules (Who to accept from):')
+    local anyVal = ImGui.Checkbox('Accept from Anyone##aaAnyone', ctrl.auto_accept_anyone or false)
+    if anyVal ~= (ctrl.auto_accept_anyone or false) then
+        ctrl.auto_accept_anyone = anyVal
+        runtime.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Accept requests from ANY player unconditionally (bypasses group, guild, and whitelist checks).')
+    end
+
+    local grpMemVal = ImGui.Checkbox('Always accept from Group Members##aaGrpMem', ctrl.auto_accept_group or false)
+    if grpMemVal ~= (ctrl.auto_accept_group or false) then
+        ctrl.auto_accept_group = grpMemVal
+        runtime.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Accept trades and expedition requests from current group members.')
+    end
+
+    local gldVal = ImGui.Checkbox('Accept from all Guild Members##aaGuild', ctrl.auto_accept_guild or false)
+    if gldVal ~= (ctrl.auto_accept_guild or false) then
+        ctrl.auto_accept_guild = gldVal
+        runtime.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Accept requests from players in the same guild as your character.')
+    end
+
+    ImGui.Separator()
+
+    -- Whitelisted Players
+    accent(GOLD, 'Whitelisted Players:')
+    ImGui.TextDisabled('Specific character names and player IDs allowed to trigger auto-accept (case-insensitive):')
+
+    ImGui.SetNextItemWidth(170)
+    local enteredText, enterPressed = ImGui.InputTextWithHint('##autoAcceptAddInput', 'Player Name or ID', runtime.autoAcceptInputName or '', (ImGuiInputTextFlags and ImGuiInputTextFlags.EnterReturnsTrue) or 0)
+    if enteredText ~= nil then runtime.autoAcceptInputName = enteredText end
+    ImGui.SameLine()
+    if ImGui.Button('Add##autoAcceptAddBtn') or enterPressed then
+        if runtime.autoAcceptInputName and runtime.autoAcceptInputName:gsub('%s+', '') ~= '' then
+            runtime.addAutoAcceptName(runtime.autoAcceptInputName)
+            runtime.autoAcceptInputName = ''
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Add the entered player name or ID to the auto-accept whitelist.')
+    end
+
+    ImGui.SameLine()
+    if ImGui.Button('+ Add Target##autoAcceptAddTargetBtn') then
+        local tName, tId = nil, 0
+        pcall(function()
+            local tgt = mq.TLO.Target
+            if tgt and tgt() and tgt.Type() == 'PC' then
+                tName = tgt.CleanName()
+                tId = tgt.ID() or 0
+            end
+        end)
+        if tName and tName ~= '' then
+            runtime.addAutoAcceptName(tName, tId)
+        else
+            print('\ar[Triune Auto-Accept]\ax Target is not a player character.')
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Target a player character (PC) in-game and click to add their Name and Player ID.')
+    end
+
+    local canRemove = (runtime.autoAcceptSelectedPlayer and runtime.autoAcceptSelectedPlayer ~= '')
+    if not canRemove then
+        pcall(function()
+            local tgt = mq.TLO.Target
+            if tgt and tgt() and tgt.Type() == 'PC' then
+                local tgtName = tgt.CleanName()
+                local tgtId = tgt.ID() or 0
+                if runtime.isAutoAcceptListed(tgtName) or (tgtId > 0 and runtime.isAutoAcceptListed(tgtId)) then
+                    canRemove = true
+                end
+            end
+        end)
+    end
+
+    ImGui.SameLine()
+    if not canRemove then ImGui.BeginDisabled() end
+    if ImGui.Button('Remove##autoAcceptRemoveBtn') then
+        if runtime.autoAcceptSelectedPlayer and runtime.autoAcceptSelectedPlayer ~= '' then
+            runtime.removeAutoAcceptName(runtime.autoAcceptSelectedPlayer)
+            runtime.autoAcceptSelectedPlayer = nil
+        else
+            local tgtName, tgtId = nil, 0
+            pcall(function()
+                local tgt = mq.TLO.Target
+                if tgt and tgt() and tgt.Type() == 'PC' then
+                    tgtName = tgt.CleanName()
+                    tgtId = tgt.ID() or 0
+                end
+            end)
+            if tgtId > 0 and runtime.isAutoAcceptListed(tgtId) then
+                runtime.removeAutoAcceptName(tgtId)
+            elseif tgtName and tgtName ~= '' and runtime.isAutoAcceptListed(tgtName) then
+                runtime.removeAutoAcceptName(tgtName)
+            end
+        end
+    end
+    if not canRemove then ImGui.EndDisabled() end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Remove the selected player from the whitelist (or target a whitelisted player to remove them).')
+    end
+
+    if ctrl.auto_accept_names and #ctrl.auto_accept_names > 0 then
+        ImGui.SameLine()
+        if ImGui.Button('Clear All##autoAcceptClearBtn') then
+            runtime.clearAutoAcceptNames()
+            runtime.autoAcceptSelectedPlayer = nil
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('%s', 'Remove all players from the auto-accept whitelist.')
+        end
+    end
+
+    -- Whitelist table frame
+    local names = ctrl.auto_accept_names or {}
+    if #names == 0 then
+        accent(MUTED, 'No whitelisted players configured.')
+    else
+        local tableFlags = bit.bor(
+            (ImGuiTableFlags and ImGuiTableFlags.Borders) or 0,
+            (ImGuiTableFlags and ImGuiTableFlags.RowBg) or 0,
+            (ImGuiTableFlags and ImGuiTableFlags.ScrollY) or 0
+        )
+        if ImGui.BeginTable('autoAcceptWhitelistTable', 3, tableFlags, 0, 180) then
+            ImGui.TableSetupColumn('Player Name', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthStretch) or 0)
+            ImGui.TableSetupColumn('Player ID', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, 95)
+            ImGui.TableSetupColumn('Action', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, 75)
+            ImGui.TableHeadersRow()
+
+            local toRemove = nil
+            for i, entry in ipairs(names) do
+                local eName, eId = runtime.getAutoAcceptPlayerInfo(entry)
+                local isSelected = (runtime.autoAcceptSelectedPlayer and runtime.autoAcceptSelectedPlayer:lower() == eName:lower())
+                ImGui.TableNextRow()
+
+                -- Column 1: Player Name (Selectable)
+                ImGui.TableSetColumnIndex(0)
+                ImGui.PushID('aa_row_name_' .. i)
+                if ImGui.Selectable(eName, isSelected, (ImGuiSelectableFlags and ImGuiSelectableFlags.SpanAllColumns) or 0) then
+                    runtime.autoAcceptSelectedPlayer = eName
+                end
+                ImGui.PopID()
+
+                -- Column 2: Player ID
+                ImGui.TableSetColumnIndex(1)
+                if eId > 0 then
+                    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], tostring(eId))
+                else
+                    ImGui.TextDisabled('--')
+                end
+
+                -- Column 3: Remove button
+                ImGui.TableSetColumnIndex(2)
+                ImGui.PushID('aa_btn_remove_' .. i)
+                if ImGui.Button('Remove', 60, 20) then
+                    toRemove = entry
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', string.format('Remove %s from the whitelist.', eName))
+                end
+                ImGui.PopID()
+            end
+
+            ImGui.EndTable()
+
+            if toRemove then
+                runtime.removeAutoAcceptName(toRemove)
+                local rName = runtime.getAutoAcceptPlayerInfo(toRemove)
+                if runtime.autoAcceptSelectedPlayer and rName:lower() == runtime.autoAcceptSelectedPlayer:lower() then
+                    runtime.autoAcceptSelectedPlayer = nil
+                end
+            end
+        end
+        ImGui.TextDisabled(string.format('%d whitelisted player(s) configured', #names))
+        if runtime.autoAcceptSelectedPlayer then
+            ImGui.SameLine()
+            accent(GOLD, string.format('Selected: %s', runtime.autoAcceptSelectedPlayer))
+        end
+    end
+end
+
 function UI.drawSettingsTab()
     if not ImGui.BeginTabItem('Settings') then return end
 
-    -- 1. Character Classes & Profile
-    UI.drawClassPicker()
+    if ImGui.BeginTabBar('settingsSubTabBar') then
+        if ImGui.BeginTabItem('General Settings##settingsGeneral') then
+            -- 1. Character Classes & Profile
+            UI.drawClassPicker()
 
     -- 2. Combat Style & Positioning
     if ImGui.CollapsingHeader('Combat Style & Positioning', ImGuiTreeNodeFlags.DefaultOpen) then
@@ -9974,6 +10715,17 @@ function UI.drawSettingsTab()
                 .. 'state every few seconds) to help track down a stuck/frozen\n'
                 .. 'report. Off by default -- noisy for normal use.')
         end
+    end
+
+    ImGui.EndTabItem()
+    end
+
+    if ImGui.BeginTabItem('Auto-Accept##settingsAutoAccept') then
+        UI.drawAutoAcceptSettings()
+        ImGui.EndTabItem()
+    end
+
+    ImGui.EndTabBar()
     end
 
     ImGui.EndTabItem()
@@ -11757,6 +12509,24 @@ local function buffActive(id, name, minSec)
 end
 runtime.buffActive = buffActive
 
+function runtime.isNpcSpellActive(id, spellName)
+    if not id or id <= 0 or not spellName or spellName == '' then return false end
+    if buffActive(id, spellName) then return true end
+    if runtime.npcSpellApplied and runtime.npcSpellApplied[id] then
+        local now = os.clock()
+        for sName, expireAt in pairs(runtime.npcSpellApplied[id]) do
+            if expireAt and now < expireAt then
+                if sName == spellName or (cleanSpellName and cleanSpellName(sName):lower() == cleanSpellName(spellName):lower()) then
+                    return true
+                end
+            else
+                runtime.npcSpellApplied[id][sName] = nil
+            end
+        end
+    end
+    return false
+end
+
 local function hasSpellReagents(spellName)
     if not spellName or spellName == '' then return true end
     local has = true
@@ -12474,7 +13244,124 @@ local function resolvePetTargetId(when, spellName, cls, pct)
     return allPets[1]
 end
 
-function runtime.resolveTargetId(token, cls, when, spellName, pct)
+function runtime.resolveAllEnemiesTargetId(spellName, when, pct, cls, extra)
+    local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
+    local maxZ = isPulling and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75)
+    local maxDist = (ctrl and ctrl.xtar_nav_dist) or 150
+    local myZ = mq.TLO.Me.Z() or 0
+
+    local isDet = isDetrimentalSpell(spellName, nil, extra and extra.kind, 'E: All Enemies')
+    local maxC = tonumber(extra and extra.max_casts) or 0
+    local hasDur = false
+    if extra and (extra.kind == 'dot' or extra.kind == 'debuff') then
+        hasDur = true
+    elseif spellName and spellName ~= '' then
+        pcall(function()
+            local sp = mq.TLO.Spell(spellName)
+            if sp and sp() then
+                local dur = tonumber(sp.Duration()) or 0
+                if dur > 0 then hasDur = true end
+            end
+        end)
+    end
+
+    local candidates = {}
+    local slots = 13
+    pcall(function() slots = mq.TLO.Me.XTargetSlots() or 13 end)
+
+    for i = 1, slots do
+        local xt = nil
+        pcall(function() xt = mq.TLO.Me.XTarget(i) end)
+        if xt and xt() then
+            local id = 0
+            pcall(function() id = xt.ID() or 0 end)
+            if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
+                local s = mq.TLO.Spawn(id)
+                if s and s() then
+                    local stype = s.Type() or ''
+                    local cname = s.CleanName() or ''
+                    local dist = 999
+                    local okDist, sDist = pcall(function() return s.Distance3D() or s.Distance() end)
+                    if okDist and sDist then dist = sDist end
+                    local okZ, sz = pcall(function() return s.Z() end)
+                    local zOk = okZ and sz and (math.abs(sz - myZ) <= maxZ)
+
+                    if (stype == 'NPC' or stype == 'Pet')
+                        and not s.Dead() and stype ~= 'Corpse'
+                        and isHostileTarget(id)
+                        and dist <= maxDist
+                        and zOk
+                        and not isIgnored(cname)
+                        and not isUnreachable(id) then
+
+                        local engagedOk = not (ctrl.mode == 'Assist' and not runtime.targetIsEngaged(id))
+                        if engagedOk then
+                            local inRange = (not isDet) or runtime.isTargetInRange(spellName, id)
+                            if inRange then
+                                local lockedOut = castTracker and castTracker.isLockedOut(spellName, id, extra and extra.kind)
+                                if not lockedOut then
+                                    local castLimitOk = true
+                                    local currentCasts = (runtime.npcCastCounts and runtime.npcCastCounts[id] and runtime.npcCastCounts[id][spellName]) or 0
+                                    if maxC > 0 and currentCasts >= maxC then
+                                        castLimitOk = false
+                                    end
+                                    if castLimitOk then
+                                        local spellActive = false
+                                        if hasDur and isDet and runtime.isNpcSpellActive(id, spellName) then
+                                            spellActive = true
+                                        end
+                                        if not spellActive then
+                                            local condMet = true
+                                            if when and when ~= '' and when ~= 'always' then
+                                                condMet = runtime.conditionMet(when, pct, spellName, id, cls, 'E: All Enemies', extra)
+                                            end
+                                            if condMet then
+                                                local lastCastTime = (runtime.npcSpellLastCast and runtime.npcSpellLastCast[id] and runtime.npcSpellLastCast[id][spellName]) or 0
+                                                local hp = s.PctHPs() or 100
+                                                table.insert(candidates, {
+                                                    id = id,
+                                                    casts = currentCasts,
+                                                    lastCast = lastCastTime,
+                                                    hp = hp,
+                                                    dist = dist
+                                                })
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #candidates > 0 then
+        table.sort(candidates, function(a, b)
+            if a.casts ~= b.casts then return a.casts < b.casts end
+            if a.lastCast ~= b.lastCast then return a.lastCast < b.lastCast end
+            if a.hp ~= b.hp then return a.hp < b.hp end
+            return a.dist < b.dist
+        end)
+        return candidates[1].id
+    end
+
+    local xtCount = runtime.countNPCXtarget and runtime.countNPCXtarget() or 0
+    if xtCount == 0 then
+        local curT = mq.TLO.Target.ID() or 0
+        if curT > 0 and isHostileTarget(curT) and not isSpawnPetOrPlayer(curT) and isSpawnAlive(curT) then
+            local lockedOut = castTracker and castTracker.isLockedOut(spellName, curT, extra and extra.kind)
+            if not lockedOut and (not hasDur or not runtime.isNpcSpellActive(curT, spellName)) then
+                return curT
+            end
+        end
+    end
+
+    return nil
+end
+
+function runtime.resolveTargetId(token, cls, when, spellName, pct, extra)
     local b = baseTok(token)
     local id
     if b == 'Myself' or b == 'Whole Group' then
@@ -12497,7 +13384,7 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct)
         end
     elseif b == 'Unmezzed Add' then
         id = firstNPCXtarget(true)
-    elseif b == 'Nearest Add' or b == 'All Enemies' then
+    elseif b == 'Nearest Add' then
         local isPulling = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp')
         local maxZ = isPulling and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75)
         id = firstNPCXtarget(false, maxZ)
@@ -12524,6 +13411,8 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct)
                 end
             end
         end
+    elseif b == 'All Enemies' then
+        id = runtime.resolveAllEnemiesTargetId(spellName, when, pct, cls, extra)
     else
         id = mq.TLO.Target.ID()
     end
@@ -12543,7 +13432,7 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct)
 end
 
 mq.event('TriuneZone', 'You have entered #*#', function()
-    runtime.sungBuffs = {}; runtime.npcCastCounts = {}; if runtime.onZoned then runtime.onZoned() end
+    runtime.sungBuffs = {}; runtime.npcCastCounts = {}; runtime.npcSpellApplied = {}; runtime.npcSpellLastCast = {}; if runtime.onZoned then runtime.onZoned() end
 end)
 
 local function reconcileSungBuffs()
@@ -12858,17 +13747,27 @@ function runtime.castGem(i, g, id)
         runtime.npcCastCounts[id] = runtime.npcCastCounts[id] or {}
         runtime.npcCastCounts[id][g.spell] = ((runtime.npcCastCounts[id][g.spell]) or 0) + 1
 
+        runtime.npcSpellLastCast = runtime.npcSpellLastCast or {}
+        runtime.npcSpellLastCast[id] = runtime.npcSpellLastCast[id] or {}
+        runtime.npcSpellLastCast[id][g.spell] = os.clock()
+
+        local durSec = 0
+        pcall(function()
+            local d = mq.TLO.Spell(g.spell).Duration() or 0
+            if d and tonumber(d) then durSec = math.floor(tonumber(d) * 6) end
+        end)
+        if durSec > 0 then
+            runtime.npcSpellApplied = runtime.npcSpellApplied or {}
+            runtime.npcSpellApplied[id] = runtime.npcSpellApplied[id] or {}
+            runtime.npcSpellApplied[id][g.spell] = os.clock() + durSec
+        end
+
         local myPetId = 0
         pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
         if (myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id) then
             local bene = false
             pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
             if bene then
-                local durSec = 0
-                pcall(function()
-                    local d = mq.TLO.Spell(g.spell).Duration() or 0
-                    if d and tonumber(d) then durSec = math.floor(tonumber(d) * 6) end
-                end)
                 runtime.recordPetBuff(id, g.spell, durSec)
             end
         end
@@ -14139,6 +15038,30 @@ runtime.useClickie = function(c, id)
     mq.cmdf('/useitem "%s"', c.name)
     runtime.lastCast[key] = os.clock()
     print('\ag[Triune]\ax Clickie used: ' .. c.name .. (c.spell and (' (' .. c.spell .. ')') or ''))
+
+    if id and id > 0 then
+        local effSpell = (c.spell and c.spell ~= '' and c.spell) or effName
+        if effSpell and effSpell ~= '' then
+            runtime.npcCastCounts = runtime.npcCastCounts or {}
+            runtime.npcCastCounts[id] = runtime.npcCastCounts[id] or {}
+            runtime.npcCastCounts[id][effSpell] = ((runtime.npcCastCounts[id][effSpell]) or 0) + 1
+
+            runtime.npcSpellLastCast = runtime.npcSpellLastCast or {}
+            runtime.npcSpellLastCast[id] = runtime.npcSpellLastCast[id] or {}
+            runtime.npcSpellLastCast[id][effSpell] = os.clock()
+
+            local durSec = 0
+            pcall(function()
+                local d = mq.TLO.Spell(effSpell).Duration() or 0
+                if d and tonumber(d) then durSec = math.floor(tonumber(d) * 6) end
+            end)
+            if durSec > 0 then
+                runtime.npcSpellApplied = runtime.npcSpellApplied or {}
+                runtime.npcSpellApplied[id] = runtime.npcSpellApplied[id] or {}
+                runtime.npcSpellApplied[id][effSpell] = os.clock() + durSec
+            end
+        end
+    end
 
     local myPetId = 0
     pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
@@ -16221,6 +17144,8 @@ runtime.onZoned = function()
     if castTracker and castTracker.clear then
         castTracker.clear()
     end
+    runtime.npcSpellApplied = {}
+    runtime.npcSpellLastCast = {}
     pursuit.unreachableIds = {}
     pursuit.id = 0
     pursuit.wanderLoc = nil
@@ -16591,6 +17516,8 @@ local function combatTick()
             fullStop()
             runtime.sungBuffs = {}
             runtime.npcCastCounts = {}
+            runtime.npcSpellApplied = {}
+            runtime.npcSpellLastCast = {}
             runtime.discExpires = {}
             runtime.discCooldown = {}
             petState.myPets = {}; petState.lastObservedId = 0; petState.lastCastCls = nil
@@ -16610,6 +17537,8 @@ local function combatTick()
             for tid in pairs(runtime.npcCastCounts) do
                 if not isSpawnAlive(tid) then
                     runtime.npcCastCounts[tid] = nil
+                    if runtime.npcSpellApplied then runtime.npcSpellApplied[tid] = nil end
+                    if runtime.npcSpellLastCast then runtime.npcSpellLastCast[tid] = nil end
                 end
             end
         end
@@ -17532,7 +18461,7 @@ local function combatTick()
             local minXt = tonumber(a.min_xtar) or 1
             local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
             if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and xtOk then
-                local id = resolveTargetId(a.target, a.cls, a.when, name, aPct)
+                local id = resolveTargetId(a.target, a.cls, a.when, name, aPct, a)
                 if id and conditionMet(a.when, aPct, name, id, a.cls, a.target) then
                     if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
                         fireAA(name, a, id)
@@ -17551,7 +18480,7 @@ local function combatTick()
             if act.enabled and act.autoskill and isAutoskillEligible(name) and (not act.burn_only or ctrl.burn) and xtOk then
                 local actPct = tonumber(act.pct)
                 if actPct == nil then actPct = 100 end
-                local id = resolveTargetId(act.target, act.cls, act.when, name, actPct)
+                local id = resolveTargetId(act.target, act.cls, act.when, name, actPct, act)
                 if id and id > 0 then
                     if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
                         if isSkillReady(name) then
@@ -17572,7 +18501,7 @@ local function combatTick()
                 local minXt = tonumber(act.min_xtar) or 1
                 local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
                 if (actPct > 0) and (not act.burn_only or ctrl.burn) and xtOk then
-                    local id = resolveTargetId(act.target, act.cls, act.when, name, actPct)
+                    local id = resolveTargetId(act.target, act.cls, act.when, name, actPct, act)
                     if id and conditionMet(act.when, actPct, name, id, act.cls, act.target) then
                         local bossOk = true
                         if act.boss_only then
@@ -17610,7 +18539,7 @@ local function combatTick()
             local minXt = tonumber(d.min_xtar) or 1
             local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
             if d.enabled and (dPct > 0) and (not d.burn_only or ctrl.burn) and xtOk then
-                local id = resolveTargetId(d.target, d.cls, d.when, name, dPct)
+                local id = resolveTargetId(d.target, d.cls, d.when, name, dPct, d)
                 if id and conditionMet(d.when, dPct, name, id, d.cls, d.target) then
                     local bossOk = true
                     if d.boss_only then
@@ -17667,7 +18596,7 @@ local function combatTick()
             local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
             local burnOk = (not c.burn_only or ctrl.burn)
             if isEnabled and burnOk and xtOk then
-                local id = resolveTargetId(c.target, 'ALL', c.when, effName, cPct)
+                local id = resolveTargetId(c.target, 'ALL', c.when, effName, cPct, c)
                 local lockedOut = id and castTracker.isLockedOut(effName, id, c.kind)
                 if not lockedOut then
                     local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL', c.target)
@@ -17723,7 +18652,7 @@ local function combatTick()
                         local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
                         local burnOk = (not g.burn_only or ctrl.burn)
                         if isEnabled and burnOk and xtOk then
-                            local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal)
+                            local id = resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal, g)
                             local lockedOut = id and castTracker and castTracker.isLockedOut(g.spell, id, g.kind)
                             local condOk = false
                             if not lockedOut then
@@ -18959,7 +19888,7 @@ local function runMainLoop()
             local prevZone = runtime.lastZoneShort
             runtime.lastZoneShort = curZone
             if prevZone ~= nil then
-                runtime.sungBuffs = {}; runtime.npcCastCounts = {}; if runtime.onZoned then runtime.onZoned() end
+                runtime.sungBuffs = {}; runtime.npcCastCounts = {}; runtime.npcSpellApplied = {}; runtime.npcSpellLastCast = {}; if runtime.onZoned then runtime.onZoned() end
             end
             reconcilePets()
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
@@ -19007,6 +19936,9 @@ local function runMainLoop()
         end
         if ctrl.auto_summon_fireworks and runtime.checkAutoSummonFireworks and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
             runtime.checkAutoSummonFireworks()
+        end
+        if (ctrl.auto_group or ctrl.auto_trade or ctrl.auto_dzadd) and runtime.checkAutoAccept then
+            runtime.checkAutoAccept()
         end
         runtime.updateMapRadiusVisuals()
         -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting

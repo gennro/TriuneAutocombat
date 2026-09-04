@@ -609,6 +609,13 @@ local EXPECTED_FIELDS = {
     { 'auto_spend_aa_action',    'string' },
     { 'auto_summon_fireworks',   'boolean' },
     { 'pause_on_zone',           'boolean' },
+    { 'auto_group',               'boolean' },
+    { 'auto_trade',               'boolean' },
+    { 'auto_dzadd',               'boolean' },
+    { 'auto_accept_anyone',       'boolean' },
+    { 'auto_accept_guild',        'boolean' },
+    { 'auto_accept_group',        'boolean' },
+    { 'auto_accept_names',        'table' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -5435,6 +5442,409 @@ do
     assert_eq(callCount, 1, 'callCount remains 1')
     assert_true(mockDebouncedOnZoned(12.1), 'Call at 2.1s delta succeeds')
     assert_eq(callCount, 2, 'callCount increments to 2')
+end
+
+-- ============================================================================
+-- Suite 55: Auto-Accept Logic & Whitelist Authorization with Player IDs
+-- ============================================================================
+do
+    print('--- Suite 55: Auto-Accept Logic & Whitelist Authorization ---')
+
+    local testCtrl = {
+        auto_group = false,
+        auto_trade = false,
+        auto_dzadd = false,
+        auto_accept_anyone = false,
+        auto_accept_guild = false,
+        auto_accept_group = false,
+        auto_accept_names = {},
+    }
+
+    local testRuntime = {}
+
+    function testRuntime.getAutoAcceptPlayerInfo(entry)
+        if type(entry) == 'table' then
+            return tostring(entry.name or ''), tonumber(entry.id) or 0
+        else
+            return tostring(entry or ''), 0
+        end
+    end
+
+    function testRuntime.isAutoAcceptListed(nameOrId)
+        if not nameOrId or nameOrId == '' or nameOrId == 0 then return false end
+        if not testCtrl.auto_accept_names or type(testCtrl.auto_accept_names) ~= 'table' then
+            testCtrl.auto_accept_names = {}
+            return false
+        end
+        local targetNum = tonumber(nameOrId)
+        local targetStr = tostring(nameOrId):lower():gsub('^%s+', ''):gsub('%s+$', '')
+        for _, entry in ipairs(testCtrl.auto_accept_names) do
+            local eName, eId = testRuntime.getAutoAcceptPlayerInfo(entry)
+            if targetNum and targetNum > 0 and eId > 0 and eId == targetNum then
+                return true
+            end
+            if targetStr ~= '' and eName ~= '' and eName:lower() == targetStr then
+                return true
+            end
+        end
+        return false
+    end
+
+    function testRuntime.addAutoAcceptName(nameOrId, optionalId)
+        if not nameOrId then return end
+        local s = tostring(nameOrId):gsub('^%s+', ''):gsub('%s+$', '')
+        if s == '' then return end
+
+        local name = s
+        local id = tonumber(optionalId) or 0
+        local num = tonumber(s)
+        if num and num > 0 and id == 0 then
+            id = num
+            name = string.format('Player_%d', id)
+        end
+
+        if not testCtrl.auto_accept_names or type(testCtrl.auto_accept_names) ~= 'table' then
+            testCtrl.auto_accept_names = {}
+        end
+
+        local found = false
+        for _, entry in ipairs(testCtrl.auto_accept_names) do
+            local eName, eId = testRuntime.getAutoAcceptPlayerInfo(entry)
+            if (id > 0 and eId > 0 and eId == id) or (name ~= '' and eName ~= '' and eName:lower() == name:lower()) then
+                if type(entry) == 'table' then
+                    if id > 0 then entry.id = id end
+                    if name ~= '' and (entry.name == '' or entry.name:find('^Player_')) then entry.name = name end
+                end
+                found = true
+                break
+            end
+        end
+
+        if not found then
+            table.insert(testCtrl.auto_accept_names, { name = name, id = id })
+            table.sort(testCtrl.auto_accept_names, function(a, b)
+                local aName = testRuntime.getAutoAcceptPlayerInfo(a)
+                local bName = testRuntime.getAutoAcceptPlayerInfo(b)
+                return aName:lower() < bName:lower()
+            end)
+        end
+    end
+
+    function testRuntime.removeAutoAcceptName(nameOrIdOrEntry)
+        if not nameOrIdOrEntry or not testCtrl.auto_accept_names then return false end
+        local targetNum = nil
+        local targetStr = nil
+        if type(nameOrIdOrEntry) == 'table' then
+            targetNum = tonumber(nameOrIdOrEntry.id)
+            targetStr = nameOrIdOrEntry.name and tostring(nameOrIdOrEntry.name):lower():gsub('^%s+', ''):gsub('%s+$', '')
+        else
+            targetNum = tonumber(nameOrIdOrEntry)
+            targetStr = tostring(nameOrIdOrEntry):lower():gsub('^%s+', ''):gsub('%s+$', '')
+        end
+        for i, entry in ipairs(testCtrl.auto_accept_names) do
+            local eName, eId = testRuntime.getAutoAcceptPlayerInfo(entry)
+            if (targetNum and targetNum > 0 and eId > 0 and eId == targetNum) or
+               (targetStr and targetStr ~= '' and eName ~= '' and eName:lower() == targetStr) then
+                table.remove(testCtrl.auto_accept_names, i)
+                return true
+            end
+        end
+        return false
+    end
+
+    function testRuntime.clearAutoAcceptNames()
+        testCtrl.auto_accept_names = {}
+    end
+
+    local mockGroupMembers = { { name = 'TrioHealer', id = 101 }, { name = 'TrioTank', id = 102 } }
+    local mockGuild = 'Fires of Heaven'
+    local mockSpawnGuilds = {
+        ['GuildieOne'] = 'Fires of Heaven',
+        ['guildieone'] = 'Fires of Heaven',
+        ['GuildieTwo'] = 'fires of heaven',
+        ['guildietwo'] = 'fires of heaven',
+        ['Outsider'] = 'Some Other Guild',
+    }
+
+    -- Authorization evaluator mirroring runtime.isAutoAcceptAllowed
+    function testRuntime.isAutoAcceptAllowed(senderName, senderId)
+        if (not senderName or senderName == '') and (not senderId or senderId == 0) then return false end
+        if senderName then senderName = tostring(senderName):gsub('^%s+', ''):gsub('%s+$', '') end
+
+        if testCtrl.auto_accept_anyone then return true end
+
+        if senderId and senderId > 0 and testRuntime.isAutoAcceptListed(senderId) then return true end
+        if senderName and senderName ~= '' and testRuntime.isAutoAcceptListed(senderName) then return true end
+
+        local sLower = senderName and senderName:lower() or ''
+        local sIdNum = tonumber(senderId) or 0
+
+        if testCtrl.auto_accept_group then
+            for i = 1, #mockGroupMembers do
+                local mem = mockGroupMembers[i]
+                if (sIdNum > 0 and mem.id == sIdNum) or (sLower ~= '' and mem.name:lower() == sLower) then
+                    return true
+                end
+            end
+        end
+
+        if testCtrl.auto_accept_guild and senderName and senderName ~= '' then
+            local myG = mockGuild
+            if myG and myG ~= '' then
+                local theirG = mockSpawnGuilds[senderName]
+                if theirG and theirG ~= '' and theirG:lower() == myG:lower() then
+                    return true
+                end
+            end
+        end
+
+        return false
+    end
+
+    -- 1. Whitelist list operations with Names and Player IDs
+    assert_eq(#testCtrl.auto_accept_names, 0, 'Auto-accept list starts empty')
+    testRuntime.addAutoAcceptName('Charlie', 300)
+    testRuntime.addAutoAcceptName('Alice', 100)
+    testRuntime.addAutoAcceptName('bob', 200)
+    assert_eq(#testCtrl.auto_accept_names, 3, 'Three names added to whitelist')
+    local aName, aId = testRuntime.getAutoAcceptPlayerInfo(testCtrl.auto_accept_names[1])
+    local bName, bId = testRuntime.getAutoAcceptPlayerInfo(testCtrl.auto_accept_names[2])
+    local cName, cId = testRuntime.getAutoAcceptPlayerInfo(testCtrl.auto_accept_names[3])
+    assert_eq(aName, 'Alice', 'Names sorted alphabetically (Alice)')
+    assert_eq(aId, 100, 'Alice has ID 100')
+    assert_eq(bName, 'bob', 'Names sorted alphabetically (bob)')
+    assert_eq(bId, 200, 'bob has ID 200')
+    assert_eq(cName, 'Charlie', 'Names sorted alphabetically (Charlie)')
+    assert_eq(cId, 300, 'Charlie has ID 300')
+
+    -- Adding purely by ID number
+    testRuntime.addAutoAcceptName(450)
+    assert_true(testRuntime.isAutoAcceptListed(450), 'isAutoAcceptListed matches numeric player ID 450')
+    assert_true(testRuntime.isAutoAcceptListed('450'), 'isAutoAcceptListed matches string player ID "450"')
+
+    -- Case-insensitive duplicate rejection and ID update
+    testRuntime.addAutoAcceptName('ALICE', 100)
+    testRuntime.addAutoAcceptName('  bob  ', 200)
+    assert_eq(#testCtrl.auto_accept_names, 4, 'Duplicates with different case/whitespace not inserted as new rows')
+
+    -- Case-insensitive whitelist matching by name and by ID
+    assert_true(testRuntime.isAutoAcceptListed('alice'), 'isAutoAcceptListed matches lowercase alice')
+    assert_true(testRuntime.isAutoAcceptListed('BOB'), 'isAutoAcceptListed matches uppercase BOB')
+    assert_true(testRuntime.isAutoAcceptListed(100), 'isAutoAcceptListed matches ID 100')
+    assert_true(testRuntime.isAutoAcceptListed(200), 'isAutoAcceptListed matches ID 200')
+    assert_true(testRuntime.isAutoAcceptListed(300), 'isAutoAcceptListed matches ID 300')
+    assert_eq(testRuntime.isAutoAcceptListed('David'), false, 'David not in whitelist')
+    assert_eq(testRuntime.isAutoAcceptListed(999), false, 'ID 999 not in whitelist')
+
+    -- Whitelist removal by Name, ID, or Entry object
+    assert_true(testRuntime.removeAutoAcceptName(200), 'Successfully removed bob by ID 200')
+    assert_eq(testRuntime.isAutoAcceptListed('bob'), false, 'bob no longer listed by name')
+    assert_eq(testRuntime.isAutoAcceptListed(200), false, 'bob no longer listed by ID')
+
+    assert_true(testRuntime.removeAutoAcceptName('charlie'), 'Successfully removed Charlie by name')
+    assert_eq(testRuntime.isAutoAcceptListed('charlie'), false, 'Charlie no longer listed')
+
+    assert_true(testRuntime.removeAutoAcceptName({ name = 'Player_450', id = 450 }), 'Successfully removed entry by table')
+    assert_eq(testRuntime.isAutoAcceptListed(450), false, 'Player_450 no longer listed')
+
+    assert_true(testRuntime.isAutoAcceptListed('Alice'), 'Alice still listed')
+
+    -- Whitelist clearing
+    testRuntime.clearAutoAcceptNames()
+    assert_eq(#testCtrl.auto_accept_names, 0, 'Whitelist successfully cleared')
+
+    -- 2. Authorization rules evaluation with Names and IDs
+    -- Baseline: everything off, list empty
+    assert_eq(testRuntime.isAutoAcceptAllowed('Alice', 100), false, 'Denied: not on whitelist and rules disabled')
+    assert_eq(testRuntime.isAutoAcceptAllowed('', 0), false, 'Denied: empty sender name and 0 ID')
+    assert_eq(testRuntime.isAutoAcceptAllowed(nil, nil), false, 'Denied: nil sender name and nil ID')
+
+    -- Whitelist authorization by Name and by ID
+    testRuntime.addAutoAcceptName('Alice', 100)
+    assert_true(testRuntime.isAutoAcceptAllowed('alice', 100), 'Allowed: Alice matched by name and ID')
+    assert_true(testRuntime.isAutoAcceptAllowed('Unknown', 100), 'Allowed: Matched by whitelisted Player ID 100')
+    assert_true(testRuntime.isAutoAcceptAllowed('Alice', 0), 'Allowed: Matched by whitelisted Name Alice')
+    assert_eq(testRuntime.isAutoAcceptAllowed('Bob', 999), false, 'Denied: Bob (ID 999) not on whitelist')
+
+    -- Accept from Anyone
+    testCtrl.auto_accept_anyone = true
+    assert_true(testRuntime.isAutoAcceptAllowed('Bob', 999), 'Allowed: Accept from Anyone enabled')
+    assert_true(testRuntime.isAutoAcceptAllowed('RandomPlayer', 0), 'Allowed: Accept from Anyone accepts anyone')
+    testCtrl.auto_accept_anyone = false
+
+    -- Accept from Group Members (matching by Name or ID)
+    testCtrl.auto_accept_group = true
+    assert_true(testRuntime.isAutoAcceptAllowed('TrioHealer', 101), 'Allowed: TrioHealer is group member (Name and ID)')
+    assert_true(testRuntime.isAutoAcceptAllowed('Unknown', 102), 'Allowed: TrioTank matched by group member ID 102')
+    assert_true(testRuntime.isAutoAcceptAllowed('triotank', 0), 'Allowed: triotank matched by group member name case-insensitively')
+    assert_eq(testRuntime.isAutoAcceptAllowed('GuildieOne', 501), false, 'Denied: GuildieOne is not in group')
+    testCtrl.auto_accept_group = false
+
+    -- Accept from Guild Members
+    testCtrl.auto_accept_guild = true
+    assert_true(testRuntime.isAutoAcceptAllowed('GuildieOne', 501), 'Allowed: GuildieOne is in same guild')
+    assert_true(testRuntime.isAutoAcceptAllowed('guildietwo', 502), 'Allowed: guildietwo matches same guild case-insensitively')
+    assert_eq(testRuntime.isAutoAcceptAllowed('Outsider', 600), false, 'Denied: Outsider belongs to a different guild')
+    testCtrl.auto_accept_guild = false
+end
+
+-- ============================================================================
+-- Suite 56: Multi-Target All Enemies XTarget Logic
+-- ============================================================================
+print('--- Suite 56: Multi-Target All Enemies XTarget Logic ---')
+do
+    local testRuntime = {
+        npcCastCounts = {},
+        npcSpellApplied = {},
+        npcSpellLastCast = {},
+    }
+
+    local mockSpawns = {
+        [101] = { id = 101, name = 'a_goblin01', clean = 'a goblin', type = 'NPC', dead = false, hp = 80, dist = 30, z = 10 },
+        [102] = { id = 102, name = 'a_goblin02', clean = 'a goblin', type = 'NPC', dead = false, hp = 95, dist = 45, z = 12 },
+        [103] = { id = 103, name = 'a_goblin03', clean = 'a goblin', type = 'NPC', dead = false, hp = 60, dist = 25, z = 10 },
+    }
+    local mockXTarget = { 101, 102, 103 }
+    local mockSpells = {
+        ['Sicken'] = { duration = 10 },
+        ['Ice Comet'] = { duration = 0 },
+    }
+    local mockTargetBuffs = {}
+    local mockLockouts = {}
+
+    local function buffActive(id, name)
+        return mockTargetBuffs[id] and mockTargetBuffs[id][name] or false
+    end
+
+    function testRuntime.isNpcSpellActive(id, spellName)
+        if not id or id <= 0 or not spellName or spellName == '' then return false end
+        if buffActive(id, spellName) then return true end
+        if testRuntime.npcSpellApplied and testRuntime.npcSpellApplied[id] then
+            local now = os.clock()
+            for sName, expireAt in pairs(testRuntime.npcSpellApplied[id]) do
+                if expireAt and now < expireAt then
+                    if sName == spellName or sName:lower() == spellName:lower() then
+                        return true
+                    end
+                else
+                    testRuntime.npcSpellApplied[id][sName] = nil
+                end
+            end
+        end
+        return false
+    end
+
+    function testRuntime.resolveAllEnemiesTargetId(spellName, when, pct, cls, extra)
+        local hasDur = false
+        if extra and (extra.kind == 'dot' or extra.kind == 'debuff') then
+            hasDur = true
+        elseif mockSpells[spellName] and mockSpells[spellName].duration > 0 then
+            hasDur = true
+        end
+
+        local isDet = true
+        local maxC = tonumber(extra and extra.max_casts) or 0
+        local candidates = {}
+
+        for _, id in ipairs(mockXTarget) do
+            local s = mockSpawns[id]
+            if s and not s.dead and s.type == 'NPC' then
+                local lockedOut = mockLockouts[id] and mockLockouts[id][spellName]
+                if not lockedOut then
+                    local currentCasts = (testRuntime.npcCastCounts and testRuntime.npcCastCounts[id] and testRuntime.npcCastCounts[id][spellName]) or 0
+                    local castLimitOk = (maxC == 0 or currentCasts < maxC)
+                    if castLimitOk then
+                        local spellActive = (hasDur and isDet and testRuntime.isNpcSpellActive(id, spellName))
+                        if not spellActive then
+                            local lastCastTime = (testRuntime.npcSpellLastCast and testRuntime.npcSpellLastCast[id] and testRuntime.npcSpellLastCast[id][spellName]) or 0
+                            table.insert(candidates, {
+                                id = id,
+                                casts = currentCasts,
+                                lastCast = lastCastTime,
+                                hp = s.hp,
+                                dist = s.dist
+                            })
+                        end
+                    end
+                end
+            end
+        end
+
+        if #candidates > 0 then
+            table.sort(candidates, function(a, b)
+                if a.casts ~= b.casts then return a.casts < b.casts end
+                if a.lastCast ~= b.lastCast then return a.lastCast < b.lastCast end
+                if a.hp ~= b.hp then return a.hp < b.hp end
+                return a.dist < b.dist
+            end)
+            return candidates[1].id
+        end
+        return nil
+    end
+
+    -- 1. DoT casting across multiple XTarget enemies (Sicken)
+    local t1 = testRuntime.resolveAllEnemiesTargetId('Sicken', 'in combat', 100, 'Shm', { kind = 'dot' })
+    assert_eq(t1, 103, 'Selects mob 103 first for DoT (lowest HP tie-break)')
+
+    testRuntime.npcCastCounts[103] = { ['Sicken'] = 1 }
+    testRuntime.npcSpellLastCast[103] = { ['Sicken'] = os.clock() }
+    testRuntime.npcSpellApplied[103] = { ['Sicken'] = os.clock() + 30 }
+
+    local t2 = testRuntime.resolveAllEnemiesTargetId('Sicken', 'in combat', 100, 'Shm', { kind = 'dot' })
+    assert_eq(t2, 101, 'Selects mob 101 next for DoT (lowest HP among un-DoTed mobs: 80 < 95)')
+
+    testRuntime.npcCastCounts[101] = { ['Sicken'] = 1 }
+    testRuntime.npcSpellLastCast[101] = { ['Sicken'] = os.clock() }
+    testRuntime.npcSpellApplied[101] = { ['Sicken'] = os.clock() + 30 }
+
+    local t3 = testRuntime.resolveAllEnemiesTargetId('Sicken', 'in combat', 100, 'Shm', { kind = 'dot' })
+    assert_eq(t3, 102, 'Selects mob 102 next for DoT (last remaining un-DoTed mob)')
+
+    testRuntime.npcCastCounts[102] = { ['Sicken'] = 1 }
+    testRuntime.npcSpellLastCast[102] = { ['Sicken'] = os.clock() }
+    testRuntime.npcSpellApplied[102] = { ['Sicken'] = os.clock() + 30 }
+
+    local t4 = testRuntime.resolveAllEnemiesTargetId('Sicken', 'in combat', 100, 'Shm', { kind = 'dot' })
+    assert_eq(t4, nil, 'Returns nil when all XTarget mobs have DoT active')
+
+    testRuntime.npcSpellApplied[103]['Sicken'] = os.clock() - 1
+    local t5 = testRuntime.resolveAllEnemiesTargetId('Sicken', 'in combat', 100, 'Shm', { kind = 'dot' })
+    assert_eq(t5, 103, 'Selects mob 103 again once DoT expires on it')
+
+    -- 2. Direct Damage Nuke round-robin (Ice Comet, duration 0)
+    testRuntime.npcCastCounts = {}
+    testRuntime.npcSpellLastCast = {}
+    testRuntime.npcSpellApplied = {}
+
+    local n1 = testRuntime.resolveAllEnemiesTargetId('Ice Comet', 'in combat', 100, 'Wiz', { kind = 'dd' })
+    assert_eq(n1, 103, 'First nuke hits mob 103 (lowest HP tie-break)')
+    testRuntime.npcCastCounts[103] = { ['Ice Comet'] = 1 }
+    testRuntime.npcSpellLastCast[103] = { ['Ice Comet'] = 100 }
+
+    local n2 = testRuntime.resolveAllEnemiesTargetId('Ice Comet', 'in combat', 100, 'Wiz', { kind = 'dd' })
+    assert_eq(n2, 101, 'Second nuke hits mob 101 (0 casts vs 1 cast)')
+    testRuntime.npcCastCounts[101] = { ['Ice Comet'] = 1 }
+    testRuntime.npcSpellLastCast[101] = { ['Ice Comet'] = 101 }
+
+    local n3 = testRuntime.resolveAllEnemiesTargetId('Ice Comet', 'in combat', 100, 'Wiz', { kind = 'dd' })
+    assert_eq(n3, 102, 'Third nuke hits mob 102 (0 casts vs 1 cast)')
+    testRuntime.npcCastCounts[102] = { ['Ice Comet'] = 1 }
+    testRuntime.npcSpellLastCast[102] = { ['Ice Comet'] = 102 }
+
+    local n4 = testRuntime.resolveAllEnemiesTargetId('Ice Comet', 'in combat', 100, 'Wiz', { kind = 'dd' })
+    assert_eq(n4, 103, 'Fourth nuke round-robins back to mob 103 (least recently cast)')
+
+    -- 3. Max Casts Limit (max_casts = 1)
+    local mc = testRuntime.resolveAllEnemiesTargetId('Ice Comet', 'in combat', 100, 'Wiz', { kind = 'dd', max_casts = 1 })
+    assert_eq(mc, nil, 'Returns nil when all XTarget mobs have reached max_casts (1)')
+
+    -- 4. Target Lockout / Resist skipping
+    testRuntime.npcCastCounts = {}
+    testRuntime.npcSpellLastCast = {}
+    mockLockouts[103] = { ['Sicken'] = true }
+    local r1 = testRuntime.resolveAllEnemiesTargetId('Sicken', 'in combat', 100, 'Shm', { kind = 'dot' })
+    assert_eq(r1, 101, 'Skips locked-out mob 103 and selects mob 101')
+    mockLockouts = {}
 end
 
 -- ============================================================================

@@ -13,6 +13,41 @@
   - **Resolved Shadowed Variable**: Fixed shadowed `local tid` in `combatTick`'s camp pull distance check.
   - **Automated Test Coverage (`Suite 53`)**: Added unit tests in `tests/test_pure_logic.lua` validating command argument parsing for `/ac clear lockouts` and debounce timing for `onZoned`.
 
+- **Auto-Accept Settings Page: Auto Group, Auto Trade, Auto DZAdd & Whitelist Management (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **Dedicated Settings Sub-Page (`UI.drawAutoAcceptSettings`, `UI.drawSettingsTab`)**: Restructured the Settings tab with clean sub-navigation tabs (`General Settings` and `Auto-Accept`), providing an organized dedicated interface for social and group automation without cluttering general engine settings.
+  - **Automated Request Acceptance Toggles**:
+    - `Auto-Accept Group Invites` (`ctrl.auto_group`): Automatically accepts incoming group invites via `/invite` and dialog confirmation whenever received from an authorized player.
+    - `Auto-Accept Trades` (`ctrl.auto_trade`): Automatically clicks the Trade button (`TRDW_Trade_Button`) when the trading partner has marked trade ready and is authorized.
+    - `Auto-Accept Dynamic Zone / Expedition Invites (DZAdd)` (`ctrl.auto_dzadd`): Automatically accepts dynamic zone invites (`/dzaccept`), task adds, and expedition confirmation prompts from authorized players.
+  - **Flexible Authorization Filtering Rules**:
+    - `Accept from Anyone` (`ctrl.auto_accept_anyone`): Unconditionally accepts eligible group, trade, and expedition requests from any player.
+    - `Always accept from Group Members` (`ctrl.auto_accept_group`): Automatically authorizes requests from characters currently in your group.
+    - `Accept from all Guild Members` (`ctrl.auto_accept_guild`): Automatically authorizes requests from any player in the same guild as your character (`Me.Guild()`).
+  - **Player Whitelist Management with Player IDs & Dedicated Removal (`ctrl.auto_accept_names`, `runtime.addAutoAcceptName`, `runtime.removeAutoAcceptName`)**:
+    - **Dual Identification (Player Name & Player ID)**: Structured whitelist entries store both character name and numeric Player ID (`{ name = ..., id = ... }`), allowing resilient matching against either player names or spawn IDs with backwards compatibility for legacy string entries.
+    - **Interactive Input & Target Resolution**: Text input field accepting player names or IDs with Enter key submission support, plus a one-click `+ Add Target` button that extracts both clean name and spawn ID from the targeted player character (`mq.TLO.Target`).
+    - **Dedicated Remove Button**: Added a dedicated `[Remove]` button in the top toolbar to instantly remove the selected player or the targeted player from the whitelist, alongside individual `[Remove]` action buttons on each row of the whitelist table and a `[Clear All]` button.
+    - **Structured Whitelist Table (`autoAcceptWhitelistTable`)**: Scrollable 3-column table displaying Player Name (selectable), Player ID, and per-row `[Remove]` button with selected player status badge.
+    - Alphabetically sorted, case-insensitive whitelist with duplicate prevention by name and ID.
+  - **Continuous Pulse & Event Integration (`runMainLoop`, `runtime.checkAutoAccept`, `mq.event`)**:
+    - Integrated throttled background evaluation in `runMainLoop` to monitor `Me.Invited()`, `Window('TradeWnd')` (matching target ID or name), and `Window('ConfirmationDialogBox')`.
+    - Added reactive chat event listeners (`TriuneAutoGroupInvite1/2`, `TriuneAutoDZInvite1/2/3`) for immediate instant response to invites.
+  - **Unit Test Coverage (`Suite 55`)**: Added unit tests verifying whitelist additions with Player IDs, case-insensitive duplicate prevention, alphabetical sorting, removal by ID/name/entry, clearing, and multi-rule authorization evaluation (anyone, group, guild, whitelist).
+
+- **Multi-Target Extended Target Engine for 'All Enemies' Option (`triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Multi-Target Cast Distribution (`runtime.resolveAllEnemiesTargetId`)**: Refactored the `E: All Enemies` target selector across Spell Gems, Clickies, Combat Actions, AAs, and Disciplines so that it actively iterates and distributes casts across all hostile NPC candidates on your Extended Target (XTarget) list.
+  - **Debuff & DoT Multi-Targeting**: Spells with a duration (DoTs, debuffs, snares, mes) evaluate whether each mob already has the effect active (`runtime.isNpcSpellActive`, checking both MQ target buffs and tracked applied durations). Triune sequentially casts the effect on Mob 1, Mob 2, Mob 3, etc., and cleanly yields to subsequent gems/actions once all mobs on XTarget have the effect active.
+  - **Direct Damage & Nuke Round-Robin**: Spells with zero duration or unlimited casts round-robin evenly across all living enemies on XTarget based on fewest cast counts and least-recent cast timestamps.
+  - **Max Casts Enforcement per Mob**: Honors `max_casts` on a per-mob basis across XTarget, casting up to the configured limit on each enemy before skipping that target.
+  - **Lockout & Resist Resiliency**: Automatically skips mobs that are locked out or immune via `castTracker`, targeting other eligible mobs on XTarget without halting the rotation.
+  - **Applied Spell & Cast Tracking Lifecycle**: Added `runtime.npcSpellApplied` and `runtime.npcSpellLastCast` tracking in `castGem` and `useClickie`, clearing applied timers on fizzles, interrupts, resists, and non-stacking debuff conflicts in `castTracker.reportResult`, and pruning dead mobs during combat ticks, death, and zone transitions.
+  - **Unit Test Coverage (`Suite 56`)**: Added comprehensive tests in `tests/test_pure_logic.lua` validating sequential DoT distribution across XTarget, yielding when all mobs are DoTed, recast upon expiration, round-robin direct damage nuking, `max_casts` gating, and lockout skipping.
+
+- **Target Filters & Cast Conditions Reference in Help Tab (`triune.lua`).**
+  - **In-Game Reference Section (`UI.drawHelpTab`)**: Added a dedicated `Spell & Ability Target Filters` collapsing header to the Help tab, providing comprehensive reference documentation directly in the UI.
+  - **Target Resolution Guide (`##HelpTargetTable`)**: Details behavior for all 11 target selectors across Enemy options (`E: All Enemies`, `E: Current Target`, `E: Assist Target`, `E: Nearest Add`, `E: Unmezzed Add`) and Friendly options (`F: Myself`, `F: Main Assist`, `F: Tank`, `F: Lowest-HP Ally`, `F: Whole Group`, `F: Pet`).
+  - **Cast Conditions Guide (`##HelpWhenTable`)**: Explains activation criteria and usage for all 16 "When" conditions (HP thresholds, mana checks, buff/debuff presence, cure counter checks, loose adds, aggro triggers, and continuous twisting).
+
 ---
 
 ## 2026-09-03
