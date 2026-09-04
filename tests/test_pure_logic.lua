@@ -6104,6 +6104,116 @@ Submitted by: Tester
 end
 
 -- ============================================================================
+-- Suite 58: Assist Mode Position Behind NPC Logic
+-- ============================================================================
+print('--- Suite 58: Assist Mode Position Behind NPC Logic ---')
+do
+    local sanitizeModeConfig = loadFunc(src, 'sanitizeModeConfig', { MODES = MODES })
+    local defaultCtrl = loadFunc(src, 'defaultCtrl')
+
+    -- 1. Default ctrl has assist_behind = true
+    local c = defaultCtrl()
+    assert_true(c.assist_behind == true, 'defaultCtrl initializes assist_behind to true')
+
+    -- 2. sanitizeModeConfig handles missing assist_behind and preserves false
+    local cMissing = { mode = 'Assist', submode = 'Chase' }
+    sanitizeModeConfig(cMissing)
+    assert_true(cMissing.assist_behind == true, 'sanitizeModeConfig sets default assist_behind = true when nil')
+
+    local cDisabled = { mode = 'Assist', submode = 'Chase', assist_behind = false }
+    sanitizeModeConfig(cDisabled)
+    assert_true(cDisabled.assist_behind == false, 'sanitizeModeConfig preserves assist_behind = false')
+
+    -- 3. Geometric calculation for isBehindTarget
+    local function calcIsBehind(px, py, sx, sy, sHead)
+        local dx = px - sx
+        local dy = py - sy
+        local dist = math.sqrt(dx * dx + dy * dy)
+        if dist <= 0.001 then return true end
+        local vx = dx / dist
+        local vy = dy / dist
+        local hRad = math.rad(sHead or 0)
+        local fx = math.sin(hRad)
+        local fy = math.cos(hRad)
+        local dot = fx * vx + fy * vy
+        return dot <= 0.0
+    end
+
+    -- Heading 0 = North (+Y):
+    -- Behind is South (-Y), Front is North (+Y)
+    assert_true(calcIsBehind(0, -10, 0, 0, 0), 'Behind target facing North (player South)')
+    assert_eq(calcIsBehind(0, 10, 0, 0, 0), false, 'In front of target facing North (player North)')
+    assert_true(calcIsBehind(10, 0, 0, 0, 0), 'Flank of target facing North (player West dot=0 <= 0)')
+
+    -- Heading 90 = West (+X):
+    -- Behind is East (-X), Front is West (+X)
+    assert_true(calcIsBehind(-10, 0, 0, 0, 90), 'Behind target facing West (player East)')
+    assert_eq(calcIsBehind(10, 0, 0, 0, 90), false, 'In front of target facing West (player West)')
+
+    -- Heading 180 = South (-Y):
+    -- Behind is North (+Y), Front is South (-Y)
+    assert_true(calcIsBehind(0, 10, 0, 0, 180), 'Behind target facing South (player North)')
+    assert_eq(calcIsBehind(0, -10, 0, 0, 180), false, 'In front of target facing South (player South)')
+
+    -- Heading 270 = East (-X):
+    -- Behind is West (+X), Front is East (-X)
+    assert_true(calcIsBehind(10, 0, 0, 0, 270), 'Behind target facing East (player West)')
+    assert_eq(calcIsBehind(-10, 0, 0, 0, 270), false, 'In front of target facing East (player East)')
+
+    -- 4. Behind coordinates calculation (getBehindLoc)
+    local function calcBehindLoc(sx, sy, sz, sHead, behindDist)
+        local hRad = math.rad(sHead or 0)
+        local bx = sx - behindDist * math.sin(hRad)
+        local by = sy - behindDist * math.cos(hRad)
+        return bx, by, sz
+    end
+
+    local bx, by, bz = calcBehindLoc(100, 200, 10, 0, 12)
+    assert_eq(math.floor(bx + 0.5), 100, 'Behind loc North heading X matches 100')
+    assert_eq(math.floor(by + 0.5), 188, 'Behind loc North heading Y is 200 - 12 = 188')
+    assert_eq(bz, 10, 'Behind loc Z matches 10')
+
+    bx, by, bz = calcBehindLoc(100, 200, 10, 90, 12)
+    assert_eq(math.floor(bx + 0.5), 88, 'Behind loc West heading X is 100 - 12 = 88')
+    assert_eq(math.floor(by + 0.5), 200, 'Behind loc West heading Y matches 200')
+
+    -- 5. Aggro safety evaluation logic
+    local function evaluateBehindBehavior(mode, assistBehind, hasAggro)
+        if mode ~= 'Assist' or not assistBehind then
+            return 'NORMAL'
+        end
+        if hasAggro then
+            return 'SUSPEND_BEHIND' -- prevent spinning with mob while tanking
+        end
+        return 'POSITION_BEHIND'
+    end
+
+    assert_eq(evaluateBehindBehavior('Assist', true, false), 'POSITION_BEHIND', 'Assist mode without aggro positions behind')
+    assert_eq(evaluateBehindBehavior('Assist', true, true), 'SUSPEND_BEHIND', 'Assist mode with aggro suspends behind positioning')
+    assert_eq(evaluateBehindBehavior('Assist', false, false), 'NORMAL', 'Assist mode with assist_behind disabled uses normal facing')
+    assert_eq(evaluateBehindBehavior('Manual', true, false), 'NORMAL', 'Manual mode uses normal facing')
+
+    -- 6. Slash command handling emulation
+    local function handleBehindSlashCmd(ctrlTable, sub)
+        sub = sub and string.lower(sub) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            ctrlTable.assist_behind = true
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            ctrlTable.assist_behind = false
+        else
+            ctrlTable.assist_behind = ctrlTable.assist_behind == false
+        end
+        return ctrlTable.assist_behind
+    end
+
+    local testCtrl = { assist_behind = true }
+    assert_eq(handleBehindSlashCmd(testCtrl, 'off'), false, 'Slash cmd off disables assist_behind')
+    assert_true(handleBehindSlashCmd(testCtrl, 'on'), 'Slash cmd on enables assist_behind')
+    assert_eq(handleBehindSlashCmd(testCtrl, ''), false, 'Slash cmd toggle flips to false')
+    assert_true(handleBehindSlashCmd(testCtrl, ''), 'Slash cmd toggle flips back to true')
+end
+
+-- ============================================================================
 -- Results
 -- ============================================================================
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

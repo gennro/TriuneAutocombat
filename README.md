@@ -49,7 +49,7 @@ Triune keeps things simple with **3 main combat modes**:
 |---|---|---|
 | **Manual** | When you want to drive | You control movement and pick where to go. Triune handles attacking, casting your 3-class loadout spells, using AAs/discs, and healing allies. When the fight is over, it will walk back to your camp if you have one set. |
 | **Puller** | The group leader / puller | Automates finding and engaging mobs. Comes in two flavors:<br>• **`Camp`**: Runs out, tags a mob (with a spell, bow, melee hit, or pet), brings it back to camp, and tanks it there.<br>• **`Hunt`**: Roams around the zone, finds mobs, and kills them right where they stand. |
-| **Assist** | Box characters & helpers | Follows and assists your Main Assist (MA). Comes in three flavors:<br>• **`Chase`**: Runs right behind the MA and attacks whatever the MA targets.<br>• **`Camp`**: Holds position at camp and only hits mobs that get brought into camp.<br>• **`Backline`**: For healers and casters — stays safely at range and never charges into melee. |
+| **Assist** | Box characters & helpers | Follows and assists your Main Assist (MA). Automatically positions behind the attacked NPC so only the MA tanks in front (toggleable via checkbox or `/ac assistbehind`). Comes in three flavors:<br>• **`Chase`**: Runs right behind the MA and attacks whatever the MA targets.<br>• **`Camp`**: Holds position at camp and only hits mobs that get brought into camp.<br>• **`Backline`**: For healers and casters — stays safely at range and never charges into melee. |
 
 ---
 
@@ -237,6 +237,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac xtardist [25-300]` | `/ac xtar`, `/ac xtarrange` | Configure max XTarget / assist engagement chase distance (default: 150) |
 | `/ac chasedist [5-100]` | `/ac chase`, `/ac followdist` | Configure following distance (how far to stay back) from Main Assist (default: 15) |
 | `/ac selfdefense [on\|off]` | `/ac assistdefend`, `/ac defend` | Toggle Assist mode self-defense when attacked while MA has no target |
+| `/ac assistbehind [on\|off]` | `/ac behind`, `/ac posbehind` | Toggle Assist mode positioning behind NPC in combat (default: on) |
 | `/ac pullhp [0-95]` | `/ac minhp` | Set minimum HP % threshold before pausing pulling to rest until 100% |
 | `/ac pullcon [preset\|con]` | `/ac con`, `/ac confilter` | Configure faction filters (`hostile`, `indifferent`, `all`, `none`) or toggle single considerations |
 | `/ac wp [add\|clear\|del\|on\|off\|list]` | `/ac waypoint`, `/ac waypoints` | Manage waypoint patrol routes, arrival radius, and scan distance |

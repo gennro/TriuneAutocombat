@@ -205,6 +205,7 @@ local function sanitizeModeConfig(c)
     end
 
     if c.assist_self_defense == nil then c.assist_self_defense = true end
+    if c.assist_behind == nil then c.assist_behind = true end
     if c.hunter_z_plane == nil then c.hunter_z_plane = 15 end
     if c.hunter_z == nil then c.hunter_z = 75 end
 
@@ -296,6 +297,7 @@ local function defaultCtrl()
         custom_ma_list       = {},
         assist_at            = 98,
         assist_self_defense  = true,
+        assist_behind        = true,
         chase                = true,
         chase_dist           = 15,
         automem              = true,
@@ -5866,6 +5868,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac xtardist [25-300]',              desc = 'Configure max XTarget / assist engagement chase distance (default 150)' },
                 { cmd = '/ac chasedist [5-100]',              desc = 'Configure following distance (how far to stay back) from Main Assist (default 15)' },
                 { cmd = '/ac selfdefense [on|off]',           desc = 'Toggle Assist mode self-defense when attacked while MA has no target' },
+                { cmd = '/ac assistbehind [on|off]',          desc = 'Toggle Assist mode positioning behind NPC in combat (default: on)' },
                 { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
                 { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
                 { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
@@ -8244,9 +8247,10 @@ function UI.drawStatusTab()
                 end
                 if ImGui.IsItemHovered() then UI.setTooltip(string.format('Target %s (ID %d)', maInfo.targetName, maInfo.targetId)) end
             end
-            ImGui.TextDisabled(string.format('• Chase MA: %s (Chase Dist: %d ft) | Max XTar Chase: %d ft | Self-Defense: %s',
+            ImGui.TextDisabled(string.format('• Chase MA: %s (Chase Dist: %d ft) | Max XTar Chase: %d ft | Self-Defense: %s | Behind: %s',
                 ctrl.chase and 'Enabled' or 'Disabled', ctrl.chase_dist or 15, ctrl.xtar_nav_dist or 150,
-                (ctrl.assist_self_defense ~= false) and 'Enabled' or 'Disabled'))
+                (ctrl.assist_self_defense ~= false) and 'Enabled' or 'Disabled',
+                (ctrl.assist_behind ~= false) and 'Enabled' or 'Disabled'))
         elseif ctrl.mode == 'Manual' then
             accent(GOLD, 'Manual Operations:')
             local campInfo = 'No camp set (stays put wherever fights end)'
@@ -9552,6 +9556,15 @@ function UI.drawControlTab()
         ctrl.assist_self_defense = ImGui.Checkbox('Self-Defense When Attacked##assistSelfDefense', ctrl.assist_self_defense ~= false)
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('When enabled, if the Main Assist has no active engaged target and an enemy attacks you, defend yourself.\nWhen the MA engages a target, the assistant will strictly focus on the MA target only.')
+        end
+
+        local behindVal = ImGui.Checkbox('Position Behind NPC##assistBehind', ctrl.assist_behind ~= false)
+        if behindVal ~= (ctrl.assist_behind ~= false) then
+            ctrl.assist_behind = behindVal
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('When enabled in Assist mode, positions the character behind the attacked NPC.\nThe Main Assist stays in front holding aggro, while assistants attack from the rear to avoid ripostes/blocks.\n(If this character pulls aggro, behind positioning suspends until aggro is cleared.)')
         end
 
         if ctrl.submode == 'Chase' then
@@ -15487,6 +15500,104 @@ function runtime.isSpawnInForwardCone(spawnId, maxAngleDeg)
     return runtime.isHeadingInForwardCone(myHeading, myX, myY, sx, sy, maxAngleDeg)
 end
 
+function runtime.isBehindTarget(targetId)
+    if not targetId or targetId <= 0 then return false end
+    local me = mq.TLO.Me
+    if not me() then return false end
+    local s = mq.TLO.Spawn(targetId)
+    if not s() then return false end
+
+    -- Check MQ2MoveUtils TLO if active and stick is tracking this target
+    if stickLoaded() then
+        local stickOk = false
+        local isBehind = false
+        pcall(function()
+            if (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') and mq.TLO.Stick.StickTarget() == targetId then
+                isBehind = mq.TLO.Stick.Behind() or false
+                stickOk = true
+            end
+        end)
+        if stickOk then return isBehind end
+    end
+
+    -- Mathematical calculation:
+    local px, py = me.X() or 0, me.Y() or 0
+    local sx, sy = s.X() or 0, s.Y() or 0
+    local sHead = 0
+    pcall(function() sHead = s.Heading.Degrees() or s.Heading() or 0 end)
+    local dx = px - sx
+    local dy = py - sy
+    local dist = math.sqrt(dx * dx + dy * dy)
+    if dist <= 0.001 then return true end
+
+    local vx = dx / dist
+    local vy = dy / dist
+
+    -- Target forward unit vector in EQ coordinates (Y is North, X is West)
+    local hRad = math.rad(sHead)
+    local fx = math.sin(hRad)
+    local fy = math.cos(hRad)
+
+    -- Dot product: > 0 is front arc, <= 0 is rear arc (90 to 270 deg)
+    local dot = fx * vx + fy * vy
+    return dot <= 0.0
+end
+
+function runtime.getBehindLoc(targetId, dist)
+    if not targetId or targetId <= 0 then return nil end
+    local s = mq.TLO.Spawn(targetId)
+    if not s() then return nil end
+    local sx, sy, sz = s.X() or 0, s.Y() or 0, s.Z() or 0
+    local sHead = 0
+    pcall(function() sHead = s.Heading.Degrees() or s.Heading() or 0 end)
+    local behindDist = dist or math.max(6, math.min(12, (ctrl and ctrl.melee_dist) or 12))
+    local hRad = math.rad(sHead)
+    -- Facing unit vector is (sin(hRad), cos(hRad))
+    -- Behind is target minus facing vector * dist
+    local bx = sx - behindDist * math.sin(hRad)
+    local by = sy - behindDist * math.cos(hRad)
+    local bz = sz
+    return bx, by, bz
+end
+
+function runtime.positionBehindTarget(targetId, targetDist)
+    if not targetId or targetId <= 0 then return false end
+    local dist = targetDist or runtime.desiredRange(targetId)
+    local stickDist = math.max(4, math.floor(dist))
+
+    if stickLoaded() then
+        local needStick = true
+        pcall(function()
+            local sActive = mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON'
+            local sTarget = mq.TLO.Stick.StickTarget() or 0
+            local sBehind = mq.TLO.Stick.MoveBehind() or false
+            if sActive and sTarget == targetId and sBehind then
+                needStick = false
+            end
+        end)
+        if needStick and not runtime.isCasting() then
+            mq.cmdf('/stick id %d %d behind', targetId, stickDist)
+        end
+        return true
+    end
+
+    -- Fallback when MQ2MoveUtils is not loaded: navigate to rear coordinates
+    if not runtime.isBehindTarget(targetId) and not runtime.isCasting() then
+        local bx, by, bz = runtime.getBehindLoc(targetId, dist)
+        if bx then
+            runtime.moveTowardLoc(bx, by, bz, 3)
+            return false
+        end
+    else
+        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+            pursuit.lastCombatFaceAt = os.clock()
+            mq.cmd('/face fast')
+        end
+        return true
+    end
+    return false
+end
+
 -- Raw 3D distance says nothing about walls/doors between you and the target --
 -- being "within range" through a wall is not being in range at all. Without this,
 -- moveToward would call itself "arrived" right at a doorway (in range by straight-
@@ -15639,7 +15750,8 @@ function runtime.moveToward(id, dist, followOnly)
     -- Movement Stage 2: MQ2Stick / MoveUtils
     if stickLoaded() and ctrl.nav_fallback_stick then
         if pursuit.lastNavTargetId ~= id or pursuit.lastStickDist ~= targetDist then
-            mq.cmdf('/stick id %d %d', id, targetDist)
+            local behindMod = (ctrl.mode == 'Assist' and ctrl.assist_behind ~= false and not runtime.playerHasAggro(id)) and ' behind' or ''
+            mq.cmdf('/stick id %d %d%s', id, targetDist, behindMod)
             pursuit.lastNavTargetId = id
             pursuit.lastStickDist = targetDist
         end
@@ -15703,7 +15815,8 @@ local function repositionCloser()
     end
 
     if stickLoaded() then
-        mq.cmdf('/stick id %d %d', tid, targetDist)
+        local behindMod = (ctrl.mode == 'Assist' and ctrl.assist_behind ~= false and not runtime.playerHasAggro(tid)) and ' behind' or ''
+        mq.cmdf('/stick id %d %d%s', tid, targetDist, behindMod)
     else
         mq.cmd('/keypress forward hold')
         mq.delay(200)
@@ -15777,7 +15890,8 @@ local function handleCantHitFromHere()
     end
 
     if stickLoaded() then
-        mq.cmdf('/stick id %d %d', tid, targetDist)
+        local behindMod = (ctrl.mode == 'Assist' and ctrl.assist_behind ~= false and not runtime.playerHasAggro(tid)) and ' behind' or ''
+        mq.cmdf('/stick id %d %d%s', tid, targetDist, behindMod)
     else
         mq.cmd('/keypress forward hold')
         mq.delay(250)
@@ -18258,9 +18372,29 @@ local function combatTick()
                             tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
                         mq.cmd('/attack on')
                     end
-                    if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
-                        pursuit.lastCombatFaceAt = os.clock()
-                        mq.cmd('/face fast')
+                    local isAssistBehind = (ctrl.mode == 'Assist' and ctrl.assist_behind ~= false)
+                    if isAssistBehind then
+                        if runtime.playerHasAggro(tid) then
+                            -- Assistant currently has aggro: suspend behind positioning to prevent circular spinning while tanking
+                            if stickLoaded() then
+                                pcall(function()
+                                    if (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') and mq.TLO.Stick.MoveBehind() then
+                                        mq.cmdf('/stick id %d %d', tid, math.floor(desiredRange(tid)))
+                                    end
+                                end)
+                            end
+                            if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+                                pursuit.lastCombatFaceAt = os.clock()
+                                mq.cmd('/face fast')
+                            end
+                        else
+                            runtime.positionBehindTarget(tid, desiredRange(tid))
+                        end
+                    else
+                        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+                            pursuit.lastCombatFaceAt = os.clock()
+                            mq.cmd('/face fast')
+                        end
                     end
                 elseif not isMoveActive() and curDist > maxReach and tid > 0 then
                     -- Mob moved, was pushed, or is out of striking reach: re-close distance
@@ -18272,6 +18406,13 @@ local function combatTick()
                 -- Not engaging any NPC or dragging mob to camp: turn off auto-attack if not in manual combat
                 if mq.TLO.Me.Combat() and not (ctrl.mode == 'Manual' and (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')) then
                     mq.cmd('/attack off')
+                end
+                if stickLoaded() then
+                    pcall(function()
+                        if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                            mq.cmd('/stick off')
+                        end
+                    end)
                 end
             end
         end
@@ -18315,6 +18456,13 @@ local function combatTick()
             end
             if mq.TLO.Me.AutoFire() then
                 mq.cmd('/autofire off')
+            end
+            if stickLoaded() then
+                pcall(function()
+                    if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                        mq.cmd('/stick off')
+                    end
+                end)
             end
         end
     end
@@ -18903,6 +19051,7 @@ local function triuneCommand(...)
         print('  \ag/ac xtardist [25-300]\ax - Set max XTarget chase / engagement distance')
         print('  \ag/ac chasedist [5-100]\ax - Set following distance to stay back from Main Assist')
         print('  \ag/ac selfdefense [on|off]\ax - Toggle Assist mode self-defense when attacked')
+        print('  \ag/ac assistbehind [on|off]\ax - Toggle positioning behind NPC in Assist mode')
         print('  \ag/ac pausezone [on|off]\ax - Toggle automatic script pause when zoning (default: on)')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
@@ -19154,6 +19303,22 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Assist Self-Defense When Attacked: %s.',
                 ctrl.assist_self_defense and '\agENABLED\ax' or '\arDISABLED\ax'))
+        end
+    elseif cmd == 'assistbehind' or cmd == 'behind' or cmd == 'posbehind' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            ctrl.assist_behind = true
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Assist Mode Position Behind NPC: \agENABLED\ax.')
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            ctrl.assist_behind = false
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Assist Mode Position Behind NPC: \arDISABLED\ax.')
+        else
+            ctrl.assist_behind = ctrl.assist_behind == false
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Assist Mode Position Behind NPC: %s.',
+                ctrl.assist_behind and '\agENABLED\ax' or '\arDISABLED\ax'))
         end
     elseif cmd == 'pausezone' or cmd == 'zonepause' or cmd == 'pauseonzone' then
         local sub = args[2] and string.lower(args[2]) or ''

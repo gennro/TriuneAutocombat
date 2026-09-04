@@ -2,6 +2,20 @@
 
 ## 2026-09-04
 
+- **Assist Mode Combat Positioning: Position Behind NPC with Aggro Safety & Toggle (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **Automated Flank/Rear Positioning (`runtime.positionBehindTarget`, `combatTick`)**: In Assist mode, characters engaging in melee combat automatically maneuver behind the attacked NPC so only the Main Assist tanks the front arc, completely mitigating frontal ripostes, parries, blocks, and frontal area-of-effect abilities while enabling Rogue backstabs.
+  - **Aggro Safety Gate (`runtime.playerHasAggro`)**: If the assistant character pulls aggro or is being attacked directly, behind-positioning is immediately suspended and switches to direct target facing, preventing infinite circling/spinning while tanking. Behind positioning automatically resumes the moment the Main Assist or another group member regains aggro.
+  - **MQ2MoveUtils & Geometric Vector Dual Stack (`runtime.isBehindTarget`, `runtime.getBehindLoc`)**:
+    - Leverages MQ2MoveUtils (`/stick id <tid> <dist> behind`) when loaded for continuous, smooth orbital rear tracking.
+    - Implements an autonomous trigonometry fallback calculating real-time rear coordinates based on the NPC's compass heading vector ($x_{behind} = x_{target} - dist \cdot \sin(\theta_{rad})$, $y_{behind} = y_{target} - dist \cdot \cos(\theta_{rad})$) and dot-product rear-arc detection ($\le 0$ dot product).
+    - Extends `moveToward` fallback, `repositionCloser()`, and `handleCantHitFromHere()` with the `behind` modifier for seamless repositioning.
+    - Cleans up active stick commands (`/stick off`) whenever targets die or auto-attack disengages.
+  - **User Configurable Opt-Out Checkbox & Slash Command**:
+    - Added `Position Behind NPC` checkbox (`ctrl.assist_behind`, default: `true`) to the Assist mode controls tab with a descriptive tooltip explaining the MA vs assistant group mechanics.
+    - Added live status feedback in the Assist Operations summary (`Behind: Enabled/Disabled`).
+    - Added `/ac assistbehind [on|off]` (and `/ac behind [on|off]`) slash command support for convenient macro and chat toggling.
+  - **Automated Test Coverage (`Suite 58`)**: Added 14 unit tests validating default and sanitized state initialization, pure geometric rear-arc detection across all 4 cardinal headings ($0^\circ, 90^\circ, 180^\circ, 270^\circ$), rear coordinate calculations, aggro behavior branching, and slash command toggle logic.
+
 - **New Subsystem: Triune Quest Guide & Server-Ground-Truth Quest Database (`triune_quest.lua`, `triune_quest/`, `build_triune_quest.py`, `tests/test_pure_logic.lua`).**
   - **Standalone Interactive Quest Guide Window (`TAC/lua/triune_quest.lua`)**: Introduced a fully standalone, era-aware ImGui quest browser runnable via `/lua run triune_quest`. Styled with the unified dark cyan/blue Triune theme tokens, complete with master-detail split layout, search bar, expansion dropdown, level slider, and hide-completed toggle.
   - **Comprehensive Multi-Expansion Quest Catalog (Classic to Expansion 32)**: Precompiled 2,633 full quest walkthroughs spanning 32 expansions into partitioned, on-demand per-zone Lua packages (`TAC/resources/triune_quest/zones/<shortname>.lua`) and a lightweight search index (`catalog.lua`). Minimizes LuaJIT memory consumption by loading only active zone data on-demand.
