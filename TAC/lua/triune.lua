@@ -256,6 +256,7 @@ local function sanitizeModeConfig(c)
         c.auto_aa_buy_order = 'cost'
     end
     if c.downtime_buffing == nil then c.downtime_buffing = true end
+    if c.pause_on_zone == nil then c.pause_on_zone = true end
     if type(c.status_collapsed) ~= 'table' then c.status_collapsed = {} end
 
     if c.ma_id == nil then c.ma_id = 0 end
@@ -396,6 +397,7 @@ local function defaultCtrl()
         auto_aa_only_prioritized = false,
         auto_aa_buy_order        = 'cost',
         downtime_buffing         = true,
+        pause_on_zone            = true,
         status_collapsed         = {
             target = false,
             vitals = false,
@@ -415,7 +417,6 @@ local runtime = {
     deathGuardFired = false,
     medBreakActive = false,
     pullBreadcrumbs = {},
-    lastBreadcrumbAt = 0,
     activeDetour = nil,
     lastProactiveDoorAt = 0,
     lastLevClearAt = 0,
@@ -469,7 +470,6 @@ local runtime = {
     ignoreInput = '',
     pullInput = '',
     conCache = {},
-    lastConReqAt = 0,
     spellbookSetCache = nil,
     lastSpellbookCacheTime = 0,
     hasAACache = {},
@@ -586,8 +586,10 @@ local COMBO_OPTIONS = {
         'ally is Dead', 'add is loose', 'twist while fighting', 'in combat',
         'always' }
 }
-for _, t in ipairs(COMBO_OPTIONS.FRIENDLY) do COMBO_OPTIONS.TARGETS[#COMBO_OPTIONS.TARGETS + 1] = 'F: ' .. t end
-for _, t in ipairs(COMBO_OPTIONS.ENEMY) do COMBO_OPTIONS.TARGETS[#COMBO_OPTIONS.TARGETS + 1] = 'E: ' .. t end
+do
+    for _, t in ipairs(COMBO_OPTIONS.FRIENDLY) do COMBO_OPTIONS.TARGETS[#COMBO_OPTIONS.TARGETS + 1] = 'F: ' .. t end
+    for _, t in ipairs(COMBO_OPTIONS.ENEMY) do COMBO_OPTIONS.TARGETS[#COMBO_OPTIONS.TARGETS + 1] = 'E: ' .. t end
+end
 
 -- ============================================================================
 -- Local Theme & Common Helpers (Self-Contained Module)
@@ -623,7 +625,7 @@ local function classColor(abbr)
     return 0.49, 0.56, 0.65, 1.0
 end
 
-local function classPlausible(abbr)
+function runtime.classPlausible(abbr)
     if not abbr or type(abbr) ~= 'string' then return false end
     if DATA and DATA.spells and DATA.spells[abbr] and #DATA.spells[abbr] > 0 then
         return true
@@ -1165,10 +1167,11 @@ local function hasActivePet()
     return #pets > 0
 end
 
-local PET_SCOPE_LIST = {
+petState.PET_SCOPE_LIST = {
     'all', 'swarm', 'mag', 'bst', 'nec', 'enc', 'shm', 'dru', 'brd', 'shd'
 }
 local function classToPetCmdScope(cls)
+    local PET_SCOPE_LIST = petState.PET_SCOPE_LIST
     if not cls or type(cls) ~= 'string' then return 'all' end
     local lower = string.lower(cls)
     if lower == 'sk' or lower == 'shd' then return 'shd' end
@@ -1611,13 +1614,14 @@ end
 -- climb. Used by checkStuck() (skip false-positive stuck detection) and
 -- moveToward() (skip false-positive pursuit-stall/unreachable marking) --
 -- see comments at each call site.
-local LADDER_CLIMB = {
+pursuit.LADDER_CLIMB = {
     Z_DELTA    = 3,      -- minimum Z moved per sample to count as climbing
     XY_DELTA   = 3,      -- maximum X/Y moved per sample to still count as climbing (not just running)
     SAMPLE_SEC = 1.0,    -- resample cadence
     GRACE_SEC  = 3.0,    -- keep reporting "climbing" this long after the last positive sample
 }
 local function isClimbingLadder()
+    local LADDER_CLIMB = pursuit.LADDER_CLIMB
     local now = os.clock()
     if (now - (pursuit.climbSampleAt or 0)) >= LADDER_CLIMB.SAMPLE_SEC then
         local x, y, z = 0, 0, 0
@@ -2873,7 +2877,7 @@ function runtime.tryMem(slot, spellName, bypassCheck)
     end
 end
 
-local ALIAS_CLASS_MAP = {
+DATA.ALIAS_CLASS_MAP = {
     SK = 'SK',
     SHD = 'SK',
     BST = 'Bst',
@@ -2883,6 +2887,7 @@ local ALIAS_CLASS_MAP = {
 }
 
 local function lookupSpells(abbr)
+    local ALIAS_CLASS_MAP = DATA.ALIAS_CLASS_MAP
     if not abbr or not DATA.spells then return {} end
     if DATA.spells[abbr] then return DATA.spells[abbr] end
 
@@ -2916,7 +2921,7 @@ local function isDisciplineSpell(abbr, spellName)
     if runtime.PURE_MELEE[abbr] or runtime.PURE_MELEE[abbr:upper()] then return true end
 
     if DATA and DATA.discs then
-        local alt = ALIAS_CLASS_MAP[abbr:upper()] or abbr
+        local alt = (DATA.ALIAS_CLASS_MAP and DATA.ALIAS_CLASS_MAP[abbr:upper()]) or abbr
         local discList = DATA.discs[abbr] or DATA.discs[abbr:upper()] or DATA.discs[alt]
         if discList then
             for _, row in ipairs(discList) do
@@ -4218,7 +4223,9 @@ local WP = {
     B64_CHARS  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
     B64_LOOKUP = {},
 }
-for i = 1, #WP.B64_CHARS do WP.B64_LOOKUP[WP.B64_CHARS:sub(i, i)] = i - 1 end
+do
+    for i = 1, #WP.B64_CHARS do WP.B64_LOOKUP[WP.B64_CHARS:sub(i, i)] = i - 1 end
+end
 
 local function sanitizeWpField(s)
     return (tostring(s or ''):gsub('%c', ''))
@@ -5178,40 +5185,6 @@ function UI.popDisabledSliderStyle(pCount)
     if pCount and pCount > 0 then
         pcall(ImGui.PopStyleColor, pCount)
     end
-end
-
--- Renders the Triune sigil (outer ring + inner triangle + three class-colored
--- nodes) at the cursor, matching the site emblem: top node = slot 1 (arcane),
--- bottom-right = slot 2 (ember), bottom-left = slot 3 (jade). Node colors track
--- your actual gestalt trio via SLOT_COLORS/classColor. Every draw call is
--- pcall-guarded so an unsupported binding can't take the header down with it.
--- UI: header emblem
-function UI.drawEmblem(size)
-    pcall(function()
-        local ImVec2Type = _G.ImVec2 or ImVec2 or
-            (mq.imgui and mq.imgui.ImVec2) ---@diagnostic disable-line: undefined-field
-        local dl = ImGui.GetWindowDrawList()
-        local p = ImGui.GetCursorScreenPosVec()
-        local r = size / 2
-        local cx, cy = p.x + r, p.y + r
-
-        dl:AddCircle(ImVec2Type(cx, cy), r - 1, IM_COL32(143, 208, 255, 160), 24, 1.2)
-
-        local tri_r = r * 0.62
-        local top   = ImVec2Type(cx, cy - tri_r)
-        local right = ImVec2Type(cx + tri_r * 0.87, cy + tri_r * 0.55)
-        local left  = ImVec2Type(cx - tri_r * 0.87, cy + tri_r * 0.55)
-        dl:AddTriangle(top, right, left, IM_COL32(143, 165, 235, 150), 1.1)
-
-        local function node(pt, slot)
-            local slotColors = { { 0.30, 0.70, 1.0 }, { 0.37, 0.88, 0.64 }, { 1.0, 0.70, 0.54 } }
-            local c = slotColors[slot] or { 0.5, 0.5, 0.5 }
-            dl:AddCircleFilled(pt, r * 0.16,
-                IM_COL32(math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255), 255), 12)
-        end
-        node(top, 1); node(right, 2); node(left, 3)
-    end)
-    ImGui.Dummy(size, size) -- reserve the layout space even if the draw above failed
 end
 
 -- Session Tracker Helpers (AA / Platinum)
@@ -6784,7 +6757,7 @@ function UI.drawAutoAATab()
 
             ImGui.SameLine()
             if ImGui.Button('Clear Cursor (/autoinv)##clearCursorAutoAaBtn') then
-                clearCursor()
+                runtime.pendingCursorClearAt = os.clock()
             end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('%s', 'Clears any item currently on cursor into your inventory bags.')
@@ -9947,6 +9920,17 @@ function UI.drawSettingsTab()
 
     -- 7. Interface, Overlays & Diagnostics
     if ImGui.CollapsingHeader('Interface, Overlays & Diagnostics', ImGuiTreeNodeFlags.DefaultOpen) then
+        local pauseZoneVal = ImGui.Checkbox('Pause Autocombat When Zoning', ctrl.pause_on_zone ~= false)
+        if pauseZoneVal ~= (ctrl.pause_on_zone ~= false) then
+            ctrl.pause_on_zone = pauseZoneVal
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Automatically pause autocombat execution upon entering a new zone.\n'
+                .. 'When disabled, autocombat remains active and continues running across zone transitions.')
+        end
+
         local mapRadVal = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius or false)
         if mapRadVal ~= (ctrl.show_map_radius or false) then
             ctrl.show_map_radius = mapRadVal
@@ -12780,7 +12764,7 @@ mq.event('TriuneCannotSee2', '#*#can\'t see your target#*#', onCannotSeeEvent)
 mq.event('TriuneNoTakeHold1', 'Your #1# spell did not take hold#*#', function(_, sp) onFailureEvent('did not take hold', sp) end)
 mq.event('TriuneNoTakeHold2', '#*#Your spell did not take hold#*#', function() onFailureEvent('did not take hold') end)
 mq.event('TriuneNoTakeHold3', '#*#Your spell would not have taken hold#*#', function() onFailureEvent('did not take hold') end)
-mq.event('TriuneImmuneSpell1', 'Your target is immune to #1#', function() onFailureEvent('target immune') end)
+mq.event('TriuneImmuneSpell1', 'Your target is immune to #1#', function(_, sp) onFailureEvent('target immune', sp) end)
 mq.event('TriuneImmuneSpell2', '#*#Your target cannot be mezzed#*#', function() onFailureEvent('target immune') end)
 mq.event('TriuneDeadTargetSpell', '#*#dead target#*#', function() onFailureEvent('dead target') end)
 mq.event('TriuneCantCast', '#*#cast spells while#*#', function() onFailureEvent('cannot cast') end)
@@ -14204,7 +14188,7 @@ end
 -- at 14 are already covered separately by moveToward's own stall-timeout
 -- acceptance branch below (dist + 12 tolerance, only after real evidence of
 -- being stuck) -- that path doesn't need this constant widened to work.
-local NAV_CONST = {
+pursuit.NAV_CONST = {
     MELEE_RANGE           = 14,
     LOS_TRUST_RANGE       = 8,
     PURSUIT_STALL_TIMEOUT = 8,   -- give up if no closer approach for this long
@@ -14212,6 +14196,7 @@ local NAV_CONST = {
 }
 
 local function maxMeleeDistance(id)
+    local NAV_CONST = pursuit.NAV_CONST
     local userDist = (ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE
     local spawnReach = 0
     if id and id > 0 then
@@ -14239,6 +14224,7 @@ end
 runtime.maxMeleeDistance = maxMeleeDistance
 
 local function desiredRange(id)
+    local NAV_CONST = pursuit.NAV_CONST
     if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
         return ctrl.pull_engage_dist or 100
     end
@@ -14587,6 +14573,7 @@ end
 -- itself errors, so a broken check can't wedge movement forever.
 
 function runtime.moveToward(id, dist, followOnly)
+    local NAV_CONST = pursuit.NAV_CONST
     if not id or id <= 0 then return false end
     local d = distToId(id)
     local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
@@ -16220,10 +16207,16 @@ runtime.fullStop = function()
 end
 
 runtime.onZoned = function()
-    if ctrl.running then
+    local now = os.clock()
+    if (now - (runtime.lastZonedAt or 0)) < 2.0 then return end
+    runtime.lastZonedAt = now
+    if ctrl.pause_on_zone ~= false and ctrl.running then
         ctrl.running = false
         if runtime.fullStop then runtime.fullStop() end
         print('\ay[Triune]\ax zoned -- pausing autocombat.')
+    elseif ctrl.running then
+        if runtime.fullStop then runtime.fullStop() end
+        print('\ag[Triune]\ax zoned -- continuing autocombat (pause on zone disabled).')
     end
     if castTracker and castTracker.clear then
         castTracker.clear()
@@ -17326,7 +17319,7 @@ local function combatTick()
             local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
             if haveNPC and not isDraggingToCamp and autoAttackOk then
                 local curDist = (tid > 0) and distToId(tid) or 999
-                local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE)
+                local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or (pursuit.NAV_CONST and pursuit.NAV_CONST.MELEE_RANGE or 14))
                 if curDist <= maxReach then
                     if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
                         print('\ag[Triune]\ax Standing up to attack.')
@@ -17440,9 +17433,9 @@ local function combatTick()
     end
     if isPullingToCamp and ctrl.camp_loc then
         pcall(function()
-            local tid = mq.TLO.Target.ID() or 0
-            if tid > 0 then
-                local ts = mq.TLO.Spawn(tid)
+            local campTargetId = mq.TLO.Target.ID() or 0
+            if campTargetId > 0 then
+                local ts = mq.TLO.Spawn(campTargetId)
                 if ts() then
                     local tx = ts.X()
                     local ty = ts.Y()
@@ -17863,6 +17856,50 @@ local function setTriuneMode(arg1, arg2)
     return true
 end
 
+function runtime.setRunning(enable)
+    if enable then
+        if ctrl.running then
+            print('\ay[Triune]\ax already running.')
+            return
+        end
+        if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+            runtime.setNearestWaypoint()
+        end
+        ctrl.running = true
+        runtime.wasRunning = true
+        print('\ag[Triune]\ax running.')
+        if not navLoaded() and ctrl.mode ~= 'Manual' then
+            mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
+            print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
+        elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
+            local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+            mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
+            print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
+        end
+        if not stickLoaded() and ctrl.mode ~= 'Manual' then
+            mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
+            print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
+        end
+    else
+        if not ctrl.running then
+            print('\ay[Triune]\ax already paused.')
+            return
+        end
+        if ctrl.mode == 'Manual' then
+            setManualHunterPetHold(true, true)
+        else
+            setManualHunterPetHold(false, true)
+        end
+        ctrl.running = false
+        if runtime.fullStop then runtime.fullStop() end
+        print('\ag[Triune]\ax paused.')
+    end
+end
+
+function runtime.triuneToggle()
+    runtime.setRunning(not ctrl.running)
+end
+
 local function triuneCommand(...)
     local args = { ... }
     local cmd = ''
@@ -17874,41 +17911,9 @@ local function triuneCommand(...)
         return
     end
     if cmd == 'run' or cmd == 'start' then
-        if ctrl.running then
-            print('\ay[Triune]\ax already running.')
-        else
-            if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
-                runtime.setNearestWaypoint()
-            end
-            ctrl.running = true
-            runtime.wasRunning = true
-            print('\ag[Triune]\ax running.')
-            if not navLoaded() and ctrl.mode ~= 'Manual' then
-                mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
-                print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
-            elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
-                local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-                mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
-                print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
-            end
-            if not stickLoaded() and ctrl.mode ~= 'Manual' then
-                mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
-                print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
-            end
-        end
+        runtime.setRunning(true)
     elseif cmd == 'pause' or cmd == 'stop' then
-        if not ctrl.running then
-            print('\ay[Triune]\ax already paused.')
-        else
-            if ctrl.mode == 'Manual' then
-                setManualHunterPetHold(true, true)
-            else
-                setManualHunterPetHold(false, true)
-            end
-            ctrl.running = false
-            if runtime.fullStop then runtime.fullStop() end
-            print('\ag[Triune]\ax paused.')
-        end
+        runtime.setRunning(false)
     elseif cmd == 'status' then
         local modeStr = ctrl.mode
         if MODES.SUBMODES[ctrl.mode] then modeStr = modeStr .. ' (' .. ctrl.submode .. ')' end
@@ -17970,6 +17975,7 @@ local function triuneCommand(...)
         print('  \ag/ac xtardist [25-300]\ax - Set max XTarget chase / engagement distance')
         print('  \ag/ac chasedist [5-100]\ax - Set following distance to stay back from Main Assist')
         print('  \ag/ac selfdefense [on|off]\ax - Toggle Assist mode self-defense when attacked')
+        print('  \ag/ac pausezone [on|off]\ax - Toggle automatic script pause when zoning (default: on)')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
@@ -18074,7 +18080,7 @@ local function triuneCommand(...)
         else
             print('\ag[Triune]\ax toggling DPS parser window...')
         end
-    elseif cmd == 'clearlockouts' or cmd == 'unlock' or (cmd == 'clear' and (arg == 'lockouts' or arg == 'locks' or arg == 'all')) then
+    elseif cmd == 'clearlockouts' or cmd == 'unlock' or (cmd == 'clear' and (args[2] and (string.lower(args[2]) == 'lockouts' or string.lower(args[2]) == 'locks' or string.lower(args[2]) == 'all'))) then
         if castTracker and castTracker.clear then
             castTracker.clear()
             print('\ag[Triune]\ax Cleared all active spell lockouts, target backoffs, and mob immunities.')
@@ -18220,6 +18226,22 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Assist Self-Defense When Attacked: %s.',
                 ctrl.assist_self_defense and '\agENABLED\ax' or '\arDISABLED\ax'))
+        end
+    elseif cmd == 'pausezone' or cmd == 'zonepause' or cmd == 'pauseonzone' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            ctrl.pause_on_zone = true
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Pause On Zone: \agENABLED\ax (autocombat pauses when entering a new zone).')
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            ctrl.pause_on_zone = false
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Pause On Zone: \arDISABLED\ax (autocombat continues across zones).')
+        else
+            ctrl.pause_on_zone = ctrl.pause_on_zone == false
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Pause On Zone: %s.',
+                ctrl.pause_on_zone and '\agENABLED\ax' or '\arDISABLED\ax'))
         end
     elseif cmd == 'chasedist' or cmd == 'chase' or cmd == 'chaserange' or cmd == 'followdist' then
         local arg2 = args[2] and string.lower(args[2]) or ''
@@ -18472,38 +18494,6 @@ local function triuneCommand(...)
     end
 end
 
-runtime.triuneToggle = function()
-    if ctrl.running then
-        if ctrl.mode == 'Manual' then
-            setManualHunterPetHold(true, true)
-        else
-            setManualHunterPetHold(false, true)
-        end
-        ctrl.running = false
-        if runtime.fullStop then runtime.fullStop() end
-        print('\ag[Triune]\ax paused.')
-    else
-        if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
-            runtime.setNearestWaypoint()
-        end
-        ctrl.running = true
-        runtime.wasRunning = true
-        print('\ag[Triune]\ax running.')
-        if not navLoaded() and ctrl.mode ~= 'Manual' then
-            mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
-            print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
-        elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
-            local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-            mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
-            print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
-        end
-        if not stickLoaded() and ctrl.mode ~= 'Manual' then
-            mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
-            print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
-        end
-    end
-end
-
 mq.unbind('/triune')
 mq.bind('/triune', triuneCommand)
 
@@ -18543,7 +18533,7 @@ runtime.autoloadRequiredPlugins()
 --                                   'headshot', 'slay'.
 -- ============================================================================
 
-local CRIT = {
+runtime.CRIT = {
     LIFETIME   = 2.0,    -- seconds a floater lives
     RISE_SPEED = 80,     -- pixels per second upward drift
     SPREAD     = 120,    -- horizontal jitter range (pixels)
@@ -18565,6 +18555,7 @@ local CRIT = {
 
 function runtime.spawnCritFloater(text, critType, dmg)
     if not ctrl.show_crit_floaters then return end
+    local CRIT = runtime.CRIT
     local seed = math.random(1000)
     local xOff = math.random(-CRIT.SPREAD / 2, CRIT.SPREAD / 2)
     table.insert(runtime.critFloaters, {
@@ -18584,6 +18575,7 @@ end
 function UI.drawCritOverlay()
     if not ctrl.show_crit_floaters then return end
     if #runtime.critFloaters == 0 then return end
+    local CRIT = runtime.CRIT
 
     -- Get screen dimensions for centering
     local screenW, screenH = 0, 0
@@ -18964,7 +18956,11 @@ local function runMainLoop()
         end
         local curZone = mq.TLO.Zone.ShortName()
         if curZone and curZone ~= '' and curZone ~= runtime.lastZoneShort then
+            local prevZone = runtime.lastZoneShort
             runtime.lastZoneShort = curZone
+            if prevZone ~= nil then
+                runtime.sungBuffs = {}; runtime.npcCastCounts = {}; if runtime.onZoned then runtime.onZoned() end
+            end
             reconcilePets()
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()

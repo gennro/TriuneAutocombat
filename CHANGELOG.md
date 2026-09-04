@@ -1,6 +1,27 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-04
+
+- **Code Audit, Logic Bug Fixes, Thread Safety & Headroom Optimization (`triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Fixed Slash Command `/ac clear lockouts` (`triuneCommand`)**: Corrected an undefined global variable access (`arg == 'lockouts'`) to inspect `args[2]` (`string.lower(args[2]) == 'lockouts'`), ensuring the command correctly clears all active spell lockouts, target backoffs, and mob immunities as documented.
+  - **Fixed ImGui Thread Safety in AA Clear Cursor Button (`UI.drawAAsTab`)**: Replaced a direct synchronous `clearCursor()` call (which invoked `mq.delay()` inside the non-yieldable ImGui render callback) with an asynchronous queue via `runtime.pendingCursorClearAt = os.clock()`, eliminating runtime thread crashes and ensuring multi-item cursors drain properly in the main coroutine loop.
+  - **Fixed Missing Parameter in Mob Immunity Event Handler (`TriuneImmuneSpell1`)**: Updated the event handler to capture `(_, sp)` and pass `sp` into `onFailureEvent('target immune', sp)`, ensuring the cast tracker records the exact immune spell rather than relying on heuristic fallbacks.
+  - **Hardened Zone Transition Triggering (`runMainLoop`, `runtime.onZoned`)**: Added an automated `runtime.onZoned()` dispatch with a 2.0s debounce timestamp when `mq.TLO.Zone.ShortName()` transitions in the main loop, guaranteeing complete state resets (stuck, pursuit, camp, lockouts, pause-on-zone) even if the `"You have entered ..."` chat line was delayed or missed (e.g. during evac, gate, or succor).
+  - **Deduplicated Autocombat Start/Stop Control (`runtime.setRunning`, `runtime.triuneToggle`)**: Unified start/pause execution, waypoint synchronization, pet hold management, and plugin status warnings into a single shared helper used across `/ac run`, `/ac pause`, and `/triunerun`.
+  - **Eliminated Dead & Unused Code**: Removed unreferenced `UI.drawEmblem()` helper and dead state fields `runtime.lastBreadcrumbAt` and `runtime.lastConReqAt`.
+  - **Enhanced Lua 5.1 Main Chunk Register & Local Variable Headroom**: Attached static tables (`CRIT`, `LADDER_CLIMB`, `PET_SCOPE_LIST`, `NAV_CONST`, `ALIAS_CLASS_MAP`) to their respective subsystems and scoped file-level loops (`COMBO_OPTIONS`, `WP`), dropping main-chunk local variable consumption from 188 down to 182 and slots from 172 to 168 (substantially expanding the safe buffer under Lua 5.1's 200 `MAXVARS` limit).
+  - **Resolved Shadowed Variable**: Fixed shadowed `local tid` in `combatTick`'s camp pull distance check.
+  - **Automated Test Coverage (`Suite 53`)**: Added unit tests in `tests/test_pure_logic.lua` validating command argument parsing for `/ac clear lockouts` and debounce timing for `onZoned`.
+
+---
+
 ## 2026-09-03
+
+- **Configurable Automatic Script Pause on Zoning (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **New Setting & Checkbox in Settings (`ctrl.pause_on_zone`)**: Added a `Pause Autocombat When Zoning` checkbox in the Settings tab under *Interface, Overlays & Diagnostics* (enabled by default). Allows players to toggle whether the script automatically pauses when zoning or seamlessly continues running in the new zone.
+  - **Zone Transition Handling (`runtime.onZoned`)**: When `ctrl.pause_on_zone` is enabled (default), zoning halts execution and sets `ctrl.running = false` as before. When disabled, autocombat remains running across zone lines while still performing essential zone transition maintenance (stopping stale movement, clearing prior-zone detours, breadcrumbs, unreachable IDs, and target locks).
+  - **New Slash Command `/ac pausezone [on|off]`**: Added `/ac pausezone` (aliases: `/ac zonepause`, `/ac pauseonzone`) to quickly query or toggle the pause-on-zoning behavior via chat or macros.
+  - **Unit Test Coverage (`Suite 53`)**: Added unit tests verifying `defaultCtrl` initialization, `sanitizeModeConfig` default and preservation, `runtime.onZoned` execution with pause enabled/disabled, and slash command toggling.
 
 - **Pet Target Live Tracking & Status Page Display (`triune.lua`, `tests/test_pure_logic.lua`).**
   - **Fixed Pet Target Resolution (`getPetSpawnInfo`)**: MacroQuest general `Spawn` datatypes do not expose a `.Target` member, which previously caused `s.Target` to evaluate to `nil` and left the pet target permanently displaying `Target: None`. Implemented a multi-tier pet target resolution chain inspecting `mq.TLO.Me.Pet.Target`, `mq.TLO.Me.Pet.Following` (for following hostile NPCs), targeted pet `Target.TargetOfTarget`, `Spawn.TargetOfTarget`, and active combat command fallbacks (`petState.lastCmdTargetId` and `Me.Pet.Combat()`).

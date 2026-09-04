@@ -205,6 +205,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac` | | Start or pause autocombat |
 | `/ac run` | `/ac start` | Start autocombat |
 | `/ac pause` | `/ac stop` | Pause autocombat and stop moving |
+| `/ac pausezone [on\|off]` | `/ac zonepause`, `/ac pauseonzone` | Toggle automatic script pause when zoning (default: on) |
 | `/ac burn [on\|off]` | `/ac burnon`, `/ac burnoff` | Toggle Burn mode on/off |
 | `/ac memall` | `/ac mem`, `/ac remem` | Queue all missing or mismatched priority spells to memorization bar |
 | `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |

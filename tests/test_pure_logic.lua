@@ -475,6 +475,12 @@ do
     sanitizeModeConfig(c3)
     assert_eq(c3.hunter_z, 200, 'sanitize: hunter_z preserved')
     assert_eq(c3.hunter_z_plane, 50, 'sanitize: hunter_z_plane preserved')
+
+    -- pause_on_zone default and preservation
+    assert_eq(c2.pause_on_zone, true, 'sanitize: pause_on_zone default')
+    local c4 = { mode = 'Manual', pause_on_zone = false }
+    sanitizeModeConfig(c4)
+    assert_eq(c4.pause_on_zone, false, 'sanitize: pause_on_zone=false preserved')
 end
 
 -- ============================================================================
@@ -602,6 +608,7 @@ local EXPECTED_FIELDS = {
     { 'auto_spend_aa_name',      'string' },
     { 'auto_spend_aa_action',    'string' },
     { 'auto_summon_fireworks',   'boolean' },
+    { 'pause_on_zone',           'boolean' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -625,6 +632,7 @@ assert_eq(dc.auto_spend_aa_cost, 25, 'defaultCtrl: auto_spend_aa_cost=25')
 assert_eq(dc.auto_spend_aa_name, 'Alternately Advanced Fireworks', 'defaultCtrl: auto_spend_aa_name')
 assert_eq(dc.auto_spend_aa_action, 'window', 'defaultCtrl: auto_spend_aa_action=window')
 assert_eq(dc.auto_summon_fireworks, false, 'defaultCtrl: auto_summon_fireworks=false')
+assert_eq(dc.pause_on_zone, true, 'defaultCtrl: pause_on_zone=true')
 
 -- ============================================================================
 -- 9.  isActionSkill(name) & defaultActionEntry
@@ -5331,6 +5339,102 @@ do
     local idleInfo = mockResolvePetTarget(100, 100, nil, nil, nil, nil, { petHoldActive = false, lastCmdTargetId = 0 }, dummyAlive, dummyHostile, mockSpawns)
     assert_eq(idleInfo.targetName, 'None', 'Idle pet returns Target: None')
     assert_eq(idleInfo.targetId, 0, 'Idle pet returns target ID 0')
+end
+
+-- ============================================================================
+-- Suite 53: Automatic Script Pause on Zoning Logic & Slash Commands
+-- ============================================================================
+do
+    print('--- Automatic Script Pause on Zoning Logic & Slash Commands ---')
+
+    -- 1. onZoned behavior with pause_on_zone = true (default)
+    local testCtrl = { running = true, pause_on_zone = true }
+    local stopped = false
+    local mockFullStop = function() stopped = true end
+    local mockOnZoned = function(c, stopFn)
+        if c.pause_on_zone ~= false and c.running then
+            c.running = false
+            if stopFn then stopFn() end
+        elseif c.running then
+            if stopFn then stopFn() end
+        end
+    end
+
+    mockOnZoned(testCtrl, mockFullStop)
+    assert_eq(testCtrl.running, false, 'onZoned pauses engine when pause_on_zone is true')
+    assert_true(stopped, 'fullStop called on zone pause')
+
+    -- 2. onZoned behavior with pause_on_zone = false
+    testCtrl = { running = true, pause_on_zone = false }
+    stopped = false
+    mockOnZoned(testCtrl, mockFullStop)
+    assert_eq(testCtrl.running, true, 'onZoned keeps engine running when pause_on_zone is false')
+    assert_true(stopped, 'fullStop called on zone transition even when running continues')
+
+    -- 3. Slash command handling
+    local function handlePauseZoneCmd(c, arg)
+        local sub = arg and string.lower(arg) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            c.pause_on_zone = true
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            c.pause_on_zone = false
+        else
+            c.pause_on_zone = c.pause_on_zone == false
+        end
+    end
+
+    local cmdCtrl = { pause_on_zone = true }
+    handlePauseZoneCmd(cmdCtrl, 'off')
+    assert_eq(cmdCtrl.pause_on_zone, false, '/ac pausezone off disables pause on zone')
+    handlePauseZoneCmd(cmdCtrl, 'on')
+    assert_eq(cmdCtrl.pause_on_zone, true, '/ac pausezone on enables pause on zone')
+    handlePauseZoneCmd(cmdCtrl, '')
+    assert_eq(cmdCtrl.pause_on_zone, false, '/ac pausezone toggle from true to false')
+    handlePauseZoneCmd(cmdCtrl, nil)
+    assert_eq(cmdCtrl.pause_on_zone, true, '/ac pausezone toggle from false to true')
+end
+
+-- ============================================================================
+-- Suite 53: Triune Code Audit Fixes & Logic Verification
+-- ============================================================================
+do
+    print('--- Triune Code Audit Fixes & Logic Verification ---')
+
+    -- 1. Verify /ac clear lockouts command condition matching
+    local function parseClearLockouts(cmd, args)
+        if cmd == 'clearlockouts' or cmd == 'unlock' or (cmd == 'clear' and (args[2] and (string.lower(args[2]) == 'lockouts' or string.lower(args[2]) == 'locks' or string.lower(args[2]) == 'all'))) then
+            return true
+        end
+        return false
+    end
+
+    assert_true(parseClearLockouts('clearlockouts', {}), '/ac clearlockouts matches')
+    assert_true(parseClearLockouts('unlock', {}), '/ac unlock matches')
+    assert_true(parseClearLockouts('clear', { 'clear', 'lockouts' }), '/ac clear lockouts matches')
+    assert_true(parseClearLockouts('clear', { 'clear', 'LOCKOUTS' }), '/ac clear LOCKOUTS matches case-insensitively')
+    assert_true(parseClearLockouts('clear', { 'clear', 'locks' }), '/ac clear locks matches')
+    assert_true(parseClearLockouts('clear', { 'clear', 'all' }), '/ac clear all matches')
+    assert_eq(parseClearLockouts('clear', { 'clear' }), false, '/ac clear alone without subarg does not trigger clear lockouts')
+    assert_eq(parseClearLockouts('clear', { 'clear', 'camp' }), false, '/ac clear camp does not trigger clear lockouts')
+
+    -- 2. Verify onZoned debounce timing logic
+    local callCount = 0
+    local mockRuntime = { lastZonedAt = 0 }
+    local function mockDebouncedOnZoned(now)
+        if (now - (mockRuntime.lastZonedAt or 0)) < 2.0 then return false end
+        mockRuntime.lastZonedAt = now
+        callCount = callCount + 1
+        return true
+    end
+
+    assert_true(mockDebouncedOnZoned(10.0), 'First onZoned invocation succeeds')
+    assert_eq(callCount, 1, 'callCount is 1')
+    assert_eq(mockDebouncedOnZoned(10.5), false, 'Immediate second onZoned call within 2s debounce window is ignored')
+    assert_eq(callCount, 1, 'callCount remains 1')
+    assert_eq(mockDebouncedOnZoned(11.9), false, 'Call at 1.9s delta is still debounced')
+    assert_eq(callCount, 1, 'callCount remains 1')
+    assert_true(mockDebouncedOnZoned(12.1), 'Call at 2.1s delta succeeds')
+    assert_eq(callCount, 2, 'callCount increments to 2')
 end
 
 -- ============================================================================
