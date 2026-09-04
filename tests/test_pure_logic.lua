@@ -6005,6 +6005,102 @@ do
 
     local qSearchCompleted = searchQuests(lookupCatalog, "", false, 32, true, { ["101"] = true, ["102"] = true })
     assert_eq(#qSearchCompleted, 4, 'hide completed filters out 2 done quests')
+
+    -- 4. Walkthrough Narrative Cleaning & Tokenizer Tests
+    local rawWalkthroughSample = [[
+Quest Started By: | Description:
+**Where:**
+- North Qeynos [zone=4]
+**Who:**
+- Captain Hazran [npc=18176]
+Rating:
+0/0**_*__*__*__*__*_**
+Information:
+**Level:** | 10
+**Maximum Level:** | 125
+**Monster Mission:** | No
+**Repeatable:** | Yes
+**Can Be Shrouded?:** | No
+**Quest Type:** | Quest
+**Quest Goal:**
+- Advancement
+Modified: Tue Dec 5 05:21:04 2023 | | Speak with Captain Hazran in North Qeynos.
+You say, 'Hail, Captain Hazran'
+Captain Hazran says, 'Greetings, _____! We are having trouble with the local orcs.'
+You say, 'What orcs?'
+Captain Hazran says, 'Crushbone orcs. Bring me their belts.'
+---
+**Task Steps**
+1. Loot 4 Crushbone Belts
+2. Deliver 4 Crushbone Belts to Captain Hazran
+NOTE: Beware of the orc emissary roaming nearby!
+Your faction standing with Guards of Qeynos has been adjusted by 10.
+Your faction standing with Corrupt Qeynos Guards has been adjusted by -2.
+You receive 5 gold from Captain Hazran.
+You gain experience!!
+Submitted by: Tester
+]]
+
+    local function testCleanPreamble(raw)
+        local pos = raw:find("Modified:[^\n|]+|%s*|%s*") or raw:find("Entered:[^\n|]+|%s*|%s*")
+        local body = raw
+        if pos then
+            local after = raw:sub(pos):match("^[^\n|]+|%s*|%s*(.*)$")
+            if after and after ~= "" then body = after end
+        end
+        local subPos = body:find("Submitted by:") or body:find("%*%*Submitted by:")
+        if subPos then body = body:sub(1, subPos - 1) end
+        body = body:gsub("____+", "Bob")
+        return body:match("^%s*(.-)%s*$") or ""
+    end
+
+    local cleanWt = testCleanPreamble(rawWalkthroughSample)
+    assert_true(not cleanWt:find("Quest Started By:"), 'preamble stripped from walkthrough')
+    assert_true(not cleanWt:find("Submitted by:"), 'submission footer stripped from walkthrough')
+    assert_true(cleanWt:find("Greetings, Bob!"), 'player name substituted into dialogue')
+
+    local function testTokenize(cleaned)
+        local toks = {}
+        for line in cleaned:gmatch("[^\r\n]+") do
+            local l = line:match("^%s*(.-)%s*$")
+            if l and l ~= "" then
+                if l == "---" then
+                    table.insert(toks, { type = "divider" })
+                elseif l:find("^[Yy]ou say") then
+                    local phrase = l:match("^[Yy]ou say,?%s*['\"](.-)['\"]")
+                    table.insert(toks, { type = "player_say", phrase = phrase })
+                elseif l:find(" says") then
+                    local spk, spc = l:match("^([%w%s%-%_%.%`']+)[%s,]+says?,?%s*['\"](.-)['\"]")
+                    table.insert(toks, { type = "npc_say", speaker = spk, text = spc })
+                elseif l:find("^[Yy]our faction standing with") then
+                    table.insert(toks, { type = "faction" })
+                elseif l:find("^[Yy]ou receive") or l:find("^[Yy]ou gain") then
+                    table.insert(toks, { type = "reward" })
+                elseif l:find("^NOTE:") then
+                    table.insert(toks, { type = "note" })
+                elseif l:match("^%d+[%.)]%s+") then
+                    table.insert(toks, { type = "step" })
+                elseif l:match("^%*%*(.-)%*%*$") then
+                    table.insert(toks, { type = "header" })
+                else
+                    table.insert(toks, { type = "text" })
+                end
+            end
+        end
+        return toks
+    end
+
+    local toks = testTokenize(cleanWt)
+    assert_eq(#toks, 14, '14 tokens parsed from sample walkthrough')
+    assert_eq(toks[2].type, 'player_say', 'second token is player_say')
+    assert_eq(toks[2].phrase, 'Hail, Captain Hazran', 'player say phrase is Hail, Captain Hazran')
+    assert_eq(toks[3].type, 'npc_say', 'third token is npc_say')
+    assert_eq(toks[3].speaker, 'Captain Hazran', 'npc speaker is Captain Hazran')
+    assert_eq(toks[7].type, 'header', 'token 7 is header Task Steps')
+    assert_eq(toks[8].type, 'step', 'token 8 is step')
+    assert_eq(toks[10].type, 'note', 'token 10 is note')
+    assert_eq(toks[11].type, 'faction', 'token 11 is faction')
+    assert_eq(toks[13].type, 'reward', 'token 13 is reward')
 end
 
 -- ============================================================================

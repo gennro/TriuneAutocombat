@@ -148,6 +148,7 @@ local state = {
     -- Completed and tracked quests
     completedQuests = {}, -- { [qid_str] = true }
     trackedQuests   = {},
+    walkthroughViewMode = "formatted", -- "formatted" or "raw"
     
     -- Coroutine queue
     pendingAction   = nil,
@@ -602,6 +603,194 @@ function UI.renderWindowContent()
 end
 
 -- ---------------------------------------------------------------------------
+-- Walkthrough Narrative Cleaner & Rich Formatter
+-- ---------------------------------------------------------------------------
+function UI.cleanPreambleAndTags(raw)
+    if not raw or raw == "" then return "" end
+    
+    -- Strip infobox table preamble if present
+    local pos = raw:find("Modified:[^\n|]+|%s*|%s*") or raw:find("Entered:[^\n|]+|%s*|%s*")
+    local body = raw
+    if pos then
+        local after = raw:sub(pos):match("^[^\n|]+|%s*|%s*(.*)$")
+        if after and after ~= "" then
+            body = after
+        end
+    else
+        -- If no Modified/Entered pipe divider, scan and strip leading infobox lines
+        local lines = {}
+        for line in raw:gmatch("[^\r\n]+") do table.insert(lines, line) end
+        local idx = 1
+        while idx <= #lines and idx <= 60 do
+            local l = lines[idx]:match("^%s*(.-)%s*$")
+            local isMeta = false
+            if l == "" or l:find("^Quest Started By:") or l:find("^Description:") or
+               l:find("^Rating:") or l:find("^Information:") or l:find("^Recommended:") or
+               l:find("^%*%*Level:") or l:find("^%*%*Maximum Level:") or l:find("^%*%*Monster Mission:") or
+               l:find("^%*%*Repeatable:") or l:find("^%*%*Can Be Shrouded") or l:find("^%*%*Quest Type:") or
+               l:find("^%*%*Quest Goal:") or l:find("^%*%*Time Limit:") or l:find("^%*%*Time:") or
+               l:find("^%*%*Success Lockout") or l:find("^%*%*Where:") or l:find("^%*%*Who:") or
+               l:find("^%*%*Group Size:") or l:find("^%*%*Min%. # of Players:") or l:find("^%*%*Max%. # of Players:") or
+               l:find("^Appropriate Classes:") or l:find("^Appropriate Races:") or l:find("^%*%*Related Zones:") or
+               l:find("^%*%*Related Creatures:") or l:find("^%*%*Related Quests:") or l:find("^%*%*Quest Items:") or
+               l:find("^%*%*Era:") or l:find("^Entered:") or l:find("^Modified:") or
+               l:find("^%d+/%d+%*%*_?%*") or (l:find("^%-%s+[A-Z]") and idx < 40) then
+                isMeta = true
+            end
+            if not isMeta then break end
+            idx = idx + 1
+        end
+        local rest = {}
+        for k = idx, #lines do table.insert(rest, lines[k]) end
+        body = table.concat(rest, "\n")
+    end
+    
+    -- Strip trailing wiki submission / rewards junk
+    local subPos = body:find("Submitted by:") or body:find("%*%*Submitted by:")
+    if subPos then
+        body = body:sub(1, subPos - 1)
+    end
+    
+    -- Clean wiki tag brackets and escape artifacts
+    body = body:gsub("%[item=%d+%]", "")
+    body = body:gsub("%[npc=%d+%]", "")
+    body = body:gsub("%[zone=%d+%]", "")
+    body = body:gsub("%[quest=%d+%]", "")
+    body = body:gsub("\\%_", "_")
+    body = body:gsub("\\%-", "-")
+    body = body:gsub("\\%*", "*")
+    body = body:gsub("\\%.", ".")
+    
+    -- Personalize player character name
+    local charName = "Adventurer"
+    pcall(function()
+        if mq and mq.TLO and mq.TLO.Me and mq.TLO.Me.CleanName then
+            local cn = mq.TLO.Me.CleanName()
+            if cn and cn ~= "" then charName = cn end
+        end
+    end)
+    body = body:gsub("____+", charName)
+    body = body:gsub("your name", charName)
+    
+    -- Remove wiki nav headers
+    body = body:gsub("%*%*[^%*]+Info & Guides:[^\n]+%*%*", "")
+    body = body:gsub("%*%*Click here%*%*[^\n]+", "")
+    
+    return body:match("^%s*(.-)%s*$") or ""
+end
+
+function UI.parseWalkthrough(q)
+    if q._parsedWalkthrough then return q._parsedWalkthrough end
+    local clean = UI.cleanPreambleAndTags(q.walkthrough)
+    local tokens = {}
+    if clean == "" then
+        q._parsedWalkthrough = tokens
+        return tokens
+    end
+    
+    for line in clean:gmatch("[^\r\n]+") do
+        local l = line:match("^%s*(.-)%s*$")
+        if l and l ~= "" then
+            if l == "---" or l:find("^%-%-%-%-+$") or l:find("^%=%=%=+$") then
+                table.insert(tokens, { type = "divider" })
+            elseif l:find("^[Yy]ou say") then
+                local sayPhrase = l:match("^[Yy]ou say,?%s*['\"](.-)['\"]%s*$") or l:match("^[Yy]ou say,?%s*['\"](.-)['\"]")
+                if sayPhrase then
+                    table.insert(tokens, { type = "player_say", phrase = sayPhrase, raw = l, npc = q.npc })
+                else
+                    table.insert(tokens, { type = "text", text = l:gsub("%*%*", "") })
+                end
+            elseif l:find("^[Yy]our faction standing with") then
+                local isNeg = l:find("adjusted by %-") ~= nil
+                table.insert(tokens, { type = "faction", text = l, isNeg = isNeg })
+            elseif l:find("^[Yy]ou gain") or l:find("^[Yy]ou receive") or l:find("^[Yy]ou get") or l:find("^Reward%(s%):") then
+                table.insert(tokens, { type = "reward", text = l })
+            elseif l:find("^[Nn][Oo][Tt][Ee]:") or l:find("^%*%*_?NOTE:") or l:find("^[Ww]arning:") or l:find("^[Ff]ailure Mechanics") then
+                local cleanNote = l:gsub("^%*%*_?", ""):gsub("_?%*%*$", "")
+                table.insert(tokens, { type = "note", text = cleanNote })
+            elseif l:match("^%d+[%.)]%s+") or l:match("^[Kk]ill%s+") or l:match("^[Ll]oot%s+") or l:match("^[Hh]and in%s+") or l:match("^[Dd]eliver%s+") or l:match("^[Cc]ombine%s+") then
+                table.insert(tokens, { type = "step", text = l:gsub("%*%*", "") })
+            elseif l:match("^[Ff]ind%s+") or l:match("^[Ss]peak with%s+") or l:match("^Go back%s+") or l:match("is located") then
+                table.insert(tokens, { type = "direction", text = l:gsub("%*%*", "") })
+            elseif l:find(" says") then
+                local speaker, speech = l:match("^([%w%s%-%_%.%`']+)[%s,]+says?,?%s*['\"](.-)['\"]%s*$")
+                if speaker and speech and not speaker:lower():find("^you") then
+                    table.insert(tokens, { type = "npc_say", speaker = speaker, text = speech })
+                else
+                    table.insert(tokens, { type = "text", text = l:gsub("%*%*", "") })
+                end
+            elseif l:match("^%*%*(.-)%*%*$") or l:match("^Task Steps") or l:match("^Task Details") or l:match("^The Phases") or l:match("^Types of Armor") then
+                local h = l:match("^%*%*(.-)%*%*$") or l
+                table.insert(tokens, { type = "header", text = h })
+            else
+                local cleanText = l:gsub("%*%*", "")
+                table.insert(tokens, { type = "text", text = cleanText })
+            end
+        end
+    end
+    q._parsedWalkthrough = tokens
+    return tokens
+end
+
+function UI.drawFormattedWalkthrough(q)
+    local tokens = UI.parseWalkthrough(q)
+    if #tokens == 0 then
+        ImGui.Dummy(10, 20)
+        ImGui.TextColored(C_MUTED[1], C_MUTED[2], C_MUTED[3], C_MUTED[4], "  No walkthrough text recorded for this quest.")
+        return
+    end
+    
+    for idx, tok in ipairs(tokens) do
+        if tok.type == "header" then
+            ImGui.Spacing()
+            ImGui.TextColored(C_GOLD[1], C_GOLD[2], C_GOLD[3], C_GOLD[4], string.format("◆  %s", tok.text))
+            ImGui.Separator()
+        elseif tok.type == "player_say" then
+            ImGui.TextColored(C_GOOD[1], C_GOOD[2], C_GOOD[3], C_GOOD[4], "💬 You say:")
+            ImGui.SameLine()
+            ImGui.TextColored(C_BRIGHT[1], C_BRIGHT[2], C_BRIGHT[3], C_BRIGHT[4], string.format("'%s'", tok.phrase))
+            ImGui.SameLine()
+            local btnId = string.format("Say##Line_%d", idx)
+            if ImGui.SmallButton(btnId) then
+                Engine.queueSay(tok.phrase, q.npc)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip("Click to target %s and say: '%s'", q.npc or "NPC", tok.phrase)
+            end
+            ImGui.Spacing()
+        elseif tok.type == "npc_say" then
+            ImGui.TextColored(C_CYAN[1], C_CYAN[2], C_CYAN[3], C_CYAN[4], string.format("👤 %s says:", tok.speaker))
+            ImGui.Indent(16)
+            ImGui.TextColored(C_BRIGHT[1], C_BRIGHT[2], C_BRIGHT[3], C_BRIGHT[4], string.format("\"%s\"", tok.text))
+            ImGui.Unindent(16)
+            ImGui.Spacing()
+        elseif tok.type == "step" then
+            ImGui.TextColored(C_GOLD[1], C_GOLD[2], C_GOLD[3], C_GOLD[4], "▶")
+            ImGui.SameLine()
+            ImGui.TextWrapped("%s", tok.text)
+        elseif tok.type == "direction" then
+            ImGui.TextColored(C_CYAN[1], C_CYAN[2], C_CYAN[3], C_CYAN[4], "📍")
+            ImGui.SameLine()
+            ImGui.TextColored(C_CYAN[1], C_CYAN[2], C_CYAN[3], C_CYAN[4], "%s", tok.text)
+        elseif tok.type == "faction" then
+            if tok.isNeg then
+                ImGui.TextColored(C_ERR[1], C_ERR[2], C_ERR[3], C_ERR[4], string.format("  ▼ %s", tok.text))
+            else
+                ImGui.TextColored(C_GOOD[1], C_GOOD[2], C_GOOD[3], C_GOOD[4], string.format("  ▲ %s", tok.text))
+            end
+        elseif tok.type == "reward" then
+            ImGui.TextColored(C_GOOD[1], C_GOOD[2], C_GOOD[3], C_GOOD[4], string.format("★ %s", tok.text))
+        elseif tok.type == "note" then
+            ImGui.TextColored(C_WARN[1], C_WARN[2], C_WARN[3], C_WARN[4], string.format("⚠ %s", tok.text))
+        elseif tok.type == "divider" then
+            ImGui.Separator()
+        else
+            ImGui.TextWrapped("%s", tok.text)
+        end
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- Tab 1: Zone Guide View (Active Zone Walkthrough, Radar, Turn-Ins)
 -- ---------------------------------------------------------------------------
 function UI.drawZoneGuideTab()
@@ -858,9 +1047,22 @@ function UI.drawZoneGuideTab()
         end
         
         -- Walkthrough Narrative
-        ImGui.TextColored(C_GOLD[1], C_GOLD[2], C_GOLD[3], C_GOLD[4], "Walkthrough & Narrative:")
+        ImGui.TextColored(C_GOLD[1], C_GOLD[2], C_GOLD[3], C_GOLD[4], "Walkthrough & Narrative Guide:")
+        ImGui.SameLine()
+        if ImGui.RadioButton("Formatted View##ViewFmt", state.walkthroughViewMode ~= "raw") then
+            state.walkthroughViewMode = "formatted"
+        end
+        ImGui.SameLine(0, 15)
+        if ImGui.RadioButton("Raw Text##ViewRaw", state.walkthroughViewMode == "raw") then
+            state.walkthroughViewMode = "raw"
+        end
+        
         ImGui.BeginChild("WalkthroughTextChild", 0, 0, true)
-        ImGui.TextWrapped("%s", q.walkthrough or "No walkthrough text recorded.")
+        if state.walkthroughViewMode == "raw" then
+            ImGui.TextWrapped("%s", q.walkthrough or "No walkthrough text recorded.")
+        else
+            UI.drawFormattedWalkthrough(q)
+        end
         ImGui.EndChild()
     end
     

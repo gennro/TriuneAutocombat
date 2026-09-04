@@ -18,7 +18,19 @@
     - **Norrath Zone Directory Browser (`UI.drawBrowseZonesView`)**: Built an interactive directory indexing all 169 zones across Norrath, sorted alphabetically with instant name/shortname filtering, expansion era markers, and total quest counts. Selecting any zone displays a complete quest list with levels, quest givers, completion status, and a one-click `[Load in Zone Guide]` button that disengages auto-sync to avoid unwanted snapping.
     - **Global Norrath Quest Search (`UI.drawGlobalQuestSearchView`)**: Added a global query engine searching across all 2,633 quests simultaneously by title, NPC name, zone name, or zone shortname, with real-time era cap enforcement and hide-completed filtering.
     - **One-Click Guide Jump**: Clicking `[Guide]` next to any quest in the Lookup tabs immediately sets the target zone, selects the quest walkthrough, loads required turn-in inventory counts, and jumps directly to the Zone Guide tab.
-  - **Automated Test Coverage (`Suite 57`)**: Added regression unit tests validating catalog loading, 33 expansion definitions (00 to 32), zone package schema verification, server era filtering logic, zone list directory building and sorting, and global quest query filtering.
+  - **Walkthrough Narrative Cleaner & Rich Formatter (`UI.cleanPreambleAndTags`, `UI.parseWalkthrough`, `UI.drawFormattedWalkthrough`)**:
+    - **Preamble & Metadata Stripping**: Automatically removes raw wiki infobox preambles, rating tags, item/NPC bracket codes (`[item=123]`), and trailing footer junk, instantly exposing the real story narrative, instructions, and objectives.
+    - **Character Name Personalization**: Replaces Allakhazam generic underscore placeholders (`_____` / `your name`) with the player's active character name (`mq.TLO.Me.CleanName()`), creating an authentic and immersive quest dialog experience.
+    - **Semantic Tokenization & Rich Visual Styling**: Parses narratives into structured tokens rendered with distinct UI treatments:
+      - **Section Headers** (`◆ Title`): Highlighted in bright gold with subtle separators.
+      - **Player Speech** (`💬 You say:`): Highlighted in emerald green with inline `[Say]` buttons to immediately target the NPC and speak the line in-game.
+      - **NPC Responses** (`👤 NPC Name says:`): Speaker styled in bright cyan with indented quoted dialogue blocks.
+      - **Action Steps & Objectives** (`▶ Step`): Highlighted with action bullets for clear readability.
+      - **Location & Directions** (`📍 Directions`): Marked with location pins in cyan.
+      - **Faction & Rewards** (`▲ / ▼ Faction`, `★ Reward`): Color-coded green and red with delta badges.
+      - **Alerts & Warnings** (`⚠ Note`): Highlighted in warning orange.
+    - **View Mode Toggle**: Added `[Formatted View]` vs `[Raw Text]` radio selectors in the walkthrough header, allowing users to toggle between rich formatted presentation and the raw wiki text at any time.
+  - **Automated Test Coverage (`Suite 57`)**: Added regression unit tests validating catalog loading, 33 expansion definitions (00 to 32), zone package schema verification, server era filtering logic, zone list directory building and sorting, global quest query filtering, and narrative preamble stripping and tokenization.
 
 - **Code Audit, Logic Bug Fixes, Thread Safety & Headroom Optimization (`triune.lua`, `tests/test_pure_logic.lua`).**
   - **Fixed Slash Command `/ac clear lockouts` (`triuneCommand`)**: Corrected an undefined global variable access (`arg == 'lockouts'`) to inspect `args[2]` (`string.lower(args[2]) == 'lockouts'`), ensuring the command correctly clears all active spell lockouts, target backoffs, and mob immunities as documented.
