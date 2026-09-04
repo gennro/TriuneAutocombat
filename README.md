@@ -210,6 +210,7 @@ Triune comes packed with handy standalone tools you can open right from the main
 | 🛡️ **Interactive Buffbot** | `/ac buffbot` | Run an automated buffing station! Listens for `/tell` requests from nearby players, hands out buffs, and sends a reply when done. |
 | 📊 **DPS Parser** | `/dps` | Live combat parser tracking player damage, spell hits, DoTs, and pet DPS with historic fight logs. |
 | 🎯 **Zone NPC Tracker** | `/ac track` | Lists all NPCs in the zone by distance and level. Double-click any mob (or click `[Nav]`) to run straight to it! |
+| 📜 **Quest Guide & Lookup** | `/lua run triune_quest` | Standalone interactive quest guide and atlas across 32 expansions with live NPC radar, dialogue triggers, inventory scanner, Norrath Zone Directory, and global quest search. |
 | 🔄 **Release Updater** | `/ac update` | Checks GitHub for new Triune updates and lets you update your files with a single click. |
 
 ---
@@ -271,6 +272,7 @@ You can control almost everything using simple in-game chat commands:
 | `/dps` | `/triunedps` | Open/toggle the DPS parser |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
 | `/lua run triune_buttons` | `/lua stop triune_buttons` | Launch or stop the standalone Hot Buttons toolbar |
+| `/lua run triune_quest` | `/lua stop triune_quest` | Launch or stop the standalone Triune Quest Guide window |
 
 ---
 
@@ -282,11 +284,14 @@ TriuneAutocombat/
 │   ├── triune_updater.py    # Python updater script
 │   ├── update.bat           # Windows updater launcher
 │   ├── update.sh            # Linux updater launcher
+│   ├── tools/
+│   │   └── build_triune_quest.py # Quest database compilation script
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
 │   │   ├── triune_buttons.lua   # Standalone ImGui hot button toolbar
 │   │   ├── triune_map.lua       # Standalone 2D in-game map, Norrath Zone Atlas & NPC tracker
 │   │   ├── triune_track.lua     # Zone NPC tracker & navigation tool
+│   │   ├── triune_quest.lua     # Standalone Quest Guide, radar & dialogue assistant
 │   │   ├── triune_updater.lua   # In-game updater window
 │   │   ├── triune_spellbook.lua # Spellbook browser & loadout helper
 │   │   ├── triune_cursor.lua    # Cursor item manager
@@ -297,7 +302,11 @@ TriuneAutocombat/
 │   └── resources/
 │       ├── ItemDB.txt           # Item database lookup
 │       ├── Zones.ini            # Zone configuration metadata
-│       └── MQ2Nav/              # Pre-packaged zone navigation meshes (.nav)
+│       ├── MQ2Nav/              # Pre-packaged zone navigation meshes (.nav)
+│       └── triune_quest/        # Pre-packaged quest database (catalog & per-zone packages)
+│           ├── catalog.lua      # Lightweight global search index
+│           ├── expansions.lua   # Expansion metadata & levels
+│           └── zones/           # Partitioned per-zone quest walkthroughs (169 zones)
 ├── README.md                # User guide & documentation
 └── CHANGELOG.md             # Detailed update and change history
 ```

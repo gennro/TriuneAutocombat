@@ -1,0 +1,64 @@
+-- ============================================================================
+-- TRIUNE QUEST GUIDE: Zone Package for Breeding Grounds (griegsend)
+-- Total Quests: 2
+-- ============================================================================
+
+return {
+  zone = "griegsend",
+  zone_name = "Breeding Grounds",
+  quests = {
+    {
+      id = "6074",
+      title = "Breeding Grounds \\#1: A Chilling Rescue",
+      exp = "19",
+      exp_name = "Rain of Fear",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Foreman Sukar",
+      loc = { y = 180.0, x = -30.0, z = -150.0 },
+      triggers = {
+        "Hail, Foreman Sukar",
+        "What can be learned?",
+        "What death ritual?",
+        "Tell me about the breeding grounds",
+        "What new breed?",
+        "What about these studies?",
+        "And your workers?",
+        "I will help",
+      },
+      items_required = {
+      },
+      rewards = {
+        { id = 108191, name = "Dragon Claw Torch", type = "item" },
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Breeding Grounds [zone=871]\n**Who:**\n- Foreman Sukar [npc=41317]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 100\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Advancement\n- Experience\n- Money\n**Quest Items:**\n- Dragon Claw Torch [item=108191]\n**Related Creatures:**\n- a Chetari hoarder [npc=42156]\n- a Chetari scavenger [npc=42157]\n- a Chetari seeker [npc=42158]\n- a chetari bruiser [npc=42153]\n- a chetari defender [npc=42155]\n- a halfling excavator [npc=42167]\n- a phase spider [npc=42172]\n- a pile of dragon bones [npc=42173]\n**Related Quests:**\n- Breeding Grounds #2: Treading Lightly [quest=6075]\n- Breeding Grounds #3: Eggs As Bait [quest=6076]\n- Raid Expedition: A Feast for Zalikor [quest=6079]\n- Raid Expedition: Velishan's Revenge [quest=6080]\n- The Rise of the Ancients [quest=6077]\n- Zalikor's Lair [quest=6078]\n**Era:** | !Rain of Fear\nRecommended:\n**Group Size:** | Solo\n**Min. # of Players:** | 1\n**Max. # of Players:** | 1\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Wed Nov 28 22:44:08 2012\nModified: Tue Dec 5 05:21:04 2023 | | **Rain of Fear Information & Guides: An Overview \\| Group Progression & Task List \\| Raid Progression \\| Visible Armor**\n\n---\n\n_This task is the first in a series of three and begins with Foreman Sukar ( map) at the zone-in of the Breeding Grounds (-20, 0, 4)._\n_Pre-Requisites:_\n\\- Level 85\n\\- No tasks\nYou say, 'Hail, Foreman Sukar'\nForeman Sukar greets you with a troubled smile, 'I am Sukar, leader of many brave [workers] who are trained in the careful extraction and preservation of dragon artifacts. Excavation crews have long been present in Dragon Necropolis, eager to uncover bones or other relics that might make their finder wealthy, but my crew is quite different. We are more concerned about what can be [learned] from the bones and relics that are found.\nYou say, 'What can be learned?'\nForeman Sukar says 'We have always done our best to avoid disrupting the dragon [death ritual]. We remove artifacts with care, and when able, return them to their original resting place once our [studies] are complete. The recent discovery of the [Breeding Grounds] has given my crew and poachers alike something to get excited about.'\nYou say, 'What death ritual?'\nForeman Sukar says 'Despite their reputation for being beasts of destruction, dragons are quite refined creatures with a very structured society. They persevere even in the face of extinction, often outliving countless other creatures that also call Norrath home. For such long and grand lives, it seems fitting that these creatures would meet death with dignity. Dragons from all over Norrath make their way to the necropolis when the end is near, allowing their bones to rest peacefully among their ancestors.'\nYou say, 'Tell me about the breeding grounds'\nForeman Sukar gestures to the area around him, 'It wasn't until recently that this area was discovered. As shards of fear rained down upon Norrath, one large chunk of crystal tore through the tundra within the Western Wastes, pierced through the heart of Dragon Necropolis, and eventually lodged itself into the core of what we now call the Breeding Grounds. This name was not given by its inhabitants though, but by those who have come here and witnessed the miraculous arrival of a [new breed] of dragons.\nYou say, 'What new breed?'\nForeman Sukar says 'We don't know much about the dragons that dwell in this area, but the more we explore and study, the more we begin to understand. It is evident that the fear crystal that lodged itself into the cavern floor is having an effect on the dragons that dwell here. Some of their scales have a unique purple hue, and they appear to mature at an accelerated rated. My studies have come to an unsettling halt though, as my [excavation crew] has disappeared.'\nYou say, 'What about these studies?'\nForeman Sukar flashes a modest grin, 'Our research would not be possible without the generosity of Mr. Napth. Not only is he a charitable benefactor, but the philanthropist genuinely seems interested in our findings. While his curiosity leans more toward crystals clusters than the dragons, it's still refreshing to know that our research is being funded by someone who believes in the cause.\nYou say, 'And your workers?'\nForeman Sukar says 'I run a diverse team, made up of individuals trained in the extraction and preservation of dragon bones, relics, and other artifacts. My crewmembers have all been instructed not to disturb the native inhabitants in any way. We strive to maintain a non-threatening presence, devoting our efforts to learning and observing, rather than looting and killing. We haven't had too many issues with the dragons here, as we've always kept a safe distance, but they are growing increasingly hostile. I worry for my crewmembers' safety, and have yet to find an adventurer willing to [help] me find them.'\nYou say, 'I will help'\nForeman Sukar says 'Many thanks, \\_\\_\\_\\_\\_. I trust that you will be able to locate my crew and help them return to me safely. Their last known excursion was to the frozen area which rests beneath where we stand now. They were sent to collect egg shells from recent hatchlings, but have not been heard from for days.'\nYou have been assigned the task 'A Chilling Rescue'.\nSukar's excavation crew has gone missing. He's asked for your help in locating them.\n\n---\n\nFind the missing excavation crew 0/1 (The Breeding Grounds)\n_This updates at around 180, -30, -150 ( map \\-\\- this is in the ice area that's underneath the zone-in, so you'll have to travel through the eastern tunnel system to get there). There are no markings on the ground; you just have to run over the location (due west out of the tunnel into the ice cavern)._\nBeneath the thick layer of ice lie the frozen remains of Sukar's crew, though one survivor can be seen trapped beneath the frozen barrier.\nReturn to Foreman Sukar 0/1 (The Breeding Grounds)\n_Task Window Says:_ While Sukar will be saddened to hear of his crew's frozen fate, he will be happy to hear there is a survivor.\nYou say, 'Hail, Foreman Sukar'\nForeman Sukar drops his gaze to the floor as a heavy sigh escapes his lips. 'I am crippled by the loss of my crewmembers, but an effort must be made to rescue the sole survivor. The ice is too thick to crack, and likely won't melt by any normal means. A flame ignited by lava and fueled by phase venom should be enough to turn the ice to water. I am in no shape to collect the needed items on my own. Please, I beg you, gather the materials and return to me so that we can rescue my crewmember before it's too late.'\n\n---\n\nRecover a brittle patch of rat fur 0/1 (The Breeding Grounds)\nRecover a dragon claw 0/1 (The Breeding Grounds)\nRecover a phase spider venom sac 0/1 (The Breeding Grounds)\n_Task Window Says:_ Sukar has asked you to collect some materials to build a torch. Brittle rat fur can be found on any Chetari. A dragon claw could be found in piles of dragon bones. A venom sac can be found on phase spiders.\n_These are random updates from chetari kills (tunnels to the east of the zone-in); piles of dragon bones kills ( map \\-\\- objects scattered throughout the side rooms in the Chetari tunnels); and phase spider kills (found in northernmost part of the zone)._\nReturn to Foreman Sukar 0/1 (The Breeding Grounds)\n_Task Window Says:_ Now that you have all the required items, Sukar should be able to fashion a torch that is capable of melting the thick ice.\nYou say, 'Hail, Foreman Sukar'\nForeman Sukar takes the items from you and begins to wind the brittle hair around the larger end of the dragon claw. After forming a tight ball at its tip, he coats it generously with phase spider venom. With a quick but careful hand, he places the complete Dragon Claw Torch in your grasp. 'Carrying this torch as you walk across an active volcano should be enough to ignite it. As soon as it's lit, make your way to the ice patch where my crewmember is trapped. Touch the torch to the ice and step back, as the flames will flicker high.'\n_You receive a \"Dragonclaw Torch\"._\n\n---\n\nRun over an active volcano to light the Dragonclaw Torch 0/1 (The Breeding Grounds)\n_Task Window Says:_ In order to light the torch, you'll need to quickly run over an active volcano.\n_With the Dragonclaw Torch on you, run over any of the \"volcanoes\" in the lava areas of the zone (there a few locations near the zone-in). Note: This update breaks invisibility._\nThe Dragonclaw Torch ignites into a blinding flame as you walk over the active volcano.\nUse the Dragonclaw Torch while on the ice patch 0/1 (The Breeding Grounds)\n_Task Window Says:_ Now that the torch is lit, head to the ice patch where the halfling was trapped and attempt to melt the ice.\n_Go back to the excavation crew update location and right-click the torch there._\nIn a bizarre reaction, the frozen pond ignites when the torch's flames lick its cool exterior, causing the ice to melt and the halfling excavator to escape.\nReturn to Foreman Sukar 0/1 (The Breeding Grounds)\n_Task Window Says:_ Inform Sukar that the trapped excavator has been freed.\nYou say, 'Hail, Foreman Sukar'\nForeman Sukar greets your arrival with somber gratitude. 'I cannot dwell on the dead, but instead must be grateful that you were able to save a life. I have sent the one you rescued back to Shard's Landing to rest and recuperate. Someone should notify his mother, Haela, of his rescue since he won't be back in the Thicket for some time. The tale of his icy entrapment is one you may be [interested] in hearing, however.\nYou helped rescue one of Sukar's missing crewmembers.\n_His reference to Misty Thicket involves the task \" The Long Lost Puppet [quest=6191]\", and \"interested\" leads in to the next task in this series._\n_Rewards:_\n187 platinum, 5 gold\nExperience (2 AAs + 2-3% regular exp in Level 96)",
+    },
+    {
+      id = "3536",
+      title = "Making a Stand",
+      exp = "05",
+      exp_name = "The Legacy of Ykesha",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "Task",
+      repeatable = true,
+      group_size = "Solo",
+      npc = "You walk",
+      loc = { y = -455.0, x = 1720.0, z = 0.0 },
+      triggers = {
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "**Level:** 1\n**Maximum Level:** 125\n**Monster Mission:** No\n**Repeatable:** Yes\n**Can Be Shrouded?:** No\n**Quest Type:** Task\n**Group Size:** Solo\n\nExplore the underground shore near the pier in the west - Crypt of Nadox\nStage is fulfilled near a fence in the water at -455, +1720.\nExplore the buildings to the southwest of the fort - Gulf of Gunthak\nStage is fulfilled when you walk between the huts surrounding the fort, near -2100, +30.\nSpeak with Winon Glahar - Plane of Knowledge\nWhen you zone in, your compass will point in his direction.  He's at -120, +55.\nThe search for the Morticalidon won't end, not as long as intrepid explorers like you are on the trail. With this type of creature, you never know when or where you'll find it, but one thing is for sure -- finding it will be the most rewarding experience you'll ever have. In the meantime, here's payment for the time you spent searching.\nYou receive approximately 52 platinum.\nThis is just a placeholder as we have almost no information about this quest. We need all dialogues; task stages and descriptions; upper and lower level limits to receive task; any other missing information.Submitted by: TemperanceRewards:\n- Money\n[",
+    },
+  },
+}

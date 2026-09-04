@@ -1,0 +1,223 @@
+-- ============================================================================
+-- TRIUNE QUEST GUIDE: Zone Package for Western Wastes (westwastes)
+-- Total Quests: 7
+-- ============================================================================
+
+return {
+  zone = "westwastes",
+  zone_name = "Western Wastes",
+  quests = {
+    {
+      id = "10126",
+      title = "One For You, Two For Me",
+      exp = "27",
+      exp_name = "Claws of Veeshan",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Colwell Emtray - CoV",
+      loc = nil,
+      triggers = {
+        "Hail, Colwell Emtray",
+        "hunt",
+        "death wish",
+        "thankless",
+        "eye",
+        "employer",
+        "Hail, Ms. Hegla",
+        "_Quests_",
+      },
+      items_required = {
+        { name = "us much more in the way of resources", count = 1 },
+      },
+      rewards = {
+        { id = 140256, name = "Hegla's Response", type = "item" },
+        { id = 136868, name = "Restless Meat Slurry", type = "item" },
+        { id = 140255, name = "Sealed Hunter's Report", type = "item" },
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Western Wastes [CoV]\n**Who:**\n- Colwell Emtray - CoV [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 113\n**Maximum Level:** | 130\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Quest\n**Quest Goal:**\n- Advancement\n- Experience\n**Quest Items:**\n- Hegla's Response [item=140256]\n- Restless Meat Slurry [item=136868]\n- Sealed Hunter's Report [item=140255]\n**Related Zones:**\n- The Plane of Knowledge [zone=158]\n- Western Wastes [CoV]\n**Related Creatures:**\n- Ms. Hegla - CoV [ _Oresco Hunters_]\n**Related Quests:**\n- Partisan of The Western Wastes (10 Points) [quest=10277]\n**Era:** | !Claws of Veeshan\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Wed Oct 28 00:45:54 2020\nModified: Tue Jun 9 11:52:11 2026 | | **Claws of Veeshan Info & Guides: Overview \\| Progression & Task List \\| Raiding \\| Visible Armor**\n\n---\n\n_**Colwell Emtray is located in The Western Wastes (CoV).**_\n_**/waypoint -1479, -2196, +31**_\nYou say, 'Hail, Colwell Emtray'\nColwell Emtray's expression raises to hope after he sees you approach, 'It, it's you!' Colwell says with a relieved look, 'I'm so happy to see you! We need some help. My cohorts and I have been hunting dragons here for some time and one day, everything started to change to what you see now. Which, I admit, doesn't drastically change the landscape, but it does drastically alter how we [ **hunt**] dragons.'\nYou say, 'hunt'\nColwell Emtray says, 'Yes, this wretched ice has seeped into nooks and crannies here in the Western Wastes and has crept into the dragon caves to the north. I sent Thach to gather information about this, but he hasn't returned. I'm sure he's fine, he's just new and needs to learn somehow! I was thrown to the dragons when I was a kid and I'm totally fine, well with the exception of having a [ **death wish**] and fighting monsters who can eat me in two bites, and the only reason it takes two bites is because I have good armor!'\nYou say, 'death wish'\nColwell Emtray says, 'Ok so not really a death wish, but this job is not for the weak! Many hunters who joined our ranks quit after their first spotting of a dragon, but not us! We know what we need to do and it may be [ **thankless**], but it is honest work, which brings me to why I'm elated to see you.'\nYou say, 'thankless'\nColwell Emtray says, 'Well, while you adventurers are out kicking the teeth in of every gnoll you find, someone has to keep the dragons here in check or at least keep an [ **eye**] on their plans.'\nYou say, 'eye'\nColwell Emtray rolls with the joke without missing a beat, 'Hardy har! I didn't realize the greatest comedian of Norrath was going to visit me today. Let me see if I can get you a crowd', Colwell puts two fingers in his mouth and whistles so loudly, you almost had to cover your ears by reflex, 'Oh look, all of your fans showed up! Anyways, my crew needs to get paid and in order to do that, I need to get a message to my [ **employer**] in the Plane of Knowledge to let them know what we have found so far.'\nYou say, 'employer'\nYou have been assigned the task 'One For You, Two For Me'.\nColwell Emtray says, 'I guess knowing who to look for would be important to you, should you actually want to help. Their name is Ms Hegla and they are also a part of the Oresco Hunters. You may need to look around a bit for them, but they will be there. Bring them this report and hopefully we can get some much needed resources like food or...', Colwell pauses for a moment, 'Well I guess that's all we really need, it isn't much but I have no doubt that they will supply us with what we need in order to protect the whole of Norrath from being destroyed.''\n_**You receive Sealed Hunter's Report [item=140255].**_\n\n---\n\n**1\\. Deliver the Report to Ms. Hegla 0/1 - The Plane of Knowledge**\n> **Task Window Text:** The Oresco Hunters are a newer group of dragon hunters who are learning the ropes on dragon hunting. Though it appears they may be a bit in the weeds with their current mission.\n>\n> Deliver the report to Ms. Hegla in the Plane of Knowledge and let them know what is happening in the Western Wastes.\n_**Ms. Hegla is located in The Plane of Knowledge outside of the smithing building.**_\n_**/waypoint -331, +510, -125**_\nYou say, 'Hail, Ms. Hegla'\nMs. Hegla appears to be checking a lot of notes while frantically trying to sort something out, 'I'm a very important and busy person, go away!'\n_**Upon handing her the Sealed Hunter's Report:**_\nMs. Hegla says, 'Ah yes, the Western Wastes Branch. I sent them there because I knew they could handle the weight of what is happening in that area with little to no resources. Which is great because the less resources they use, the more money I make! With that aside, please return this envelope to Colwell, inside are further instructions on his next task as well as his crew's compensation.'\nYour task 'One For You, Two For Me' has been updated.\n_**You receive Hegla's Response [item=140256].**_\n\n---\n\n**2\\. Report Back to Colwell 0/1 - Western Wastes**\n> **Task Window Text:** Return to Colwell with the response from Ms Hegla.\nUpon handing Hegla's Reponse to Colwell Emtray:\nColwell Emtray happily takes the report from you and immediately tears it open, two platinum coins drop from the envelope into Colwell's hand, 'Well, it isn't much, but I know the company is strapped for cash so this will do.' After he finishes reading the report, he takes out a small item and clicks it a few times. In a flash, the report catches fire and disappears in a puff of smoke and ash. Colwell turns to you with a tired smile. 'I hope you don't mind helping us again, friend. This may seem like a simple task for one such as yourself, but I need you to kill a few giants. We aren't sure why they are here, but we need to take care of them too now,' he pauses for a moment, '...apparently'\nYour task 'One For You, Two For Me' has been updated.\n\n---\n\n**3\\. Dispatch Giants 0/5 - The Western Wastes**\n> **Task Window Text:** There are giants in the Wastes that are not meant to be there and you are asked to clear them out.\n_**This step updates by killing a restless kromzek [npc=56159]. They are found northeast of the 'Temple of Veeshan' valley.**_\n\n---\n\n**4\\. Return to Ms. Hegla 0/1 - The Plane of Knowledge**\nMs. Hegla is found burning several reports at once, completely oblivious to you watching them do this, 'You again? Oh, right, the Western Wastes branch. Thanks for taking care of that for them? I guess? I'm going to be honest with you and I'm not sure why you came and told me, I'm too busy to care. Go back to,' her voice becomes heavy with disdain, 'them.'\n\n---\n\n**5\\. Update Colwell about the Situation 0/1 - The Western Wastes**\nColwell Emtray looks a little defeated and embarrassed when they see you approach, 'I'm very sorry about my reaction to the report. I took it out on you and didn't mean to. Thank you so much for helping us. Well it is clear that my employer isn't going to give us much more in the way of resources. Which I totally understand! We're all just flying by the seat of our pantaloons here. If you could do us one big favor, we need supplies for rations. Can you please bring me some meat? I just need a small pile of it for proper meal prep. We can continue to work hard out here so long as food is in our belly and a passion is in our heart!' Colwell seems to have cheered up since the start of this conversation.\n\n---\n\n**6\\. Collect Rations for The Hunters 0/5 - The Western Wastes**\n> **Task Window Text:** The Oresco Hunters are a new group of dragon hunters who are learning the ropes on dragon hunting. Though it appears they may be a bit in the weeds with their current mission.\n_**The Oresco Hunters are in need of rations. Collect Restless Meat Slurry [item=136868] from Velious (ToV) zones.**_\n_**HINT: The quest doesn't update if you already have Restless Meat Slurry in the inventory. To update the task, you need to trade them to another character and then back again. You can also start trading them to Colwell and then cancel the trade for a task update.**_\n\n---\n\n**7\\. Return to Colwell with the Restless Meat 0/5 - The Western Wastes**\nColwell Emtray is very happy to see your delivery, 'Well my friend, you blessed us with more sustenance than any god ever has, we should build a temple for you! I'm kidding you're still not funny enough for that kind of attention.' Colwell chuckles. 'We have all we need here to continue our important work. Thank you again. If you happen to be in these parts again, just find me and we may have more work for you. I certainly can use the help.'\n\n---\n\n_**Reward(s):**_\n425 platinum\nYou gain experience!\n**Submitted by:** Gidono ; Revamped by iventheassassin\n- Experience, Money",
+    },
+    {
+      id = "10127",
+      title = "Kedge Sledge",
+      exp = "27",
+      exp_name = "Claws of Veeshan",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Captain Alron Cuppboard - CoV",
+      loc = { y = 3325.0, x = 2461.0, z = -267.0 },
+      triggers = {
+        "Hail, Captain Alron Cuppboard",
+        "butts",
+        "flavors",
+        "kedge",
+        "_Quests_",
+        "burrower",
+        "brontotherium",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Western Wastes [CoV]\n**Who:**\n- Captain Alron Cuppboard - CoV [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 113\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Quest\n**Quest Goal:**\n- Advancement\n- Experience\n- Money\n**Related Creatures:**\n- an exiled kedge - CoV [npc=56173]\n**Related Quests:**\n- Mercenary of The Western Wastes (10 Points) [quest=10276]\n**Era:** | !Claws of Veeshan\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Wed Oct 28 14:13:29 2020\nModified: Tue Dec 5 05:21:04 2023 | | **Claws of Veeshan Info & Guides: Overview \\| Progression & Task List \\| Raiding \\| Visible Armor**\n\n---\n\n**Prerequisite Quests:** None.\nYou can obtain this quest from Captain Alron Cuppboard in Western Wastes. He is located at the very far northwest corner of the zone right next to the water at /loc 3325, 2461, -267.\nYou say, 'Hail, Captain Alron Cuppboard'\nCaptain Alron Cuppboard says, 'Why don't ye go ahead and hail yerselves before ye hail me. The lot of ye keep getting in the way, saying ye're here to help but none of ye do! Ye just go into the water and never come back. Ye are all a bunch of worthless hooligans who show up wherever ye wish and wreck up the place. If ye had any sense of decency, you will get off yer [butts] and save me crew!'\nYou say, 'butts'\nCaptain Alron Cuppboard inhales sharply, loosening up any mucus and then spits, 'Ye heard me, I got a crew to keep safe and if ye want to get on me good side...Which, trust me, ye de, erm do. I got 3 [flavors] of problems you can help me with.\nYou say, 'flavors'\nCaptain Alron Cuppboard says, 'Well I gots me some [kedge] problems, some [burrower] problems and some [brontotherium] problems. Take yer pick.'\nYou say, 'kedge'\nYou have been assigned the task 'Kedge Sledge'.\nCaptain Alron Cuppboard appears to be adjusting his smallclothes while talking to you, trying to do so without being noticed or looking silly. Unfortunately, they failed, 'Yeeeah. I hadn't seen something like that in a long time. 'Ow they got here I don't care. All I care about is making sure me crew is safe. The crew is uneasy around 'em, so let's get rid of 'em.\n\n---\n\n**Task Window Text:** The kedge are driving a wedge between the ledge and the ... other survivors in the Western Wastes.\nClear out the Kedge 0/5 The Western Wastes\nKill 5 Kedge located in the waters of the Northern part of the zone.\nYour task 'Kedge Sledge' has been updated.\n_The waters feel a bit calmer than they used to. The kedge have fled(ge)._\nYou gain experience!\nYou receive 7 copper.\nYou receive 6 silver\nYou receive 6 gold.\nYou receive 141 platinum.\n\n---\n\nReward(s):\nEXP or AA\n141 platinum\n**Submitted by:** Gidono",
+    },
+    {
+      id = "10128",
+      title = "Burrower? I hardly know er!",
+      exp = "27",
+      exp_name = "Claws of Veeshan",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Captain Alron Cuppboard - CoV",
+      loc = { y = 3325.0, x = 2461.0, z = -267.0 },
+      triggers = {
+        "Hail, Captain Alron Cuppboard",
+        "butts",
+        "flavors",
+        "burrower",
+        "_Quests_",
+        "kedge",
+        "brontotherium",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Western Wastes [CoV]\n**Who:**\n- Captain Alron Cuppboard - CoV [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 113\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Quest\n**Quest Goal:**\n- Advancement\n**Related Creatures:**\n- a tunnel burrower - CoV [npc=56161]\n**Related Quests:**\n- Mercenary of The Western Wastes (10 Points) [quest=10276]\n**Era:** | !Claws of Veeshan\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Wed Oct 28 14:20:32 2020\nModified: Tue Dec 5 05:21:04 2023 | | **Claws of Veeshan Info & Guides: Overview \\| Progression & Task List \\| Raiding \\| Visible Armor**\n\n---\n\n**Prerequisite Quests:** None.\nYou can obtain this quest from Captain Alron Cuppboard in Western Wastes. He is located at the very far northwest corner of the zone right next to the water at /loc 3325, 2461, -267.\nYou say, 'Hail, Captain Alron Cuppboard'\nCaptain Alron Cuppboard says, 'Why don't ye go ahead and hail yerselves before ye hail me. The lot of ye keep getting in the way, saying ye're here to help but none of ye do! Ye just go into the water and never come back. Ye are all a bunch of worthless hooligans who show up wherever ye wish and wreck up the place. If ye had any sense of decency, you will get off yer [butts] and save me crew!'\nYou say, 'butts'\nCaptain Alron Cuppboard inhales sharply, loosening up any mucus and then spits, 'Ye heard me, I got a crew to keep safe and if ye want to get on me good side...Which, trust me, ye de, erm do. I got 3 [flavors] of problems you can help me with.\nYou say, 'flavors'\nCaptain Alron Cuppboard says, 'Well I gots me some [kedge] problems, some [burrower] problems and some [brontotherium] problems. Take yer pick.'\nYou say, 'burrower'\nYou have been assigned the task 'Burrower? I hardly know er!'.\nCaptain Alron Cuppboard clears his throat for an annoyingly long time before addressing you, 'Yeah I figured yer kind might be better off fightin some of the burrowers that are more inland. From time to time, they break through the side of the cliff here and send rocks flying down to me and the crew. Kill 'em.\n\n---\n\n**Task Window Text:** The burrowers in the Western Wastes are causing a menace to the pirates and need to be removed.\nThin out the Burrowers 0/6 The Western Wastes\nKill 6 tunnel burrowers.\nYour task 'Burrower? I hardly know er!' has been updated.\n_The crew will sleep better now that they are not being pummeled by rocks at any moment of the day._\nYou gain experience!\nYou receive 7 copper.\nYou receive 6 silver.\nYou receive 6 gold.\nYou receive 141 platinum.\n\n---\n\nReward(s):\nEXP\n141 platinum\n**Submitted by:** Gidono",
+    },
+    {
+      id = "10129",
+      title = "What Rhymes with Brontotherium?",
+      exp = "27",
+      exp_name = "Claws of Veeshan",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Captain Alron Cuppboard - CoV",
+      loc = { y = 3325.0, x = 2461.0, z = -267.0 },
+      triggers = {
+        "Hail, Captain Alron Cuppboard",
+        "butts",
+        "flavors",
+        "brontotherium",
+        "_Quests_",
+        "kedge",
+        "burrower",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Western Wastes [CoV]\n**Who:**\n- Captain Alron Cuppboard - CoV [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 113\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Quest\n**Quest Goal:**\n- Advancement\n**Related Creatures:**\n- a velious brontotherium - CoV [npc=56162]\n**Related Quests:**\n- Mercenary of The Western Wastes (10 Points) [quest=10276]\n**Era:** | !Claws of Veeshan\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Wed Oct 28 15:13:19 2020\nModified: Tue Dec 5 05:21:04 2023 | | **Claws of Veeshan Info & Guides: Overview \\| Progression & Task List \\| Raiding \\| Visible Armor**\n\n---\n\n**Prerequisite Quests:** None.\nYou can obtain this quest from Captain Alron Cuppboard in Western Wastes. He is located at the very far northwest corner of the zone right next to the water at /loc 3325, 2461, -267.\nYou say, 'Hail, Captain Alron Cuppboard'\nCaptain Alron Cuppboard says, 'Why don't ye go ahead and hail yerselves before ye hail me. The lot of ye keep getting in the way, saying ye're here to help but none of ye do! Ye just go into the water and never come back. Ye are all a bunch of worthless hooligans who show up wherever ye wish and wreck up the place. If ye had any sense of decency, you will get off yer [butts] and save me crew!'\nYou say, 'butts'\nCaptain Alron Cuppboard inhales sharply, loosening up any mucus and then spits, 'Ye heard me, I got a crew to keep safe and if ye want to get on me good side...Which, trust me, ye de, erm do. I got 3 [flavors] of problems you can help me with.\nYou say, 'flavors'\nCaptain Alron Cuppboard says, 'Well I gots me some [kedge] problems, some [burrower] problems and some [brontotherium] problems. Take yer pick.'\nYou say, 'brontotherium'\nYou have been assigned the task 'What Rhymes with Brontotherium?'.\nCaptain Alron Cuppboard looks at you, somewhat impressed, 'Huh, I didn't think you'd be the type to go after big game. Color me shocked. The brontotheriums here are constantly stomping around, which is both loud and a pain in me backside. Stop them from roaming around so much in the only way you all know how to, by killing them.\n\n---\n\n**Task Window Text:** The shaking caused by the brontotherium stomping in the Western Wastes is keeping Alron and his crew awake.\n1\\. Put down the brontotherium 0/8 The Western Wastes\nKill 8 Brontotherium.\n\n---\n\nReward(s):\n?\n**Submitted by:** Gidono",
+    },
+    {
+      id = "10131",
+      title = "Aaryonar",
+      exp = "27",
+      exp_name = "Claws of Veeshan",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Sentry Ellison - CoV",
+      loc = { y = -44.0, x = 1935.0, z = -200.0 },
+      triggers = {
+        "Hail, Sentry Ellison",
+        "reason",
+        "force",
+        "small",
+        "ready",
+        "Hail, Aaryonar",
+        "killed",
+        "large",
+      },
+      items_required = {
+        { name = "them dragons a taste of Brell's hammer!'", count = 1 },
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Western Wastes [CoV]\n**Who:**\n- Sentry Ellison - CoV [npc=56180]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 113\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Quest\n**Quest Goal:**\n- Advancement\n**Time Limit:** | 06:00:00\n**Related Zones:**\n- Temple of Veeshan [CoV] (Group)\n**Related Creatures:**\n- Aaryonar - CoV [npc=56351]\n- Grolik [npc=56450]\n- a draconic chest [npc=56455]\n- a guardian [npc=56454]\n- a shadow orb [npc=56451]\n- an earthen orb [npc=56453]\n- an icy orb [npc=56452]\n- rumbling earth [npc=56463]\n**Related Quests:**\n- Hero of The Temple of Veeshan (10 Points) [quest=10204]\n**Era:** | !Claws of Veeshan\nRecommended:\n**Group Size:** | Group\n**Min. # of Players:** | 1\n**Max. # of Players:** | 6\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Wed Oct 28 15:43:43 2020\nModified: Tue Dec 5 05:21:04 2023 | | **Claws of Veeshan Info & Guides: Overview \\| Progression & Task List \\| Raiding \\| Visible Armor**\n\n---\n\n**Prerequisite Quests:** None.\nYou can obtain this mission from Sentry Ellison in Western Wastes at /loc -44, 1935, -200 in the ToV valley on the west end.\nYou say, 'Hail, Sentry Ellison'\nSentry Ellison says, 'Hello there. What brings you here? Perhaps the same [reason] that I have been sent here to stand in such a dangerous location?'\nYou say, 'reason'\nSentry Ellison says, 'Ah, well, I have been sent here to keep my eye on the coming and goings of the dragons from their temple over there. But, well, this is as close as I can get without them bony dragons finding me. I suppose it's just as well, since I also need to gather a [force] to get in there and stop the dragons from doing whatever magic they are doing to make such a mess of Velious.'\nYou say, 'force'\nSentry Ellison yawns. 'Pardon me. We really could use a [large] number of adventurers like yourself, but if a [small] bunch wants to go, I can still help you get in and take a shot at it. Just don't let them know how you got in, or I won't be here to help the next lot that needs it.'\nYou say, 'small'\nSentry Ellison says, 'Ah, good. The sooner someone deals with this, the sooner we can all get home to our beds. Just let me know when you are [ready].'\nYou have been assigned the task 'Aaryonar'.\nYou say, 'ready'\nSentry Ellison says, 'Give them dragons a taste of Brell's hammer!'\nLOADING, PLEASE WAIT...\nYou have entered The Temple of Veeshan.\n\n---\n\n1\\. Defeat Aarynoar\nYou say, 'Hail, Aaryonar'\nAaryonar says, 'You well know that you are not wanted here. Also, I well know that you are not going to leave until you have been taught a lesson. Let me know when you are ready to be [killed]. Let it not be said that I treated you unkindly.'\nYou say, 'killed'\nAaryonar says, 'As you wish.'\nAt this point Aarynoar attacks and hit my ranger tracker in group gear at level 115 for between 48k to 74k per hit when I was buffless.\n2\\. Open the chest and claim your reward\n\n---\n\nReward(s):\n?\n**Submitted by:** Gidono",
+    },
+    {
+      id = "10161",
+      title = "Zlandicar Reborn",
+      exp = "27",
+      exp_name = "Claws of Veeshan",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Watcher Scots - CoV",
+      loc = { y = -1946.0, x = 449.0, z = -170.0 },
+      triggers = {
+        "Hail, Watcher Scots",
+        "nods",
+        "smaller",
+        "ready",
+        "Hail, Zlandicar",
+        "insist",
+        "information",
+        "magic",
+      },
+      items_required = {
+        { name = "welcome", count = 1 },
+        { name = "it to you", count = 1 },
+      },
+      rewards = {
+        { id = 140013, name = "Restless Mark", type = "item" },
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- Western Wastes [CoV]\n**Who:**\n- Watcher Scots - CoV [ _Raid & Mission_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 113\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Quest\n**Quest Goal:**\n- Advancement\n- Experience\n- Loot\n- Money\n**Time Limit:** | 06:00:00\n**Success Lockout Timer**: 05:48:00\n**Related Zones:**\n- Dragon Necropolis [CoV]: Zlandicar (Group)\n**Related Creatures:**\n- Zlandicar - CoV [npc=56382]\n- a chilly chest [npc=56445]\n**Related Quests:**\n- Hero of Dragon Necropolis (10 Points) [quest=10262]\n- Savior of Dragon Necropolis: Zlandicar (20 Points) [quest=10263]\n- Zlandicar Reborn: Skin Care (10 Points) (Mission) [quest=10266]\n**Era:** | !Claws of Veeshan\nRecommended:\n**Group Size:** | Group\n**Min. # of Players:** | 1\n**Max. # of Players:** | 6\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Sun Nov 1 06:18:43 2020\nModified: Tue Dec 5 05:21:04 2023 | | **Claws of Veeshan Info & Guides: Overview \\| Progression & Task List \\| Raiding \\| Visible Armor**\n\n---\n\n**Prerequisite Quests:** None.\nYou can obtain this quest from Watcher Scots in Western Wastes. You can find him/her at /loc -1946, 449, -170 down in the Dragon Necropolis valley near the zone in to DN and he is on the find tool CTRL F.\nYou say, 'Hail, Watcher Scots'\nWatcher Scots nods and raises his hand in welcome. He tilts his head toward the portal to the Dragon Necropolis and raises his eyebrows. He then [nods] once, then [shakes his head] once.\nYou say, 'nods'\nWatcher Scots reaches into his pocket and opens a worn bit of paper. He shows it to you. It reads: \"Thank you for your help. We are certain that Zlandicar is the cause of this entire horrible situation. Please find a way to make him stop. Of course, we are fine if you must kill him. We suggest that you find as [large] of a group as you can, but this is important, so we will accept a [smaller] group.\" It is signed Ada.\nYou say, 'smaller'\nWatcher Scots bows slightly, waiting for an indication that you are [ready] to go.\nYou have been assigned the task 'Zlandicar Reborn'.\nYou say, 'ready'\nWatcher Scots smiles widely and casts a spell, sending you on your way.\nLOADING, PLEASE WAIT...\nYou have entered Dragon Necropolis: Zlandicar.\n\n---\n\n**Task Window Text:** Defeat Zlandicar and try to stop the restless ice.\nDefeat Zlandicar 0/1 Dragon Necropolis\nYou say, 'Hail, Zlandicar'\nZlandicar shouts, 'It was only a matter of time before you, or someone like you, showed up. I have no doubt that you want something from me. And you must know that I don't want to give it to you. Of course, I am not what I once was. I am so much more. I have been informed that you have grown quite strong as well, am I correct?'\nTalendor's Head says. 'You know you are. You know what I know. Let us destroy them!'\nZlandicar shouts, 'As I suppose we must. Prepare yourselves, tiny things. It is my intent to unleash all my strength against you, should you [insist] on a fight.'\nYou say, 'insist'\nZlandicar says, 'Good. Maybe you will be enough of a challenge! I hope you like it cold!'\n**Zlandicar raises his head. Toxic mist floats from his nostrils as he inhales deeply.**\nAt this point, Zlandicar becomes active.\nDuring the event, there are emotes:\n\\- Suffer in as your flesh rots away (Zlandicar will cast Rotting Flesh from this emote)\n\\- The device glows brightly for a moment and a pillar of ice forms in the room.\n\\- Zlandicar raises his second head. Smoke seeps from between his teeth as he takes a deep breath (Zlandicar will cast Burning Breath from this emote)\n\\- Suffer in burning pain (Zlandicar will cast Oily Skin from this emote)\n**_At 5% he goes inactive._**\nAh, well. I needed to test my strength and that is what we did. I guess even gaining the mind and strength of one of our greatest generals wasn't enough. I know, I know, you don't appreciate being used as punching bags. Nobody does. But I am pretty sure you won't want to kill me. I have [information] you desperately need. I will tell you what you need to know in exchange for your forgiveness.\nYou say, 'information'\nZlandicar shouts, 'You certainly came here seeking the source of the restless ice that has invaded Velious. And seeing my wonderful device you might be assuming that I am involved in some way. I am involved, but in my own way. You see, this device only taps into the power that is flowing through the ice, allowing me access to [magic] power that is beyond even my ability.'\nYou say, 'magic'\nZlandicar shouts, 'Without it, and the generous donation of Talendor's corpse made by your kind, I would not have been able to improve myself as I have. I admit, my power may have leaked into the magical flow somewhat. It might be my fault that the dead are walking all over Velious, but I consider that only a small bonus. No, if you want things to return to the way they were, you will need to stop the fool in charge. You will need to confront [Vulak'Aerr].'\nYou say, 'Vulak'Aerr'\nZlandicar shouts, 'Certainly. That old fool has become a bit mad, my sources tell me. It must be true, or he would not be trying such a ridiculous thing. You see, he is trying to call Veeshan back to Norrath. He believes that she will save dragon kind from the plague that is, well, you. Foolish. We, and by that I mean they, have failed in their charge. They were given this planet to rule and they have lost it to your kind. Should he succeed in bringing her back, I have no doubt that she would [punish] Vulak'Aerr and all the elder dragons. She might even wipe this place clean and begin again.'\nYou say, 'punish'\nZlandicar shouts, 'Of course, I would not be exempt from her wrath. Even though I have been poorly treated by my own kind, she would certainly destroy me. And so, you and I share a goal. Vulak'Aerr must be stopped. You will need to get into the Sleeper's Tomb and destroy the device he has created. He has changed the magic that guards the tomb and will certainly have enlisted guardians of some sort. Someone in the Temple will know how to access the Tomb. Find a way in, destroy his device, and all will be restored. Pray to whatever petty gods you worship that you are not too late. If Veeshan has heard and heeded his message, those gods will not be able to help you. Now, get out of my cave.'\nYou have received a replay timer for 'Zlandicar Reborn': 0d:5h:48m remaining.\nYou have defeated Zlandicar, but the mystery of the ice remains.\n\n---\n\nReward(s):\n177 platinum 8 silver 3 copper\nYou have gained 1 mercenary ability point(s)!\nYou have gained 10 ability point(s)!\nYou gain experience!\n45 Restless Marks\n\n---\n\nClick here to see a chilly chest drops from this event. [npc=56445]\n**Submitted by:** Gidono\n- Restless Mark [item=140013]",
+    },
+    {
+      id = "8620",
+      title = "Conqueror of The Western Wastes",
+      exp = "02",
+      exp_name = "The Scars of Velious",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "Achievement",
+      repeatable = false,
+      group_size = "Solo",
+      npc = "Derasinal",
+      loc = nil,
+      triggers = {
+        "need your rune",
+        "aid jualicn",
+      },
+      items_required = {
+        { id = 1908, name = "Item #1908", count = 1 },
+      },
+      rewards = {
+        { id = 1895, name = "Item #1895", type = "item" },
+        { id = 1908, name = "Item #1908", type = "item" },
+      },
+      factions = {
+      },
+      walkthrough = "**Level:** 1\n**Maximum Level:** 125\n**Monster Mission:** No\n**Repeatable:** No\n**Can Be Shrouded?:** No\n**Quest Type:** Achievement\n**Group Size:** Solo\n\nThis achievement is gained upon completing the following raids in The Western Wastes:\nAmcilla\nAtpaev\nAyillish\nBratavar\nBufa\nCargalia\nCrial\nDel Sapara\nDerasinal\nDraazak\nEntariz\nEsorpa of the Ring\nGafala\nGangel\nGlati\nHarla Dar\nHechaeva\nHonvar\nIonat\nJen Sapara\nJerigozia\nKar Sapara\nKarkona\nKlandicar\nLinbrak\nMakala\nMav Saprara\nMazi\nMraaka\nMyga\nNeordia\nNintal\nOnava\nPantrilla\nQuoza\nRak Sapara\nSivar\nSontalak\nTsiraka\nUilak\nVeredenia\nVitaela\nVon\nVraptin\nYal\nYeldema\nZli SaparaSubmitted by: GidonoRewards:\n[",
+    },
+  },
+}

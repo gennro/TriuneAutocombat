@@ -5848,6 +5848,166 @@ do
 end
 
 -- ============================================================================
+-- Suite 57: Triune Quest Guide Logic & Database Validation
+-- ============================================================================
+do
+    print('--- Suite 57: Triune Quest Guide Logic & Database Validation ---')
+    local catFn = loadfile('TAC/resources/triune_quest/catalog.lua')
+    assert_true(catFn ~= nil, 'catalog.lua loads cleanly')
+    if catFn then
+        local cat = catFn()
+        assert_true(type(cat) == 'table', 'catalog is a table')
+        assert_true(#cat >= 2000, string.format('catalog contains >= 2000 quests (found: %d)', #cat))
+        assert_true(cat[1].title ~= nil, 'catalog quest has title')
+        assert_true(cat[1].zone ~= nil, 'catalog quest has zone shortname')
+    end
+
+    local expFn = loadfile('TAC/resources/triune_quest/expansions.lua')
+    assert_true(expFn ~= nil, 'expansions.lua loads cleanly')
+    if expFn then
+        local exps = expFn()
+        assert_true(type(exps) == 'table', 'expansions is a table')
+        assert_eq(#exps, 33, 'expansions has 33 entries (00 through 32)')
+        assert_eq(exps[1].id, '00', 'first expansion is 00')
+        assert_eq(exps[33].id, '32', 'last expansion is 32')
+    end
+
+    local zoneFn = loadfile('TAC/resources/triune_quest/zones/cabeast.lua')
+    assert_true(zoneFn ~= nil, 'cabeast.lua zone package loads cleanly')
+    if zoneFn then
+        local zpkg = zoneFn()
+        assert_eq(zpkg.zone, 'cabeast', 'zone shortname matches cabeast')
+        assert_true(type(zpkg.quests) == 'table', 'zone package has quests table')
+        assert_true(#zpkg.quests > 0, 'cabeast has >= 1 quest')
+        assert_true(zpkg.quests[1].walkthrough ~= nil, 'quest entry has walkthrough')
+    end
+
+    -- Server Era Filtering Logic Check
+    local sampleCatalog = {
+        { id = "1", exp = "01", title = "Kunark Quest" },
+        { id = "2", exp = "04", title = "PoP Quest" },
+        { id = "3", exp = "05", title = "LoY Quest" },
+        { id = "4", exp = "15", title = "SoD Quest" },
+        { id = "5", exp = "32", title = "Modern Ro Quest" },
+    }
+    local function filterByEra(cat, limitEra, maxCap)
+        local out = {}
+        for _, q in ipairs(cat) do
+            local eNum = tonumber(q.exp) or 0
+            if not limitEra or (maxCap and eNum <= maxCap) then
+                table.insert(out, q)
+            end
+        end
+        return out
+    end
+    local capped5 = filterByEra(sampleCatalog, true, 5)
+    assert_eq(#capped5, 3, 'capped to era 5 returns 3 quests')
+    assert_eq(capped5[3].title, 'LoY Quest', 'era 5 includes LoY Quest')
+    local uncapped = filterByEra(sampleCatalog, false, 5)
+    assert_eq(#uncapped, 5, 'uncapped returns all 5 quests')
+
+    -- Zone Directory and Global Quest Lookup Logic Tests
+    local lookupCatalog = {
+        { id = "101", title = "Crushbone Belts", zone = "gfaydark", zone_name = "Greater Faydark", exp = "00", exp_name = "Classic", min_lvl = 5, max_lvl = 15, npc = "Captain Hazran" },
+        { id = "102", title = "Orc Hatchets", zone = "gfaydark", zone_name = "Greater Faydark", exp = "00", exp_name = "Classic", min_lvl = 3, max_lvl = 10, npc = "Dill Fireshine" },
+        { id = "103", title = "Bone Chips", zone = "qeynos2", zone_name = "North Qeynos", exp = "00", exp_name = "Classic", min_lvl = 1, max_lvl = 5, npc = "Lashun Novashine" },
+        { id = "104", title = "Iksar Berserker Club", zone = "cabeast", zone_name = "East Cabilis", exp = "01", exp_name = "Ruins of Kunark", min_lvl = 15, max_lvl = 25, npc = "Trooper Mozo" },
+        { id = "105", title = "Trial of Tactics", zone = "solrotower", zone_name = "Tower of Solusek Ro", exp = "04", exp_name = "Planes of Power", min_lvl = 60, max_lvl = 65, npc = "Rizlona" },
+        { id = "106", title = "Late Era Task", zone = "argath", zone_name = "Argath", exp = "18", exp_name = "Veil of Alaris", min_lvl = 90, max_lvl = 95, npc = "Commander Galenth" },
+    }
+
+    -- 1. Build Zone List from Catalog
+    local function buildZoneList(cat)
+        local zoneMap = {}
+        local zList = {}
+        for _, q in ipairs(cat) do
+            local z = q.zone and q.zone:lower() or "unknown"
+            if not zoneMap[z] then
+                local zObj = {
+                    shortname = z,
+                    name = q.zone_name or z,
+                    exp = tonumber(q.exp) or 0,
+                    exp_name = q.exp_name or "",
+                    count = 0,
+                }
+                zoneMap[z] = zObj
+                table.insert(zList, zObj)
+            end
+            zoneMap[z].count = zoneMap[z].count + 1
+            local qExp = tonumber(q.exp) or 0
+            if qExp < zoneMap[z].exp then
+                zoneMap[z].exp = qExp
+                zoneMap[z].exp_name = q.exp_name
+            end
+        end
+        table.sort(zList, function(a, b)
+            return (a.name or a.shortname) < (b.name or b.shortname)
+        end)
+        return zList
+    end
+
+    local zList = buildZoneList(lookupCatalog)
+    assert_eq(#zList, 5, '5 unique zones identified')
+    assert_eq(zList[1].name, 'Argath', 'alphabetical sorting: Argath first')
+    assert_eq(zList[3].name, 'Greater Faydark', 'Greater Faydark present')
+    assert_eq(zList[3].count, 2, 'Greater Faydark has 2 quests')
+    assert_eq(zList[3].exp, 0, 'Greater Faydark min exp is 0')
+
+    -- 2. Zone Lookup Search Filter
+    local function filterZoneList(list, query, limitEra, maxCap)
+        local out = {}
+        local qLow = query:lower()
+        for _, z in ipairs(list) do
+            local matchesEra = not limitEra or (z.exp <= (maxCap or 32))
+            if matchesEra then
+                local matchesText = (qLow == "") or (z.name:lower():find(qLow, 1, true) ~= nil) or (z.shortname:lower():find(qLow, 1, true) ~= nil)
+                if matchesText then
+                    table.insert(out, z)
+                end
+            end
+        end
+        return out
+    end
+
+    local zFilt1 = filterZoneList(zList, "fay", false, 32)
+    assert_eq(#zFilt1, 1, 'zone filter "fay" matches 1 zone')
+    assert_eq(zFilt1[1].shortname, 'gfaydark', 'zone matched is gfaydark')
+
+    local zFiltEra = filterZoneList(zList, "", true, 4)
+    assert_eq(#zFiltEra, 4, 'era cap 4 excludes Argath (exp 18)')
+
+    -- 3. Global Quest Search Filter
+    local function searchQuests(cat, term, limitEra, maxCap, hideDone, completedMap)
+        local out = {}
+        local tLow = term:lower()
+        for _, q in ipairs(cat) do
+            local expNum = tonumber(q.exp) or 0
+            local eraMatch = not limitEra or (expNum <= (maxCap or 32))
+            if eraMatch then
+                local isDone = completedMap and (completedMap[q.id] == true)
+                if not (hideDone and isDone) then
+                    local textMatch = (tLow == "") or (q.title:lower():find(tLow, 1, true) ~= nil) or (q.npc:lower():find(tLow, 1, true) ~= nil) or (q.zone_name:lower():find(tLow, 1, true) ~= nil)
+                    if textMatch then
+                        table.insert(out, q)
+                    end
+                end
+            end
+        end
+        return out
+    end
+
+    local qSearch1 = searchQuests(lookupCatalog, "belt", false, 32, false, nil)
+    assert_eq(#qSearch1, 1, 'search "belt" matches Crushbone Belts')
+    assert_eq(qSearch1[1].id, "101", 'quest id is 101')
+
+    local qSearchNpc = searchQuests(lookupCatalog, "novashine", false, 32, false, nil)
+    assert_eq(#qSearchNpc, 1, 'search by NPC "novashine" matches Bone Chips')
+
+    local qSearchCompleted = searchQuests(lookupCatalog, "", false, 32, true, { ["101"] = true, ["102"] = true })
+    assert_eq(#qSearchCompleted, 4, 'hide completed filters out 2 done quests')
+end
+
+-- ============================================================================
 -- Results
 -- ============================================================================
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

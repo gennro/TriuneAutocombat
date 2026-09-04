@@ -30,6 +30,7 @@ extracting a shared module.
 | `lua/triune_dps.lua` | Standalone live DPS parser with its own independent version number. |
 | `lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window with theme. |
 | `lua/triune_track.lua` | Standalone zone NPC tracker + navigation window with theme. |
+| `lua/triune_quest.lua` | Standalone interactive quest guide + radar + dialogue & turn-in helper with theme. |
 | `lua/triune_updater.lua` | Standalone in-game release updater (GitHub Releases). |
 | `lua/kissedit/` | Legacy standalone KissAssist INI editor suite (pre-convention code, not part of the main suite). |
 | `config/triune_data.lua` | Era-correct spell/disc/AA database (generated, not hand-edited). |

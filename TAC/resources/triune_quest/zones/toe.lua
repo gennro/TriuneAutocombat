@@ -1,0 +1,197 @@
+-- ============================================================================
+-- TRIUNE QUEST GUIDE: Zone Package for The Theater of Eternity (toe)
+-- Total Quests: 6
+-- ============================================================================
+
+return {
+  zone = "toe",
+  zone_name = "The Theater of Eternity",
+  quests = {
+    {
+      id = "12987",
+      title = "The Hardest Step Is the First",
+      exp = "31",
+      exp_name = "The Outer Brood",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Wellalanon",
+      loc = nil,
+      triggers = {
+        "Hail, Wellalanon",
+        "Where are these beasts?",
+        "I",
+        "_Quests_",
+        "beasts",
+        "troops",
+        "servants",
+        "soldiers",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- The Theater of Eternity [zone=1359]\n**Who:**\n- Wellalanon [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 110\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Experience\n- Money\n**Related Quests:**\n- Mercenary of The Theater of Eternity (15 Points) [quest=13041]\n**Era:** | !The Outer Brood\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Thu Oct 17 01:18:23 2024\nModified: Tue Dec 3 04:12:17 2024 | | You can obtain this task from Wellalanon at the zone in at /way 20, -331, -1. He is on the find tool CTRL F.\nYou say, 'Hail, Wellalanon'\nWellalanon spits his words at you. He makes it very clear that he doesn't hold you or your kind in high regard. 'I knew it would only be a matter of time before your lot would find your way up here. You won't last long in this fight, but chess has pawns for a reason.' He scans the observable area, and gives a dismissive grunt. 'Fine, if you want to help, go clear a path to make it easier for us to claim a stronger foothold on this monstrous behemoth. You can start your work with the [beasts]. If you're feeling like someone who wants to put an actual dent in these forces, then weed out some of the [troops]. I suspect you won't last long against them, so I would suggest you tackle the beasts instead.'\nYou say, 'Where are these beasts?'\nYou have been assigned the task 'Too Dangerous to Be Left Alive!'.\nWellalanon's lip curls up in a half smile as he chuckles. 'I figured you would be wanting to fight the beasts, given that they are just dumb animals. Come back when you think you have killed enough to impress me. If you got a death wish, I can tell you about the [troops] that need to be killed.'\nYou say, 'I'm not afraid of the troops.'\nWellalanon raises an eyebrow at your response. 'Troops? You think you can handle the troops? How about you try and handle some of the monitor [servants] before you attempt to take on the actual [soldiers]. I know you don't have what it takes to cull [both].'\nYou say, 'I'll handle the soldiers.'\nYou have been assigned the task 'The Hardest Step Is the First'.\nWellalanon chortles. 'You made it this far just to throw it all away? Suit yourself, mortal. Have at them then. I look forward to finding your corpse being fed to the beasts.'\n\n---\n\nIn order to establish a stronger foothold for reinforcements, Wellalanon needs you to kill as many soldiers as you can. He doesn't think you will make it back to him. Prove him wrong.\n1\\. Crush Flying Defenders 0/7 The Theater of Eternity\nThese are the flying scalewrought npc's such as the secondwave enforcer.\n2\\. Destroy Ground Attackers 0/7 The Theater of Eternity\nThese are any of the scalewrought model npc's that are on the ground such as a vicious trooper.\n\n---\n\nReward(s):\n178 platinum 8 silver\nExperience\n**Submitted by:** Gidono",
+    },
+    {
+      id = "12988",
+      title = "This Does Not Spark Joy",
+      exp = "31",
+      exp_name = "The Outer Brood",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Wellalanon",
+      loc = nil,
+      triggers = {
+        "Hail, Wellalanon",
+        "I",
+        "I can handle the servants.",
+        "_Quests_",
+        "beasts",
+        "troops",
+        "servants",
+        "soldiers",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- The Theater of Eternity [zone=1359]\n**Who:**\n- Wellalanon [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 110\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Experience\n- Money\n**Related Quests:**\n- Mercenary of The Theater of Eternity (15 Points) [quest=13041]\n**Era:** | !The Outer Brood\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Thu Oct 17 01:23:33 2024\nModified: Tue Dec 3 04:12:03 2024 | | You can obtain this task from Wellalanon at the zone in at /way 20, -331, -1. He is on the find tool CTRL F.\nYou say, 'Hail, Wellalanon'\nWellalanon spits his words at you. He makes it very clear that he doesn't hold you or your kind in high regard. 'I knew it would only be a matter of time before your lot would find your way up here. You won't last long in this fight, but chess has pawns for a reason.' He scans the observable area, and gives a dismissive grunt. 'Fine, if you want to help, go clear a path to make it easier for us to claim a stronger foothold on this monstrous behemoth. You can start your work with the [beasts]. If you're feeling like someone who wants to put an actual dent in these forces, then weed out some of the [troops]. I suspect you won't last long against them, so I would suggest you tackle the beasts instead.'\nYou say, 'I'm not afraid of the troops.'\nWellalanon raises an eyebrow at your response. 'Troops? You think you can handle the troops? How about you try and handle some of the monitor [servants] before you attempt to take on the actual [soldiers]. I know you don't have what it takes to cull [both].'\nYou say, 'I can handle the servants.'\nYou have been assigned the task 'This Does Not Spark Joy'.\nWellalanon says, 'Servants are no stronger than the beasts. They sneak around the ruins in attempts to recover scrolls and artifacts that are important to these fiends. You'll see them nearby, but those ones don't count. You have to clear out the ones you find among the ruins or near the front door.'\n\n---\n\nStop the monitor servants before they can continue their work. Wellalanon needs you to dear them out in order to help the advance. Remember that you need to kill the larger ones that are amongst the ruins.\n1\\. Sweep out the large Monitors 0/10 The Theater of Eternity\na strong monitor, a respected servant, and a loyal monitor update this step. You can find them in the far northwest corner of the zone.\n\n---\n\nReward(s):\n178 platinum 8 silver\nExperience\n**Submitted by:** Gidono",
+    },
+    {
+      id = "12989",
+      title = "Too Dangerous to Be Left Alive!",
+      exp = "31",
+      exp_name = "The Outer Brood",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Wellalanon",
+      loc = nil,
+      triggers = {
+        "Hail, Wellalanon",
+        "Where are these beasts?",
+        "_Quests_",
+        "beasts",
+        "troops",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- The Theater of Eternity [zone=1359]\n**Who:**\n- Wellalanon [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 110\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Experience\n- Money\n**Related Quests:**\n- Mercenary of The Theater of Eternity (15 Points) [quest=13041]\n**Era:** | !The Outer Brood\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Thu Oct 17 01:28:44 2024\nModified: Tue Dec 3 04:11:47 2024 | | You can obtain this task from Wellalanon at the zone in at /way 20, -331, -1. He is on the find tool CTRL F.\nYou say, 'Hail, Wellalanon'\nWellalanon spits his words at you. He makes it very clear that he doesn't hold you or your kind in high regard. 'I knew it would only be a matter of time before your lot would find your way up here. You won't last long in this fight, but chess has pawns for a reason.' He scans the observable area, and gives a dismissive grunt. 'Fine, if you want to help, go clear a path to make it easier for us to claim a stronger foothold on this monstrous behemoth. You can start your work with the [beasts]. If you're feeling like someone who wants to put an actual dent in these forces, then weed out some of the [troops]. I suspect you won't last long against them, so I would suggest you tackle the beasts instead.'\nYou say, 'Where are these beasts?'\nYou have been assigned the task 'Too Dangerous to Be Left Alive!'.\nWellalanon's lip curls up in a half smile as he chuckles. 'I figured you would be wanting to fight the beasts, given that they are just dumb animals. Come back when you think you have killed enough to impress me. If you got a death wish, I can tell you about the [troops] that need to be killed.'\n\n---\n\nWellalanon has asked that you dear off the wildlife that are in the way between the forward assault and the front door. Keep killing them until he is satisfied with your progress.\n1\\. Crush the Barnacles 0/7 The Theater of Eternity\na mature barnacle, a sky glandula, and an astral brnacle counted for this. They can be found in the far southwest corner of the zone.\n2\\. Clear out the Scouters, Spies or Seekers 0/5 The Theater of Eternity\na reinforced scouter, a roaming seeker, a star spy update this step. You can find these in the far south west side of the zone out near the water.\n3\\. Eradicate the Eels 0/4 The Theater of Eternity\na void conger, an abyssal eel, a dendroid menace count for this step. You can find them on the north side near the wall, about mid zone.\n4\\. Overcome Horrors and Terrors 0/6 The Theater of Eternity\na toughened horror, an abyssal terror count for this step. They can be found on the south side of the zone about mid way.\n\n---\n\nReward(s):\n178 platinum 8 silver\nExperience\n**Submitted by:** Gidono",
+    },
+    {
+      id = "12990",
+      title = "Crashing the Party",
+      exp = "31",
+      exp_name = "The Outer Brood",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Mokolin",
+      loc = { y = -6.0, x = -308.0, z = -1.0 },
+      triggers = {
+        "Hail, Mokolin",
+        "What is this new form of gate?",
+        "How can I help with gaining a foothold?",
+        "Cleaning the ruins?",
+        "I",
+        "Hail, Dexter Tibblesbit",
+        "_Quests_",
+        "new form of gate",
+      },
+      items_required = {
+      },
+      rewards = {
+        { id = 151002, name = "Humming Power Crystal", type = "item" },
+        { id = 151005, name = "Jury-Rigged Portal Stabilizer", type = "item" },
+        { id = 151004, name = "Modified Otherworldly Tool", type = "item" },
+        { id = 150806, name = "Otherworldly Device", type = "item" },
+        { id = 151003, name = "Snapped Aureate Blade", type = "item" },
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- The Theater of Eternity [zone=1359]\n**Who:**\n- Mokolin [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 110\n**Maximum Level:** | 130\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Experience\n- Money\n**Quest Items:**\n- Humming Power Crystal [item=151002]\n- Jury-Rigged Portal Stabilizer [item=151005]\n- Modified Otherworldly Tool [item=151004]\n- Otherworldly Device [item=150806]\n- Snapped Aureate Blade [item=151003]\n**Related Quests:**\n- Partisan of The Theater of Eternity (15 Points) [quest=13042]\n- The Bigger the Door, the Larger the Crack [quest=12991]\n**Era:** | !The Outer Brood\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Thu Oct 17 02:33:49 2024\nModified: Sat Nov 29 23:45:55 2025 | | This task starts with Molokin at the zone in The Theater of Eternity. She is located at -6, -308, -1 and is on the find tool CTRL F.\nYou say, 'Hail, Mokolin'\nMokolin eyes widen in shock as she sees you. 'Finally! More reinforcements! More of your kind are on their way, correct? Your presence is very much desired. Dexter Tibblesbit and I have arrived with the goal of getting a [new form of gate] working, but we are running into an issue getting it to start. I have taken to this form in a better attempt to get a base camp established.'\nYou say, 'What is this new form of gate?'\nMokolin winces. 'The Ring of Scale has been experimenting with teleportation magics and has devised a way to make a device that allows travel similar to the druid's circles seen across all of Norrath. We constructed the device, but as we went to start it up, it would not function.' She looks to the sky above. 'The atmosphere on this creature we stand upon is interfering with our natural magical currents. We are unable to get our gate to work correctly, and without it working, it will be difficult to establish a [foothold]. Which is exactly what Dexter Tibblesbit and I are up here doing. You making it here will help our chances.'\nYou say, 'How can I help with gaining a foothold?'\nMokolin looks at you, making sure to lock eyes. 'Currently, we are trying to locate any tools that these invaders use, but we have been unsuccessful. In order to maintain what little ground we have, we have decided to lay as low as we can and not tip off our location to the enemy, but we are out of options. We are in need of an invitation with the locals. That is why I am most relieved to see you. You're a better fighter than we are. There are these strange creatures nearby that look like horrific abominations of' - she has a forlorn look on her face - 'well, pieces of dragons. These creatures behave like janitors or cleaners, trying to recover objects that have been lost to the [ruins].'\nYou say, 'Cleaning the ruins?'\nYou have been assigned the task 'Crashing the Party'.\nMokolin says, 'It is very curious to witness them work. They try their best not to be seen while doing their job. I believe these may be some lower-ranked servitors whose main goal is to be the role of servants. Unfortunately, they may hold the key to us getting set up. They also appear to be sentries and will report back to their masters the moment they see us. Kill them so they can't, and see if you can find anything on their bodies that can help us. Bring me back anything you find.'\n\n---\n\nThe invaders are at the door and the first pushback has started. You have made it to the back of the large beast that they used to get here. Unfortunately, there is a snag with getting reinforcements to the beast. An experimental teleportation spire has been created by the Ring of Scale member Mokolin. She is part of the forward party for the counterattack and needs your help getying a foothold established.\nMokolin suggested collecting anything of use from the desperate monitors nearby. Slay them until you find a tool they use and bring it back to her.\n1\\. Slay monitors and locate any device they may be using for their work 0/1 The Theater of Eternity\nOtherworldly Device drops from a desperate monitor.\n2\\. Return the device to Mokolin 0/1 The Theater of Eternity\nYou offered 1 Otherworldly Device to Mokolin.\nYou have been given: Otherworldly Device\nYour task 'Crashing the Party' has been updated.\nMokolin takes the device with a curious look on her face. She spins it around in her hands, trying to discern how it works. 'What a fascinating little thing. I suspect the monitors use this for lifting debris that is heavier than they can handle. Or perhaps it is to shape these scales?' She looks annoyed for a moment, but not at you. 'I know I asked that you bring what you find to me, but I cannot make heads or tails as to how it works. It working doesn't matter fully if we can use it to continue our work. Please bring this to chief engineer Dexter Tibblesbit. You should be able to find him near the circle.'\nYou complete the trade with Mokolin.\n3\\. Bring the device to Chief Engineer Dexter Tribblesbit 0/1 The Theater of Eternity\nYou offered 1 Otherworldly Device to Dexter Tibblesbit.\nYour task 'Crashing the Party' has been updated.\nDexter Tibblesbit is intensely focusing on his work with his back to you, angrily mumbling to himself expletives that rival the energy from the Plane of Hate. You break him free from his rage when you hand him the device over his shoulder. 'Finally!' He turns to look at you. 'Wait, you!? You made it here, Gebb! My my, I'm not in a proper state! I thought you were Moko-' His eyes are wide in adoration. It is clear that he has heard of your exploits. 'Okay, um well' - he performs a little curtsy as he acknowledges the area around him - 'welcome to what we are calling \"the beast.\"' Powerful explosions crescendo in the air, making it hard to hear anything for a moment. Dexter pauses until the explosions stop. 'As you can see, it's a bit of a [mess].'\nYou complete the trade with Dexter Tibblesbit.\nYou say, 'I've seen some pretty bad messes before.'\nDexter Tibblesbit gives an embarrassed chuckle. 'I'm sure you have! Unfortunately this mess is in the middle of a battlefield from an invading army.' He finally examines the device you gave him. 'Interesting. I think I might be able to use some of these pieces to fix our device, but we will need a bit more juice to get the thing to punch through the interference. I'm going to work on this for now. See if Mokolin has spotted anything that can be used as a power source and something that can be used as a proper grounding device. Perhaps some metal or other object that has been used recently by the invaders.'\n4\\. Return to Mokolin for help 0/1 The Theater of Eternity\nYou say, 'Hail, Mokolin'\nYour task 'Crashing the Party' has been updated.\nMokolin greets you warmly. 'I see you have made progress with Dexter Tibblesbit and, as I understand it, you are in need of finding some means of a power source and a device that can be used for grounding?' She scratches her chin with her knuckle in thought. 'On the way here, we did bear witness to a training area on the' - she looks up the back of the leviathan toward the two huge doors and points to the right - 'right side of the beast's back. Your search can start there for a grounding tool. As for a power source, the cannons would do wonders, but we are on the business end of those, so that strategy will be out. Look for other things that could use power. Maybe one of those structures that are showing the images of a dragon.' She winces again. 'From what I understand, that dragon is their depiction of Veeshan. A crude mockery of her visage if you ask me. Get to it. We need to get this working before we expect more reinforcements.'\n5\\. Find a power source from the ruins 0/1 The Theater of Eternity\nOn the north side of the zone at /way 183, 518, -4 there is a power crystal that is projecting an image of Veeshan laying on its side. Click on it, you will get Humming Power Crystal on your cursor.\n6\\. Locate something that can be used as a grounding device 0/1 The Theater of Eternity\nClicking on a ground spawn sword at the following locationsupdated this step for me. It gave me Snapped Aureate Blade.\n/way 436, 1291, 1\n/way 512, 1355, 2\n/way 443, 1397, 1\n7\\. Speak with Dexter 0/1 The Theater of Eternity\nYou say, 'Hail, Dexter Tibblesbit'\nYou have been given: Modified Otherworldly Tool\nYour task 'Crashing the Party' has been updated.\nDexter Tibblesbit is seen tinkering with the device. Most of the parts from the inside are on the ground around him. 'Hey there Gebb! I got this jury-rigged well enough. I can only assume that since you're talking to me, you were successful in finding a power source and a grounding device?' His eyes catch yours for a moment and he blushes. 'Of course you did. You're Gebb, you always get the job done.' He snaps back to the reality of the situation. 'Right. Anyways.' He looks at the objects you brought and begins to tinker some more with the device. After a moment, he finishes and hands it to you. 'Here, I was able to alter this tool for our need. Insert the power source and blade into it and attach it to the spire opposite of me. It shouldn't explode, but you know how things can be sometimes. Oh don't look at me like that. You'll be fine!'\n8\\. Repair the device 0/1 ALL\nStick the Humming Power Crystal and Snapped Aureate Blade into Modified Otherworldly Tool and hit Combine.\nYou have fashioned the items together to create something new: Jury-Rigged Portal Stabilizer.\nYour task 'Crashing the Party' has been updated.\nWith a few satisfying clicks, you are able to fit the blade and power crystal into the device. Have Dexter check your work.\n9\\. Insert the device into the spire 0/1 The Theater of Eternity\nTrade the Jury-Rigged Portal Stabilizer to shower of sparks at /way -25, -191, 2\nYou offered 1 Jury-Rigged Portal Stabilizer to shower of sparks.\nYour task 'Crashing the Party' has been updated.\nYou complete the trade with shower of sparks.\n10\\. Update Mokolin with your findings 0/1 The Theater of Eternity\nYou say, 'Hail, Mokolin'\nYour task 'Crashing the Party' has been updated.\nWorking with Mokolin and Dexter Tibblesbit, you were able to help get a makeshift druid's circle set up on the back of the behemoth. This is one small step in the counter invasion, but the next challenge lies ahead: getting inside.\nMokolin's eyes grow wide with astonishment. 'Gebb! You did it!' she exclaims cheerfully as you approach. The first step is done. We can start getting more reinforcements and supplies up here. Now we have to worry about getting inside. Have you seen the size of that fortress?' Her gaze returns toward the direction of giant doors as her visage grows dour. 'Those doors are not going to be easy to get through.'\nYou have successfully been granted your reward for: Crashing the Party\n\n---\n\nReward(s):\n267 platinum 1 gold 2 silver\nExperience\n**Submitted by:** Gidono",
+    },
+    {
+      id = "12991",
+      title = "The Bigger the Door, the Larger the Crack",
+      exp = "31",
+      exp_name = "The Outer Brood",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Mokolin",
+      loc = { y = -6.0, x = -308.0, z = -1.0 },
+      triggers = {
+        "Hail, Mokolin",
+        "I can help with getting inside.",
+        "Hail, Krithss Zeprin",
+        "Hail, Dexter Tibblesbit",
+        "_Quests_",
+        "ruins",
+        "getting inside",
+        "reporting back",
+      },
+      items_required = {
+      },
+      rewards = {
+        { id = 150997, name = "Attuned Crystal Vial", type = "item" },
+        { id = 150999, name = "Aureate Skeleton Key", type = "item" },
+        { id = 150998, name = "Caustic Beast Blood", type = "item" },
+        { id = 151000, name = "Stabilized Caustic Beast Blood", type = "item" },
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- The Theater of Eternity [zone=1359]\n**Who:**\n- Mokolin [ _Quests_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 110\n**Maximum Level:** | 125\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Experience\n- Money\n**Quest Items:**\n- Attuned Crystal Vial [item=150997]\n- Aureate Skeleton Key [item=150999]\n- Caustic Beast Blood [item=150998]\n- Stabilized Caustic Beast Blood [item=151000]\n**Related Quests:**\n- Crashing the Party [quest=12990]\n- Partisan of The Theater of Eternity (15 Points) [quest=13042]\n- We Have to Go Back! [quest=12992]\n**Era:** | !The Outer Brood\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Fri Oct 18 00:21:05 2024\nModified: Sun Dec 22 21:09:20 2024 | | **Prerequisite Task:** Crashing the Party [quest=12990]\n\n---\n\nThis task starts with Molokin at the zone in The Theater of Eternity. She is located at -6, -308, -1 and is on the find tool CTRL F.\nYou say, 'Hail, Mokolin'\nMokolin says, '\\_\\_\\_\\_! I'm glad you are back! Chief Engineer Tibblesbit mentioned that there is an issue with the gate and could use your help to search the [ruins] for a monitor with another device. The one we used last time is starting to fall apart and we could use your help fixing it. Otherwise, our next step is [getting inside].'\nYou say, 'I can help with getting inside.'\nYou have been assigned the task 'The Bigger the Door, the Larger the Crack'.\nMokolin says, 'We have been able to establish a forward base here with your work, but now we have to work on getting past the front gate. Krithss Zeprin joined us on this trip and you can find him nearby. He's a master of infiltration and poisons. He has taken the task upon himself to gain entrance to the fortress. Speak with him and try to find us a way past the doors.'\n\n---\n\nHaving received your help with the spire, Mokolin now asks that you work with a rogue named Krithss Zeprin to find a way inside of the Aureate Fortress.\nSpeak with Krithss Zeprin, who should be nearby.\n1\\. Speak with Krithss 0/1 The Theater of Eternity\nYou say, 'Hail, Krithss Zeprin'\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\nKrithss Zeprin acknowledges your approach with a grunt and a nod. He turns his gaze toward the fortress. 'Getting here was one thing, Gebb. Staying is a whole 'nother, and I don't aim to stay here. But as you have noticed, there seems to be a large set of doors and a wall in the way of us and getting inside that thing.' He spits brown saliva onto the ground. 'I reckon whenever there are doors that big, there are cracks that are bigger. We just gotta find 'em.' He says while continuing to scan the horizon, 'I'm going to need your help with this. You're the adventurer. Why don't you go adventure us some way in? Start your search by the big doors and see if you can't find some weakness we can exploit.'\n2\\. Locate a weakness in the fortress' defenses 0/1 The Theater of Eternity\nThis step updates at /way -583, 2098, 3 in the southwestern corner of the zone.\nYou notice that the water at your feet is coming from a culvert with a gate over it. This information will be useful to Krithss Zeprin.\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\n3\\. Return to Krithss 0/1 The Theater of Eternity\nYou say, 'Hail, Krithss Zeprin'\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\nKrithss Zeprin raises an eyebrow as you tell him what you found. 'Well well well, you actually found a way in. I'm impressed. Good work. I reckon that's what we are going to be focusing on.' He spits again. Disgusting brown ichor launches out of his mouth and onto the ground much like last time. 'I'm guessing that those gates are probably created to keep the critters from getting in through that pipe and messing with the insides.' He scratches his chin for a moment. 'I'm guessin' that those critters out there probably have some kind of weird not-of-this-earth type blood or spit.' He spits again. You begin to believe that he does this without thinking. 'Go talk to Dexter. See if he would be able to use some of that ick to get us past those bars. If so, go get some for him.'\n4\\. Connect with Chief Engineer Dexter 0/1 The Theater of Eternity\nYou say, 'Hail, Dexter Tibblesbit'\nYou have been given: Attuned Crystal Vial\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\nDexter Tibblesbit is striking the object in front of him with a spanner, cursing enough to make an orc blush. He sees you approach and wipes the sweat off of his brow with the back of his free hand. 'Hey Gebb! Just doing some percussive maintenance on this thing. I understand you are working with Krithss to get into the fortress? That's not an easy feat, but from what I understand of his plan, he wants to weaken the bars that you found in that culvert with these critters' fluids. I'm sure that could be something that we can do, but only if any of these critters actually have acidic fluids. It is a heck of an assumption to start with, but it isn't like standing around out here is going to get us inside any time soon. I think this plan will work, but first you have to find the fluids. I guess your best bet would be to go fight a few and see which ones burn the most? If you find anything, collect it in this vial and come back to me with what you find. We can then see what options we have.'\n5\\. Locate a creature with caustic blood 0/1 The Theater of Eternity\nan astral barnacle in the southwestern corner of the zone drops Caustic Beast Blood.\n--You have looted a Caustic Beast Blood from an astral barnacle's corpse.--\nAfter you kill the barnacle, its wounds fester and spit. As their ichor touches the ground, you notice the ground sizzle and a little plume of steam floats into the air and dissipates. You are able to collect some of the ichor in the vial. Chief Engineer Dexter will want to see this.\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\n6\\. Bring the caustic blood to Dexter 0/1 The Theater of Eternity\nYou offered 1 Caustic Beast Blood to Dexter Tibblesbit.\nYou have been given: Stabilized Caustic Beast Blood\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\nDexter Tibblesbit continues his torrent of expletives. You notice that every time you approach him, you learn new ways to express your anger through words. You suspect he may be a poet with how well spoken some of his insults are. His demeanor changes to jovial as you hand him the vial. He holds it at eye level and swirls it around, observing how it reacts. 'Huh. Yeah, this will work. One moment.' He opens the container and empties a small packet of gray powder in the vial. He closes the vial with a cork and swirls it again before tossing it back to you. 'You will need to add some more reagents to this concoction in order to get it really cooking. If there was one person I would ask about what exactly could be used, that would be Zeprin. I think his plan will work now, so bring him that vial and he will know what to do.'\n7\\. Give Krithss the preserved blood 0/1 The Theater of Eternity\nYou offered 1 Stabilized Caustic Beast Blood to Krithss Zeprin.\nYou have been given: Aureate Skeleton Key\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\nKrithss Zeprin takes the vial and examines it at his eye level like Dexter did. 'I knew ol' Dex would get you what you needed. His discerning eye for quality reagents makes him very useful.' Krithss Zeprin turns to look in the direction of Dexter, as you hear a muffled blast of expletives linger into the air. 'Among other talents,' Krithss Zeprin chuckles as he bites the cork off of the vial you handed him. He reaches into his jacket pocket to pull out a bundle that he unrolls across his arm. The bundle contains several other vials with different colors of liquids inside. He confidently pulls out a green one with the same hand that is holding the other vial. He uses his thumb to pop the cork off the second vial, sending the cork flying. With a dexterous tilt of his hand, he manages to pour the green vial into the vial of the caustic blood. He drops the empty vial, causing it to shatter on the ground by his feet. He takes the now full vial and brings it to his teeth, where he recorks it and gives it a twirl before handing it back. 'There ya go. Put that on the bars and let's crack open this tin can.'\nYou complete the trade with Krithss Zeprin.\n8\\. Use the acid on the bars in the culvert 0/1 The Theater of Eternity\nThis step is a location update at /way -444, 2192, -9 right next to Alchemist Balino Frugrin.\n9\\. Update Mokolin on the status of ingress 0/1 The Theater of Eternity\nYou say, 'Hail, Mokolin'\nYour task 'The Bigger the Door, the Larger the Crack' has been updated.\nYou have been able to work with Krithss Zeprin to gain access to the rest of the leviathan through a secret entrance in the Theater of Eternity. You will be able to make your way inside to infiltrate the invader's stronghold.\nMokolin's eyes beam with excitement. 'So you were able to find a way inside? Such wonderful news! With your work, we will be able to sneak into the fortress and finally start to learn more about our enemy. We will continue our work here, and maintain our current ground, but for now I can use your help with [reporting back].'\nYou have successfully been granted your reward for: The Bigger the Door, the Larger the Crack\n\n---\n\nReward(s):\n267 platinum 1 gold 2 silver\nExperience\n**Submitted by:** Gidono",
+    },
+    {
+      id = "13019",
+      title = "Brood Architect Hazuri - Group",
+      exp = "31",
+      exp_name = "The Outer Brood",
+      min_lvl = 1,
+      max_lvl = 125,
+      quest_type = "",
+      repeatable = false,
+      group_size = "",
+      npc = "Alchemist Balino Frugrin",
+      loc = nil,
+      triggers = {
+        "Hail, Alchemist Balino Frugrin",
+        "madness",
+        "want to",
+        "group",
+        "Hail, Atathus, the Red Lord",
+        "_Raids and Mission_",
+        "large",
+        "ready",
+      },
+      items_required = {
+      },
+      rewards = {
+      },
+      factions = {
+      },
+      walkthrough = "Quest Started By: | Description:\n**Where:**\n- The Theater of Eternity [zone=1359]\n**Who:**\n- Alchemist Balino Frugrin [ _Raids and Mission_]\nRating:\n0/0**_\\*__\\*__\\*__\\*__\\*_**\nInformation:\n**Level:** | 110\n**Maximum Level:** | 130\n**Monster Mission:** | No\n**Repeatable:** | Yes\n**Can Be Shrouded?:** | No\n**Quest Type:** | Task\n**Quest Goal:**\n- Experience\n- Money\n**Related Zones:**\n- The Harbinger's Cradle: Brood Architect Hazuri [zone=1365]\n**Related Creatures:**\n- a moldy chest - Brood Architect Hazuri [npc=60429]\n**Related Quests:**\n- Hero of The Harbinger's Cradle: Brood Architect Hazuri (10 Points) [quest=13051]\n**Era:** | !The Outer Brood\nRecommended:\n**Group Size:** | Solo\n**Appropriate Classes:**\n- All\n**Appropriate Races:**\n- All\nEntered: Sat Nov 9 21:17:54 2024\nModified: Sun Feb 8 11:24:31 2026 | | You can obtain this group mission from Alchemist Balino Frugrin [npc=60362] in The Theater of Eternity at /way -426, 2207, -11. He is on the Find tool (Ctrl+F).\nYou say, 'Hail, Alchemist Balino Frugrin'\nAlchemist Balino Frugrin says, 'Oh, hi.' Balino stands on his toes, obviously trying to stand clear of the dubious water at his feet. 'I hope you're here to replace me. I mean, I'm good at my job and all, but I don't normally have to stand in the stuff that I've been asked to investigate. I know what's in this stuff, after all. Nobody should touch this stuff, much less let it soak into their boots!' Balino cringes, 'Sorry, not so loud, I know, monsters everywhere. Pretty sure none of them is going to come in here and stand in this stuff... Now that I look at you, you are certainly not here to take my place. You must be here to go in there and put a stop to whatever [madness] is going on in there.'\nYou say, 'madness'\nAlchemist Balino Frugrin says, 'From what I can tell, someone in there is doing some unbelievably weird stuff to other things in there. Using some sort of magic to change the essence of what they are. I can't understand the magic, I don't think anyone here does. But I understand the, the leavings, I guess. This stuff is full of broken-down flesh and bones. Things that happen if you, I don't know, pour acid on someone. Or fill them full of poison just to see what happens. But that sort of thing at a much more basic level. It's hard to explain, I guess because it's just about impossible to understand. Regardless, someone needs to get in there and stop this. I don't care about the lives of these,' waves his hand about, 'monsters at all. But not even they should be subjected to whatever magic causes what is in this water. I can get you in there, but I can't really offer any advice. Assuming you [want to] actually go in there.'\nYou say, 'want to'\nAlchemist Balino Frugrin says, 'I'll keep my eyes on the water, just in case you come out this way. But before you go, how many of you should I be expecting? A [large] or a smaller [group]?'\nYou say, 'group'\nAlchemist Balino Frugrin says, 'Good to know. I can crack open that grate whenever you are [ready].'\nYou have been assigned the task 'Brood Architect Hazuri'.\n\n---\n\n1\\. Defeat the Brood Architect Hazuri and open its chest 0/1 The Harbinger's Cradle\nYou say, 'Hail, Atathus, the Red Lord'\nAtathus, the Red Lord says, 'I... You should flee. I cannot, I do not have complete control of my own mind anymore. You should get out while you can. Do not [stay] here, do not try to [fight] this creature.'\nSay fight to start the event.\n3 an unmodified experiment attack. They cannot be mezzed. They are slowable.\nIf you disengage or succor you will see this message.\nUnengaged enemies, free to get reinforcements, return and your battle is lost.\nOnce you killed these mobs, Brood Architect attacks. It casts Strength of the Striker (Unresistable PBAE 86k damage. AE Range: 600) every 5 seconds.\nIt also casts Strength of the Skyguardian (Unresistable PB AE DoT 50450 damage. AE Range: 600, Duration: 30 seconds). This will fade off you if you run 200 ft from Brood Architect Hazuri\nIt also casts Venom-Binding Aspect (Unresistable) This increases the damage you get from Strength of the Skyguardian.\nIt also casts Poisonous Explosion (Unresistable PB AE 77k damage, AE Range: 350)\nThe pillars in the room with Brood Architect do not block the AE's.\nAt certain percentages of health of Brood Architect Hazuri, an altered striker spawns and attacks, it is slowable. Brood Architect does not stop attacking during this so you'll need an off tank for it.\n\n---\n\nReward(s):\n267 platinum 1 gold 2 silver\nExperience\n45 Scalewrought Emblem\n**Submitted by:** Gidono",
+    },
+  },
+}
