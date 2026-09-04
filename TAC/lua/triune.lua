@@ -13681,7 +13681,16 @@ function runtime.castGem(i, g, id)
         end
         return false
     end
-    local key = 'g' .. i
+    -- Keyed by (gem, target) rather than just gem: after casting on one target, an "All Enemies"
+    -- gem needs to be able to try a DIFFERENT XTarget right away instead of sitting locked out
+    -- for 1.2s regardless of target. With the old gem-only key, resolveAllEnemiesTargetId could
+    -- correctly pick the next NPC that still needs this spell, but castGem would refuse it purely
+    -- because THIS gem slot had just fired (on someone else) a moment ago -- so the loop fell
+    -- through to a lower-priority gem, which grabbed the FIRST target again for a different spell.
+    -- Net effect: every "All Enemies" debuff piled onto one NPC before any of them reached the
+    -- second one. Scoping the cooldown to the specific target fixes that while still preventing
+    -- a double-cast-attempt on the same target within 1.2s (the gate's original purpose).
+    local key = 'g' .. i .. ':' .. tostring(id or 0)
     if (os.clock() - (tonumber(runtime.lastCast[key]) or 0)) < 1.2 then return false end
     local sp = mq.TLO.Spell(g.spell)
     if not sp() then return false end
