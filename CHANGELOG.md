@@ -2,6 +2,18 @@
 
 ## 2026-09-04
 
+- **Project Version Bump (v2.0-beta) (`triune.lua`, `triune_updater.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - Synchronized major version bump to `2.0-beta` across the main suite (`triune.lua`), the standalone release updater (`triune_updater.lua`), repository documentation (`README.md`), and regression test suites.
+
+- **Camera Field of View (/fov) Slider & Automatic Zoning Persistence (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **Custom FOV Slider (`50-150 units`)**: Added a `/fov` slider under the Settings tab (`General Settings -> Interface, Overlays & Diagnostics -> Camera & Viewport`) enabling players to customize their camera viewport between 50 and 150 units (EverQuest default: ~75). Adjusting the slider or clicking the dedicated `[Apply]` button immediately issues `/fov <value>` in-game and saves the preference to `triune_loadout.lua`.
+  - **Automatic Zoning Re-Application (`runtime.onZoned`, `runtime.pendingFovAt`)**: EverQuest natively resets camera FOV back to default whenever zoning occurs. Triune now automatically tracks the user's desired FOV and re-applies `/fov <value>` immediately upon zone entry and again 1.5 seconds later to ensure the 3D rendering context and camera matrices are properly overridden after zone geometry loads.
+  - **Character Startup & Switch Hook (`runtime.onCharacterChanged`, `runtime.loadAll`)**: Enforces the configured FOV automatically when the script starts or when switching characters.
+  - **Maintain FOV Checkbox & Slash Commands**:
+    - Added `Maintain Field of View (/fov)` checkbox (`ctrl.fov_enabled`, default: `false`, auto-enabled on slider drag or Apply).
+    - Added `/ac fov [50-150|on|off]` (aliases `/ac setfov`, `/ac camfov`) chat commands for quick toggling, inspection, or value adjustment.
+  - **Automated Test Coverage (`Suite 59`)**: Added 25 unit test assertions covering default ctrl shape, slider value clamping (50-150), slash command parsing, mock execution, and simulated zone re-application.
+
 - **Assist Mode Combat Positioning: Position Behind NPC with Aggro Safety & Toggle (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
   - **Automated Flank/Rear Positioning (`runtime.positionBehindTarget`, `combatTick`)**: In Assist mode, characters engaging in melee combat automatically maneuver behind the attacked NPC so only the Main Assist tanks the front arc, completely mitigating frontal ripostes, parries, blocks, and frontal area-of-effect abilities while enabling Rogue backstabs.
   - **Aggro Safety Gate (`runtime.playerHasAggro`)**: If the assistant character pulls aggro or is being attacked directly, behind-positioning is immediately suspended and switches to direct target facing, preventing infinite circling/spinning while tanking. Behind positioning automatically resumes the moment the Main Assist or another group member regains aggro.

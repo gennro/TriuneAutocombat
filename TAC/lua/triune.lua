@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '1.9.0'
+local VERSION           = '2.0-beta'
 local open              = true
 local cfg               = mq.configDir
 
@@ -407,6 +407,8 @@ local function defaultCtrl()
         auto_accept_guild        = false,
         auto_accept_group        = false,
         auto_accept_names        = {},
+        fov                      = 100,
+        fov_enabled              = false,
         status_collapsed         = {
             target = false,
             vitals = false,
@@ -4130,6 +4132,8 @@ function runtime.applyEntry(e)
         if ctrl.auto_accept_guild == nil then ctrl.auto_accept_guild = false end
         if ctrl.auto_accept_group == nil then ctrl.auto_accept_group = false end
         if type(ctrl.auto_accept_names) ~= 'table' then ctrl.auto_accept_names = {} end
+        if ctrl.fov == nil then ctrl.fov = 100 end
+        if ctrl.fov_enabled == nil then ctrl.fov_enabled = false end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -5483,6 +5487,15 @@ end
 -- find a real 2nd/3rd class) will show zero.
 -- classPlausible is defined in local helpers above
 
+-- Field of View (FOV) Camera Management
+function runtime.applyFov()
+    if not ctrl.fov_enabled then return end
+    local val = tonumber(ctrl.fov) or 100
+    if val < 50 then val = 50 end
+    if val > 150 then val = 150 end
+    mq.cmdf('/fov %d', math.floor(val))
+end
+
 -- Called when the logged-in character changes: load that toon's saved setup, or
 -- detect classes fresh if it's new.
 function runtime.onCharacterChanged()
@@ -5509,6 +5522,9 @@ function runtime.onCharacterChanged()
 end
 
 runtime.loadAll()
+if ctrl.fov_enabled and runtime.applyFov then
+    runtime.applyFov()
+end
 
 -- Memorize a spell into a specific gem slot, with verification + a clear reason on
 -- failure. /memspell only works on spells that are SCRIBED in your book; the gem
@@ -10726,6 +10742,41 @@ function UI.drawSettingsTab()
                 'Prints extra diagnostic lines (e.g. Hunter\'s full targeting\n'
                 .. 'state every few seconds) to help track down a stuck/frozen\n'
                 .. 'report. Off by default -- noisy for normal use.')
+        end
+
+        accent(GOLD, 'Camera & Viewport:')
+        local fovVal = ImGui.Checkbox('Maintain Field of View (/fov)##fovEnabled', ctrl.fov_enabled or false)
+        if fovVal ~= (ctrl.fov_enabled or false) then
+            ctrl.fov_enabled = fovVal
+            if ctrl.fov_enabled and runtime.applyFov then
+                runtime.applyFov()
+            end
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.')
+        end
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(200)
+        local curFov = ctrl.fov or 100
+        local newFov, fovChanged = ImGui.SliderInt('FOV##fovSlider', curFov, 50, 150, '%d units')
+        if fovChanged or (newFov and newFov ~= ctrl.fov) then
+            ctrl.fov = newFov
+            ctrl.fov_enabled = true
+            if runtime.applyFov then runtime.applyFov() end
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\nMoving the slider automatically enables FOV persistence across zoning.')
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Apply##applyFovBtn') then
+            ctrl.fov_enabled = true
+            if runtime.applyFov then runtime.applyFov() end
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(string.format('Executes /fov %d now and saves the setting.', ctrl.fov or 100))
         end
     end
 
@@ -17291,6 +17342,10 @@ runtime.onZoned = function()
         print(string.format('\ag[Triune]\ax Loaded saved waypoint route for %s (%d waypoint(s)).',
             runtime.getZoneDisplayName(runtime.getCurrentZoneShortName()), #(ctrl.waypoints or {})))
     end
+    if ctrl.fov_enabled and runtime.applyFov then
+        runtime.applyFov()
+        runtime.pendingFovAt = os.clock() + 1.5
+    end
 end
 
 -- Bind remaining engine helpers to runtime table
@@ -19053,6 +19108,7 @@ local function triuneCommand(...)
         print('  \ag/ac selfdefense [on|off]\ax - Toggle Assist mode self-defense when attacked')
         print('  \ag/ac assistbehind [on|off]\ax - Toggle positioning behind NPC in Assist mode')
         print('  \ag/ac pausezone [on|off]\ax - Toggle automatic script pause when zoning (default: on)')
+        print('  \ag/ac fov [50-150|on|off]\ax - Set camera FOV and toggle maintain on zone')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
@@ -19335,6 +19391,30 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Pause On Zone: %s.',
                 ctrl.pause_on_zone and '\agENABLED\ax' or '\arDISABLED\ax'))
+        end
+    elseif cmd == 'fov' or cmd == 'setfov' or cmd == 'camfov' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        local num = tonumber(args[2])
+        if num then
+            if num < 50 then num = 50 end
+            if num > 150 then num = 150 end
+            ctrl.fov = math.floor(num)
+            ctrl.fov_enabled = true
+            if runtime.applyFov then runtime.applyFov() end
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Field of View set to \ag%d\ax units (Maintain on Zone: ENABLED).', ctrl.fov))
+        elseif sub == 'on' or sub == '1' or sub == 'enable' or sub == 'true' then
+            ctrl.fov_enabled = true
+            if runtime.applyFov then runtime.applyFov() end
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Maintain Field of View: \agENABLED\ax (%d units).', ctrl.fov or 100))
+        elseif sub == 'off' or sub == '0' or sub == 'disable' or sub == 'false' then
+            ctrl.fov_enabled = false
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Maintain Field of View: \arDISABLED\ax.')
+        else
+            print(string.format('\ag[Triune]\ax Field of View: %d units (Maintain on Zone: %s). Usage: /ac fov [50-150|on|off]',
+                ctrl.fov or 100, ctrl.fov_enabled and '\agENABLED\ax' or '\arDISABLED\ax'))
         end
     elseif cmd == 'chasedist' or cmd == 'chase' or cmd == 'chaserange' or cmd == 'followdist' then
         local arg2 = args[2] and string.lower(args[2]) or ''
@@ -20046,6 +20126,9 @@ local function runMainLoop()
             reconcileSungBuffs()                                      -- don't re-sing bard buffs that are already up
             reconcilePets()                                           -- don't re-summon pets that are already out
             runtime.lastSig = loadoutSig(); runtime.autoDirty = false -- baseline; don't save what we just loaded
+            if ctrl.fov_enabled and runtime.applyFov then
+                runtime.applyFov()
+            end
         end
         local curZone = mq.TLO.Zone.ShortName()
         if curZone and curZone ~= '' and curZone ~= runtime.lastZoneShort then
@@ -20072,6 +20155,12 @@ local function runMainLoop()
         if runtime.pendingCursorClearAt and os.clock() >= runtime.pendingCursorClearAt then
             runtime.pendingCursorClearAt = nil
             clearCursor()
+        end
+        if runtime.pendingFovAt and os.clock() >= runtime.pendingFovAt then
+            runtime.pendingFovAt = nil
+            if ctrl.fov_enabled and runtime.applyFov then
+                runtime.applyFov()
+            end
         end
         if runtime.pendingAATrain and runtime.processAATrainWorkflow then
             runtime.processAATrainWorkflow()

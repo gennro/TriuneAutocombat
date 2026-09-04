@@ -225,6 +225,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac run` | `/ac start` | Start autocombat |
 | `/ac pause` | `/ac stop` | Pause autocombat and stop moving |
 | `/ac pausezone [on\|off]` | `/ac zonepause`, `/ac pauseonzone` | Toggle automatic script pause when zoning (default: on) |
+| `/ac fov [50-150\|on\|off]` | `/ac setfov`, `/ac camfov` | Configure camera Field of View (50-150 units) and maintain across zoning |
 | `/ac burn [on\|off]` | `/ac burnon`, `/ac burnoff` | Toggle Burn mode on/off |
 | `/ac memall` | `/ac mem`, `/ac remem` | Queue all missing or mismatched priority spells to memorization bar |
 | `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |
@@ -327,6 +328,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **1.9.0**
+Current version: **2.0-beta**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

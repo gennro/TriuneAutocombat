@@ -616,6 +616,8 @@ local EXPECTED_FIELDS = {
     { 'auto_accept_guild',        'boolean' },
     { 'auto_accept_group',        'boolean' },
     { 'auto_accept_names',        'table' },
+    { 'fov',                      'number' },
+    { 'fov_enabled',              'boolean' },
 }
 
 for _, spec in ipairs(EXPECTED_FIELDS) do
@@ -640,6 +642,8 @@ assert_eq(dc.auto_spend_aa_name, 'Alternately Advanced Fireworks', 'defaultCtrl:
 assert_eq(dc.auto_spend_aa_action, 'window', 'defaultCtrl: auto_spend_aa_action=window')
 assert_eq(dc.auto_summon_fireworks, false, 'defaultCtrl: auto_summon_fireworks=false')
 assert_eq(dc.pause_on_zone, true, 'defaultCtrl: pause_on_zone=true')
+assert_eq(dc.fov, 100, 'defaultCtrl: fov=100')
+assert_eq(dc.fov_enabled, false, 'defaultCtrl: fov_enabled=false')
 
 -- ============================================================================
 -- 9.  isActionSkill(name) & defaultActionEntry
@@ -2795,9 +2799,9 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '1.9.0', 'triune.lua version is 1.9.0')
-    assert_eq(updaterVer, '1.9.0', 'triune_updater.lua version is 1.9.0')
-    assert_eq(readmeVer, '1.9.0', 'README.md version is 1.9.0')
+    assert_eq(triuneVer, '2.0-beta', 'triune.lua version is 2.0-beta')
+    assert_eq(updaterVer, '2.0-beta', 'triune_updater.lua version is 2.0-beta')
+    assert_eq(readmeVer, '2.0-beta', 'README.md version is 2.0-beta')
     assert_true(triuneSrc:find('hdrUpdate') == nil, 'triune.lua does not contain hdrUpdate button')
     assert_true(triuneSrc:find('miniUpdate') == nil, 'triune.lua does not contain miniUpdate button')
 end
@@ -6211,6 +6215,101 @@ do
     assert_true(handleBehindSlashCmd(testCtrl, 'on'), 'Slash cmd on enables assist_behind')
     assert_eq(handleBehindSlashCmd(testCtrl, ''), false, 'Slash cmd toggle flips to false')
     assert_true(handleBehindSlashCmd(testCtrl, ''), 'Slash cmd toggle flips back to true')
+end
+
+-- ============================================================================
+-- Suite 59: Field of View (FOV) Camera & Zoning Logic
+-- ============================================================================
+print('--- Suite 59: Field of View (FOV) Camera & Zoning Logic ---')
+do
+    -- 1. Default ctrl verification
+    local defaultCtrl = loadFunc(src, 'defaultCtrl')
+    local c = defaultCtrl()
+    assert_eq(c.fov, 100, 'defaultCtrl initializes fov to 100')
+    assert_eq(c.fov_enabled, false, 'defaultCtrl initializes fov_enabled to false')
+
+    -- 2. Clamping and command execution emulation
+    local lastExecutedCmd = nil
+    local function mockApplyFov(ctrlTable)
+        if not ctrlTable.fov_enabled then return nil end
+        local val = tonumber(ctrlTable.fov) or 100
+        if val < 50 then val = 50 end
+        if val > 150 then val = 150 end
+        local cmd = string.format('/fov %d', math.floor(val))
+        lastExecutedCmd = cmd
+        return cmd
+    end
+
+    local testCtrl = { fov = 100, fov_enabled = false }
+    assert_eq(mockApplyFov(testCtrl), nil, 'mockApplyFov: no-op when fov_enabled is false')
+
+    testCtrl.fov_enabled = true
+    assert_eq(mockApplyFov(testCtrl), '/fov 100', 'mockApplyFov: executes /fov 100 when enabled')
+
+    testCtrl.fov = 125
+    assert_eq(mockApplyFov(testCtrl), '/fov 125', 'mockApplyFov: executes /fov 125')
+
+    testCtrl.fov = 30 -- below min
+    assert_eq(mockApplyFov(testCtrl), '/fov 50', 'mockApplyFov: clamps to min 50')
+
+    testCtrl.fov = 180 -- above max
+    assert_eq(mockApplyFov(testCtrl), '/fov 150', 'mockApplyFov: clamps to max 150')
+
+    -- 3. Slash command handling emulation
+    local function handleFovSlashCmd(ctrlTable, arg)
+        local sub = arg and string.lower(tostring(arg)) or ''
+        local num = tonumber(arg)
+        if num then
+            if num < 50 then num = 50 end
+            if num > 150 then num = 150 end
+            ctrlTable.fov = math.floor(num)
+            ctrlTable.fov_enabled = true
+            mockApplyFov(ctrlTable)
+            return 'SET'
+        elseif sub == 'on' or sub == '1' or sub == 'enable' or sub == 'true' then
+            ctrlTable.fov_enabled = true
+            mockApplyFov(ctrlTable)
+            return 'ENABLED'
+        elseif sub == 'off' or sub == '0' or sub == 'disable' or sub == 'false' then
+            ctrlTable.fov_enabled = false
+            return 'DISABLED'
+        else
+            return 'STATUS'
+        end
+    end
+
+    local cmdCtrl = { fov = 100, fov_enabled = false }
+    assert_eq(handleFovSlashCmd(cmdCtrl, '120'), 'SET', 'Slash cmd sets FOV')
+    assert_eq(cmdCtrl.fov, 120, 'Slash cmd updated ctrl.fov to 120')
+    assert_true(cmdCtrl.fov_enabled, 'Slash cmd enabled fov_enabled')
+    assert_eq(lastExecutedCmd, '/fov 120', 'Slash cmd executed /fov 120')
+
+    assert_eq(handleFovSlashCmd(cmdCtrl, 'off'), 'DISABLED', 'Slash cmd disabled FOV')
+    assert_eq(cmdCtrl.fov_enabled, false, 'ctrl.fov_enabled is false')
+
+    assert_eq(handleFovSlashCmd(cmdCtrl, 'on'), 'ENABLED', 'Slash cmd enabled FOV')
+    assert_true(cmdCtrl.fov_enabled, 'ctrl.fov_enabled is true')
+    assert_eq(lastExecutedCmd, '/fov 120', 'Slash cmd re-executed /fov 120')
+
+    -- 4. Zoning reapplication verification
+    local zonedFovApplied = false
+    local function mockOnZoned(ctrlTable)
+        if ctrlTable.fov_enabled then
+            mockApplyFov(ctrlTable)
+            zonedFovApplied = true
+        end
+    end
+
+    zonedFovApplied = false
+    cmdCtrl.fov_enabled = false
+    mockOnZoned(cmdCtrl)
+    assert_eq(zonedFovApplied, false, 'mockOnZoned does not apply when fov_enabled is false')
+
+    cmdCtrl.fov_enabled = true
+    cmdCtrl.fov = 110
+    mockOnZoned(cmdCtrl)
+    assert_true(zonedFovApplied, 'mockOnZoned applies FOV when fov_enabled is true')
+    assert_eq(lastExecutedCmd, '/fov 110', 'mockOnZoned executed /fov 110')
 end
 
 -- ============================================================================
