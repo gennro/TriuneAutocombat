@@ -4503,8 +4503,7 @@ end
 
 function runtime.removeAutoAcceptName(nameOrIdOrEntry)
     if not nameOrIdOrEntry or not ctrl.auto_accept_names then return false end
-    local targetNum = nil
-    local targetStr = nil
+    local targetNum, targetStr
 
     if type(nameOrIdOrEntry) == 'table' then
         targetNum = tonumber(nameOrIdOrEntry.id)

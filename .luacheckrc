@@ -1,3 +1,4 @@
+---@diagnostic disable: lowercase-global, undefined-global
 -- .luacheckrc — Luacheck configuration for TriuneAutocombat
 -- Runs on CI via `luacheck TAC/` to catch typos, unused vars, shadowed
 -- locals, and references to undefined globals.
@@ -21,6 +22,7 @@ globals = {
     "ImGuiTreeNodeFlags",
     "ImGuiTabBarFlags",
     "ImGuiTabItemFlags",
+    "ImGuiInputTextFlags",
     "ImGuiMod",
     "ImGuiKey",
     "ImVec2",

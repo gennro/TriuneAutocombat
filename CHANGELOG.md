@@ -30,6 +30,11 @@
       - **Faction & Rewards** (`▲ / ▼ Faction`, `★ Reward`): Color-coded green and red with delta badges.
       - **Alerts & Warnings** (`⚠ Note`): Highlighted in warning orange.
     - **View Mode Toggle**: Added `[Formatted View]` vs `[Raw Text]` radio selectors in the walkthrough header, allowing users to toggle between rich formatted presentation and the raw wiki text at any time.
+  - **Static Code Analysis Clean Pass (`.luacheckrc`, `triune.lua`, `triune_quest.lua`)**:
+    - Registered `ImGuiInputTextFlags` in `.luacheckrc` globals.
+    - Cleaned redundant `nil` declarations for `targetNum` and `targetStr` in `runtime.removeAutoAcceptName`.
+    - Eliminated unused region width variables (`availX`) and loop indices across `triune_quest.lua`.
+    - Achieved **0 warnings / 0 errors across 182 files** in `luacheck TAC/`.
   - **Automated Test Coverage (`Suite 57`)**: Added regression unit tests validating catalog loading, 33 expansion definitions (00 to 32), zone package schema verification, server era filtering logic, zone list directory building and sorting, global quest query filtering, and narrative preamble stripping and tokenization.
 
 - **Code Audit, Logic Bug Fixes, Thread Safety & Headroom Optimization (`triune.lua`, `tests/test_pure_logic.lua`).**

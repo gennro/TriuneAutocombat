@@ -859,7 +859,7 @@ function UI.drawZoneGuideTab()
     ImGui.Separator()
     
     -- Split Layout: Left pane list (380px), Right pane details (Remaining)
-    local availX, availY = ImGui.GetContentRegionAvail()
+    local _, availY = ImGui.GetContentRegionAvail()
     local leftWidth = 380
     
     -- Left Pane: Quest Table
@@ -1014,7 +1014,7 @@ function UI.drawZoneGuideTab()
         -- Required Items / Turn-Ins
         if q.items_required and #q.items_required > 0 then
             ImGui.TextColored(C_GOLD[1], C_GOLD[2], C_GOLD[3], C_GOLD[4], "Required Turn-In Items:")
-            for idx, item in ipairs(q.items_required) do
+            for _, item in ipairs(q.items_required) do
                 local inBags, inBank = Engine.getInventoryCount(item.name)
                 local countReq = item.count or 1
                 local hasEnough = inBags >= countReq
@@ -1094,7 +1094,7 @@ end
 
 -- Browse Zones View: Left zone directory, Right quests in selected zone
 function UI.drawBrowseZonesView()
-    local availX, availY = ImGui.GetContentRegionAvail()
+    local _, availY = ImGui.GetContentRegionAvail()
     local leftWidth = 360
     
     -- Left Pane: Zone Directory
@@ -1277,7 +1277,7 @@ end
 
 -- Global Quest Search View: Search across all 2,600+ quests in Norrath
 function UI.drawGlobalQuestSearchView()
-    local availX, availY = ImGui.GetContentRegionAvail()
+    local _, availY = ImGui.GetContentRegionAvail()
     
     -- Global Search Input Bar
     ImGui.SetNextItemWidth(350)
@@ -1467,8 +1467,8 @@ local function main()
         end
         
         -- Execute any queued action in main coroutine thread
-        if state.pendingAction then
-            local act = state.pendingAction
+        local act = state.pendingAction
+        if type(act) == "function" then
             state.pendingAction = nil
             pcall(act)
         end
