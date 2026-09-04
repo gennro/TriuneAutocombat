@@ -213,6 +213,10 @@ You can control almost everything using simple in-game chat commands:
 | `/ac status` | | Print current status and mode to chat |
 | `/ac help` | `/ac ?` | Show command help in chat |
 | `/ac <mode> [submode]` | | Switch mode (e.g. `/ac manual`, `/ac puller camp`, `/ac assist chase`, `/ac backline`) |
+| `/ac ma [target\|clear\|<name>\|<id>]` | `/ac mainassist` | Configure Main Assist by player ID or name, or set from current PC target |
+| `/ac xtardist [25-300]` | `/ac xtar`, `/ac xtarrange` | Configure max XTarget / assist engagement chase distance (default: 150) |
+| `/ac chasedist [5-100]` | `/ac chase`, `/ac followdist` | Configure following distance (how far to stay back) from Main Assist (default: 15) |
+| `/ac selfdefense [on\|off]` | `/ac assistdefend`, `/ac defend` | Toggle Assist mode self-defense when attacked while MA has no target |
 | `/ac pullhp [0-95]` | `/ac minhp` | Set minimum HP % threshold before pausing pulling to rest until 100% |
 | `/ac pullcon [preset\|con]` | `/ac con`, `/ac confilter` | Configure faction filters (`hostile`, `indifferent`, `all`, `none`) or toggle single considerations |
 | `/ac wp [add\|clear\|del\|on\|off\|list]` | `/ac waypoint`, `/ac waypoints` | Manage waypoint patrol routes, arrival radius, and scan distance |

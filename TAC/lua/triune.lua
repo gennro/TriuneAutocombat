@@ -204,6 +204,7 @@ local function sanitizeModeConfig(c)
         c.submode = 'Hunt'
     end
 
+    if c.assist_self_defense == nil then c.assist_self_defense = true end
     if c.hunter_z_plane == nil then c.hunter_z_plane = 15 end
     if c.hunter_z == nil then c.hunter_z = 75 end
 
@@ -257,6 +258,9 @@ local function sanitizeModeConfig(c)
     if c.downtime_buffing == nil then c.downtime_buffing = true end
     if type(c.status_collapsed) ~= 'table' then c.status_collapsed = {} end
 
+    if c.ma_id == nil then c.ma_id = 0 end
+    if type(c.custom_ma_list) ~= 'table' then c.custom_ma_list = {} end
+
     if type(c.pull_con_filter) ~= 'table' then
         c.pull_con_filter = {}
     end
@@ -287,7 +291,10 @@ local function defaultCtrl()
         ranged_dist          = 40,
         los_face_only        = false,
         ma_name              = '',
+        ma_id                = 0,
+        custom_ma_list       = {},
         assist_at            = 98,
+        assist_self_defense  = true,
         chase                = true,
         chase_dist           = 15,
         automem              = true,
@@ -1335,6 +1342,7 @@ local function getPetSpawnInfo(petId)
         targetName = 'None',
         targetHpPct = 0,
         targetDist = 0,
+        targetId = 0,
         buffCount = 0,
         buffs = {},
         buffDetails = {}
@@ -1371,16 +1379,98 @@ local function getPetSpawnInfo(petId)
             info.stunned = s.Stunned() or false
             info.levitating = s.Levitating() or false
 
-            local t = s.Target
-            if t and t() and t.ID() and t.ID() > 0 then
+            -- Pet target resolution: general Spawn does not expose .Target in MacroQuest.
+            -- Check Me.Pet.Target, Me.Pet.Following, TargetOfTarget, and combat command state.
+            local myPetId = 0
+            pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+
+            local t = nil
+            -- 1. Primary pet target from Me.Pet.Target
+            if myPetId > 0 and myPetId == petId then
+                pcall(function()
+                    local pt = mq.TLO.Me.Pet.Target
+                    if pt and pt() and (pt.ID() or 0) > 0 then
+                        t = pt
+                    end
+                end)
+                if not t then
+                    pcall(function()
+                        local pf = mq.TLO.Me.Pet.Following
+                        if pf and pf() and (pf.ID() or 0) > 0 and pf.Type() == 'NPC' then
+                            t = pf
+                        end
+                    end)
+                end
+            end
+
+            -- 2. If this pet is currently targeted by player, check Target.TargetOfTarget
+            if not t then
+                pcall(function()
+                    local curTargId = mq.TLO.Target.ID() or 0
+                    if curTargId == petId then
+                        local tot = mq.TLO.Target.TargetOfTarget
+                        if tot and tot() and (tot.ID() or 0) > 0 then
+                            t = tot
+                        end
+                    end
+                end)
+            end
+
+            -- 3. Spawn TargetOfTarget
+            if not t then
+                pcall(function()
+                    local tot = s.TargetOfTarget
+                    if tot and tot() and (tot.ID() or 0) > 0 then
+                        t = tot
+                    end
+                end)
+            end
+
+            -- 4. Fallback to active combat command target if pet was ordered to attack and hold is not active
+            if not t and petState and not petState.petHoldActive and (petState.lastCmdTargetId or 0) > 0 then
+                local cmdTid = petState.lastCmdTargetId
+                if isSpawnAlive(cmdTid) and isHostileTarget(cmdTid) then
+                    pcall(function()
+                        local ts = mq.TLO.Spawn(cmdTid)
+                        if ts and ts() and not ts.Dead() and ts.Type() ~= 'Corpse' then
+                            t = ts
+                        end
+                    end)
+                end
+            end
+
+            -- 5. Fallback: if pet is actively in combat and master has an engaged hostile NPC target
+            if not t and petState and not petState.petHoldActive then
+                pcall(function()
+                    local petInCombat = false
+                    if myPetId > 0 and myPetId == petId then
+                        petInCombat = mq.TLO.Me.Pet.Combat() or false
+                    end
+                    if petInCombat then
+                        local curTargId = mq.TLO.Target.ID() or 0
+                        if curTargId > 0 and isHostileTarget(curTargId) and isSpawnAlive(curTargId) then
+                            local ts = mq.TLO.Spawn(curTargId)
+                            if ts and ts() and not ts.Dead() and ts.Type() ~= 'Corpse' then
+                                t = ts
+                            end
+                        end
+                    end
+                end)
+            end
+
+            if t and t() and (t.ID() or 0) > 0 and not t.Dead() and t.Type() ~= 'Corpse' then
                 info.targetName = t.CleanName() or 'Target'
                 info.targetHpPct = t.PctHPs() or 0
                 info.targetDist = t.Distance() or 0
+                info.targetId = t.ID() or 0
+            else
+                info.targetName = 'None'
+                info.targetHpPct = 0
+                info.targetDist = 0
+                info.targetId = 0
             end
 
             -- 1. Try Me.Pet buffs if this is the player's primary pet
-            local myPetId = 0
-            pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
             if myPetId > 0 and myPetId == petId then
                 for b = 1, 30 do
                     pcall(function()
@@ -1672,6 +1762,62 @@ local function stopMoving()
     pursuit.detourStartedAt = 0
     pursuit.detourExpiresAt = 0
 end
+
+function runtime.stopMovementForCast(cls, spell)
+    -- Bards can sing songs while running in EverQuest
+    if cls == 'Brd' then return end
+    local isBrd = false
+    pcall(function() isBrd = (mq.TLO.Me.Class.ShortName() == 'BRD') end)
+    if isBrd and (not cls or cls == 'Brd') then return end
+
+    -- Halt active MQ2Nav
+    if navLoaded() then
+        local navActive = false
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+        if navActive then
+            pcall(function() mq.cmd('/nav stop') end)
+            pursuit.id = 0
+            pursuit.lastNavTargetId = 0
+            pursuit.lastNavLoc = nil
+        end
+    end
+
+    -- Pause MQ2Stick if active so it can cleanly unpause post-cast
+    if stickLoaded() then
+        pcall(function()
+            if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                mq.cmd('/stick pause')
+            end
+        end)
+    end
+
+    -- Halt active MQ2MoveTo
+    pcall(function()
+        if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving() then
+            mq.cmd('/moveto off')
+        end
+    end)
+
+    -- Release keyboard movement keys and wait briefly for momentum to stop
+    local isMoving = false
+    pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+    if isMoving then
+        pcall(function() mq.cmd('/keypress forward') end)
+        pcall(function() mq.cmd('/keypress back') end)
+        pcall(function() mq.cmd('/keypress strafe_left') end)
+        pcall(function() mq.cmd('/keypress strafe_right') end)
+        local waitStop = 0
+        while waitStop < 200 do
+            local stillMoving = false
+            pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
+            if not stillMoving then break end
+            local ok = pcall(function() mq.delay(20) end)
+            if not ok then break end
+            waitStop = waitStop + 20
+        end
+    end
+end
+
 
 -- Spawn ids MQ2Nav has told us have no path to. Cleared after 60s in case terrain
 -- state changes (a door opens, etc). findRoamTarget skips these when picking a
@@ -3947,6 +4093,8 @@ function runtime.applyEntry(e)
         if ctrl.pull_min_hp_pct == nil then ctrl.pull_min_hp_pct = 0 end
         if ctrl.action_trained_only == nil then ctrl.action_trained_only = true end
         if ctrl.buff_refresh_sec == nil then ctrl.buff_refresh_sec = 45 end
+        if ctrl.ma_id == nil then ctrl.ma_id = 0 end
+        if type(ctrl.custom_ma_list) ~= 'table' then ctrl.custom_ma_list = {} end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -4887,6 +5035,9 @@ function runtime.onCharacterChanged()
     loadout = { gems = {}, aas = {}, discs = {}, actions = {}, clickies = {} }
     ctrl = defaultCtrl()
     runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
+    runtime.specialTabAAs = nil
+    runtime.specialTabReadDone = false
+    runtime.pendingReadSpecialTab = true
     lvlMin, lvlMax = 1, 65
     if ALLDATA[myName] then
         runtime.applyEntry(ALLDATA[myName])
@@ -5293,6 +5444,10 @@ function UI.drawHelpTab()
                 { cmd = '/ac zplane [5-100]',                 desc = 'Configure Hunter Tier 1 same-floor / Z plane height threshold (default 15)' },
                 { cmd = '/ac huntz [10-300]',                 desc = 'Configure Hunter Tier 2 max vertical height difference (default 75)' },
                 { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
+                { cmd = '/ac ma [target|clear|<name>|<id>]',  desc = 'Configure Main Assist by player ID or name, or set from current PC target' },
+                { cmd = '/ac xtardist [25-300]',              desc = 'Configure max XTarget / assist engagement chase distance (default 150)' },
+                { cmd = '/ac chasedist [5-100]',              desc = 'Configure following distance (how far to stay back) from Main Assist (default 15)' },
+                { cmd = '/ac selfdefense [on|off]',           desc = 'Toggle Assist mode self-defense when attacked while MA has no target' },
                 { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
                 { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
                 { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
@@ -6396,6 +6551,8 @@ function UI.drawAutoAATab()
 
     ImGui.SameLine()
     if ImGui.Button('↻ Refresh##autoAaRefreshBtn') then
+        runtime.specialTabReadDone = false
+        runtime.pendingReadSpecialTab = true
         if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
     end
     if ImGui.IsItemHovered() then
@@ -7097,6 +7254,31 @@ function UI.drawStatusTab()
 
     -- 2. Current Target & Threat Card
     if UI.drawCollapsingStatusHeader('target', 'Current Target & Threat', 'statusTarget') then
+        if ctrl.mode == 'Assist' or (ctrl.ma_id and ctrl.ma_id > 0) or (ctrl.ma_name and ctrl.ma_name ~= '') then
+            local maInfo = runtime.getMaTargetInfo and runtime.getMaTargetInfo()
+            if maInfo and maInfo.hasMA then
+                accent(GOLD, 'Main Assist:')
+                ImGui.SameLine(); ImGui.Text(string.format('%s (ID: %d)', maInfo.maName, maInfo.maId))
+                ImGui.SameLine(); ImGui.TextDisabled('|')
+                ImGui.SameLine()
+                if maInfo.hasTarget then
+                    local clsStr = (maInfo.targetClass ~= '') and (' [' .. maInfo.targetClass .. ']') or ''
+                    accent(ARC, 'MA Target:')
+                    ImGui.SameLine()
+                    local conCol = UI.getConColorRgb(maInfo.targetCon)
+                    accent(conCol, string.format('%s%s (ID: %d, %d%% HP, %.1fft)', maInfo.targetName, clsStr, maInfo.targetId, maInfo.targetHp, maInfo.targetDist))
+                    ImGui.SameLine()
+                    if ImGui.Button('Target MA Target##statCardTargMA', 125, 18) then
+                        mq.cmdf('/target id %d', maInfo.targetId)
+                    end
+                    if ImGui.IsItemHovered() then UI.setTooltip(string.format('Acquire Main Assist target: %s (ID %d)', maInfo.targetName, maInfo.targetId)) end
+                else
+                    accent(MUTED, 'MA Target: No Target')
+                end
+                ImGui.Separator()
+            end
+        end
+
         local tId, tName, tLvl, tClass, tRace, tType, tCon, tHpPct, tCurHp, tMaxHp, tDist, tLoS, tHeading
         local tTotName, tTotPct, tMyAggro, tMySecAggro
         pcall(function()
@@ -7366,9 +7548,24 @@ function UI.drawStatusTab()
                 ImGui.SameLine()
                 accent(GOLD, string.format('%s (Lvl %d %s, ID: %d)', info.cleanName, info.level, info.race, info.id))
                 ImGui.SameLine(); ImGui.TextDisabled('|')
-                ImGui.SameLine(); accent(ARC, string.format('Target: %s', (info.targetName and info.targetName ~= '') and info.targetName or 'None'))
-                if info.targetDist and info.targetDist > 0 and info.targetDist < 900 then
-                    ImGui.SameLine(); ImGui.TextDisabled(string.format('(%.1fft)', info.targetDist))
+                ImGui.SameLine()
+                local hasTarg = (info.targetName and info.targetName ~= '' and info.targetName ~= 'None')
+                if hasTarg then
+                    accent(ARC, string.format('Target: %s (%d%%)', info.targetName, info.targetHpPct or 0))
+                    if info.targetDist and info.targetDist > 0 and info.targetDist < 900 then
+                        ImGui.SameLine(); ImGui.TextDisabled(string.format('(%.1fft)', info.targetDist))
+                    end
+                    if info.targetId and info.targetId > 0 then
+                        ImGui.SameLine()
+                        if ImGui.SmallButton(string.format('Target##petTarg_%d', info.id or 0)) then
+                            mq.cmdf('/target id %d', info.targetId)
+                        end
+                        if ImGui.IsItemHovered() then
+                            UI.setTooltip(string.format('Target pet\'s target: %s (ID %d)', info.targetName, info.targetId))
+                        end
+                    end
+                else
+                    accent(MUTED, 'Target: None')
                 end
 
                 local pr, pg, pb = 0.35, 0.75, 0.45
@@ -7543,15 +7740,26 @@ function UI.drawStatusTab()
             ImGui.TextDisabled(string.format('• Anchor: %s | Min Level: %d | Max Level: %d',
                 anchorInfo, ctrl.pull_min_level or 1, ctrl.pull_max_level or 100))
         elseif ctrl.mode == 'Assist' then
-            local maTargName = 'None'
-            if ctrl.ma_name and ctrl.ma_name ~= '' then
-                pcall(function() maTargName = mq.TLO.Spawn(string.format('pc =%s', ctrl.ma_name)).Target.CleanName() or 'No Target' end)
+            local maInfo = runtime.getMaTargetInfo and runtime.getMaTargetInfo()
+            local maDisplay = (maInfo and maInfo.hasMA) and string.format('%s (ID: %d)', maInfo.maName, maInfo.maId) or '(None Set)'
+            local maTargStr = 'No Target'
+            if maInfo and maInfo.hasTarget then
+                local clsStr = (maInfo.targetClass ~= '') and (' [' .. maInfo.targetClass .. ']') or ''
+                maTargStr = string.format('%s%s (ID: %d, %d%% HP, %.1fft)', maInfo.targetName, clsStr, maInfo.targetId, maInfo.targetHp, maInfo.targetDist)
             end
             accent(GOLD, 'Assist Operations:')
             ImGui.Text(string.format('• Main Assist: %s | MA Target: %s | Assist At: %d%% HP',
-                (ctrl.ma_name and ctrl.ma_name ~= '') and ctrl.ma_name or '(None Set)', maTargName, ctrl.assist_at or 98))
-            ImGui.TextDisabled(string.format('• Chase MA: %s (Chase Dist: %d ft)',
-                ctrl.chase and 'Enabled' or 'Disabled', ctrl.chase_dist or 15))
+                maDisplay, maTargStr, ctrl.assist_at or 98))
+            if maInfo and maInfo.hasTarget then
+                ImGui.SameLine()
+                if ImGui.SmallButton('Target##statOpTargMA') then
+                    mq.cmdf('/target id %d', maInfo.targetId)
+                end
+                if ImGui.IsItemHovered() then UI.setTooltip(string.format('Target %s (ID %d)', maInfo.targetName, maInfo.targetId)) end
+            end
+            ImGui.TextDisabled(string.format('• Chase MA: %s (Chase Dist: %d ft) | Max XTar Chase: %d ft | Self-Defense: %s',
+                ctrl.chase and 'Enabled' or 'Disabled', ctrl.chase_dist or 15, ctrl.xtar_nav_dist or 150,
+                (ctrl.assist_self_defense ~= false) and 'Enabled' or 'Disabled'))
         elseif ctrl.mode == 'Manual' then
             accent(GOLD, 'Manual Operations:')
             local campInfo = 'No camp set (stays put wherever fights end)'
@@ -7676,6 +7884,283 @@ function UI.drawStatusTab()
     ImGui.EndTabItem()
 end
 
+function runtime.getMaTargetInfo()
+    local maId = (runtime.maPcId and runtime.maPcId()) or (ctrl and ctrl.ma_id and ctrl.ma_id > 0 and ctrl.ma_id) or nil
+    local maName = (ctrl and ctrl.ma_name and ctrl.ma_name ~= '') and ctrl.ma_name or nil
+    local maSpawn = nil
+    if maId and maId > 0 then
+        pcall(function() maSpawn = mq.TLO.Spawn(maId) end)
+    elseif maName then
+        pcall(function() maSpawn = mq.TLO.Spawn('pc =' .. maName) end)
+    end
+    if not maSpawn or not maSpawn() then
+        return {
+            maId = maId or 0,
+            maName = maName or '(None Set)',
+            hasMA = false,
+            hasTarget = false,
+            targetName = 'No Target',
+            targetId = 0,
+            targetHp = 0,
+            targetDist = 0,
+            targetLvl = 0,
+            targetClass = '',
+            targetType = '',
+            targetCon = 'White',
+        }
+    end
+
+    local cleanMaName = maSpawn.CleanName() or (maName or 'Unknown')
+    local actualMaId = maSpawn.ID() or (maId or 0)
+    local t = nil
+    pcall(function() t = maSpawn.Target end)
+    if not t or not t() or (t.ID() or 0) <= 0 then
+        return {
+            maId = actualMaId,
+            maName = cleanMaName,
+            hasMA = true,
+            hasTarget = false,
+            targetName = 'No Target',
+            targetId = 0,
+            targetHp = 0,
+            targetDist = 0,
+            targetLvl = 0,
+            targetClass = '',
+            targetType = '',
+            targetCon = 'White',
+        }
+    end
+
+    local tId = 0
+    local tName = 'No Target'
+    local tHp = 0
+    local tDist = 0
+    local tLvl = 0
+    local tClass = ''
+    local tType = ''
+    local tCon = 'White'
+    pcall(function()
+        tId = t.ID() or 0
+        tName = t.CleanName() or 'No Target'
+        tHp = t.PctHPs() or 0
+        tDist = t.Distance() or 0
+        tLvl = t.Level() or 0
+        tClass = t.Class.ShortName() or ''
+        tType = t.Type() or ''
+        tCon = t.ConColor() or 'White'
+    end)
+
+    return {
+        maId = actualMaId,
+        maName = cleanMaName,
+        hasMA = true,
+        hasTarget = (tId > 0),
+        targetName = tName,
+        targetId = tId,
+        targetHp = tHp,
+        targetDist = tDist,
+        targetLvl = tLvl,
+        targetClass = tClass,
+        targetType = tType,
+        targetCon = tCon,
+    }
+end
+
+function runtime.getAssistCandidates()
+    local candidates = {
+        { id = 0, name = '', label = '(None)', source = 'none' }
+    }
+    local seenNames = {}
+
+    -- 1. Dynamic group members (excluding self)
+    local grpCount = 0
+    pcall(function() grpCount = mq.TLO.Group.Members() or 0 end)
+    local leaderName = ''
+    pcall(function() leaderName = mq.TLO.Group.Leader.CleanName() or '' end)
+
+    if grpCount > 0 then
+        for i = 1, grpCount do
+            local mId = 0
+            local mName = ''
+            local mClass = ''
+            pcall(function()
+                local m = mq.TLO.Group.Member(i)
+                if m and m() then
+                    mId = m.ID() or 0
+                    mName = m.CleanName() or ''
+                    mClass = m.Class.ShortName() or ''
+                end
+            end)
+            if mName ~= '' then
+                local isLdr = (leaderName ~= '' and mName:lower() == leaderName:lower())
+                local ldrPrefix = isLdr and '[Leader] ' or '[Group] '
+                local clsStr = (mClass ~= '') and (' [' .. mClass .. ']') or ''
+                local idStr = (mId > 0) and (' (ID: ' .. tostring(mId) .. ')') or ' (Not in zone)'
+                local lbl = string.format('%s%s%s%s', ldrPrefix, mName, clsStr, idStr)
+                table.insert(candidates, { id = mId, name = mName, label = lbl, source = 'group', class = mClass })
+                seenNames[mName:lower()] = true
+            end
+        end
+    end
+
+    -- 2. Custom assist candidates from ctrl.custom_ma_list
+    if ctrl and ctrl.custom_ma_list and type(ctrl.custom_ma_list) == 'table' then
+        for _, entry in ipairs(ctrl.custom_ma_list) do
+            local eName = entry.name or ''
+            if eName ~= '' and not seenNames[eName:lower()] then
+                local liveId = 0
+                local liveCls = entry.class or ''
+                pcall(function()
+                    local s = mq.TLO.Spawn('pc =' .. eName)
+                    if s and s() and isSpawnAlive(s.ID()) then
+                        liveId = s.ID() or 0
+                        liveCls = s.Class.ShortName() or liveCls
+                    end
+                end)
+                if liveId > 0 then
+                    entry.id = liveId
+                    entry.class = liveCls
+                end
+                local clsStr = (liveCls ~= '') and (' [' .. liveCls .. ']') or ''
+                local idStr
+                if liveId > 0 then
+                    idStr = ' (ID: ' .. tostring(liveId) .. ')'
+                elseif (entry.id or 0) > 0 then
+                    idStr = ' (ID: ' .. tostring(entry.id) .. ' - Away)'
+                else
+                    idStr = ' (Not in zone)'
+                end
+                local lbl = string.format('[Custom] %s%s%s', eName, clsStr, idStr)
+                table.insert(candidates, {
+                    id = liveId > 0 and liveId or (entry.id or 0),
+                    name = eName,
+                    label = lbl,
+                    source = 'custom',
+                    class = liveCls
+                })
+                seenNames[eName:lower()] = true
+            end
+        end
+    end
+
+    return candidates
+end
+
+function runtime.addCustomAssistTarget()
+    local tId = 0
+    local tType = ''
+    local tName = ''
+    local tClass = ''
+    pcall(function()
+        local t = mq.TLO.Target
+        if t and t() then
+            tId = t.ID() or 0
+            tType = t.Type() or ''
+            tName = t.CleanName() or ''
+            tClass = t.Class.ShortName() or ''
+        end
+    end)
+
+    if tId <= 0 or tName == '' then
+        runtime.maStatusMsg = 'Target a player character (PC) first to add.'
+        runtime.maStatusTimer = os.clock() + 4.0
+        return false
+    end
+
+    if tType ~= 'PC' then
+        runtime.maStatusMsg = string.format('Target "%s" is not a PC (%s). Target must be a PC.', tName, tType)
+        runtime.maStatusTimer = os.clock() + 4.0
+        return false
+    end
+
+    local myId = 0
+    pcall(function() myId = mq.TLO.Me.ID() or 0 end)
+    if tId == myId then
+        runtime.maStatusMsg = 'Cannot add yourself as Main Assist.'
+        runtime.maStatusTimer = os.clock() + 4.0
+        return false
+    end
+
+    ctrl.custom_ma_list = ctrl.custom_ma_list or {}
+    local found = false
+    for _, entry in ipairs(ctrl.custom_ma_list) do
+        if entry.name:lower() == tName:lower() then
+            entry.id = tId
+            entry.class = tClass
+            found = true
+            break
+        end
+    end
+    if not found then
+        table.insert(ctrl.custom_ma_list, { name = tName, id = tId, class = tClass })
+    end
+
+    ctrl.ma_id = tId
+    ctrl.ma_name = tName
+    runtime.saveLoadout(true)
+    runtime.maStatusMsg = string.format('Added %s (ID: %d) as Main Assist.', tName, tId)
+    runtime.maStatusTimer = os.clock() + 4.0
+    return true
+end
+
+function runtime.removeCustomAssist(targetNameOrId)
+    ctrl.custom_ma_list = ctrl.custom_ma_list or {}
+    local removeIdx = nil
+
+    if targetNameOrId then
+        local searchStr = tostring(targetNameOrId):lower()
+        for i, entry in ipairs(ctrl.custom_ma_list) do
+            if entry.name:lower() == searchStr or tostring(entry.id) == searchStr then
+                removeIdx = i
+                break
+            end
+        end
+    end
+
+    if not removeIdx then
+        local tName = nil
+        pcall(function()
+            local t = mq.TLO.Target
+            if t and t() and t.Type() == 'PC' then tName = t.CleanName() end
+        end)
+        if tName and tName ~= '' then
+            for i, entry in ipairs(ctrl.custom_ma_list) do
+                if entry.name:lower() == tName:lower() then
+                    removeIdx = i
+                    break
+                end
+            end
+        end
+    end
+
+    if not removeIdx then
+        for i, entry in ipairs(ctrl.custom_ma_list) do
+            if (ctrl.ma_id and ctrl.ma_id > 0 and entry.id == ctrl.ma_id) or
+               (ctrl.ma_name and ctrl.ma_name ~= '' and entry.name:lower() == ctrl.ma_name:lower()) then
+                removeIdx = i
+                break
+            end
+        end
+    end
+
+    if removeIdx then
+        local removedName = ctrl.custom_ma_list[removeIdx].name
+        table.remove(ctrl.custom_ma_list, removeIdx)
+        if ctrl.ma_name and ctrl.ma_name:lower() == removedName:lower() then
+            ctrl.ma_id = 0
+            ctrl.ma_name = ''
+        end
+        runtime.saveLoadout(true)
+        runtime.maStatusMsg = string.format('Removed "%s" from custom assist list.', removedName)
+        runtime.maStatusTimer = os.clock() + 4.0
+        return true
+    else
+        runtime.maStatusMsg = 'Select or target a custom assist to remove (group members are dynamic).'
+        runtime.maStatusTimer = os.clock() + 4.0
+        return false
+    end
+end
+
 -- UI: control tab
 function UI.drawControlTab()
     if not ImGui.BeginTabItem('Control') then return end
@@ -7684,6 +8169,9 @@ function UI.drawControlTab()
     local curPrimaryIdx = idxOf(MODES.PRIMARY, ctrl.mode)
     local newPrimaryIdx = ImGui.Combo('##primaryMode', curPrimaryIdx, MODES.PRIMARY)
     local newPrimaryMode = MODES.PRIMARY[newPrimaryIdx]
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Select primary combat operating mode (Manual, Puller, Assist).')
+    end
 
     if newPrimaryMode ~= ctrl.mode then
         if ctrl.mode == 'Manual' and newPrimaryMode ~= 'Manual' then
@@ -7708,6 +8196,9 @@ function UI.drawControlTab()
         local subList = MODES.SUBMODES[ctrl.mode]
         local curSubIdx = idxOf(subList, ctrl.submode)
         local newSubIdx = ImGui.Combo('##submode', curSubIdx, subList)
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Select operational submode behavior for ' .. tostring(ctrl.mode) .. '.')
+        end
         if newSubIdx ~= curSubIdx then
             ctrl.submode = subList[newSubIdx]
             if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
@@ -7734,6 +8225,9 @@ function UI.drawControlTab()
             local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
             if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
         end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Set the current location as the Camp anchor point. Character will return here when idle.')
+        end
         ImGui.SameLine()
         if ImGui.Button('Clear Camp##manualCampClear') then
             ctrl.camp_loc = nil
@@ -7745,6 +8239,9 @@ function UI.drawControlTab()
         if ctrl.camp_loc then
             ImGui.SetNextItemWidth(180)
             ctrl.camp_radius = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Maximum distance in units from camp center to engage enemies.')
+            end
         end
 
         ctrl.manual_auto_xtarget = ImGui.Checkbox('Auto-Target Hostiles on XTarget##manualAutoXtar',
@@ -7950,21 +8447,39 @@ function UI.drawControlTab()
                 local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
                 if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
             end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Set the current location as the Puller Camp anchor point. Puller returns here after pulling.')
+            end
             ImGui.SameLine()
             if ImGui.Button('Clear Camp##pullerCampClear') then
                 ctrl.camp_loc = nil; runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
             end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Clear the Puller Camp anchor point.')
+            end
 
             ImGui.SetNextItemWidth(180)
             ctrl.camp_radius = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Maximum horizontal distance in units from camp to search for pullable NPCs.')
+            end
             ImGui.SetNextItemWidth(180)
             ctrl.camp_z = ImGui.SliderInt('Pull Height Diff (Z)', ctrl.camp_z or 75, 10, 300)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Maximum vertical height difference (Z) in units above or below camp to search for pullable NPCs.')
+            end
 
             ImGui.SetNextItemWidth(180)
             ctrl.pull_min_level = ImGui.SliderInt('Min NPC Level', ctrl.pull_min_level or 1, 1, 100)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Minimum NPC level required to consider a mob eligible for pulling.')
+            end
             ImGui.SameLine()
             ImGui.SetNextItemWidth(180)
             ctrl.pull_max_level = ImGui.SliderInt('Max NPC Level', ctrl.pull_max_level or 100, 1, 100)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Maximum NPC level allowed to consider a mob eligible for pulling.')
+            end
             if ctrl.pull_min_level > ctrl.pull_max_level then ctrl.pull_min_level = ctrl.pull_max_level end
 
             ImGui.SetNextItemWidth(180)
@@ -8441,18 +8956,121 @@ function UI.drawControlTab()
 
     -- Assist Mode Contextual Controls
     if ctrl.mode == 'Assist' then
-        accent(GOLD, 'Main Assist Settings')
-        ImGui.SetNextItemWidth(160)
-        ctrl.ma_name = ImGui.InputText('MA Name', ctrl.ma_name or '')
-        if ImGui.IsItemHovered() then ImGui.SetTooltip('Character to assist. Leave blank to assist group leader.') end
+        accent(GOLD, 'Main Assist Selection (by Player ID)')
+        local candidates = runtime.getAssistCandidates()
+        local comboLabels = {}
+        local curIdx = 1
+        for idx, c in ipairs(candidates) do
+            table.insert(comboLabels, c.label)
+            if ctrl.ma_id and ctrl.ma_id > 0 and c.id == ctrl.ma_id then
+                curIdx = idx
+            end
+        end
+        -- Fallback match by name if not matched by ID
+        if curIdx == 1 and ctrl.ma_name and ctrl.ma_name ~= '' then
+            for idx, c in ipairs(candidates) do
+                if c.name:lower() == ctrl.ma_name:lower() then
+                    curIdx = idx
+                    if c.id > 0 then ctrl.ma_id = c.id end
+                    break
+                end
+            end
+        end
+
+        ImGui.SetNextItemWidth(260)
+        local newIdx = ImGui.Combo('##maSelectCombo', curIdx, comboLabels)
+        if newIdx ~= curIdx then
+            local chosen = candidates[newIdx]
+            if chosen then
+                ctrl.ma_id = chosen.id or 0
+                ctrl.ma_name = chosen.name or ''
+                runtime.saveLoadout(true)
+            end
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Select Main Assist by player ID.\nDynamically populated with current group members and custom targets.')
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button('+ Add Target##maAdd') then
+            runtime.addCustomAssistTarget()
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Target a player character (PC) in game and click to add them to the assist dropdown.')
+        end
+
+        local selectedCandidate = candidates[curIdx]
+        local isSelectedCustom = (selectedCandidate and selectedCandidate.source == 'custom')
+        local selectedInCustom = false
+        if selectedCandidate and selectedCandidate.name and selectedCandidate.name ~= '' and ctrl.custom_ma_list then
+            for _, entry in ipairs(ctrl.custom_ma_list) do
+                if entry.name:lower() == selectedCandidate.name:lower() then
+                    selectedInCustom = true
+                    break
+                end
+            end
+        end
+        local targetInCustom = false
+        local tName = nil
+        pcall(function()
+            local t = mq.TLO.Target
+            if t and t() and t.Type() == 'PC' then tName = t.CleanName() end
+        end)
+        if tName and tName ~= '' and ctrl.custom_ma_list then
+            for _, entry in ipairs(ctrl.custom_ma_list) do
+                if entry.name:lower() == tName:lower() then
+                    targetInCustom = true
+                    break
+                end
+            end
+        end
+        local canRemove = isSelectedCustom or selectedInCustom or targetInCustom
+
+        ImGui.SameLine()
+        if not canRemove then ImGui.BeginDisabled() end
+        if ImGui.Button('Remove##maRemove') then
+            runtime.removeCustomAssist()
+        end
+        if not canRemove then ImGui.EndDisabled() end
+        if ImGui.IsItemHovered() then
+            if canRemove then
+                ImGui.SetTooltip('Remove the selected custom player (or current PC target) from the assist dropdown.')
+            else
+                ImGui.SetTooltip('Remove is only available for custom added players.\nGroup members are dynamically managed by group membership.')
+            end
+        end
+
+        if runtime.maStatusMsg and os.clock() < (runtime.maStatusTimer or 0) then
+            accent(WARN, runtime.maStatusMsg)
+        end
+
         ImGui.SetNextItemWidth(160)
         ctrl.assist_at = ImGui.SliderInt('Assist At %', ctrl.assist_at or 98, 1, 100, '%d%%')
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Target HP percentage at or below which this character will engage and attack the Main Assist\'s target.')
+        end
+
+        ImGui.SetNextItemWidth(180)
+        ctrl.xtar_nav_dist = ImGui.SliderInt('Max XTarget Chase Range##assistXtarDist', ctrl.xtar_nav_dist or 150, 25, 300)
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget) or Main Assist target.')
+        end
+
+        ImGui.SetNextItemWidth(180)
+        ctrl.chase_dist = ImGui.SliderInt('Chase Distance (Follow MA)##assistChaseDist', ctrl.chase_dist or 15, 5, 100, '%d ft')
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('How far to stay back from the Main Assist when following (feet/units).\nWhen moving with the MA, the character will follow and hold position at this distance.')
+        end
+
+        ctrl.assist_self_defense = ImGui.Checkbox('Self-Defense When Attacked##assistSelfDefense', ctrl.assist_self_defense ~= false)
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('When enabled, if the Main Assist has no active engaged target and an enemy attacks you, defend yourself.\nWhen the MA engages a target, the assistant will strictly focus on the MA target only.')
+        end
 
         if ctrl.submode == 'Chase' then
-            ctrl.chase = ImGui.Checkbox('Chase MA', ctrl.chase)
-            if ctrl.chase then
-                ImGui.SameLine(); ImGui.SetNextItemWidth(140)
-                ctrl.chase_dist = ImGui.SliderInt('Chase Range', ctrl.chase_dist or 15, 5, 100)
+            ctrl.chase = ImGui.Checkbox('Chase MA (Auto-Follow)', ctrl.chase)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Automatically follow and stay within Chase Distance of the Main Assist when not engaging an active target.')
             end
         elseif ctrl.submode == 'Camp' then
             accent(GOLD, 'Assist Camp Location')
@@ -8467,12 +9085,22 @@ function UI.drawControlTab()
                 local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
                 if mx and my and mz then ctrl.camp_loc = { x = mx, y = my, z = mz } end
             end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Set the current location as the Assist Camp anchor point. Character will return here when idle.')
+            end
             ImGui.SameLine()
             if ImGui.Button('Clear Camp##assistCampClear') then
                 ctrl.camp_loc = nil
             end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Clear the Assist Camp anchor point. Character will hold wherever the previous fight ended.')
+            end
         elseif ctrl.submode == 'Backline' then
-            accent(MUTED, 'Backline stays in position and assists MA with ranged/spells without moving to melee.')
+            ctrl.chase = ImGui.Checkbox('Follow MA in Backline##backlineChase', ctrl.chase)
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('When checked, follows the Main Assist at the configured Chase Distance when out of combat.\nWhen combat begins, holds backline position and assists with spells and ranged attacks without running into melee.')
+            end
+            accent(MUTED, 'Backline stays back at Chase Distance and assists MA with ranged/spells without moving to melee.')
         end
     end
 
@@ -9534,6 +10162,55 @@ function UI.drawMiniGui()
         end
         if ImGui.IsItemHovered() then
             UI.setTooltip('Enable/disable Burn Mode (fires Burn Only spells, AAs, and discs)')
+        end
+
+        ImGui.Separator()
+
+        -- Live Target / Main Assist Status
+        if ctrl.mode == 'Assist' or (ctrl.ma_id and ctrl.ma_id > 0) or (ctrl.ma_name and ctrl.ma_name ~= '') then
+            local maInfo = runtime.getMaTargetInfo and runtime.getMaTargetInfo()
+            if maInfo and maInfo.hasMA then
+                accent(GOLD, 'MA:')
+                ImGui.SameLine()
+                ImGui.Text(string.format('%s (ID: %d)', maInfo.maName, maInfo.maId))
+                ImGui.SameLine(); ImGui.TextDisabled('|')
+                ImGui.SameLine()
+                if maInfo.hasTarget then
+                    accent(ARC, 'Target:')
+                    ImGui.SameLine()
+                    local conCol = UI.getConColorRgb(maInfo.targetCon)
+                    accent(conCol, string.format('%s (%d%%)', maInfo.targetName, maInfo.targetHp))
+                    ImGui.SameLine()
+                    if ImGui.SmallButton('Target##miniTargMA') then
+                        mq.cmdf('/target id %d', maInfo.targetId)
+                    end
+                    if ImGui.IsItemHovered() then
+                        UI.setTooltip(string.format('Target MA Target: %s (ID: %d, %d%% HP, %.1fft)',
+                            maInfo.targetName, maInfo.targetId, maInfo.targetHp, maInfo.targetDist))
+                    end
+                else
+                    ImGui.TextDisabled('Target: None')
+                end
+            else
+                accent(MUTED, 'MA: (None Set)')
+            end
+        else
+            local myTId, myTName, myTHp = 0, 'No Target', 0
+            pcall(function()
+                local t = mq.TLO.Target
+                if t and t() and (t.ID() or 0) > 0 then
+                    myTId = t.ID() or 0
+                    myTName = t.CleanName() or 'Unknown'
+                    myTHp = t.PctHPs() or 0
+                end
+            end)
+            if myTId > 0 then
+                accent(ARC, 'Target:')
+                ImGui.SameLine()
+                accent(GOOD, string.format('%s (ID: %d, %d%%)', myTName, myTId, myTHp))
+            else
+                accent(MUTED, 'Target: None')
+            end
         end
 
         ImGui.Separator()
@@ -10809,6 +11486,251 @@ local function hasNamedBuff(spawnObj, name, isMe, minSec)
     return found
 end
 
+function runtime.recordPetBuff(petId, spellName, durSec)
+    if not petId or petId <= 0 or not spellName or spellName == '' then return end
+    petState.cachedPetBuffs = petState.cachedPetBuffs or {}
+    local cData = petState.cachedPetBuffs[petId] or { time = os.clock(), buffs = {}, buffDetails = {} }
+    cData.time = os.clock()
+    cData.buffs = cData.buffs or {}
+    cData.buffDetails = cData.buffDetails or {}
+    local alreadyIn = false
+    for _, bn in ipairs(cData.buffs) do
+        if bn == spellName then alreadyIn = true break end
+    end
+    if not alreadyIn then
+        table.insert(cData.buffs, spellName)
+    end
+    table.insert(cData.buffDetails, { name = spellName, duration = durSec or 0 })
+    petState.cachedPetBuffs[petId] = cData
+end
+
+function runtime.isPetBuffActive(petId, name, minSec)
+    if not petId or petId == 0 then return false end
+    name = tostring(name or '')
+    if name == '' then return false end
+    minSec = tonumber(minSec) or 0
+
+    local myPetId = 0
+    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+
+    local function isBuffNameMatch(candidateName)
+        if not candidateName or candidateName == '' or candidateName == 'NONE' then return false end
+        if candidateName == name then return true end
+        if candidateName:lower() == name:lower() then return true end
+        if isGemMatching and isGemMatching(candidateName, name) then return true end
+        if cleanSpellName and cleanSpellName(candidateName):lower() == cleanSpellName(name):lower() then return true end
+        return false
+    end
+
+    -- 1. Primary pet inspection via mq.TLO.Me.Pet
+    if myPetId > 0 and petId == myPetId then
+        local found = false
+        local remSec = -1
+        local activeBuffNames = {}
+        local activeBuffDetails = {}
+
+        for b = 1, 30 do
+            pcall(function()
+                local pb = mq.TLO.Me.Pet.Buff(b)
+                if pb then
+                    local bName = nil
+                    if type(pb) == 'string' and pb ~= '' then
+                        bName = pb
+                    elseif pb() and type(pb()) == 'string' and pb() ~= '' then
+                        bName = pb()
+                    elseif pb.Name and pb.Name() and pb.Name() ~= '' then
+                        bName = pb.Name()
+                    end
+                    if bName and bName ~= '' and bName ~= 'NONE' then
+                        local durSec = -1
+                        pcall(function()
+                            local dur = mq.TLO.Me.Pet.BuffDuration(b) or 0
+                            if type(dur) == 'number' and dur > 0 then
+                                durSec = math.floor(dur / 1000)
+                            end
+                        end)
+                        table.insert(activeBuffNames, bName)
+                        table.insert(activeBuffDetails, { slot = b, name = bName, duration = durSec })
+
+                        if not found and isBuffNameMatch(bName) then
+                            found = true
+                            remSec = durSec
+                        end
+                    end
+                end
+            end)
+        end
+
+        -- Update petState.cachedPetBuffs
+        if petState and petState.cachedPetBuffs and #activeBuffNames > 0 then
+            petState.cachedPetBuffs[petId] = {
+                time = os.clock(),
+                buffs = activeBuffNames,
+                buffDetails = activeBuffDetails
+            }
+        end
+
+        if found then
+            if minSec > 0 and remSec >= 0 then
+                return remSec > minSec
+            end
+            return true
+        end
+
+        -- Fallback direct lookup by name
+        pcall(function()
+            local bSlot = mq.TLO.Me.Pet.Buff(name)()
+            if bSlot then
+                local sNum = tonumber(bSlot) or 0
+                if sNum > 0 or (tostring(bSlot) ~= '' and tostring(bSlot) ~= 'NONE') then
+                    found = true
+                    local dur = mq.TLO.Me.Pet.BuffDuration(name)()
+                    if dur and tonumber(dur) and tonumber(dur) > 0 then
+                        remSec = math.floor(tonumber(dur) / 1000)
+                    end
+                end
+            end
+        end)
+
+        if found then
+            if minSec > 0 and remSec >= 0 then
+                return remSec > minSec
+            end
+            return true
+        end
+
+        -- Stacking check: if beneficial spell will not stack on pet, pet already has
+        -- this buff effect or a superior non-overwritable buff
+        local stacksPet = true
+        pcall(function()
+            local sp = mq.TLO.Spell(name)
+            if sp and sp() and sp.Beneficial() and sp.StacksPet then
+                stacksPet = sp.StacksPet()
+            end
+        end)
+        if stacksPet == false then
+            return true
+        end
+
+        return false
+    end
+
+    -- 2. Target buffs if this pet is currently targeted
+    local curTargId = 0
+    pcall(function() curTargId = mq.TLO.Target.ID() or 0 end)
+    if curTargId == petId then
+        local tbc = 0
+        pcall(function() tbc = mq.TLO.Target.BuffCount() or 0 end)
+        if tbc and tbc > 0 then
+            for b = 1, math.min(tbc, 30) do
+                local foundTarg = false
+                local remSec = -1
+                pcall(function()
+                    local tb = mq.TLO.Target.Buff(b)
+                    if tb and tb() then
+                        local bName = (tb.Name and tb.Name()) or tb()
+                        if isBuffNameMatch(bName) then
+                            foundTarg = true
+                            if tb.Duration and tb.Duration.TotalSeconds then
+                                remSec = tonumber(tb.Duration.TotalSeconds()) or -1
+                            end
+                        end
+                    end
+                end)
+                if foundTarg then
+                    if minSec > 0 and remSec >= 0 then
+                        return remSec > minSec
+                    end
+                    return true
+                end
+            end
+        end
+
+        local stacksTarg = true
+        pcall(function()
+            local sp = mq.TLO.Spell(name)
+            if sp and sp() and sp.Beneficial() and sp.StacksTarget then
+                stacksTarg = sp.StacksTarget()
+            end
+        end)
+        if stacksTarg == false then
+            return true
+        end
+    end
+
+    -- 3. Spawn object cached buffs and StacksSpawn
+    local s = mq.TLO.Spawn(petId)
+    if s and s() then
+        local sbc = 0
+        pcall(function()
+            sbc = (s.CachedBuffCount and s.CachedBuffCount()) or (s.BuffCount and s.BuffCount()) or 0
+        end)
+        if sbc and sbc > 0 then
+            for b = 1, math.min(sbc, 30) do
+                local foundSpawn = false
+                local remSec = -1
+                pcall(function()
+                    local sb = s.Buff(b)
+                    if sb and sb() then
+                        local bName = (sb.Name and sb.Name()) or (sb.Spell and sb.Spell.Name and sb.Spell.Name()) or sb()
+                        if isBuffNameMatch(bName) then
+                            foundSpawn = true
+                            if sb.Duration and sb.Duration.TotalSeconds then
+                                remSec = tonumber(sb.Duration.TotalSeconds()) or -1
+                            end
+                        end
+                    end
+                end)
+                if foundSpawn then
+                    if minSec > 0 and remSec >= 0 then
+                        return remSec > minSec
+                    end
+                    return true
+                end
+            end
+        end
+
+        local stacksSpawn = true
+        pcall(function()
+            local sp = mq.TLO.Spell(name)
+            if sp and sp() and sp.Beneficial() and sp.StacksSpawn then
+                stacksSpawn = sp.StacksSpawn(petId)
+            end
+        end)
+        if stacksSpawn == false then
+            return true
+        end
+    end
+
+    -- 4. Check petState.cachedPetBuffs
+    if petState and petState.cachedPetBuffs and petState.cachedPetBuffs[petId] then
+        local cData = petState.cachedPetBuffs[petId]
+        local elapsed = os.clock() - (cData.time or 0)
+        if elapsed < 300 then
+            if cData.buffDetails then
+                for _, d in ipairs(cData.buffDetails) do
+                    if isBuffNameMatch(d.name) then
+                        local remSec = (d.duration or 0) - elapsed
+                        if minSec > 0 and (d.duration or 0) > 0 then
+                            return remSec > minSec
+                        end
+                        return true
+                    end
+                end
+            end
+            if cData.buffs then
+                for _, bName in ipairs(cData.buffs) do
+                    if isBuffNameMatch(bName) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
 local function buffActive(id, name, minSec)
     if not id or id == 0 then return false end
     minSec = tonumber(minSec) or 0
@@ -10816,6 +11738,12 @@ local function buffActive(id, name, minSec)
         if hasNamedBuff(mq.TLO.Me, name, true, minSec) then return true end
         if minSec == 0 and tloTrue(function() return mq.TLO.Me.Song(name)() end) then return true end
         return false
+    end
+    -- Pet buff detection: primary pet, player-owned pet, or any pet spawn
+    local myPetId = 0
+    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+    if (myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id) then
+        return runtime.isPetBuffActive(id, name, minSec)
     end
     local total = 0
     pcall(function() total = mq.TLO.Group.Members() or 0 end)
@@ -10830,8 +11758,7 @@ local function buffActive(id, name, minSec)
     end
     for _, petId in pairs(petState.myPets) do
         if petId == id then
-            local s = mq.TLO.Spawn(id)
-            return s() and hasNamedBuff(s, name, false, minSec)
+            return runtime.isPetBuffActive(id, name, minSec)
         end
     end
     if mq.TLO.Target.ID() == id then
@@ -10843,6 +11770,7 @@ local function buffActive(id, name, minSec)
     end
     return false
 end
+runtime.buffActive = buffActive
 
 local function hasSpellReagents(spellName)
     if not spellName or spellName == '' then return true end
@@ -10982,7 +11910,29 @@ function runtime.isTargetInRange(name, targetId)
 end
 
 function runtime.maPcId()
-    return findMaPcId(ctrl and ctrl.ma_name)
+    if not ctrl then return nil end
+    -- 1. If ctrl.ma_id is set and > 0, verify it is a valid, living PC
+    if ctrl.ma_id and ctrl.ma_id > 0 then
+        local valid = false
+        pcall(function()
+            local s = mq.TLO.Spawn(ctrl.ma_id)
+            if s and s() and isSpawnAlive(ctrl.ma_id) and s.Type() == 'PC' then
+                if not ctrl.ma_name or ctrl.ma_name == '' or s.CleanName() == ctrl.ma_name then
+                    valid = true
+                end
+            end
+        end)
+        if valid then return ctrl.ma_id end
+    end
+    -- 2. Fallback: if character re-zoned and Spawn ID changed, re-locate by name and re-sync ma_id
+    if ctrl.ma_name and ctrl.ma_name ~= '' then
+        local id = findMaPcId(ctrl.ma_name)
+        if id and id > 0 then
+            ctrl.ma_id = id
+            return id
+        end
+    end
+    return nil
 end
 
 function runtime.targetIsEngaged(id)
@@ -10993,18 +11943,35 @@ function runtime.targetIsEngaged(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
     if (s.PctHPs() or 100) < 100 then return true end
 
-    -- Check if target of target is player or group member
+    -- Check if target of target or aggro holder is player or group member
     local totId = 0
     pcall(function() totId = s.TargetOfTarget.ID() or 0 end)
-    if totId > 0 then
-        if isGroupOrRaidMember(totId) or totId == (mq.TLO.Me.ID() or 0) then
-            return true
-        end
+    if totId > 0 and (isGroupOrRaidMember(totId) or totId == (mq.TLO.Me.ID() or 0)) then
+        return true
+    end
+    local aggroId = 0
+    pcall(function() aggroId = s.AggroHolder.ID() or 0 end)
+    if aggroId > 0 and (isGroupOrRaidMember(aggroId) or aggroId == (mq.TLO.Me.ID() or 0)) then
+        return true
     end
 
-    -- If in Assist, Manual, or Puller mode, valid NPC targets selected by engine/MA are engaged
-    if ctrl and (ctrl.mode == 'Assist' or ctrl.mode == 'Manual' or ctrl.mode == 'Puller') then
-        return true
+    -- In Assist mode, target is engaged if the Main Assist is actively targeting it and in combat
+    if ctrl and ctrl.mode == 'Assist' then
+        local maId = runtime.maPcId()
+        if maId and maId > 0 then
+            local maInCombat = false
+            local maTargId = 0
+            pcall(function()
+                local sp = mq.TLO.Spawn(maId)
+                if sp() then
+                    maInCombat = sp.Combat() or false
+                    maTargId = sp.Target.ID() or 0
+                end
+            end)
+            if maTargId == id and maInCombat then
+                return true
+            end
+        end
     end
 
     return false
@@ -11048,8 +12015,9 @@ local function isCombat()
 end
 
 function runtime.anyNearbyEngagedNpc(radius)
-    if runtime.anyXtarAlive() then return true end
-    local filt = string.format('npc radius %d', radius or 150)
+    radius = radius or (ctrl and ctrl.xtar_nav_dist) or 150
+    if firstNPCXtarget(false, nil, radius) then return true end
+    local filt = string.format('npc radius %d', radius)
     local n = mq.TLO.SpawnCount(filt)() or 0
     for i = 1, n do
         local s = mq.TLO.NearestSpawn(i, filt)
@@ -11064,7 +12032,8 @@ function runtime.maTargetId()
     local maId = runtime.maPcId()
     if not maId then return nil end
     local gated = (ctrl.mode == 'Assist')
-    if gated and not runtime.anyNearbyEngagedNpc(150) then
+    local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+    if gated and not runtime.anyNearbyEngagedNpc(maxNav) then
         return nil -- nothing nearby is actually being fought -- don't even peek via /assist
     end
     local now = os.clock()
@@ -11081,7 +12050,115 @@ function runtime.maTargetId()
     if gated and not runtime.targetIsEngaged(t.ID()) then
         return nil
     end
+    if gated and distToId(t.ID()) > maxNav then
+        return nil
+    end
     return t.ID()
+end
+
+-- Finds a hostile NPC actively attacking the character (self-defense).
+-- Used in Assist mode when the Main Assist has no active engaged target.
+function runtime.findSelfDefenseTarget(maxDist)
+    maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
+    local myId = mq.TLO.Me.ID() or 0
+    if myId <= 0 then return nil end
+    local bestId = nil
+    local bestDist = maxDist + 1
+
+    -- 1. Scan XTarget slots for any hostile mob attacking or targeting Me
+    local slots = 13
+    pcall(function() slots = mq.TLO.Me.XTargetSlots() or 13 end)
+    for i = 1, slots do
+        local xt = mq.TLO.Me.XTarget(i)
+        if xt() and (xt.ID() or 0) > 0 and not isUnreachable(xt.ID())
+            and not isGroupOrRaidMember(xt.ID()) and not isSpawnPetOrPlayer(xt.ID())
+            and isHostileTarget(xt.ID()) and not isIgnored(xt.CleanName()) then
+            local xId = xt.ID()
+            local d = distToId(xId)
+            if d >= 0 and d <= maxDist then
+                local isHittingMe = false
+                pcall(function()
+                    if xt.TargetOfTarget.ID() == myId or xt.AggroHolder.ID() == myId or (xt.PctAggro() or 0) >= 100 then
+                        isHittingMe = true
+                    end
+                end)
+                if isHittingMe and d < bestDist then
+                    bestDist = d
+                    bestId = xId
+                end
+            end
+        end
+    end
+    if bestId then return bestId end
+
+    -- 2. Scan XTarget for any Auto Hater or mob in close combat range if character is in combat
+    local inCombat = mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT') or ((mq.TLO.Me.XTHaterCount() or 0) > 0)
+    if inCombat then
+        for i = 1, slots do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt() and (xt.ID() or 0) > 0 and not isUnreachable(xt.ID())
+                and not isGroupOrRaidMember(xt.ID()) and not isSpawnPetOrPlayer(xt.ID())
+                and isHostileTarget(xt.ID()) and not isIgnored(xt.CleanName()) then
+                local xId = xt.ID()
+                local d = distToId(xId)
+                if d >= 0 and d <= maxDist then
+                    local isHater = false
+                    pcall(function()
+                        local tt = xt.TargetType() or ''
+                        if tt == 'Auto Hater' or (xt.PctAggro() or 0) > 0 then
+                            isHater = true
+                        end
+                    end)
+                    if isHater and d < bestDist then
+                        bestDist = d
+                        bestId = xId
+                    end
+                end
+            end
+        end
+    end
+    if bestId then return bestId end
+
+    -- 3. Check current target if it is hostile, alive, within maxDist, and hitting Me
+    local t = mq.TLO.Target
+    if t() and (t.ID() or 0) > 0 and not isUnreachable(t.ID())
+        and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID())
+        and isHostileTarget(t.ID()) and not isIgnored(t.CleanName()) then
+        local tId = t.ID()
+        local d = distToId(tId)
+        if d >= 0 and d <= maxDist then
+            local isHittingMe = false
+            pcall(function()
+                if t.TargetOfTarget.ID() == myId or t.AggroHolder.ID() == myId or (t.PctAggro() or 0) >= 100 then
+                    isHittingMe = true
+                end
+            end)
+            if isHittingMe then return tId end
+        end
+    end
+
+    -- 4. Check nearby NPCs within melee range if in combat
+    if inCombat then
+        local filt = string.format('npc radius %d', math.min(35, math.floor(maxDist)))
+        local n = mq.TLO.SpawnCount(filt)() or 0
+        for i = 1, n do
+            local s = mq.TLO.NearestSpawn(i, filt)
+            if s() and s.ID() > 0 and not isUnreachable(s.ID())
+                and not isSpawnPetOrPlayer(s.ID()) and isHostileTarget(s.ID())
+                and not isIgnored(s.CleanName()) then
+                local sId = s.ID()
+                local isHittingMe = false
+                pcall(function()
+                    if s.TargetOfTarget.ID() == myId or s.AggroHolder.ID() == myId or (s.PctAggro() or 0) >= 100 then
+                        isHittingMe = true
+                    end
+                end)
+                if isHittingMe then return sId end
+            end
+        end
+    end
+
+    return nil
 end
 
 local function isPoisonedOrDiseased(targetId)
@@ -11385,8 +12462,9 @@ local function resolvePetTargetId(when, spellName, cls, pct)
 
     -- Buff condition: find pet missing the buff
     if when == 'missing buff' and spellName and spellName ~= '' then
+        local minSec = (not isCombat() and ctrl and tonumber(ctrl.buff_refresh_sec) or 0) or 0
         for _, pid in ipairs(allPets) do
-            if not runtime.sungBuffs[sungKey(spellName, pid)] and not buffActive(pid, spellName) then
+            if not runtime.sungBuffs[sungKey(spellName, pid)] and not buffActive(pid, spellName, minSec) then
                 return pid
             end
         end
@@ -11426,6 +12504,12 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct)
         id = mq.TLO.Target.ID()
     elseif b == 'Assist Target' then
         id = runtime.maTargetId()
+        if not id and (ctrl and ctrl.assist_self_defense ~= false) then
+            local curT = mq.TLO.Target.ID() or 0
+            if curT > 0 and isHostileTarget(curT) and not isSpawnPetOrPlayer(curT) then
+                id = curT
+            end
+        end
     elseif b == 'Unmezzed Add' then
         id = firstNPCXtarget(true)
     elseif b == 'Nearest Add' or b == 'All Enemies' then
@@ -11536,6 +12620,7 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
         return thp >= minHp and thp <= pct
     end
     if when == 'missing buff' then
+        if not targetId or targetId <= 0 or not isSpawnAlive(targetId) then return false end
         if runtime.sungBuffs[sungKey(spellName, targetId)] then return false end -- already sung this life
         local minSec = (not isCombat() and ctrl and tonumber(ctrl.buff_refresh_sec) or 0) or 0
         return not buffActive(targetId, spellName, minSec)
@@ -11770,12 +12855,16 @@ function runtime.castGem(i, g, id)
         print(string.format('\ao[DEBUG cast]\ax Gem %d "%s" on target #%d (dist=%.1f, Me.Combat=%s)',
             i, g.spell, id, distToId(id), tostring(mq.TLO.Me.Combat())))
     end
-    if stickLoaded() and g.cls ~= 'Brd' then
-        pcall(function()
-            if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
-                mq.cmd('/stick pause')
+    if g.cls ~= 'Brd' then
+        runtime.stopMovementForCast(g.cls, g.spell)
+        local stillMoving = false
+        pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
+        if stillMoving then
+            if ctrl.debug_mode then
+                print(string.format('\ao[DEBUG cast]\ax Gem %d "%s" aborted: character is still moving', i, g.spell))
             end
-        end)
+            return false
+        end
     end
     mq.cmdf('/cast "%s"', g.spell)
     runtime.lastCast[key] = os.clock()
@@ -11783,6 +12872,21 @@ function runtime.castGem(i, g, id)
         runtime.npcCastCounts = runtime.npcCastCounts or {}
         runtime.npcCastCounts[id] = runtime.npcCastCounts[id] or {}
         runtime.npcCastCounts[id][g.spell] = ((runtime.npcCastCounts[id][g.spell]) or 0) + 1
+
+        local myPetId = 0
+        pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+        if (myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id) then
+            local bene = false
+            pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
+            if bene then
+                local durSec = 0
+                pcall(function()
+                    local d = mq.TLO.Spell(g.spell).Duration() or 0
+                    if d and tonumber(d) then durSec = math.floor(tonumber(d) * 6) end
+                end)
+                runtime.recordPetBuff(id, g.spell, durSec)
+            end
+        end
     end
     if g.when == 'missing pet' or g.kind == 'pet' then
         petState.lastCastCls = g.cls
@@ -11842,6 +12946,7 @@ function runtime.fireAA(name, a, id)
     if aaRank <= 0 then return false end
     if not mq.TLO.Me.AltAbilityReady(name)() then return false end
     local ok, sp = pcall(function() return aa.Spell end)
+    local castMs = 0
     if ok and sp and sp() then
         local endCost = tonumber(sp.EnduranceCost() or 0) or 0
         local manaCost = tonumber(sp.Mana() or 0) or 0
@@ -11849,6 +12954,12 @@ function runtime.fireAA(name, a, id)
         local curMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
         if endCost > 0 and curEnd < endCost then return false end
         if manaCost > 0 and curMana < manaCost then return false end
+        pcall(function() castMs = tonumber(sp.CastTime() or 0) or 0 end)
+    end
+    if castMs > 0 then
+        local isMoving = false
+        pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+        if isCasting() or (runtime.isMoveActive and runtime.isMoveActive()) or isMoving then return false end
     end
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
@@ -11860,6 +12971,13 @@ function runtime.fireAA(name, a, id)
     if pauseAttack then
         mq.cmd('/attack off')
         mq.delay(50, function() return not mq.TLO.Me.Combat() end)
+    end
+
+    if castMs > 0 then
+        runtime.stopMovementForCast(a and a.cls, name)
+        local stillMoving = false
+        pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
+        if stillMoving then return false end
     end
 
     castTracker.lastSpell      = name
@@ -12015,30 +13133,50 @@ function runtime.recordScannedAA(list, foundMap, name)
     name = tostring(name):match('^%s*(.-)%s*$')
     if name == '' or foundMap[name] then return end
     local rank, maxRank, cost, canTrain, pointsSpent, id, passive, aaType = 0, 0, 0, false, 0, 0, false, 0
+    local isCharacterAA = false
     pcall(function()
         local ma = mq.TLO.Me.AltAbility(name)
         if ma and ma() then
-            rank = tonumber(ma.Rank and ma.Rank() or 0) or 0
-            maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
-            cost = tonumber(ma.Cost and ma.Cost() or 0) or 0
-            canTrain = (ma.CanTrain and ma.CanTrain() == true)
-            pointsSpent = tonumber(ma.PointsSpent and ma.PointsSpent() or 0) or 0
             id = tonumber(ma.ID and ma.ID() or 0) or 0
-            passive = (ma.Passive and ma.Passive() == true)
-            aaType = tonumber(ma.Type and ma.Type() or 0) or 0
+            if id > 0 then
+                isCharacterAA = true
+                rank = tonumber(ma.Rank and ma.Rank() or 0) or 0
+                maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
+                cost = tonumber(ma.Cost and ma.Cost() or 0) or 0
+                canTrain = (ma.CanTrain and ma.CanTrain() == true)
+                pointsSpent = tonumber(ma.PointsSpent and ma.PointsSpent() or 0) or 0
+                passive = (ma.Passive and ma.Passive() == true)
+                aaType = tonumber(ma.Type and ma.Type() or 0) or 0
+            end
         end
-        if maxRank == 0 or (cost == 0 and not (maxRank > 0 and rank >= maxRank)) or id == 0 then
+        if isCharacterAA and (maxRank == 0 or (cost == 0 and not (maxRank > 0 and rank >= maxRank))) then
             local ga = mq.TLO.AltAbility(name)
             if ga and ga() then
                 if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
                 if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
-                if id == 0 then id = tonumber(ga.ID and ga.ID() or 0) or 0 end
                 if not canTrain and ga.CanTrain then canTrain = (ga.CanTrain() == true) end
                 if aaType == 0 and ga.Type then aaType = tonumber(ga.Type() or 0) or 0 end
             end
         end
+        -- Fallback: allow abilities that were explicitly read from the character's in-game Special tab or AAWindow
+        if not isCharacterAA and runtime.specialTabAAs then
+            for _, sName in ipairs(runtime.specialTabAAs) do
+                if sName == name then
+                    local ga = mq.TLO.AltAbility(name)
+                    if ga and ga() then
+                        id = tonumber(ga.ID and ga.ID() or 0) or 0
+                        maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0
+                        cost = tonumber(ga.Cost and ga.Cost() or 0) or 0
+                        canTrain = (ga.CanTrain and ga.CanTrain() == true)
+                        aaType = tonumber(ga.Type and ga.Type() or 0) or 0
+                        isCharacterAA = true
+                    end
+                    break
+                end
+            end
+        end
     end)
-    if maxRank > 0 or rank > 0 or canTrain or cost > 0 then
+    if isCharacterAA and (maxRank > 0 or rank > 0 or canTrain or cost > 0) then
         local entry = {
             name = name,
             rank = rank,
@@ -12054,6 +13192,127 @@ function runtime.recordScannedAA(list, foundMap, name)
         foundMap[name] = entry
         list[#list + 1] = entry
     end
+end
+
+function runtime.readSpecialTabNamesFromUI()
+    local win = nil
+    pcall(function()
+        local w = mq.TLO.Window('AAWindow')
+        if w and w() then win = w end
+    end)
+    if not win then return nil end
+
+    local specialCandidates = {
+        'AAW_SpecialList', 'AA_SpecialList', 'SpecialList', 'Special_List',
+        'AAW_Special_List', 'AAW_SpecList', 'AA_SpecList'
+    }
+    local tabParents = { 'AAW_Subwindows', 'AA_Subwindows', 'AA_SubWnd', 'AAW_SpecialTabPage', 'AA_SpecialTabPage' }
+
+    for _, lName in ipairs(specialCandidates) do
+        local child = nil
+        pcall(function()
+            child = win.Child(lName)
+            if not child or not child() then
+                for _, tp in ipairs(tabParents) do
+                    local p = win.Child(tp)
+                    if p and p() then
+                        local sc = p.Child(lName)
+                        if sc and sc() then child = sc; break end
+                    end
+                end
+            end
+            if not child or not child() then
+                child = runtime.findChildRecursive(win, lName)
+            end
+        end)
+
+        if child and child() and child.Items then
+            local count = 0
+            pcall(function() count = tonumber(child.Items() or 0) or 0 end)
+            if count > 0 and count <= 1000 then
+                local names = {}
+                local seen = {}
+                for row = 1, count do
+                    local rowTxt = nil
+                    pcall(function() rowTxt = child.List(row, 1)() or child.List(row)() end)
+                    if rowTxt and type(rowTxt) == 'string' and rowTxt ~= '' then
+                        local trimmed = rowTxt:match('^%s*(.-)%s*$')
+                        if trimmed and trimmed ~= '' and not seen[trimmed] then
+                            seen[trimmed] = true
+                            names[#names + 1] = trimmed
+                        end
+                    end
+                end
+                if #names > 0 then
+                    return names
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function runtime.readSpecialTabOnce(force)
+    if not force and runtime.specialTabReadDone and runtime.specialTabAAs and #runtime.specialTabAAs > 0 then
+        return runtime.specialTabAAs
+    end
+
+    -- 1. Try non-blocking read if already populated in UI
+    local names = runtime.readSpecialTabNamesFromUI()
+    if names and #names > 0 then
+        runtime.specialTabAAs = names
+        runtime.specialTabReadDone = true
+        return names
+    end
+
+    -- 2. Open AAWindow if not open, select tab 4, read, and restore window state
+    local wasOpen = false
+    pcall(function()
+        local w = mq.TLO.Window('AAWindow')
+        if w and w() and w.Open and w.Open() then wasOpen = true end
+    end)
+
+    if not wasOpen then
+        pcall(function()
+            local w = mq.TLO.Window('AAWindow')
+            if w and w() and w.DoOpen then w.DoOpen() end
+        end)
+        mq.cmd('/windowstate AAWindow open')
+        mq.cmd('/nomodkey /keypress alt_advancement')
+        mq.delay(250)
+    end
+
+    -- Select Tab 4 (Special)
+    mq.cmd('/nomodkey /notify AAWindow AAW_Subwindows tabselect 4')
+    mq.cmd('/nomodkey /notify AAWindow AA_Subwindows tabselect 4')
+    pcall(function()
+        local win = mq.TLO.Window('AAWindow')
+        if win and win() then
+            local sub = runtime.findChildRecursive(win, 'AAW_Subwindows') or runtime.findChildRecursive(win, 'AA_Subwindows')
+            if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(4) end
+        end
+    end)
+    mq.delay(150)
+
+    names = runtime.readSpecialTabNamesFromUI()
+    if names and #names > 0 then
+        runtime.specialTabAAs = names
+        runtime.specialTabReadDone = true
+        print(string.format('\ag[Triune]\ax Read %d abilities from AA Special tab.', #names))
+    else
+        runtime.specialTabReadDone = true
+    end
+
+    if not wasOpen then
+        pcall(function()
+            local w = mq.TLO.Window('AAWindow')
+            if w and w() and w.DoClose then w.DoClose() end
+        end)
+        mq.cmd('/windowstate AAWindow close')
+        mq.cmd('/nomodkey /keypress alt_advancement')
+    end
+
+    return runtime.specialTabAAs or {}
 end
 
 function runtime.scanPlayerAAs(force)
@@ -12131,71 +13390,40 @@ function runtime.scanPlayerAAs(force)
         'Pottery Mastery', 'Tailoring Mastery', 'Salvage', 'Origin', 'Chaotic Stab', 'Sinister Strikes',
         'Headshot', 'Endless Quiver', 'Archery Mastery', 'Weapon Affinity', 'Ferocity', 'Punishing Blow',
         'Hastened Purification', 'Hastened Curing', 'Mass Group Buff', 'Radiant Cure', 'Purification',
-        'Suspend Minion', 'Pet Affinity', 'Companion\'s Fury', 'Companion\'s Strength', 'Companion\'s Durability',
-        'Alternately Advanced Fireworks', 'Expedient Recovery', 'Throne of Heroes'
+        'Suspend Minion', 'Pet Affinity', 'Companion\'s Fury', 'Companion\'s Strength', 'Companion\'s Durability'
     }
     for _, nm in ipairs(COMMON_AAS) do
         runtime.recordScannedAA(list, foundMap, nm)
     end
 
-    -- 4. Scan Special tab abilities (Veteran rewards, Glyphs, Fireworks, Special Utilities)
-    local SPECIAL_AAS = {
-        -- Veteran Rewards
-        'Lesson of the Devoted', 'Infusion of the Faithful', 'Chaotic Jester', 'Expedient Recovery',
-        'Steadfast Servant', 'Staunch Recovery', 'Intensity of the Resolute', 'Armor of Experience',
-        'Summon Resupply Agent', 'Summon Banker', 'Summon Clockwork Banker', 'Summon Permuted Clockwork Banker',
-        'Summon Personal Tribute Master', 'Summon Permuted Resupply Agent', 'Summon Anvil', 'Summon Forge',
-        'Summon Sewing Kit', 'Summon Kiln', 'Summon Loom', 'Summon Pottery Wheel', 'Summon Brew Barrel',
-        'Summon Fletching Table', 'Summon Jewelry Kit',
-        -- Glyphs
-        'Glyph of Destruction', 'Glyph of Frantic Fertility', 'Glyph of Arcane Secrets', 'Glyph of Courage',
-        'Glyph of Angry Thoughts', 'Glyph of the Cataclysm', 'Glyph of the Master', 'Glyph of Dragon Scales',
-        'Glyph of Draconic Potential', 'Glyph of Lost Secrets', 'Glyph of Stored Life', 'Glyph of Indomitable Stone',
-        'Glyph of the Unwavering', 'Glyph of Genari Might',
-        -- Special Cap / Progression / Utilities
-        'Alternately Advanced Fireworks', 'Alternate Advanced Fireworks', 'Alternatly advanced fireworks',
-        'Advanced Fireworks', 'Fireworks', 'Throne of Heroes', 'Origin', 'Secondary Anchor', 'Primary Anchor',
-        'Guild Anchor', 'Bind Affinity', 'Gate', 'Master of the Past', 'Innate See Invisible',
-        'Innate Camouflage', 'Packrat', 'Mystical Attuning', 'Mnemonic Retention', 'Persistent Casting',
-        'Spell Casting Subtlety', 'Twinproc', 'Twincast', 'Mental Clarity', 'Body and Mind',
-        'Delay Death', 'First Aid', 'Bandage Wounds', 'New Tanaan Crafting Mastery', 'Baking Mastery',
-        'Blacksmithing Mastery', 'Brewing Mastery', 'Fletching Mastery', 'Jewelcraft Mastery',
-        'Pottery Mastery', 'Tailoring Mastery', 'Salvage', 'Energetic Attunement', 'Extended Swarm',
-        'Hastened Mass Group Buff', 'Hastened Origin', 'Hastened Exodus', 'Hastened Purification',
-        'Hastened Curing', 'Mass Group Buff', 'Radiant Cure', 'Purification', 'Suspend Minion',
-        'Pet Affinity', 'Companion\'s Fury', 'Companion\'s Strength', 'Companion\'s Durability',
-        'Companion\'s Blessing', 'Companion\'s Relocation', 'Companion\'s Suspension'
-    }
-    for _, nm in ipairs(SPECIAL_AAS) do
-        runtime.recordScannedAA(list, foundMap, nm)
+    -- 4. Scan Special tab abilities (from one-time read of the Special tab)
+    local specialList = runtime.specialTabAAs
+    if not specialList or #specialList == 0 then
+        local uiNames = runtime.readSpecialTabNamesFromUI()
+        if uiNames and #uiNames > 0 then
+            runtime.specialTabAAs = uiNames
+            runtime.specialTabReadDone = true
+            specialList = uiNames
+        else
+            runtime.pendingReadSpecialTab = true
+        end
+    end
+    if specialList and #specialList > 0 then
+        for _, nm in ipairs(specialList) do
+            runtime.recordScannedAA(list, foundMap, nm)
+        end
+    end
+    if ctrl.auto_spend_aa_name and ctrl.auto_spend_aa_name ~= '' then
+        runtime.recordScannedAA(list, foundMap, ctrl.auto_spend_aa_name)
     end
 
-    -- 5. Crawl TLO database indices without breaking on nil gaps
+    -- 5. Scan character AltAbility indices
     pcall(function()
-        for idx = 1, 1200 do
-            local a = mq.TLO.AltAbility(idx)
-            if a and a() then
-                local nm = a.Name and a.Name()
+        for idx = 1, 1000 do
+            local ma = mq.TLO.Me.AltAbility(idx)
+            if ma and ma() then
+                local nm = ma.Name and ma.Name()
                 if nm and nm ~= '' then runtime.recordScannedAA(list, foundMap, nm) end
-            end
-        end
-        local specialRanges = {
-            { 4000, 4060 },   -- Veteran Rewards
-            { 5000, 5150 },   -- Glyphs
-            { 17780, 17800 }  -- Fireworks
-        }
-        for _, rng in ipairs(specialRanges) do
-            for idx = rng[1], rng[2] do
-                local a = mq.TLO.AltAbility(idx)
-                if a and a() then
-                    local nm = a.Name and a.Name()
-                    if nm and nm ~= '' then runtime.recordScannedAA(list, foundMap, nm) end
-                end
-                local ma = mq.TLO.Me.AltAbility(idx)
-                if ma and ma() then
-                    local nm = ma.Name and ma.Name()
-                    if nm and nm ~= '' then runtime.recordScannedAA(list, foundMap, nm) end
-                end
             end
         end
     end)
@@ -12346,7 +13574,12 @@ function runtime.processAATrainWorkflow()
         end)
         if not isOpen then
             task.openedByUs = true
-            mq.cmd('/window open AAWindow')
+            pcall(function()
+                local w = mq.TLO.Window('AAWindow')
+                if w and w() and w.DoOpen then w.DoOpen() end
+            end)
+            mq.cmd('/windowstate AAWindow open')
+            mq.cmd('/nomodkey /keypress alt_advancement')
             task.nextStepAt = now + 0.35
             task.step = 'wait_open'
             return
@@ -12367,7 +13600,12 @@ function runtime.processAATrainWorkflow()
             task.nextStepAt = now + 0.1
         else
             task.retries = (task.retries or 0) + 1
-            mq.cmd('/window open AAWindow')
+            pcall(function()
+                local w = mq.TLO.Window('AAWindow')
+                if w and w() and w.DoOpen then w.DoOpen() end
+            end)
+            mq.cmd('/windowstate AAWindow open')
+            mq.cmd('/nomodkey /keypress alt_advancement')
             task.nextStepAt = now + 0.35
         end
         return
@@ -12459,11 +13697,11 @@ function runtime.processAATrainWorkflow()
 
     elseif task.step == 'finish' then
         if task.openedByUs then
-            mq.cmd('/window close AAWindow')
             pcall(function()
                 local w = mq.TLO.Window('AAWindow')
                 if w and w() and w.DoClose then w.DoClose() end
             end)
+            mq.cmd('/windowstate AAWindow close')
         end
         runtime.pendingAATrain = nil
         runtime.lastAAScanAt = 0
@@ -12874,7 +14112,11 @@ runtime.useClickie = function(c, id)
     local castMs = 0
     pcall(function() castMs = tonumber(fi.CastTime() or 0) or 0 end)
     castMs = tonumber(castMs) or 0
-    if castMs > 0 and (isCasting() or isMoveActive()) then return false end
+    if castMs > 0 then
+        local isMoving = false
+        pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+        if isCasting() or isMoveActive() or isMoving then return false end
+    end
 
     local dur = 0
     if c.spell and c.spell ~= '' then
@@ -12903,9 +14145,27 @@ runtime.useClickie = function(c, id)
     if ctrl.debug_mode then
         print(string.format('\ao[DEBUG clickie]\ax "%s" (spell="%s") on target #%d', c.name, tostring(c.spell), id))
     end
+    if castMs > 0 then
+        runtime.stopMovementForCast(c.cls, effName)
+        local stillMoving = false
+        pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
+        if stillMoving then return false end
+    end
     mq.cmdf('/useitem "%s"', c.name)
     runtime.lastCast[key] = os.clock()
     print('\ag[Triune]\ax Clickie used: ' .. c.name .. (c.spell and (' (' .. c.spell .. ')') or ''))
+
+    local myPetId = 0
+    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+    if id and id > 0 and ((myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id)) then
+        local cSpell = (c.spell and c.spell ~= '' and c.spell) or effName
+        local durSec = 0
+        pcall(function()
+            local d = mq.TLO.Spell(cSpell).Duration() or 0
+            if d and tonumber(d) then durSec = math.floor(tonumber(d) * 6) end
+        end)
+        runtime.recordPetBuff(id, cSpell, durSec)
+    end
 
     if not selfCast and orig ~= id and orig > 0 then
         if castMs > 0 then
@@ -14107,6 +15367,20 @@ function runtime.checkCombatStall()
         return
     end
 
+    -- In Assist mode, only watchdog auto-attack if this target is the active MA target or active self-defense target
+    if ctrl.mode == 'Assist' then
+        local maId = runtime.maTargetId()
+        local defId = nil
+        if not maId and (ctrl.assist_self_defense ~= false) then
+            defId = runtime.findSelfDefenseTarget()
+        end
+        local expectedId = maId or defId
+        if not expectedId or expectedId ~= t.ID() then
+            stuckState.combatStallSince = nil
+            return
+        end
+    end
+
     local d = distToId(t.ID())
     local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee')
     if ctrl.combat_style == 'Melee' and not isPullStandBack then
@@ -14707,6 +15981,7 @@ function runtime.pullerTick()
                         tagged = true
                     end
                 elseif pullStyle == 'Spell' then
+                    stopMoving()
                     mq.cmd('/face fast')
                     if isXTargetId(tid) or distToId(tid) <= 30 then
                         tagged = true
@@ -14874,7 +16149,7 @@ function runtime.checkAggroSwitch()
                     isHittingMe = true
                 end
             end)
-            local isHunterMode = (ctrl.mode == 'Manual' or (ctrl.mode == 'Puller' and ctrl.submode == 'Hunt'))
+            local isHunterMode = (ctrl.mode == 'Manual' or (ctrl.mode == 'Puller' and ctrl.submode == 'Hunt') or ctrl.mode == 'Assist')
             local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
             local maxRange = isHittingMe and 999 or (isHunterMode and maxNav or 40)
             if d < maxRange and d < bestDist then
@@ -15442,6 +16717,35 @@ local function combatTick()
                 mq.cmdf('/target id %d', reqTargetId)
             end
         end
+        local isBrd = false
+        pcall(function() isBrd = (mq.TLO.Me.Class.ShortName() == 'BRD') end)
+        if castTracker.activeKind ~= 'Brd' and not isBrd then
+            if navLoaded() then
+                local navActive = false
+                pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+                if navActive then pcall(function() mq.cmd('/nav stop') end) end
+            end
+            if stickLoaded() then
+                pcall(function()
+                    if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                        mq.cmd('/stick pause')
+                    end
+                end)
+            end
+            pcall(function()
+                if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving() then
+                    mq.cmd('/moveto off')
+                end
+            end)
+            local isMoving = false
+            pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+            if isMoving then
+                pcall(function() mq.cmd('/keypress forward') end)
+                pcall(function() mq.cmd('/keypress back') end)
+                pcall(function() mq.cmd('/keypress strafe_left') end)
+                pcall(function() mq.cmd('/keypress strafe_right') end)
+            end
+        end
         mq.doevents()
         return
     elseif castTracker.wasCasting or (castTracker and castTracker.activeSpell and castTracker.failed) then
@@ -15471,7 +16775,7 @@ local function combatTick()
     checkStuck()
     checkCombatStall()
     checkGemMemSync()
-    if (ctrl.mode == 'Manual' and ctrl.manual_auto_xtarget ~= false) or ctrl.mode == 'Puller' or (ctrl.mode == 'Assist' and ctrl.submode == 'Camp') then
+    if (ctrl.mode == 'Manual' and ctrl.manual_auto_xtarget ~= false) or ctrl.mode == 'Puller' then
         checkAggroSwitch()
     end
 
@@ -15522,8 +16826,14 @@ local function combatTick()
             local id = mq.TLO.Target.ID()
             if not isHostileTarget(id) then
                 haveNPC = false
-            elseif moveToward(id, desiredRange(id)) then
-                engage = true
+            else
+                local inCombatState = mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')
+                local isXtar = isXTargetId(id)
+                if isXtar or inCombatState then
+                    if moveToward(id, desiredRange(id)) then
+                        engage = true
+                    end
+                end
             end
         elseif ctrl.camp_loc then
             moveTowardLoc(ctrl.camp_loc.x, ctrl.camp_loc.y, ctrl.camp_loc.z, 15)
@@ -15759,6 +17069,7 @@ local function combatTick()
                         if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
                     elseif pullStyle == 'Spell' then
                         -- Spell pull: cast pull spell from engagement range
+                        stopMoving()
                         mq.cmd('/face fast')
                         if isXTargetId(id) or mq.TLO.Me.Combat() then
                             engage = true
@@ -15876,26 +17187,44 @@ local function combatTick()
             end
         end
     elseif ctrl.mode == 'Assist' then
+        local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+        local maId = maTargetId()
+        local defendId = nil
+        if not maId and (ctrl.assist_self_defense ~= false) then
+            defendId = runtime.findSelfDefenseTarget(maxNav)
+        end
+        local id = maId or defendId
+        local isSelfDefense = (not maId and defendId ~= nil)
+
         if ctrl.submode == 'Backline' then
-            local id = maTargetId()
-            if id then
-                if mq.TLO.Target.ID() ~= id then setTarget(id) end
-                haveNPC = true
-                if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) and distToId(id) <= maxMeleeDistance(id) and hasLoS(id) then
-                    engage = true
-                end
-            else
-                haveNPC = false
-            end
-        else -- 'Chase' or 'Camp'
-            local id = maTargetId()
             local closingOnMob = false
             if id then
                 if mq.TLO.Target.ID() ~= id then setTarget(id) end
                 haveNPC = true
-                if pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id) then
+                local canAttack = isSelfDefense or (pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id))
+                if canAttack and distToId(id) <= maxNav then
                     closingOnMob = true
-                    if moveToward(id, desiredRange(id)) then engage = true end
+                    if distToId(id) <= maxMeleeDistance(id) and hasLoS(id) then
+                        engage = true
+                    end
+                end
+            else
+                haveNPC = false
+            end
+            if not closingOnMob and ctrl.chase then
+                chaseMA()
+            end
+        else -- 'Chase' or 'Camp'
+            local closingOnMob = false
+            if id then
+                if mq.TLO.Target.ID() ~= id then setTarget(id) end
+                haveNPC = true
+                local canAttack = isSelfDefense or (pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id))
+                if canAttack then
+                    if distToId(id) <= maxNav then
+                        closingOnMob = true
+                        if moveToward(id, desiredRange(id)) then engage = true end
+                    end
                 end
             else
                 haveNPC = false
@@ -16017,6 +17346,11 @@ local function combatTick()
                         moveToward(tid, desiredRange(tid))
                     end
                 end
+            else
+                -- Not engaging any NPC or dragging mob to camp: turn off auto-attack if not in manual combat
+                if mq.TLO.Me.Combat() and not (ctrl.mode == 'Manual' and (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')) then
+                    mq.cmd('/attack off')
+                end
             end
         end
     elseif style == 'Ranged' then
@@ -16052,6 +17386,13 @@ local function combatTick()
                 if ctrl.mode ~= 'Manual' then
                     moveToward(tid, desiredRange(tid))
                 end
+            end
+        else
+            if mq.TLO.Me.Combat() and not (ctrl.mode == 'Manual' and (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')) then
+                mq.cmd('/attack off')
+            end
+            if mq.TLO.Me.AutoFire() then
+                mq.cmd('/autofire off')
             end
         end
     end
@@ -16308,7 +17649,13 @@ local function combatTick()
     -- above are unaffected (instant, no cast bar, usable on the move). Casts
     mq.doevents()
 
-    if combatReady and not isCasting() and not isMoveActive() and loadout.clickies and #loadout.clickies > 0 then
+    local isMoving = false
+    pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+    local isBrdMe = false
+    pcall(function() isBrdMe = (mq.TLO.Me.Class.ShortName() == 'BRD') end)
+    local canCastMove = isBrdMe or not isMoving
+
+    if combatReady and not isCasting() and not isMoveActive() and canCastMove and loadout.clickies and #loadout.clickies > 0 then
         if not isCasting() and runtime.restoreTargetId and runtime.restoreTargetId > 0 then
             local rId = runtime.restoreTargetId
             runtime.restoreTargetId = nil
@@ -16349,7 +17696,7 @@ local function combatTick()
     local inRealCombat = isCombat() or anyXtarAlive(true) or countNPCXtarget() > 0 or mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT') or runtime.hasDowntimeAggroThreat()
     local gemCasted = false
 
-    if combatReady and not isCasting() and not isMoveActive() then
+    if combatReady and not isCasting() and not isMoveActive() and canCastMove then
         if not isCasting() and runtime.restoreTargetId and runtime.restoreTargetId > 0 then
             local rId = runtime.restoreTargetId
             runtime.restoreTargetId = nil
@@ -16618,6 +17965,10 @@ local function triuneCommand(...)
         print('  \ag/ac petscan\ax - Re-scan zone for active pets belonging to player')
         print('  \ag/ac pethold [on|off]\ax - Toggle automatic out-of-combat Pet Hold')
         print('  \ag/ac petassist [1-100]\ax - Set mob HP % threshold for sending pets to attack')
+        print('  \ag/ac ma [target|clear|<name>|<id>]\ax - Configure Main Assist player ID or name')
+        print('  \ag/ac xtardist [25-300]\ax - Set max XTarget chase / engagement distance')
+        print('  \ag/ac chasedist [5-100]\ax - Set following distance to stay back from Main Assist')
+        print('  \ag/ac selfdefense [on|off]\ax - Toggle Assist mode self-defense when attacked')
         print(
             '  \ag/ac <mode> [submode]\ax - Switch combat mode (manual, puller [hunt|camp], assist [chase|camp|backline])')
         print('  \ag/triunerun\ax - Quick keybind command to toggle run/pause')
@@ -16793,6 +18144,8 @@ local function triuneCommand(...)
             print(string.format('\ag[Triune]\ax Current Auto-Spend AA Ability Name: "%s". (usage: /ac aaname [name])', ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'))
         end
     elseif cmd == 'aascan' or cmd == 'scanaa' or cmd == 'aarefresh' then
+        runtime.specialTabReadDone = false
+        runtime.pendingReadSpecialTab = true
         if runtime.scanPlayerAAs then
             runtime.scanPlayerAAs(true)
             local count = runtime.scannedAAs and #runtime.scannedAAs or 0
@@ -16809,6 +18162,82 @@ local function triuneCommand(...)
                 aaName, ctrl.auto_aa_priorities[aaName] and '\agENABLED\ax' or '\arDISABLED\ax'))
         else
             print('\ag[Triune]\ax usage: /ac aaprio <Ability Name>')
+        end
+    elseif cmd == 'ma' or cmd == 'mainassist' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'target' or sub == 'add' then
+            runtime.addCustomAssistTarget()
+        elseif sub == 'clear' or sub == 'none' then
+            ctrl.ma_id = 0
+            ctrl.ma_name = ''
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Main Assist cleared.')
+        elseif sub == 'remove' or sub == 'delete' then
+            local removeArg = args[3]
+            runtime.removeCustomAssist(removeArg)
+        elseif sub ~= '' then
+            local numId = tonumber(sub)
+            if numId and numId > 0 then
+                ctrl.ma_id = numId
+                pcall(function()
+                    local s = mq.TLO.Spawn(numId)
+                    if s and s() then ctrl.ma_name = s.CleanName() or '' end
+                end)
+            else
+                local nameArg = table.concat(args, ' ', 2)
+                ctrl.ma_name = nameArg
+                local sId = findMaPcId(nameArg)
+                ctrl.ma_id = sId or 0
+            end
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Main Assist set to "%s" (ID: %d).', ctrl.ma_name or '', ctrl.ma_id or 0))
+        else
+            local maDisp = (ctrl.ma_name and ctrl.ma_name ~= '') and ctrl.ma_name or '(None)'
+            print(string.format('\ag[Triune]\ax Current Main Assist: %s (ID: %d). Usage: /ac ma [target|clear|<name>|<id>]', maDisp, ctrl.ma_id or 0))
+        end
+    elseif cmd == 'xtardist' or cmd == 'xtar' or cmd == 'xtarrange' then
+        local val = tonumber(args[2])
+        if val then
+            ctrl.xtar_nav_dist = math.max(25, math.min(300, math.floor(val)))
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Max XTarget Chase Range set to %d units.', ctrl.xtar_nav_dist))
+        else
+            print(string.format('\ag[Triune]\ax Current Max XTarget Chase Range: %d units. (usage: /ac xtardist [25-300])', ctrl.xtar_nav_dist or 150))
+        end
+    elseif cmd == 'selfdefense' or cmd == 'assistdefend' or cmd == 'defend' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            ctrl.assist_self_defense = true
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Assist Self-Defense When Attacked: \agENABLED\ax.')
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            ctrl.assist_self_defense = false
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Assist Self-Defense When Attacked: \arDISABLED\ax.')
+        else
+            ctrl.assist_self_defense = not (ctrl.assist_self_defense ~= false)
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Assist Self-Defense When Attacked: %s.',
+                ctrl.assist_self_defense and '\agENABLED\ax' or '\arDISABLED\ax'))
+        end
+    elseif cmd == 'chasedist' or cmd == 'chase' or cmd == 'chaserange' or cmd == 'followdist' then
+        local arg2 = args[2] and string.lower(args[2]) or ''
+        local val = tonumber(arg2)
+        if val then
+            ctrl.chase_dist = math.max(5, math.min(100, math.floor(val)))
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Chase Distance from Main Assist set to %d ft.', ctrl.chase_dist))
+        elseif arg2 == 'on' or arg2 == '1' or arg2 == 'true' then
+            ctrl.chase = true
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Chase MA (Auto-Follow): \agENABLED\ax.')
+        elseif arg2 == 'off' or arg2 == '0' or arg2 == 'false' then
+            ctrl.chase = false
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Chase MA (Auto-Follow): \arDISABLED\ax.')
+        else
+            print(string.format('\ag[Triune]\ax Chase MA is %s (Chase Distance: %d ft). Usage: /ac chasedist [5-100] or /ac chase [on|off|<dist>]',
+                ctrl.chase and '\agENABLED\ax' or '\arDISABLED\ax', ctrl.chase_dist or 15))
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()
@@ -17407,7 +18836,7 @@ runtime.updateMapRadiusVisuals = function()
     end
     local wpsKey = table.concat(wpsCoordParts, ';')
 
-    local key = string.format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
+    local key = string.format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
         tostring(mode),
         tostring(submode),
         tostring(ctrl.use_waypoints),
@@ -17417,6 +18846,7 @@ runtime.updateMapRadiusVisuals = function()
         tostring(ctrl.hunter_radius or 1500),
         tostring(ctrl.hunter_combat_radius or 0),
         tostring(ctrl.current_waypoint_idx or 1),
+        tostring(ctrl.xtar_nav_dist or 150),
         ctrl.camp_loc and
         string.format('%.1f,%.1f,%.1f', ctrl.camp_loc.x or 0, ctrl.camp_loc.y or 0, ctrl.camp_loc.z or 0) or 'nocamp',
         ctrl.hunter_combat_loc and
@@ -17503,8 +18933,8 @@ runtime.updateMapRadiusVisuals = function()
         end
     elseif mode == 'Assist' then
         if submode == 'Camp' and ctrl.camp_loc then
-            mq.cmdf('/maploc %f %f %f radius 30 rcolor 0 255 0 color 0 255 0 label Camp',
-                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z)
+            mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
+                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.xtar_nav_dist or 150)
         end
     end
 
@@ -17560,6 +18990,11 @@ local function runMainLoop()
             runtime.pendingPostTrainScanAt = nil
             runtime.lastAAScanAt = 0
             runtime.aaFilterDirty = true
+            if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+        end
+        if runtime.pendingReadSpecialTab and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isCasting() then
+            runtime.pendingReadSpecialTab = false
+            if runtime.readSpecialTabOnce then runtime.readSpecialTabOnce(false) end
             if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
         end
         local currentSpentAA = nil
@@ -17622,6 +19057,7 @@ local function runMainLoop()
     end
 end
 
+runtime.pendingReadSpecialTab = true
 runMainLoop()
 if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
 runtime.saveLoadout(true)

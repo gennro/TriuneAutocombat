@@ -3822,8 +3822,9 @@ do
     assert_true(triuneContent:find("AAW_SpecialList") ~= nil, 'triune.lua scans AAW_SpecialList')
     assert_true(triuneContent:find("AAW_TrainButton") ~= nil, 'triune.lua clicks AAW_TrainButton')
     assert_true(triuneContent:find("AAW_Subwindows") ~= nil, 'triune.lua notifies AAW_Subwindows')
-    assert_true(triuneContent:find("Lesson of the Devoted") ~= nil, 'triune.lua recognizes Lesson of the Devoted')
-    assert_true(triuneContent:find("Glyph of Destruction") ~= nil, 'triune.lua recognizes Glyph of Destruction')
+    assert_true(triuneContent:find("runtime.readSpecialTabOnce") ~= nil, 'triune.lua defines runtime.readSpecialTabOnce')
+    assert_true(triuneContent:find("runtime.readSpecialTabNamesFromUI") ~= nil, 'triune.lua defines runtime.readSpecialTabNamesFromUI')
+    assert_true(triuneContent:find("runtime.specialTabAAs") ~= nil, 'triune.lua tracks runtime.specialTabAAs')
     assert_true(triuneContent:find("TriuneAAPurchased") ~= nil, 'triune.lua registers TriuneAAPurchased event')
     assert_true(triuneContent:find("runtime.lastObservedAAPointsSpent") ~= nil, 'triune.lua tracks lastObservedAAPointsSpent')
     assert_true(triuneContent:find("runtime.pendingPostTrainScanAt") ~= nil, 'triune.lua tracks pendingPostTrainScanAt')
@@ -4429,10 +4430,568 @@ do
     assert_eq(shouldKeepBuff, false, 'Gem 12 should not remem priority spell while lower priority buff is still needed')
 end
 
+-- ============================================================================
+-- Suite 50: Spell Cast Movement Cessation Logic (stopMovementForCast)
+-- ============================================================================
+print('--- Spell Cast Movement Cessation Logic ---')
+do
+    local cmds = {}
+    local isNavActive = false
+    local isStickActive = false
+    local stickStatusStr = 'OFF'
+    local isCharacterMoving = false
 
+    local mockMq = {
+        cmd = function(c) table.insert(cmds, c) end,
+        delay = function() end,
+        TLO = {
+            Me = {
+                Class = { ShortName = function() return 'CLR' end },
+                Moving = function() return isCharacterMoving end,
+            },
+            Navigation = { Active = function() return isNavActive end },
+            Stick = { Active = function() return isStickActive end, Status = function() return stickStatusStr end },
+            MoveTo = { Moving = function() return false end },
+        },
+    }
+
+    local mockPursuit = { id = 42, lastNavTargetId = 42, lastNavLoc = '100,200' }
+    local mockNavLoaded = function() return true end
+    local mockStickLoaded = function() return true end
+
+    local function createStopMovementForCast(mq, pursuit, navLoaded, stickLoaded)
+        return function(cls, spell)
+            if cls == 'Brd' then return end
+            local isBrd = false
+            pcall(function() isBrd = (mq.TLO.Me.Class.ShortName() == 'BRD') end)
+            if isBrd and (not cls or cls == 'Brd') then return end
+
+            if navLoaded() then
+                local navActive = false
+                pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+                if navActive then
+                    pcall(function() mq.cmd('/nav stop') end)
+                    pursuit.id = 0
+                    pursuit.lastNavTargetId = 0
+                    pursuit.lastNavLoc = nil
+                end
+            end
+
+            if stickLoaded() then
+                pcall(function()
+                    if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
+                        mq.cmd('/stick pause')
+                    end
+                end)
+            end
+
+            pcall(function()
+                if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving() then
+                    mq.cmd('/moveto off')
+                end
+            end)
+
+            local isMoving = false
+            pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+            if isMoving then
+                pcall(function() mq.cmd('/keypress forward') end)
+                pcall(function() mq.cmd('/keypress back') end)
+                pcall(function() mq.cmd('/keypress strafe_left') end)
+                pcall(function() mq.cmd('/keypress strafe_right') end)
+                local waitStop = 0
+                while waitStop < 200 do
+                    local stillMoving = false
+                    pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
+                    if not stillMoving then break end
+                    local ok = pcall(function() mq.delay(20) end)
+                    if not ok then break end
+                    waitStop = waitStop + 20
+                end
+            end
+        end
+    end
+
+    -- Test 1: Bard class skips movement stopping
+    cmds = {}
+    local stopMove = createStopMovementForCast(mockMq, mockPursuit, mockNavLoaded, mockStickLoaded)
+    stopMove('Brd', 'Selo\'s Accelerando')
+    assert_eq(#cmds, 0, 'Bard casting does not stop movement')
+
+    -- Test 2: Non-Bard with active Nav halts nav and resets pursuit tracking
+    cmds = {}
+    mockPursuit.id = 100
+    mockPursuit.lastNavTargetId = 100
+    isNavActive = true
+    stopMove('Clr', 'Complete Heal')
+    assert_true(cmds[1] == '/nav stop', 'Non-bard with active navigation issues /nav stop')
+    assert_eq(mockPursuit.id, 0, 'pursuit.id reset to 0 after /nav stop')
+    assert_eq(mockPursuit.lastNavTargetId, 0, 'pursuit.lastNavTargetId reset to 0 after /nav stop')
+
+    -- Test 3: Active stick pauses stick
+    cmds = {}
+    isNavActive = false
+    stickStatusStr = 'ON'
+    isStickActive = true
+    stopMove('Wiz', 'Ice Comet')
+    assert_true(cmds[1] == '/stick pause', 'Active stick is paused before casting')
+
+    -- Test 4: Moving character releases keys
+    cmds = {}
+    stickStatusStr = 'OFF'
+    isStickActive = false
+    isCharacterMoving = true
+    stopMove('Nec', 'Lifetap')
+    local foundFwd, foundBack = false, false
+    for _, c in ipairs(cmds) do
+        if c == '/keypress forward' then foundFwd = true end
+        if c == '/keypress back' then foundBack = true end
+    end
+    assert_true(foundFwd and foundBack, 'Keys forward and back released when moving')
+end
 
 -- ============================================================================
--- Suite 50: Lua 5.1 Main Chunk 200 Local Variables Limit Verification
+-- Suite 51: Assist Mode Dropdown, Player ID Selection & Management
+-- ============================================================================
+print('--- Assist Mode Dropdown & Player ID Selection ---')
+do
+    local sanitizeModeConfig = loadFunc(src, 'sanitizeModeConfig', { MODES = MODES })
+    local defaultCtrl = loadFunc(src, 'defaultCtrl')
+
+    -- 1. Default ctrl has ma_id = 0 and custom_ma_list = {}
+    local c = defaultCtrl()
+    assert_eq(c.ma_id, 0, 'defaultCtrl initializes ma_id to 0')
+    assert_true(type(c.custom_ma_list) == 'table', 'defaultCtrl initializes custom_ma_list as a table')
+    assert_eq(#c.custom_ma_list, 0, 'defaultCtrl custom_ma_list is empty')
+
+    -- 2. sanitizeModeConfig handles missing ma_id and custom_ma_list
+    local sparseCtrl = { mode = 'Assist', submode = 'Chase' }
+    sanitizeModeConfig(sparseCtrl)
+    assert_eq(sparseCtrl.ma_id, 0, 'sanitizeModeConfig sets default ma_id = 0')
+    assert_true(type(sparseCtrl.custom_ma_list) == 'table', 'sanitizeModeConfig sets default custom_ma_list table')
+
+    -- 3. Assist Candidate Generator Logic
+    local mockGroupMembers = {
+        { id = 101, name = 'TankBob', class = 'WAR' },
+        { id = 102, name = 'HealJane', class = 'CLR' },
+    }
+    local mockSpawns = {
+        ['pc =OutsidePlayer'] = { id = 205, class = 'PAL' },
+    }
+    local testCtrl = {
+        ma_id = 101,
+        ma_name = 'TankBob',
+        custom_ma_list = {
+            { name = 'OutsidePlayer', id = 205, class = 'PAL' },
+            { name = 'TankBob', id = 101, class = 'WAR' }, -- duplicate of group member
+        },
+    }
+
+    local function createCandidateGenerator(groupMembers, leaderName, spawns, ctrlTable)
+        return function()
+            local candidates = {
+                { id = 0, name = '', label = '(None)', source = 'none' }
+            }
+            local seenNames = {}
+
+            -- Group members
+            for _, m in ipairs(groupMembers) do
+                local mId = m.id or 0
+                local mName = m.name or ''
+                local mClass = m.class or ''
+                if mName ~= '' then
+                    local isLdr = (leaderName ~= '' and mName:lower() == leaderName:lower())
+                    local ldrPrefix = isLdr and '[Leader] ' or '[Group] '
+                    local clsStr = (mClass ~= '') and (' [' .. mClass .. ']') or ''
+                    local idStr = (mId > 0) and (' (ID: ' .. tostring(mId) .. ')') or ' (Not in zone)'
+                    local lbl = string.format('%s%s%s%s', ldrPrefix, mName, clsStr, idStr)
+                    table.insert(candidates, { id = mId, name = mName, label = lbl, source = 'group', class = mClass })
+                    seenNames[mName:lower()] = true
+                end
+            end
+
+            -- Custom entries
+            if ctrlTable and ctrlTable.custom_ma_list then
+                for _, entry in ipairs(ctrlTable.custom_ma_list) do
+                    local eName = entry.name or ''
+                    if eName ~= '' and not seenNames[eName:lower()] then
+                        local sp = spawns['pc =' .. eName]
+                        local liveId = sp and sp.id or 0
+                        local liveCls = sp and sp.class or (entry.class or '')
+                        local clsStr = (liveCls ~= '') and (' [' .. liveCls .. ']') or ''
+                        local idStr = (liveId > 0) and (' (ID: ' .. tostring(liveId) .. ')') or ' (Not in zone)'
+                        local lbl = string.format('[Custom] %s%s%s', eName, clsStr, idStr)
+                        table.insert(candidates, {
+                            id = liveId > 0 and liveId or (entry.id or 0),
+                            name = eName,
+                            label = lbl,
+                            source = 'custom',
+                            class = liveCls,
+                        })
+                        seenNames[eName:lower()] = true
+                    end
+                end
+            end
+            return candidates
+        end
+    end
+
+    local gen = createCandidateGenerator(mockGroupMembers, 'TankBob', mockSpawns, testCtrl)
+    local candidates = gen()
+    assert_eq(#candidates, 4, 'Candidate list has 4 entries (None, 2 group, 1 deduplicated custom)')
+    assert_eq(candidates[1].label, '(None)', 'First entry is (None)')
+    assert_true(candidates[2].label:find('%[Leader%] TankBob %[WAR%] %(ID: 101%)') ~= nil, 'Group leader correctly identified and formatted with ID')
+    assert_true(candidates[3].label:find('%[Group%] HealJane %[CLR%] %(ID: 102%)') ~= nil, 'Group member correctly identified and formatted with ID')
+    assert_true(candidates[4].label:find('%[Custom%] OutsidePlayer %[PAL%] %(ID: 205%)') ~= nil, 'Custom player formatted with ID')
+    assert_eq(candidates[4].source, 'custom', 'Custom player marked with custom source')
+
+    -- 4. Target-based addition (validation tests)
+    local function createAddTarget(myId, getTarget, ctrlTable)
+        return function()
+            local t = getTarget()
+            if not t or (t.id or 0) <= 0 or not t.name or t.name == '' then
+                return false, 'Target a player character (PC) first to add.'
+            end
+            if t.type ~= 'PC' then
+                return false, 'Target must be a PC.'
+            end
+            if t.id == myId then
+                return false, 'Cannot add yourself as Main Assist.'
+            end
+            ctrlTable.custom_ma_list = ctrlTable.custom_ma_list or {}
+            local found = false
+            for _, entry in ipairs(ctrlTable.custom_ma_list) do
+                if entry.name:lower() == t.name:lower() then
+                    entry.id = t.id
+                    entry.class = t.class
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                table.insert(ctrlTable.custom_ma_list, { name = t.name, id = t.id, class = t.class })
+            end
+            ctrlTable.ma_id = t.id
+            ctrlTable.ma_name = t.name
+            return true, string.format('Added %s (ID: %d) as Main Assist.', t.name, t.id)
+        end
+    end
+
+    -- Rejection 1: No target
+    local curTarget = nil
+    local addTarget = createAddTarget(999, function() return curTarget end, testCtrl)
+    local ok, msg = addTarget()
+    assert_eq(ok, false, 'Adding with no target returns false')
+
+    -- Rejection 2: Target is NPC
+    curTarget = { id = 50, name = 'a gnoll', type = 'NPC', class = 'WAR' }
+    ok, msg = addTarget()
+    assert_eq(ok, false, 'Adding NPC returns false')
+
+    -- Rejection 3: Target is self
+    curTarget = { id = 999, name = 'MySelf', type = 'PC', class = 'MNK' }
+    ok, msg = addTarget()
+    assert_eq(ok, false, 'Adding self returns false')
+
+    -- Success: Valid PC
+    curTarget = { id = 301, name = 'NewRaidAssist', type = 'PC', class = 'WAR' }
+    ok, msg = addTarget()
+    assert_eq(ok, true, 'Adding valid PC returns true')
+    assert_eq(testCtrl.ma_id, 301, 'ctrl.ma_id updated to target ID')
+    assert_eq(testCtrl.ma_name, 'NewRaidAssist', 'ctrl.ma_name updated to target name')
+
+    -- 5. Custom Assist Removal
+    local function createRemoveAssist(getTarget, ctrlTable)
+        return function(targetNameOrId)
+            ctrlTable.custom_ma_list = ctrlTable.custom_ma_list or {}
+            local removeIdx = nil
+
+            if targetNameOrId then
+                local searchStr = tostring(targetNameOrId):lower()
+                for i, entry in ipairs(ctrlTable.custom_ma_list) do
+                    if entry.name:lower() == searchStr or tostring(entry.id) == searchStr then
+                        removeIdx = i; break
+                    end
+                end
+            end
+
+            if not removeIdx then
+                local t = getTarget()
+                if t and t.type == 'PC' and t.name then
+                    for i, entry in ipairs(ctrlTable.custom_ma_list) do
+                        if entry.name:lower() == t.name:lower() then
+                            removeIdx = i; break
+                        end
+                    end
+                end
+            end
+
+            if not removeIdx then
+                for i, entry in ipairs(ctrlTable.custom_ma_list) do
+                    if (ctrlTable.ma_id and ctrlTable.ma_id > 0 and entry.id == ctrlTable.ma_id) or
+                       (ctrlTable.ma_name and ctrlTable.ma_name ~= '' and entry.name:lower() == ctrlTable.ma_name:lower()) then
+                        removeIdx = i; break
+                    end
+                end
+            end
+
+            if removeIdx then
+                local removedName = ctrlTable.custom_ma_list[removeIdx].name
+                table.remove(ctrlTable.custom_ma_list, removeIdx)
+                if ctrlTable.ma_name and ctrlTable.ma_name:lower() == removedName:lower() then
+                    ctrlTable.ma_id = 0
+                    ctrlTable.ma_name = ''
+                end
+                return true, removedName
+            end
+            return false, nil
+        end
+    end
+
+    local removeAssist = createRemoveAssist(function() return nil end, testCtrl)
+    -- Remove currently selected (NewRaidAssist)
+    local remOk, remName = removeAssist()
+    assert_eq(remOk, true, 'Removing current selected assist returns true')
+    assert_eq(remName, 'NewRaidAssist', 'Removed expected player')
+    assert_eq(testCtrl.ma_id, 0, 'ctrl.ma_id reset to 0 upon removal')
+    assert_eq(testCtrl.ma_name, '', 'ctrl.ma_name reset to empty string upon removal')
+
+    -- 6. Player ID resolution with name fallback
+    local function createMaPcIdResolver(ctrlTable, liveSpawnsById, liveSpawnsByName)
+        return function()
+            if not ctrlTable then return nil end
+            if ctrlTable.ma_id and ctrlTable.ma_id > 0 then
+                local s = liveSpawnsById[ctrlTable.ma_id]
+                if s and s.alive and s.type == 'PC' then
+                    if not ctrlTable.ma_name or ctrlTable.ma_name == '' or s.name == ctrlTable.ma_name then
+                        return ctrlTable.ma_id
+                    end
+                end
+            end
+            if ctrlTable.ma_name and ctrlTable.ma_name ~= '' then
+                local s = liveSpawnsByName[ctrlTable.ma_name]
+                if s and s.alive and s.type == 'PC' then
+                    ctrlTable.ma_id = s.id
+                    return s.id
+                end
+            end
+            return nil
+        end
+    end
+
+    local spawnsById = {
+        [101] = { id = 101, name = 'TankBob', alive = true, type = 'PC' }
+    }
+    local spawnsByName = {
+        ['TankBob'] = { id = 601, name = 'TankBob', alive = true, type = 'PC' } -- new spawn ID after zoning
+    }
+
+    -- Direct ID hit
+    local resCtrl = { ma_id = 101, ma_name = 'TankBob' }
+    local resolver = createMaPcIdResolver(resCtrl, spawnsById, spawnsByName)
+    assert_eq(resolver(), 101, 'Resolves spawn ID directly when valid and matching')
+
+    -- Stale ID after zoning: ID 101 no longer in spawnsById, but name matches in new zone
+    local resCtrlZoned = { ma_id = 101, ma_name = 'TankBob' }
+    local resolverZoned = createMaPcIdResolver(resCtrlZoned, {}, spawnsByName)
+    local resolvedNewId = resolverZoned()
+    assert_eq(resolvedNewId, 601, 'Resolves new spawn ID via name lookup after zoning')
+    assert_eq(resCtrlZoned.ma_id, 601, 'Updates cached ctrl.ma_id to new spawn ID')
+
+    -- 7. getMaTargetInfo logic
+    local function createMaTargetInfoGetter(ctrlTable, spawnsById, spawnsByName)
+        return function()
+            local maId = ctrlTable and ctrlTable.ma_id and ctrlTable.ma_id > 0 and ctrlTable.ma_id or nil
+            local maName = ctrlTable and ctrlTable.ma_name and ctrlTable.ma_name ~= '' and ctrlTable.ma_name or nil
+            local maSpawn = (maId and spawnsById[maId]) or (maName and spawnsByName[maName]) or nil
+            if not maSpawn then
+                return { hasMA = false, hasTarget = false, targetName = 'No Target', maName = maName or '(None Set)' }
+            end
+            local t = maSpawn.target
+            if not t or not t.id or t.id <= 0 then
+                return { hasMA = true, hasTarget = false, targetName = 'No Target', maName = maSpawn.name, maId = maSpawn.id }
+            end
+            return {
+                hasMA = true,
+                hasTarget = true,
+                maId = maSpawn.id,
+                maName = maSpawn.name,
+                targetId = t.id,
+                targetName = t.name,
+                targetHp = t.hp or 100,
+                targetDist = t.dist or 20,
+            }
+        end
+    end
+
+    local spawnsWithTarget = {
+        [101] = {
+            id = 101,
+            name = 'TankBob',
+            target = { id = 450, name = 'a shadow knight', hp = 85, dist = 14.5 }
+        }
+    }
+    local maInfoGetter = createMaTargetInfoGetter({ ma_id = 101, ma_name = 'TankBob' }, spawnsWithTarget, {})
+    local info = maInfoGetter()
+    assert_eq(info.hasMA, true, 'maInfo hasMA is true')
+    assert_eq(info.hasTarget, true, 'maInfo hasTarget is true')
+    assert_eq(info.targetName, 'a shadow knight', 'maInfo retrieves correct target name')
+    assert_eq(info.targetId, 450, 'maInfo retrieves correct target ID')
+    assert_eq(info.targetHp, 85, 'maInfo retrieves correct target HP')
+
+end
+
+do
+    -- triune.lua source code validations
+    assert_true(src:find("runtime.getMaTargetInfo") ~= nil, 'triune.lua defines runtime.getMaTargetInfo')
+    assert_true(src:find("runtime.getAssistCandidates") ~= nil, 'triune.lua defines runtime.getAssistCandidates')
+    assert_true(src:find("runtime.addCustomAssistTarget") ~= nil, 'triune.lua defines runtime.addCustomAssistTarget')
+    assert_true(src:find("runtime.removeCustomAssist") ~= nil, 'triune.lua defines runtime.removeCustomAssist')
+    assert_true(src:find("##maSelectCombo") ~= nil, 'triune.lua renders ##maSelectCombo dropdown')
+    assert_true(src:find("+ Add Target##maAdd") ~= nil, 'triune.lua renders + Add Target button')
+    assert_true(src:find("Remove##maRemove") ~= nil, 'triune.lua renders Remove button')
+    assert_true(src:find("statCardTargMA") ~= nil, 'triune.lua renders MA target button on Status card')
+    assert_true(src:find("miniTargMA") ~= nil, 'triune.lua renders MA target button in Compact mode')
+    assert_true(src:find("##assistXtarDist") ~= nil, 'triune.lua renders Max XTarget Chase Range slider in Assist mode')
+    assert_true(src:find("cmd == 'xtardist'") ~= nil, 'triune.lua handles /ac xtardist slash command')
+    assert_true(src:find("##assistChaseDist") ~= nil, 'triune.lua renders Chase Distance slider in Assist mode')
+    assert_true(src:find("cmd == 'chasedist'") ~= nil, 'triune.lua handles /ac chasedist slash command')
+    assert_true(src:find("##assistSelfDefense") ~= nil, 'triune.lua renders Self-Defense When Attacked checkbox')
+    assert_true(src:find("cmd == 'selfdefense'") ~= nil, 'triune.lua handles /ac selfdefense slash command')
+    assert_true(src:find("runtime.findSelfDefenseTarget") ~= nil, 'triune.lua implements runtime.findSelfDefenseTarget')
+
+    -- 8. Assist mode XTarget / MA target distance gating logic
+    local function evaluateAssistEngagement(ctrlTable, targetDist, pctHp, isEngaged)
+        local maxNav = (ctrlTable and ctrlTable.xtar_nav_dist) or 150
+        local assistAt = (ctrlTable and ctrlTable.assist_at) or 100
+        if pctHp <= assistAt and isEngaged then
+            if targetDist <= maxNav then
+                return true -- closing on mob / engage allowed
+            end
+        end
+        return false -- out of range: do not close on mob, fallback to idleReturn or chaseMA
+    end
+
+    local testCtrl = { mode = 'Assist', assist_at = 98, xtar_nav_dist = 120 }
+    assert_eq(evaluateAssistEngagement(testCtrl, 80, 95, true), true, 'Assist engagement allowed when target is within xtar_nav_dist')
+    assert_eq(evaluateAssistEngagement(testCtrl, 120, 95, true), true, 'Assist engagement allowed at exact boundary of xtar_nav_dist')
+    assert_eq(evaluateAssistEngagement(testCtrl, 121, 95, true), false, 'Assist engagement blocked when target exceeds xtar_nav_dist')
+    assert_eq(evaluateAssistEngagement(testCtrl, 200, 50, true), false, 'Assist engagement blocked for far-away mob (200 units > 120 limit)')
+    assert_eq(evaluateAssistEngagement(testCtrl, 50, 99, true), false, 'Assist engagement blocked when mob HP > assist_at threshold')
+
+    -- 9. Assist mode Target Priority & Self-Defense Logic
+    local function resolveAssistCombatTarget(ctrlTable, maTargetId, attackerId)
+        local maId = maTargetId
+        local defendId = nil
+        if not maId and (ctrlTable.assist_self_defense ~= false) then
+            defendId = attackerId
+        end
+        local id = maId or defendId
+        local isSelfDefense = (not maId and defendId ~= nil)
+        return id, isSelfDefense
+    end
+
+    -- Case A: MA has an engaged target (id 501) and an add is hitting assistant (id 999)
+    -- Must ONLY attack the MA's target!
+    local cA = { mode = 'Assist', assist_self_defense = true }
+    local targA, isDefA = resolveAssistCombatTarget(cA, 501, 999)
+    assert_eq(targA, 501, 'Assistant strictly focuses on MA target even if attacked by an add')
+    assert_eq(isDefA, false, 'isSelfDefense is false when MA has an active target')
+
+    -- Case B: MA has NO target (nil), but assistant is attacked by an add (id 999) with self-defense enabled
+    local cB = { mode = 'Assist', assist_self_defense = true }
+    local targB, isDefB = resolveAssistCombatTarget(cB, nil, 999)
+    assert_eq(targB, 999, 'Assistant defends itself against attacker when MA has no target')
+    assert_eq(isDefB, true, 'isSelfDefense is true when defending against attacker')
+
+    -- Case C: MA has NO target (nil), assistant attacked (id 999), but self-defense checkbox is disabled
+    local cC = { mode = 'Assist', assist_self_defense = false }
+    local targC, isDefC = resolveAssistCombatTarget(cC, nil, 999)
+    assert_eq(targC, nil, 'Assistant does not attack when self-defense is disabled and MA has no target')
+    assert_eq(isDefC, false, 'isSelfDefense is false when self-defense is disabled')
+
+    -- Case D: MA has NO target and assistant is NOT attacked
+    local cD = { mode = 'Assist', assist_self_defense = true }
+    local targD, isDefD = resolveAssistCombatTarget(cD, nil, nil)
+    assert_eq(targD, nil, 'Assistant has no target when out of combat and MA has no target')
+    assert_eq(isDefD, false, 'isSelfDefense is false when no attackers present')
+
+    -- Case E: Assistant is defending itself against add (id 999), then MA acquires target (id 777)
+    -- Should immediately swap to MA target!
+    local cE = { mode = 'Assist', assist_self_defense = true }
+    local initialTarg, _ = resolveAssistCombatTarget(cE, nil, 999)
+    assert_eq(initialTarg, 999, 'Initially fighting back against attacker in self defense')
+    local updatedTarg, updatedIsDef = resolveAssistCombatTarget(cE, 777, 999)
+    assert_eq(updatedTarg, 777, 'Immediately prioritizes MA target the moment MA engages')
+    assert_eq(updatedIsDef, false, 'isSelfDefense turns false upon acquiring MA target')
+end
+
+do
+    -- 10. targetIsEngaged validation and auto-attack disengage logic
+    assert_true(src:find("mq.cmd%('/attack off'%)") ~= nil, 'triune.lua calls /attack off when disengaging')
+
+    local function evaluateTargetIsEngaged(isXtar, hpPct, totId, aggroId, myId, groupIds, maTargetId, maInCombat, targetId)
+        if isXtar then return true end
+        if hpPct < 100 then return true end
+        if totId == myId or groupIds[totId] then return true end
+        if aggroId == myId or groupIds[aggroId] then return true end
+        if maTargetId == targetId and maInCombat then return true end
+        return false
+    end
+
+    local grp = { [101] = true, [102] = true }
+    -- Peaceful unattacked mob at 100% HP: NOT engaged!
+    assert_eq(evaluateTargetIsEngaged(false, 100, 0, 0, 99, grp, 0, false, 555), false,
+        'Peaceful mob at 100% HP is NOT considered engaged')
+    -- Damaged mob: engaged!
+    assert_eq(evaluateTargetIsEngaged(false, 99, 0, 0, 99, grp, 0, false, 555), true,
+        'Damaged mob (<100% HP) is considered engaged')
+    -- Mob on XTarget: engaged!
+    assert_eq(evaluateTargetIsEngaged(true, 100, 0, 0, 99, grp, 0, false, 555), true,
+        'Mob on XTarget is considered engaged')
+    -- Mob targeting player: engaged!
+    assert_eq(evaluateTargetIsEngaged(false, 100, 99, 0, 99, grp, 0, false, 555), true,
+        'Mob targeting player is considered engaged')
+    -- Mob targeting group member: engaged!
+    assert_eq(evaluateTargetIsEngaged(false, 100, 101, 0, 99, grp, 0, false, 555), true,
+        'Mob targeting group member is considered engaged')
+    -- Mob targeted by MA who is in combat: engaged!
+    assert_eq(evaluateTargetIsEngaged(false, 100, 0, 0, 99, grp, 555, true, 555), true,
+        'Mob targeted by fighting MA is considered engaged')
+    -- Mob targeted by MA who is NOT in combat: NOT engaged!
+    assert_eq(evaluateTargetIsEngaged(false, 100, 0, 0, 99, grp, 555, false, 555), false,
+        'Mob targeted by out-of-combat MA is NOT considered engaged')
+
+    -- Auto-Attack State Machine Evaluation
+    local function evaluateAutoAttackAction(haveNPC, autoAttackOk, curDist, maxReach, isCombat)
+        if haveNPC and autoAttackOk then
+            if curDist <= maxReach then
+                return 'ATTACK_ON'
+            else
+                return 'MOVE_TOWARD'
+            end
+        else
+            if isCombat then
+                return 'ATTACK_OFF'
+            else
+                return 'IDLE'
+            end
+        end
+    end
+
+    assert_eq(evaluateAutoAttackAction(true, true, 10, 15, false), 'ATTACK_ON',
+        'Turns attack ON when in reach of valid engaged target')
+    assert_eq(evaluateAutoAttackAction(true, true, 25, 15, false), 'MOVE_TOWARD',
+        'Closes distance when target is outside reach')
+    assert_eq(evaluateAutoAttackAction(false, false, 10, 15, true), 'ATTACK_OFF',
+        'Turns attack OFF when target is dead or no NPC is engaged')
+    assert_eq(evaluateAutoAttackAction(true, false, 10, 15, true), 'ATTACK_OFF',
+        'Turns attack OFF when NPC is present but not authorized to attack')
+    assert_eq(evaluateAutoAttackAction(false, false, 10, 15, false), 'IDLE',
+        'Remains idle when out of combat')
+end
+
+-- ============================================================================
+-- Suite 52: Lua 5.1 Main Chunk 200 Local Variables Limit Verification
 -- ============================================================================
 print('--- Main Chunk Local Variables Limit Verification ---')
 do
@@ -4461,6 +5020,317 @@ do
             end
         end
     end
+end
+
+-- ============================================================================
+-- Suite 52: Pet Buff Detection & Management Logic
+-- ============================================================================
+do
+    print('--- Pet Buff Detection & Management Logic ---')
+
+    -- Setup mock environment for pet buff detection
+    local mockMePetBuffs = {}
+    local mockMePetDurations = {}
+    local mockTargetBuffs = {}
+    local mockTargetDurations = {}
+    local mockSpawnBuffs = {}
+    local mockSpawnDurations = {}
+    local mockSpellStacksPet = {}
+    local mockSpellStacksTarget = {}
+    local mockSpellStacksSpawn = {}
+
+    local petState = {
+        myPets = {},
+        cachedPetBuffs = {}
+    }
+
+    local testRuntime = {}
+
+    function testRuntime.recordPetBuff(petId, spellName, durSec)
+        if not petId or petId <= 0 or not spellName or spellName == '' then return end
+        petState.cachedPetBuffs = petState.cachedPetBuffs or {}
+        local cData = petState.cachedPetBuffs[petId] or { time = os.clock(), buffs = {}, buffDetails = {} }
+        cData.time = os.clock()
+        cData.buffs = cData.buffs or {}
+        cData.buffDetails = cData.buffDetails or {}
+        local alreadyIn = false
+        for _, bn in ipairs(cData.buffs) do
+            if bn == spellName then alreadyIn = true break end
+        end
+        if not alreadyIn then
+            table.insert(cData.buffs, spellName)
+        end
+        table.insert(cData.buffDetails, { name = spellName, duration = durSec or 0 })
+        petState.cachedPetBuffs[petId] = cData
+    end
+
+    local function isGemMatching(gName, tName)
+        if not gName or not tName then return false end
+        if gName == tName or gName:lower() == tName:lower() then return true end
+        return false
+    end
+
+    local function cleanSpellName(nm) return nm or '' end
+
+    function testRuntime.isPetBuffActive(petId, name, minSec)
+        if not petId or petId == 0 then return false end
+        name = tostring(name or '')
+        if name == '' then return false end
+        minSec = tonumber(minSec) or 0
+
+        local myPetId = 100 -- mock primary pet ID
+
+        local function isBuffNameMatch(candidateName)
+            if not candidateName or candidateName == '' or candidateName == 'NONE' then return false end
+            if candidateName == name then return true end
+            if candidateName:lower() == name:lower() then return true end
+            if isGemMatching(candidateName, name) then return true end
+            if cleanSpellName(candidateName):lower() == cleanSpellName(name):lower() then return true end
+            return false
+        end
+
+        -- 1. Primary pet inspection via Me.Pet
+        if myPetId > 0 and petId == myPetId then
+            local found = false
+            local remSec = -1
+            local activeBuffNames = {}
+            local activeBuffDetails = {}
+
+            for b = 1, 30 do
+                local pb = mockMePetBuffs[b]
+                if pb then
+                    local bName = pb
+                    local durSec = -1
+                    local dur = mockMePetDurations[b] or 0
+                    if type(dur) == 'number' and dur > 0 then
+                        durSec = math.floor(dur / 1000)
+                    end
+                    table.insert(activeBuffNames, bName)
+                    table.insert(activeBuffDetails, { slot = b, name = bName, duration = durSec })
+
+                    if not found and isBuffNameMatch(bName) then
+                        found = true
+                        remSec = durSec
+                    end
+                end
+            end
+
+            if petState and petState.cachedPetBuffs and #activeBuffNames > 0 then
+                petState.cachedPetBuffs[petId] = {
+                    time = os.clock(),
+                    buffs = activeBuffNames,
+                    buffDetails = activeBuffDetails
+                }
+            end
+
+            if found then
+                if minSec > 0 and remSec >= 0 then
+                    return remSec > minSec
+                end
+                return true
+            end
+
+            -- Stacking check
+            if mockSpellStacksPet[name] == false then
+                return true
+            end
+
+            return false
+        end
+
+        -- 2. Target buffs
+        if mockTargetBuffs[petId] then
+            for b = 1, 30 do
+                local bName = mockTargetBuffs[petId][b]
+                if bName and isBuffNameMatch(bName) then
+                    local remSec = mockTargetDurations[petId] and mockTargetDurations[petId][b] or -1
+                    if minSec > 0 and remSec >= 0 then
+                        return remSec > minSec
+                    end
+                    return true
+                end
+            end
+            if mockSpellStacksTarget[name] == false then
+                return true
+            end
+        end
+
+        -- 3. Cached buffs in petState
+        if petState and petState.cachedPetBuffs and petState.cachedPetBuffs[petId] then
+            local cData = petState.cachedPetBuffs[petId]
+            local elapsed = os.clock() - (cData.time or 0)
+            if elapsed < 300 then
+                if cData.buffDetails then
+                    for _, d in ipairs(cData.buffDetails) do
+                        if isBuffNameMatch(d.name) then
+                            local remSec = (d.duration or 0) - elapsed
+                            if minSec > 0 and (d.duration or 0) > 0 then
+                                return remSec > minSec
+                            end
+                            return true
+                        end
+                    end
+                end
+                if cData.buffs then
+                    for _, bName in ipairs(cData.buffs) do
+                        if isBuffNameMatch(bName) then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+
+        return false
+    end
+
+    -- Test 1: Empty pet buffs returns false
+    mockMePetBuffs = {}
+    mockMePetDurations = {}
+    assert_eq(not not testRuntime.isPetBuffActive(100, 'Burnout IV', 0), false, 'No buffs on pet returns false')
+
+    -- Test 2: Matching buff in slot returns true
+    mockMePetBuffs = { [1] = 'Burnout IV' }
+    mockMePetDurations = { [1] = 1800000 } -- 1800 sec
+    assert_true(testRuntime.isPetBuffActive(100, 'Burnout IV', 0), 'Exact match returns true')
+    assert_true(testRuntime.isPetBuffActive(100, 'burnout iv', 0), 'Case-insensitive match returns true')
+
+    -- Test 3: Duration threshold (minSec)
+    -- Buff has 1800s remaining, minSec = 60 -> true
+    assert_true(testRuntime.isPetBuffActive(100, 'Burnout IV', 60), '1800s remaining > 60s minSec returns true')
+    -- Buff has 30s remaining (30000ms), minSec = 60 -> false (needs refresh)
+    mockMePetDurations = { [1] = 30000 }
+    assert_eq(not not testRuntime.isPetBuffActive(100, 'Burnout IV', 60), false, '30s remaining <= 60s minSec returns false (needs refresh)')
+    -- When minSec = 0, even 30s remaining returns true
+    assert_true(testRuntime.isPetBuffActive(100, 'Burnout IV', 0), '30s remaining with minSec=0 returns true')
+
+    -- Test 4: StacksPet returns false -> returns true (spell blocked/existing)
+    mockMePetBuffs = {}
+    mockMePetDurations = {}
+    mockSpellStacksPet['Strength of Earth'] = false
+    assert_true(testRuntime.isPetBuffActive(100, 'Strength of Earth', 0), 'StacksPet == false returns true (spell blocked/wont land)')
+
+    -- Test 5: Cache recording & verification for secondary pets
+    testRuntime.recordPetBuff(200, 'Spirit of Wolf', 1200)
+    assert_true(testRuntime.isPetBuffActive(200, 'Spirit of Wolf', 0), 'Secondary pet buff found in cachedPetBuffs')
+    assert_eq(not not testRuntime.isPetBuffActive(200, 'Spirit of Wolf', 1500), false, 'Secondary pet buff duration expired/below minSec')
+    assert_eq(not not testRuntime.isPetBuffActive(200, 'Haste', 0), false, 'Different buff on secondary pet returns false')
+
+    -- Test 6: Missing buff condition with invalid/dead target
+    local function mockConditionMetMissingBuff(targetId, isAlive, isBuffActiveFn)
+        if not targetId or targetId <= 0 or not isAlive then return false end
+        return not isBuffActiveFn(targetId)
+    end
+    assert_eq(not not mockConditionMetMissingBuff(nil, false, function() return false end), false, 'Nil targetId never satisfies missing buff')
+    assert_eq(not not mockConditionMetMissingBuff(0, false, function() return false end), false, 'Target ID 0 never satisfies missing buff')
+    assert_eq(not not mockConditionMetMissingBuff(100, false, function() return false end), false, 'Dead pet target never satisfies missing buff')
+    assert_true(mockConditionMetMissingBuff(100, true, function() return false end), 'Living pet without buff satisfies missing buff')
+    assert_eq(not not mockConditionMetMissingBuff(100, true, function() return true end), false, 'Living pet with buff does NOT satisfy missing buff')
+
+    -- Test 7: Multi-pet missing buff targeting resolution
+    local function mockResolvePetTargetId(allPets, buffActiveFn, minSec)
+        if #allPets == 0 then return nil end
+        for _, pid in ipairs(allPets) do
+            if not buffActiveFn(pid, minSec) then
+                return pid
+            end
+        end
+        return allPets[1]
+    end
+
+    local pets = { 101, 102 }
+    -- Pet 101 has buff, 102 missing -> returns 102
+    local resPid = mockResolvePetTargetId(pets, function(pid) return pid == 101 end, 0)
+    assert_eq(resPid, 102, 'Multi-pet: selects first pet missing buff')
+
+    -- Both pets have buff -> returns 101 (caller evaluates conditionMet as false)
+    local resPidAll = mockResolvePetTargetId(pets, function(pid) return true end, 0)
+    assert_eq(resPidAll, 101, 'Multi-pet: all have buff returns allPets[1]')
+
+    -- Test 8: Pet Target Resolution
+    local function mockResolvePetTarget(petId, myPetId, mockPetTarget, mockPetFollowing, mockTargetTot, mockSpawnTot, petSt, isAliveFn, isHostileFn, mockSpawnMap)
+        local t = nil
+        if myPetId > 0 and myPetId == petId then
+            if mockPetTarget and (mockPetTarget.id or 0) > 0 then
+                t = mockPetTarget
+            elseif mockPetFollowing and (mockPetFollowing.id or 0) > 0 and mockPetFollowing.type == 'NPC' then
+                t = mockPetFollowing
+            end
+        end
+        if not t and mockTargetTot and (mockTargetTot.id or 0) > 0 then
+            t = mockTargetTot
+        end
+        if not t and mockSpawnTot and (mockSpawnTot.id or 0) > 0 then
+            t = mockSpawnTot
+        end
+        if not t and petSt and not petSt.petHoldActive and (petSt.lastCmdTargetId or 0) > 0 then
+            local cmdTid = petSt.lastCmdTargetId
+            if isAliveFn(cmdTid) and isHostileFn(cmdTid) then
+                local ts = mockSpawnMap and mockSpawnMap[cmdTid]
+                if ts and not ts.dead and ts.type ~= 'Corpse' then
+                    t = ts
+                end
+            end
+        end
+        if t and (t.id or 0) > 0 and not t.dead and t.type ~= 'Corpse' then
+            return {
+                targetName = t.cleanName or 'Target',
+                targetHpPct = t.pctHPs or 0,
+                targetDist = t.distance or 0,
+                targetId = t.id or 0
+            }
+        else
+            return {
+                targetName = 'None',
+                targetHpPct = 0,
+                targetDist = 0,
+                targetId = 0
+            }
+        end
+    end
+
+    local dummyAlive = function(id) return id and id > 0 end
+    local dummyHostile = function(id) return id and id > 0 end
+
+    -- Primary pet with Me.Pet.Target active
+    local pTargetInfo = mockResolvePetTarget(100, 100, { id = 501, cleanName = 'a fire goblin', pctHPs = 65, distance = 15.2, dead = false, type = 'NPC' }, nil, nil, nil, nil, dummyAlive, dummyHostile, nil)
+    assert_eq(pTargetInfo.targetName, 'a fire goblin', 'Me.Pet.Target name resolved')
+    assert_eq(pTargetInfo.targetHpPct, 65, 'Me.Pet.Target HP resolved')
+    assert_eq(pTargetInfo.targetId, 501, 'Me.Pet.Target ID resolved')
+
+    -- Primary pet with Me.Pet.Following fallback
+    local pFollowInfo = mockResolvePetTarget(100, 100, nil, { id = 502, cleanName = 'an orc warrior', pctHPs = 80, distance = 25.0, dead = false, type = 'NPC' }, nil, nil, nil, dummyAlive, dummyHostile, nil)
+    assert_eq(pFollowInfo.targetName, 'an orc warrior', 'Me.Pet.Following NPC resolved')
+    assert_eq(pFollowInfo.targetId, 502, 'Me.Pet.Following ID resolved')
+
+    -- Targeted pet via TargetOfTarget
+    local totInfo = mockResolvePetTarget(200, 100, nil, nil, { id = 503, cleanName = 'a giant spider', pctHPs = 42, distance = 30.0, dead = false, type = 'NPC' }, nil, nil, dummyAlive, dummyHostile, nil)
+    assert_eq(totInfo.targetName, 'a giant spider', 'Target.TargetOfTarget resolved for secondary pet')
+    assert_eq(totInfo.targetId, 503, 'Target.TargetOfTarget ID resolved')
+
+    -- Fallback via petState.lastCmdTargetId during active combat
+    local mockSpawns = {
+        [504] = { id = 504, cleanName = 'a froglok raider', pctHPs = 90, distance = 18.0, dead = false, type = 'NPC' },
+        [505] = { id = 505, cleanName = 'a dead froglok', pctHPs = 0, distance = 18.0, dead = true, type = 'Corpse' }
+    }
+    local cmdInfo = mockResolvePetTarget(100, 100, nil, nil, nil, nil, { petHoldActive = false, lastCmdTargetId = 504 }, dummyAlive, dummyHostile, mockSpawns)
+    assert_eq(cmdInfo.targetName, 'a froglok raider', 'Combat command target resolved as fallback')
+    assert_eq(cmdInfo.targetId, 504, 'Combat command target ID resolved')
+
+    -- Pet hold active suppresses lastCmdTargetId fallback
+    local holdInfo = mockResolvePetTarget(100, 100, nil, nil, nil, nil, { petHoldActive = true, lastCmdTargetId = 504 }, dummyAlive, dummyHostile, mockSpawns)
+    assert_eq(holdInfo.targetName, 'None', 'Pet hold suppresses command target fallback')
+    assert_eq(holdInfo.targetId, 0, 'Pet hold returns target ID 0')
+
+    -- Dead target / corpse rejection
+    local deadInfo = mockResolvePetTarget(100, 100, nil, nil, nil, nil, { petHoldActive = false, lastCmdTargetId = 505 }, dummyAlive, dummyHostile, mockSpawns)
+    assert_eq(deadInfo.targetName, 'None', 'Dead/Corpse target rejected and returns None')
+    assert_eq(deadInfo.targetId, 0, 'Dead/Corpse returns target ID 0')
+
+    -- Idle pet with no target
+    local idleInfo = mockResolvePetTarget(100, 100, nil, nil, nil, nil, { petHoldActive = false, lastCmdTargetId = 0 }, dummyAlive, dummyHostile, mockSpawns)
+    assert_eq(idleInfo.targetName, 'None', 'Idle pet returns Target: None')
+    assert_eq(idleInfo.targetId, 0, 'Idle pet returns target ID 0')
 end
 
 -- ============================================================================
