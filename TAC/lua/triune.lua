@@ -1060,6 +1060,7 @@ local function detectClasses(loud)
     return nil
 end
 
+local isHostileTarget
 local function isSpawnAlive(id)
     if not id or id <= 0 then return false end
     local ok, s = pcall(function() return mq.TLO.Spawn(id) end)
@@ -1994,7 +1995,7 @@ end
 -- should receive offensive actions (spells, AAs, discs, auto-attack).
 -- Prevents the engine from accidentally casting on friendly NPCs (merchants,
 -- quest givers, guards, bankers) or pets that happen to be targeted.
-local function isHostileTarget(id)
+isHostileTarget = function(id)
     if not id or id <= 0 then return false end
     if isSpawnPetOrPlayer(id) then return false end
 
@@ -18215,7 +18216,7 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print('\ag[Triune]\ax Assist Self-Defense When Attacked: \arDISABLED\ax.')
         else
-            ctrl.assist_self_defense = not (ctrl.assist_self_defense ~= false)
+            ctrl.assist_self_defense = ctrl.assist_self_defense == false
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Assist Self-Defense When Attacked: %s.',
                 ctrl.assist_self_defense and '\agENABLED\ax' or '\arDISABLED\ax'))
