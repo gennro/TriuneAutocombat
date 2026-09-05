@@ -4491,6 +4491,106 @@ do
     -- Scenario B: Buff is missing and needed
     local shouldKeepBuff = evaluateRestoreNeeded(12, multiGems, physicalBar2, function(g) return true end)
     assert_eq(shouldKeepBuff, false, 'Gem 12 should not remem priority spell while lower priority buff is still needed')
+
+    -- 6. importCurrentGems auto-population logic
+    local mockGems = {
+        [1] = 'Minor Healing',
+        [2] = 'Courage',
+        [3] = 'Frost Bolt',
+    }
+    local function mockDefaultsForKind(kind, bene)
+        if kind == 'heal' then return 'F: Myself', 'my HP <=', 75 end
+        if kind == 'buff' then return 'F: Myself', 'missing buff', 100 end
+        if kind == 'dd' then return 'E: Current Target', 'target HP <=', 95 end
+        return 'E: Current Target', 'target HP <=', 95
+    end
+    local function mockSpellClassInfo(name)
+        if name == 'Minor Healing' then return 'Clr', true, 'heal' end
+        if name == 'Courage' then return 'Clr', true, 'buff' end
+        if name == 'Frost Bolt' then return 'Wiz', false, 'dd' end
+        return 'War', false, 'other'
+    end
+
+    local function simulateImportCurrentGems(targetGemsTable, numG, activeGems)
+        targetGemsTable = targetGemsTable or {}
+        local newGems = {}
+        for i = 1, numG do
+            local nm = activeGems[i]
+            if nm and nm ~= '' and nm ~= 'NULL' then
+                local cls, bene, kind = mockSpellClassInfo(nm)
+                local tgt, wn, pc = mockDefaultsForKind(kind, bene)
+                table.insert(newGems, {
+                    gem = i,
+                    cls = cls,
+                    spell = nm,
+                    target = tgt,
+                    when = wn,
+                    pct = pc,
+                    min_xtar = 1,
+                    max_casts = 0,
+                    burn_only = false,
+                })
+            end
+        end
+        if targetGemsTable then
+            for idx = numG + 1, #targetGemsTable do
+                if targetGemsTable[idx] then
+                    table.insert(newGems, targetGemsTable[idx])
+                end
+            end
+        end
+        for k in pairs(targetGemsTable) do targetGemsTable[k] = nil end
+        for idx, v in ipairs(newGems) do targetGemsTable[idx] = v end
+        return targetGemsTable
+    end
+
+    local imported = simulateImportCurrentGems({}, 8, mockGems)
+    assert_eq(#imported, 3, 'imported 3 active spells from gem bar')
+    assert_eq(imported[1].gem, 1, 'slot 1 gem is 1')
+    assert_eq(imported[1].spell, 'Minor Healing', 'slot 1 spell is Minor Healing')
+    assert_eq(imported[1].cls, 'Clr', 'slot 1 cls is Clr')
+    assert_eq(imported[1].when, 'my HP <=', 'slot 1 when condition is heal default')
+    assert_eq(imported[1].pct, 75, 'slot 1 pct is 75')
+    assert_eq(imported[1].min_xtar, 1, 'slot 1 min_xtar is 1')
+    assert_eq(imported[1].max_casts, 0, 'slot 1 max_casts is 0')
+    assert_eq(imported[1].burn_only, false, 'slot 1 burn_only is false')
+
+    assert_eq(imported[2].gem, 2, 'slot 2 gem is 2')
+    assert_eq(imported[2].spell, 'Courage', 'slot 2 spell is Courage')
+    assert_eq(imported[2].when, 'missing buff', 'slot 2 when condition is buff default')
+
+    assert_eq(imported[3].gem, 3, 'slot 3 gem is 3')
+    assert_eq(imported[3].spell, 'Frost Bolt', 'slot 3 spell is Frost Bolt')
+    assert_eq(imported[3].when, 'target HP <=', 'slot 3 when condition is dd default')
+
+    -- Retaining extra configured spells beyond physical bar count
+    local existingLoadout = {
+        { gem = 1, spell = 'Old 1' },
+        { gem = 2, spell = 'Old 2' },
+        { gem = 3, spell = 'Old 3' },
+        { gem = 4, spell = 'Old 4' },
+        { gem = 5, spell = 'Old 5' },
+        { gem = 6, spell = 'Old 6' },
+        { gem = 7, spell = 'Old 7' },
+        { gem = 8, spell = 'Old 8' },
+        { gem = 1, spell = 'Downtime Buff 1' },
+        { gem = 2, spell = 'Downtime Buff 2' },
+    }
+    local reimported = simulateImportCurrentGems(existingLoadout, 8, mockGems)
+    assert_eq(#reimported, 5, 'reimported 3 physical gems + 2 retained downtime gems')
+    assert_eq(reimported[1].spell, 'Minor Healing', 'gem 1 replaced by active bar')
+    assert_eq(reimported[2].spell, 'Courage', 'gem 2 replaced by active bar')
+    assert_eq(reimported[3].spell, 'Frost Bolt', 'gem 3 replaced by active bar')
+    assert_eq(reimported[4].spell, 'Downtime Buff 1', 'retained extra spell line 1')
+    assert_eq(reimported[5].spell, 'Downtime Buff 2', 'retained extra spell line 2')
+
+    -- 7. triune.lua source verification for Import Bar button & slash command
+    local triuneCode = readFile('TAC/lua/triune.lua')
+    assert_true(triuneCode:find("function runtime.importCurrentGems", 1, true) ~= nil, 'triune.lua defines runtime.importCurrentGems')
+    assert_true(triuneCode:find("Import Bar##importBarBtn", 1, true) ~= nil, 'triune.lua includes Import Bar button in UI.drawGemTabHeader')
+    assert_true(triuneCode:find("Auto-populate spell lines based on what is currently memorized on your spell gems.", 1, true) ~= nil, 'triune.lua includes descriptive tooltip on Import Bar')
+    assert_true(triuneCode:find('Click "+ Add Spell" or "Import Bar" above to populate your spell list.', 1, true) ~= nil, 'triune.lua mentions Import Bar in empty gem list hint')
+    assert_true(triuneCode:find("cmd == 'importbar' or cmd == 'import'", 1, true) ~= nil, 'triune.lua handles /ac importbar and /ac import slash command')
 end
 
 -- ============================================================================

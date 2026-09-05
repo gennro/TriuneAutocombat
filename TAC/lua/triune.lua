@@ -3978,11 +3978,26 @@ function runtime.importCurrentGems(targetGemsTable)
     local numG = getNumGems()
     for i = 1, numG do
         local nm
-        pcall(function() nm = mq.TLO.Me.Gem(i).Name() end)
+        pcall(function()
+            local g = mq.TLO.Me.Gem(i)
+            if g and g() then
+                nm = g.Name()
+            end
+        end)
         if nm and nm ~= '' and nm ~= 'NULL' then
             local cls, bene, kind = spellClassInfo(nm)
             local tgt, wn, pc = defaultsForKind(kind, bene)
-            table.insert(newGems, { gem = i, cls = cls, spell = nm, target = tgt, when = wn, pct = pc })
+            table.insert(newGems, {
+                gem = i,
+                cls = cls,
+                spell = nm,
+                target = tgt,
+                when = wn,
+                pct = pc,
+                min_xtar = 1,
+                max_casts = 0,
+                burn_only = false,
+            })
         end
     end
     -- If there were existing configured spells beyond the physical bar, retain them
@@ -3996,6 +4011,12 @@ function runtime.importCurrentGems(targetGemsTable)
     for k in pairs(targetGemsTable) do targetGemsTable[k] = nil end
     for idx, v in ipairs(newGems) do targetGemsTable[idx] = v end
     runtime.saveLoadout(true)
+    if #newGems > 0 then
+        print(string.format('\ag[Triune]\ax Auto-populated %d spell(s) from current gem bar.', #newGems))
+    else
+        print('\ay[Triune]\ax No memorized spells found on current spell gem bar.')
+    end
+    return #newGems
 end
 
 -- Catches a stale loadout: a gem configured for spell X while the physical
@@ -5897,6 +5918,8 @@ function UI.drawHelpTab()
                 { cmd = '/ac run / /ac start',                desc = 'Start / unpause auto-combat execution' },
                 { cmd = '/ac pause / /ac stop',               desc = 'Pause auto-combat execution, halt movement & disengage pet' },
                 { cmd = '/ac burn [on|off]',                  desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
+                { cmd = '/ac memall',                         desc = 'Queue all missing or mismatched priority spells to memorization bar' },
+                { cmd = '/ac importbar / /ac import',         desc = 'Auto-populate spell lines from currently memorized spell gems' },
                 { cmd = '/ac status',                         desc = 'Print current running state and combat mode to chat' },
                 { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
                 { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
@@ -6111,7 +6134,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
 
     if ImGui.BeginChild('gemlist_' .. idPrefix, 0, 0, false, ImGuiWindowFlags and ImGuiWindowFlags.HorizontalScrollbar or 0) then
         if totalSpells == 0 then
-            ImGui.TextDisabled('No spells configured. Click "+ Add Spell" above to populate your spell list.')
+            ImGui.TextDisabled('No spells configured. Click "+ Add Spell" or "Import Bar" above to populate your spell list.')
         else
             for i = 1, totalSpells do
                 ImGui.PushID(idPrefix .. i)
@@ -6388,6 +6411,14 @@ function UI.drawGemTabHeader(gemsTable)
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Memorize any missing or wrong spells on your gem bar back to each gem\'s priority spell.')
+    end
+
+    ImGui.SameLine()
+    if ImGui.Button('Import Bar##importBarBtn') then
+        runtime.importCurrentGems(gemsTable)
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Auto-populate spell lines based on what is currently memorized on your spell gems.')
     end
 
     ImGui.SameLine(); ImGui.TextDisabled('|')
@@ -19146,6 +19177,8 @@ local function triuneCommand(...)
         print('  \ag/ac run | start\ax - Start autocombat execution')
         print('  \ag/ac pause | stop\ax - Pause execution & disengage combat')
         print('  \ag/ac burn [on|off]\ax - Toggle burn mode')
+        print('  \ag/ac memall | mem\ax - Memorize priority spells to gem bar')
+        print('  \ag/ac importbar | import\ax - Auto-populate spell lines from current spell gems')
         print('  \ag/ac debug\ax - Toggle live combat debug telemetry in chat')
         print('  \ag/ac status\ax - Print running state and mode')
         print('  \ag/ac compact | mini | hud\ax - Toggle compact HUD mode')
@@ -19742,11 +19775,13 @@ local function triuneCommand(...)
         end
     elseif cmd == 'memall' or cmd == 'mem' or cmd == 'remem' then
         runtime.queueMemAll()
+    elseif cmd == 'importbar' or cmd == 'import' or cmd == 'importgems' then
+        runtime.importCurrentGems()
     elseif setTriuneMode(args[1], args[2]) then
         return
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 

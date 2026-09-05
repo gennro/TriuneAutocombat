@@ -167,6 +167,7 @@ Want to clear up screen clutter while playing?
 - **Per-Spell Gem Dropdown**: Assign each spell line to any physical gem slot (Gem 1 to Gem 12). Multiple spells can share the same physical gem (e.g., a primary combat nuke and several long-duration buffs sharing Gem 12).
 - **Dynamic Spell Management**: 1-click `+ Add Spell` button to append new lines, `^` and `v` priority buttons to reorder evaluation order, and `X` button to delete lines.
 - **1-Click "Mem All" Restoral**: The `Mem All` toolbar button (and `/ac memall` command) scans all 12 physical slots, shows a pending queue count badge (e.g. `Mem All (3)`), and systematically rememorizes missing or mismatched priority combat spells in strict numerical order.
+- **1-Click "Import Bar" Auto-Population**: The `Import Bar` toolbar button (and `/ac importbar` / `/ac import` command) reads all currently memorized spells from your in-game spell gems and automatically populates the Spell Gems page with era-accurate class, default targets, and condition triggers to make character setup effortless.
 - **Automated Downtime Buff Swapping**: When out of combat, stationary, and not casting, Triune automatically swaps missing buffs into their assigned gems, waits for recharge, and casts them.
 - **Instant Aggro Interruption**: If aggro is detected at any point during a swap, Triune instantly stands up, closes the spellbook, engages combat, and kills all enemies on XTarget before safely resuming the swap.
 - **Primary Combat Spell Restoration**: Once all downtime buffs for a shared gem are cast, Triune automatically re-memorizes the primary combat spell back to that gem so your combat bar is always ready.
@@ -228,6 +229,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac fov [50-150\|on\|off]` | `/ac setfov`, `/ac camfov` | Configure camera Field of View (50-150 units) and maintain across zoning |
 | `/ac burn [on\|off]` | `/ac burnon`, `/ac burnoff` | Toggle Burn mode on/off |
 | `/ac memall` | `/ac mem`, `/ac remem` | Queue all missing or mismatched priority spells to memorization bar |
+| `/ac importbar` | `/ac import`, `/ac importgems` | Auto-populate spell lines from currently memorized spell gems |
 | `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |
 | `/ac compact` | `/ac mini`, `/ac hud` | Toggle the compact Mini HUD |
 | `/ac cd` | `/ac cooldowns`, `/ac cds` | Toggle the popout Cooldown & Ability Monitor window |

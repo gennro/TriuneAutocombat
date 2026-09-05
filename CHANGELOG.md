@@ -16,6 +16,12 @@
   - **MQ2FOV Plugin Gate (`runtime.fovLoaded`, `runtime.applyFov`)**: Added `runtime.fovLoaded()` probe checking `mq.TLO.Plugin('mq2fov')` before dispatching `/fov <val>` commands. Prevents `DoCommand - Couldn't parse '/fov 150'` red errors on MacroQuest installations that do not have the legacy FOV plugin loaded.
   - **Settings UI Status Indicators**: Added telemetry notices in the Settings tab indicating when `MQ2Map` or `MQ2FOV` are not loaded, providing clear feedback on feature availability.
 
+- **Spell Gems Auto-Population Button & Slash Command (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **Toolbar "Import Bar" Button (`UI.drawGemTabHeader`, `runtime.importCurrentGems`)**: Restored the `Import Bar` toolbar button on the Spell Gems tab right next to `Mem All`. Clicking the button immediately reads all active in-game spell gems from the character's physical gem bar and auto-populates the Spell Gems page with era-accurate class mapping, beneficial/detrimental classification, and sensible default targets and conditions (`target HP <= 95%` for nukes, `missing buff` for buffs, `my HP <= 75%` for heals).
+  - **Loadout Defaults & Safety**: Automatically sets standard loadout attributes (`min_xtar = 1`, `max_casts = 0`, `burn_only = false`), wraps MQ TLO access in `pcall` guards, preserves any extra user-configured spell rows beyond the physical gem bar count, and reports populated spell counts to chat.
+  - **UI Guidance & Help Integration**: Updated empty-state text in `UI.drawGemList` to guide players to click `+ Add Spell` or `Import Bar`, and documented the `/ac importbar` (aliases `/ac import`, `/ac importgems`) slash command in `triuneCommand` and the Help tab commands table.
+  - **Automated Regression Suite (`Suite 49`)**: Added unit tests verifying gem bar simulation, default field population, downtime spell retention, and UI button presence.
+
 ---
 
 ## 2026-09-04
