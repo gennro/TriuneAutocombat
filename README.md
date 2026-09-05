@@ -328,6 +328,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **2.0-beta**
+Current version: **2.01**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

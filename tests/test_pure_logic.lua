@@ -2799,9 +2799,9 @@ do
     local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
     local readmeSrc = readFile('README.md')
     local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '2.0-beta', 'triune.lua version is 2.0-beta')
-    assert_eq(updaterVer, '2.0-beta', 'triune_updater.lua version is 2.0-beta')
-    assert_eq(readmeVer, '2.0-beta', 'README.md version is 2.0-beta')
+    assert_eq(triuneVer, '2.01', 'triune.lua version is 2.01')
+    assert_eq(updaterVer, '2.01', 'triune_updater.lua version is 2.01')
+    assert_eq(readmeVer, '2.01', 'README.md version is 2.01')
     assert_true(triuneSrc:find('hdrUpdate') == nil, 'triune.lua does not contain hdrUpdate button')
     assert_true(triuneSrc:find('miniUpdate') == nil, 'triune.lua does not contain miniUpdate button')
 end

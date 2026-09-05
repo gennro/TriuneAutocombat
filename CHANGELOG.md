@@ -2,6 +2,9 @@
 
 ## 2026-09-05
 
+- **Project Version Bump (v2.01) (`triune.lua`, `triune_updater.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - Synchronized version bump to `2.01` across the main suite (`triune.lua`), the standalone release updater (`triune_updater.lua`), repository documentation (`README.md`), and regression test suites.
+
 - **Hostile Target Self-Healing & Beneficial Spell Target Correction (`triune.lua`, `tests/test_pure_logic.lua`).**
   - **Hostile NPC Targeting Retention for Self-Directed Heals (`runtime.castGem`, `runtime.useClickie`, `runtime.fireAA`)**: When casting single-target heals or beneficial spells on oneself (`id == mq.TLO.Me.ID()`) while currently attacking or targeting a hostile NPC (`isHostileTarget(Target.ID())`), Triune no longer changes target to the player. In EverQuest, casting a beneficial spell while targeting a hostile entity automatically redirects the spell onto the player without losing target on the enemy.
   - **Target Lock Override Prevention (`getActiveTargetRequiredCastingId`)**: Updated active casting target resolution to return `nil` instead of `Me.ID()` whenever the player has a hostile NPC targeted during a self-cast heal or buff. This prevents `combatTick`'s mid-cast target lock from dispatching `/target id <Me.ID>`, which previously broke auto-attack melee combat, cleared target from the engaged mob, and left the character idling on itself post-cast.
