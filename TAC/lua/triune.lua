@@ -256,6 +256,10 @@ local function sanitizeModeConfig(c)
     if c.auto_aa_buy_order ~= 'cost' and c.auto_aa_buy_order ~= 'list' then
         c.auto_aa_buy_order = 'cost'
     end
+    if c.auto_aa_delegate_aaspend == nil then c.auto_aa_delegate_aaspend = true end
+    if c.auto_aa_aaspend_mode ~= 'auto' and c.auto_aa_aaspend_mode ~= 'brute' then
+        c.auto_aa_aaspend_mode = 'auto'
+    end
     if c.downtime_buffing == nil then c.downtime_buffing = true end
     if c.pause_on_zone == nil then c.pause_on_zone = true end
     if type(c.status_collapsed) ~= 'table' then c.status_collapsed = {} end
@@ -398,6 +402,8 @@ local function defaultCtrl()
         auto_aa_hide_maxed       = false,
         auto_aa_only_prioritized = false,
         auto_aa_buy_order        = 'cost',
+        auto_aa_delegate_aaspend = true,
+        auto_aa_aaspend_mode     = 'auto',
         downtime_buffing         = true,
         pause_on_zone            = true,
         auto_group               = false,
@@ -1737,6 +1743,15 @@ end
 function runtime.fovLoaded()
     local ok, loaded = pcall(function()
         local p = mq.TLO.Plugin('mq2fov') or mq.TLO.Plugin('MQ2FOV') or mq.TLO.Plugin('fov')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
+function runtime.aaSpendLoaded()
+    local ok, loaded = pcall(function()
+        local p = mq.TLO.Plugin('mq2aaspend') or mq.TLO.Plugin('MQ2AASpend') or mq.TLO.Plugin('aaspend')
         if p and p() and p.IsLoaded and p.IsLoaded() then return true end
         return false
     end)
@@ -4425,6 +4440,9 @@ runtime.saveLoadout = function(silent)
     local f = io.open(cfg .. '/triune_loadout.lua', 'w')
     if not f then return end
     f:write('return '); serialize(ALLDATA, f, 1); f:close()
+    if ctrl.auto_aa_delegate_aaspend and runtime.syncAAsToMQ2AASpendIni then
+        runtime.syncAAsToMQ2AASpendIni(true)
+    end
     if not silent then print('\ag[Triune]\ax saved loadout for ' .. tostring(myName or '?') .. '.') end
 end
 
@@ -7096,39 +7114,67 @@ function UI.drawAutoAATab()
     ImGui.TextDisabled('|')
     ImGui.SameLine()
 
-    local spendVal = ImGui.Checkbox('Auto-Spend##aaAutoSpendMaster', ctrl.auto_spend_aa or false)
+    local spendVal = ImGui.Checkbox('Auto-Spend AA##aaAutoSpendMaster', ctrl.auto_spend_aa or false)
     if spendVal ~= (ctrl.auto_spend_aa or false) then
         ctrl.auto_spend_aa = spendVal
+        if spendVal then
+            if runtime.aaSpendLoaded and not runtime.aaSpendLoaded() then
+                mq.cmd('/plugin mq2aaspend load')
+            end
+            if runtime.syncAAsToMQ2AASpendIni then
+                runtime.syncAAsToMQ2AASpendIni(true)
+            end
+        end
         runtime.saveLoadout(true)
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'When enabled, Triune automatically purchases prioritized AAs when sufficient points are available.')
+        ImGui.SetTooltip('%s', 'Automatically purchases prioritized Alternate Advancements via MQ2AAspend in the background as points are earned.')
     end
 
     ImGui.SameLine()
-    ImGui.SetNextItemWidth(110)
-    local orderOpts = { 'Cheapest First', 'Alphabetical' }
-    local orderKeys = { 'cost', 'list' }
-    local curOrderIdx = (ctrl.auto_aa_buy_order == 'list') and 2 or 1
-    local newOrderIdx = ImGui.Combo('##aaOrderCombo', curOrderIdx, orderOpts)
-    if newOrderIdx ~= curOrderIdx then
-        ctrl.auto_aa_buy_order = orderKeys[newOrderIdx]
-        runtime.saveLoadout(true)
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'Priority Buy Order:\n- Cheapest First: Buys lowest-cost prioritized ability available.\n- Alphabetical: Evaluates prioritized abilities in A-Z order.')
+    local aaSpendAvail = runtime.aaSpendLoaded and runtime.aaSpendLoaded()
+    if aaSpendAvail then
+        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], '● MQ2AAspend')
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('%s', 'MQ2AAspend is active and ready.\nPrioritized AAs auto-sync to Server_Character.ini [MQ2AASpend_AAList].')
+        end
+    else
+        if ImGui.SmallButton('Load MQ2AAspend##btnLoadAASpend') then
+            mq.cmd('/plugin mq2aaspend load')
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('%s', 'MQ2AAspend is not yet loaded. Click to execute /plugin mq2aaspend load.')
+        end
     end
 
     ImGui.SameLine()
-    ImGui.SetNextItemWidth(100)
-    local curThresh = ctrl.auto_spend_aa_threshold or 100
-    local newThresh = ImGui.SliderInt('##autoAaThresh', curThresh, 25, 100, 'Cap: %d')
+    ImGui.SetNextItemWidth(90)
+    local curThresh = ctrl.auto_spend_aa_threshold or 25
+    local newThresh = ImGui.SliderInt('##autoAaThresh', curThresh, 1, 100, 'Bank: %d')
     if newThresh ~= curThresh then
         ctrl.auto_spend_aa_threshold = newThresh
         runtime.saveLoadout(true)
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', string.format('Cap Protection Threshold: %d AA\nSurplus points will dump into fireworks when reached.', curThresh))
+        ImGui.SetTooltip('%s', string.format('Reserve/Bank Threshold: %d AA points.\nAuto-spending begins once your unspent points reach this number.', curThresh))
+    end
+
+    ImGui.SameLine()
+    if ImGui.Button('Spend Now##btnAASpendNow') then
+        if runtime.manualSpendAA then runtime.manualSpendAA() end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Manually trigger an immediate purchase of prioritized AAs right now.')
+    end
+
+    ImGui.SameLine()
+    if ImGui.Button('Sync to INI##btnSyncIni') then
+        if runtime.syncAAsToMQ2AASpendIni then
+            runtime.syncAAsToMQ2AASpendIni(false)
+        end
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('%s', 'Manually syncs prioritized AAs to Server_Character.ini [MQ2AASpend_AAList] and reloads the plugin.\n(Note: Triune also syncs this automatically in the background!)')
     end
 
     ImGui.SameLine()
@@ -7138,7 +7184,7 @@ function UI.drawAutoAATab()
         if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'Re-scans all character Alternate Advancement abilities (including Special tab).')
+        ImGui.SetTooltip('%s', 'Re-scans all character Alternate Advancement abilities.')
     end
 
     ImGui.SameLine()
@@ -7150,6 +7196,8 @@ function UI.drawAutoAATab()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'Unchecks all prioritized abilities.')
     end
+
+    ImGui.Separator()
 
     -- Compact Row 2: Search, Sort & View Filter Toggles
     local allItems = runtime.getFilteredSortedAAs and runtime.getFilteredSortedAAs() or {}
@@ -7290,28 +7338,36 @@ function UI.drawAutoAATab()
                 ImGui.TableNextColumn()
                 if itm.fullyTrained then
                     ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%d/%d', itm.rank, itm.maxRank))
-                else
+                elseif itm.maxRank and itm.maxRank > 0 then
                     ImGui.Text(string.format('%d/%d', itm.rank, itm.maxRank))
+                else
+                    ImGui.Text(string.format('%d/?', itm.rank))
                 end
 
                 -- Col 4: Cost
                 ImGui.TableNextColumn()
-                if itm.fullyTrained or itm.cost <= 0 then
+                if itm.fullyTrained then
                     ImGui.TextDisabled('-')
-                elseif unspentAA >= itm.cost then
-                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%d AA', itm.cost))
+                elseif itm.cost and itm.cost > 0 then
+                    if unspentAA >= itm.cost then
+                        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%d AA', itm.cost))
+                    else
+                        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format('%d AA', itm.cost))
+                    end
                 else
-                    ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format('%d AA', itm.cost))
+                    ImGui.TextDisabled('-')
                 end
 
                 -- Col 5: Status
                 ImGui.TableNextColumn()
                 if itm.fullyTrained then
                     ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'Max Rank')
-                elseif itm.cost > 0 and unspentAA >= itm.cost then
+                elseif itm.cost and itm.cost > 0 and unspentAA >= itm.cost then
                     ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'Can Train')
-                elseif itm.cost > 0 then
+                elseif itm.cost and itm.cost > 0 then
                     ImGui.TextDisabled(string.format('Need %d AA', itm.cost - unspentAA))
+                elseif itm.rank > 0 then
+                    ImGui.TextDisabled('In Progress')
                 else
                     ImGui.TextDisabled('Untrained')
                 end
@@ -14294,54 +14350,127 @@ function runtime.findAAInWindowLists(targetName)
     return nil, nil, nil, nil
 end
 
-function runtime.recordScannedAA(list, foundMap, name)
+function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, knownCost, isKnownCharAA, category, isFromUI)
     if not name or name == '' or tonumber(name) then return end
     name = tostring(name):match('^%s*(.-)%s*$')
-    if name == '' or foundMap[name] then return end
+    if name == '' then return end
+
+    -- Explicitly reject normal character skills (e.g. Mend, Flying Kick, Backstab, Dual Wield, Bandage Wounds)
+    local isSkill = false
+    pcall(function()
+        if mq.TLO.Skill and mq.TLO.Skill(name) and mq.TLO.Skill(name)() ~= nil then
+            isSkill = true
+        end
+    end)
+    if isSkill then return end
+
+    local existing = foundMap[name]
+    if existing then
+        if knownRank ~= nil and knownRank >= 0 then
+            existing.rank = knownRank
+        end
+        if knownMaxRank ~= nil and knownMaxRank > 0 and (existing.maxRank == 0 or knownMaxRank > existing.maxRank) then
+            existing.maxRank = knownMaxRank
+        end
+        if knownCost ~= nil and knownCost > 0 then
+            existing.cost = knownCost
+        end
+        if existing.maxRank > 0 and existing.rank >= existing.maxRank then
+            existing.fullyTrained = true
+            existing.cost = 0
+            existing.canTrain = false
+        else
+            existing.fullyTrained = false
+            existing.canTrain = true
+        end
+        if category and (not existing.category or existing.category == '') then
+            existing.category = category
+        end
+        if not runtime.cachedAAData then runtime.cachedAAData = {} end
+        runtime.cachedAAData[name] = {
+            rank = existing.rank,
+            maxRank = existing.maxRank,
+            cost = existing.cost,
+            category = existing.category,
+            id = existing.id
+        }
+        return
+    end
+
     local rank, maxRank, cost, canTrain, pointsSpent, id, passive, aaType = 0, 0, 0, false, 0, 0, false, 0
-    local isCharacterAA = false
+    local isCharacterAA = not not isKnownCharAA
+
+    if runtime.cachedAAData and runtime.cachedAAData[name] then
+        local cd = runtime.cachedAAData[name]
+        if cd.rank ~= nil then rank = cd.rank end
+        if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
+        if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
+        if cd.category and not category then category = cd.category end
+        if cd.id ~= nil and cd.id > 0 then id = cd.id end
+        isCharacterAA = true
+    end
+
     pcall(function()
         local ma = mq.TLO.Me.AltAbility(name)
         if ma and ma() then
-            id = tonumber(ma.ID and ma.ID() or 0) or 0
-            if id > 0 then
+            local mid = tonumber(ma.ID and ma.ID() or 0) or 0
+            if mid > 0 then
+                id = mid
                 isCharacterAA = true
-                rank = tonumber(ma.Rank and ma.Rank() or 0) or 0
-                maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
-                cost = tonumber(ma.Cost and ma.Cost() or 0) or 0
+                if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
+                if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
+                if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
                 canTrain = (ma.CanTrain and ma.CanTrain() == true)
                 pointsSpent = tonumber(ma.PointsSpent and ma.PointsSpent() or 0) or 0
                 passive = (ma.Passive and ma.Passive() == true)
                 aaType = tonumber(ma.Type and ma.Type() or 0) or 0
             end
         end
-        if isCharacterAA and (maxRank == 0 or (cost == 0 and not (maxRank > 0 and rank >= maxRank))) then
+    end)
+
+    pcall(function()
+        if maxRank == 0 or cost == 0 or id == 0 or aaType == 0 then
             local ga = mq.TLO.AltAbility(name)
             if ga and ga() then
+                if id == 0 then id = tonumber(ga.ID and ga.ID() or 0) or 0 end
                 if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
                 if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
                 if not canTrain and ga.CanTrain then canTrain = (ga.CanTrain() == true) end
                 if aaType == 0 and ga.Type then aaType = tonumber(ga.Type() or 0) or 0 end
-            end
-        end
-        -- Fallback: allow abilities that were explicitly read from the character's in-game Special tab or AAWindow
-        if not isCharacterAA and runtime.specialTabAAs then
-            for _, sName in ipairs(runtime.specialTabAAs) do
-                if sName == name then
-                    local ga = mq.TLO.AltAbility(name)
-                    if ga and ga() then
-                        id = tonumber(ga.ID and ga.ID() or 0) or 0
-                        maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0
-                        cost = tonumber(ga.Cost and ga.Cost() or 0) or 0
-                        canTrain = (ga.CanTrain and ga.CanTrain() == true)
-                        aaType = tonumber(ga.Type and ga.Type() or 0) or 0
-                        isCharacterAA = true
-                    end
-                    break
-                end
+                if not passive and ga.Passive then passive = (ga.Passive() == true) end
             end
         end
     end)
+
+    -- If not directly read from live AAWindow UI listbox, it MUST have a valid AltAbility ID (> 0)
+    if not isFromUI and id <= 0 then
+        return
+    end
+
+    if knownRank ~= nil then rank = knownRank end
+    if knownMaxRank ~= nil and knownMaxRank > 0 then maxRank = knownMaxRank end
+    if knownCost ~= nil and knownCost > 0 then cost = knownCost end
+
+    if not isCharacterAA and runtime.specialTabAAs then
+        for _, sName in ipairs(runtime.specialTabAAs) do
+            if sName == name then isCharacterAA = true; break end
+        end
+    end
+    if not isCharacterAA and ctrl.auto_aa_priorities and ctrl.auto_aa_priorities[name] then
+        isCharacterAA = true
+    end
+
+    local fullyTrained = (maxRank > 0 and rank >= maxRank)
+    if fullyTrained then
+        cost = 0
+    elseif cost <= 0 then
+        cost = (rank > 0) and (rank + 1) or 1
+    end
+
+    if not fullyTrained and not canTrain then
+        canTrain = true
+    end
+
     if isCharacterAA and (maxRank > 0 or rank > 0 or canTrain or cost > 0) then
         local entry = {
             name = name,
@@ -14353,10 +14482,20 @@ function runtime.recordScannedAA(list, foundMap, name)
             id = id,
             passive = passive,
             type = aaType,
-            fullyTrained = (maxRank > 0 and rank >= maxRank)
+            fullyTrained = fullyTrained,
+            category = category
         }
         foundMap[name] = entry
         list[#list + 1] = entry
+
+        if not runtime.cachedAAData then runtime.cachedAAData = {} end
+        runtime.cachedAAData[name] = {
+            rank = rank,
+            maxRank = maxRank,
+            cost = cost,
+            category = category,
+            id = id
+        }
     end
 end
 
@@ -14472,32 +14611,55 @@ function runtime.scanPlayerAAs(force)
     pcall(function()
         local win = mq.TLO.Window('AAWindow')
         if win and win() then
-            local listNames = {
-                'AAW_SpecialList', 'AA_SpecialList', 'SpecialList', 'Special_List',
-                'AAW_Special_List', 'AA_Special_List', 'AAW_SpecList', 'AA_SpecList',
-                'AAW_GeneralList', 'AAW_ArchetypeList', 'AAW_ClassList', 'AAW_FocusList',
-                'AA_GeneralList', 'AA_ArchetypeList', 'AA_ClassList', 'AA_FocusList',
+            local listCandidates = {
+                'AAW_GeneralList', 'AAW_ArchList', 'AAW_ArchetypeList', 'AAW_ClassList', 'AAW_SpecialList',
+                'AA_GeneralList', 'AA_ArchList', 'AA_ArchetypeList', 'AA_ClassList', 'AA_SpecialList',
+                'GeneralList', 'ArchList', 'ClassList', 'SpecialList',
+                'List1', 'List2', 'List3', 'List4',
                 'AAW_List', 'AA_List', 'AAW_SearchResultList', 'AA_SearchResultList'
             }
-            local tabParents = { 'AAW_Subwindows', 'AA_Subwindows', 'AA_SubWnd', 'AAW_SpecialTabPage', 'AA_SpecialTabPage' }
-            for _, lName in ipairs(listNames) do
-                local child = win.Child(lName)
-                if not child or not child() then
-                    for _, tp in ipairs(tabParents) do
-                        local p = win.Child(tp)
-                        if p and p() then
-                            local sc = p.Child(lName)
-                            if sc and sc() then child = sc; break end
-                        end
+            local scannedChildren = {}
+            for _, lName in ipairs(listCandidates) do
+                local child = nil
+                pcall(function()
+                    child = win.Child(lName)
+                    if not child or not child() then
+                        child = runtime.findChildRecursive(win, lName)
                     end
-                end
-                if child and child() and child.Items then
+                end)
+                if child and child() and child.Items and not scannedChildren[child] then
+                    scannedChildren[child] = true
                     local count = tonumber(child.Items() or 0) or 0
                     if count > 0 and count <= 1000 then
                         for row = 1, count do
-                            local rowTxt = child.List(row, 1)() or child.List(row)()
-                            if rowTxt and rowTxt ~= '' then
-                                runtime.recordScannedAA(list, foundMap, rowTxt)
+                            local nameTxt = nil
+                            local curMaxTxt = nil
+                            local costTxt = nil
+                            local catTxt = nil
+                            pcall(function()
+                                nameTxt = child.List(row, 1)() or child.List(row)()
+                                curMaxTxt = child.List(row, 2)()
+                                costTxt = child.List(row, 3)()
+                                catTxt = child.List(row, 4)()
+                            end)
+                            if nameTxt and type(nameTxt) == 'string' and nameTxt ~= '' then
+                                local trimmed = nameTxt:match('^%s*(.-)%s*$')
+                                if trimmed and trimmed ~= '' and not tonumber(trimmed) then
+                                    local curRank, maxRank = nil, nil
+                                    if curMaxTxt and type(curMaxTxt) == 'string' then
+                                        local c, m = curMaxTxt:match('(%d+)%s*/%s*(%d+)')
+                                        if c and m then
+                                            curRank = tonumber(c)
+                                            maxRank = tonumber(m)
+                                        end
+                                    end
+                                    local costVal = nil
+                                    if costTxt and type(costTxt) == 'string' then
+                                        local c = costTxt:match('%d+')
+                                        if c then costVal = tonumber(c) end
+                                    end
+                                    runtime.recordScannedAA(list, foundMap, trimmed, curRank, maxRank, costVal, true, catTxt, true)
+                                end
                             end
                         end
                     end
@@ -14506,7 +14668,24 @@ function runtime.scanPlayerAAs(force)
         end
     end)
 
-    -- 2. Scan known DATA.aas combat abilities
+    -- 1.5 Load previously cached AAWindow abilities into current scan (pruning skills)
+    if runtime.cachedAAData then
+        for cName, cd in pairs(runtime.cachedAAData) do
+            local isSkill = false
+            pcall(function()
+                if mq.TLO.Skill and mq.TLO.Skill(cName) and mq.TLO.Skill(cName)() ~= nil then
+                    isSkill = true
+                end
+            end)
+            if isSkill or ((cd.id or 0) <= 0 and (cd.maxRank or 0) <= 0) then
+                runtime.cachedAAData[cName] = nil
+            elseif not foundMap[cName] then
+                runtime.recordScannedAA(list, foundMap, cName, cd.rank, cd.maxRank, cd.cost, true, cd.category, true)
+            end
+        end
+    end
+
+    -- 2. Scan known DATA.aas combat abilities (if present in config)
     if DATA and DATA.aas then
         for _, cls in ipairs(myClasses) do
             for _, aList in pairs(DATA.aas[cls] or {}) do
@@ -14514,30 +14693,11 @@ function runtime.scanPlayerAAs(force)
                     for _, item in ipairs(aList) do
                         local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
                         if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
-                        runtime.recordScannedAA(list, foundMap, nm)
+                        runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, nil, false)
                     end
                 end
             end
         end
-    end
-
-    -- 3. Scan common general, archetype, and passive Norrath AAs
-    local COMMON_AAS = {
-        'Run Speed', 'Innate Run Speed', 'Combat Agility', 'Combat Stability', 'Natural Durability',
-        'Physical Enhancement', 'Planar Power', 'Planar Durability', 'First Aid', 'Bandage Wounds',
-        'Innate Strength', 'Innate Stamina', 'Innate Agility', 'Innate Dexterity', 'Innate Intelligence',
-        'Innate Wisdom', 'Innate Charisma', 'Spell Casting Mastery', 'Spell Casting Reinforcement',
-        'Spell Casting Subtlety', 'Spell Casting Fury', 'Healing Adept', 'Healing Gift', 'Combat Fury',
-        'Ambidexterity', 'Dual Wield', 'Double Attack', 'Flurry', 'Critical Affliction', 'Destructive Fury',
-        'Mental Clarity', 'Body and Mind', 'Delay Death', 'New Tanaan Crafting Mastery', 'Baking Mastery',
-        'Blacksmithing Mastery', 'Brewing Mastery', 'Fletching Mastery', 'Jewelcraft Mastery',
-        'Pottery Mastery', 'Tailoring Mastery', 'Salvage', 'Origin', 'Chaotic Stab', 'Sinister Strikes',
-        'Headshot', 'Endless Quiver', 'Archery Mastery', 'Weapon Affinity', 'Ferocity', 'Punishing Blow',
-        'Hastened Purification', 'Hastened Curing', 'Mass Group Buff', 'Radiant Cure', 'Purification',
-        'Suspend Minion', 'Pet Affinity', 'Companion\'s Fury', 'Companion\'s Strength', 'Companion\'s Durability'
-    }
-    for _, nm in ipairs(COMMON_AAS) do
-        runtime.recordScannedAA(list, foundMap, nm)
     end
 
     -- 4. Scan Special tab abilities (from one-time read of the Special tab)
@@ -14552,28 +14712,35 @@ function runtime.scanPlayerAAs(force)
     end
     if specialList and #specialList > 0 then
         for _, nm in ipairs(specialList) do
-            runtime.recordScannedAA(list, foundMap, nm)
+            runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, 'Special', true)
         end
     end
     if ctrl.auto_spend_aa_name and ctrl.auto_spend_aa_name ~= '' then
-        runtime.recordScannedAA(list, foundMap, ctrl.auto_spend_aa_name)
+        runtime.recordScannedAA(list, foundMap, ctrl.auto_spend_aa_name, nil, nil, nil, true, nil, false)
     end
 
-    -- 5. Scan character AltAbility indices
+    -- 5. Scan character AltAbility indices across known ID ranges
     pcall(function()
-        for idx = 1, 1000 do
-            local ma = mq.TLO.Me.AltAbility(idx)
-            if ma and ma() then
-                local nm = ma.Name and ma.Name()
-                if nm and nm ~= '' then runtime.recordScannedAA(list, foundMap, nm) end
+        local function probeRange(startId, endId)
+            for idx = startId, endId do
+                local ma = mq.TLO.Me.AltAbility(idx)
+                if ma and ma() then
+                    local nm = ma.Name and ma.Name()
+                    if nm and nm ~= '' then runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, nil, true) end
+                end
             end
         end
+        probeRange(1, 1500)
+        probeRange(4000, 4060)
+        probeRange(5000, 5050)
+        probeRange(8120, 8140)
+        probeRange(17780, 17800)
     end)
 
     -- 6. Saved priorities
     if ctrl.auto_aa_priorities then
         for nm in pairs(ctrl.auto_aa_priorities) do
-            runtime.recordScannedAA(list, foundMap, nm)
+            runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true)
         end
     end
 
@@ -14722,7 +14889,7 @@ function runtime.processAATrainWorkflow()
                 if w and w() and w.DoOpen then w.DoOpen() end
             end)
             mq.cmd('/windowstate AAWindow open')
-            mq.cmd('/nomodkey /keypress alt_advancement')
+            mq.cmd('/nomodkey /keypress V')
             task.nextStepAt = now + 0.35
             task.step = 'wait_open'
             return
@@ -14748,7 +14915,7 @@ function runtime.processAATrainWorkflow()
                 if w and w() and w.DoOpen then w.DoOpen() end
             end)
             mq.cmd('/windowstate AAWindow open')
-            mq.cmd('/nomodkey /keypress alt_advancement')
+            mq.cmd('/nomodkey /keypress V')
             task.nextStepAt = now + 0.35
         end
         return
@@ -14856,6 +15023,99 @@ function runtime.processAATrainWorkflow()
     end
 end
 
+function runtime.syncAAsToMQ2AASpendIni(silent)
+    local server, cleanName
+    pcall(function()
+        server = mq.TLO.EverQuest.Server()
+        cleanName = mq.TLO.Me.CleanName()
+    end)
+    if not server or server == '' or not cleanName or cleanName == '' then return false end
+
+    local iniFile = string.format('%s/%s_%s.ini', cfg, server, cleanName)
+
+    local lines = {}
+    local f = io.open(iniFile, 'r')
+    if f then
+        for line in f:lines() do
+            lines[#lines + 1] = line
+        end
+        f:close()
+    end
+
+    local newLines = {}
+    local inTargetSection = false
+    for _, line in ipairs(lines) do
+        local trimmed = line:match('^%s*(.-)%s*$')
+        if trimmed:find('^%[') then
+            local lowerHeader = trimmed:lower()
+            if lowerHeader == '[mq2aaspend_aalist]' or lowerHeader == '[mq2aaspend_settings]' then
+                inTargetSection = true
+            else
+                inTargetSection = false
+                newLines[#newLines + 1] = line
+            end
+        elseif not inTargetSection then
+            newLines[#newLines + 1] = line
+        end
+    end
+
+    while #newLines > 0 and newLines[#newLines]:match('^%s*$') do
+        table.remove(newLines)
+    end
+
+    local prioList = {}
+    if ctrl.auto_aa_priorities then
+        for nm, enabled in pairs(ctrl.auto_aa_priorities) do
+            if enabled then
+                local cost = 0
+                if runtime.cachedAAData and runtime.cachedAAData[nm] then
+                    cost = runtime.cachedAAData[nm].cost or 0
+                end
+                prioList[#prioList + 1] = { name = nm, cost = cost }
+            end
+        end
+    end
+
+    if ctrl.auto_aa_buy_order == 'list' then
+        table.sort(prioList, function(a, b) return a.name:lower() < b.name:lower() end)
+    else
+        table.sort(prioList, function(a, b)
+            if a.cost ~= b.cost then return a.cost < b.cost end
+            return a.name:lower() < b.name:lower()
+        end)
+    end
+
+    if #newLines > 0 then newLines[#newLines + 1] = '' end
+    newLines[#newLines + 1] = '[MQ2AASpend_Settings]'
+    newLines[#newLines + 1] = 'AutoSpend=1'
+    newLines[#newLines + 1] = (ctrl.auto_aa_aaspend_mode == 'brute') and 'BruteForce=1' or 'BruteForce=0'
+    newLines[#newLines + 1] = 'BruteForceBonusFirst=0'
+    newLines[#newLines + 1] = string.format('BankPoints=%d', ctrl.auto_spend_aa_threshold or 0)
+    newLines[#newLines + 1] = 'SpendOrder=35214'
+    newLines[#newLines + 1] = ''
+    newLines[#newLines + 1] = '[MQ2AASpend_AAList]'
+    for idx, item in ipairs(prioList) do
+        newLines[#newLines + 1] = string.format('%d=%s|M', idx, item.name)
+    end
+
+    local out = io.open(iniFile, 'w')
+    if out then
+        for _, line in ipairs(newLines) do
+            out:write(line .. '\n')
+        end
+        out:close()
+        if not silent then
+            print(string.format('\ag[Triune]\ax Synced %d prioritized AAs to %s_%s.ini [MQ2AASpend_AAList].',
+                #prioList, server, cleanName))
+        end
+        if runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+            mq.cmd('/aaspend load')
+        end
+        return true
+    end
+    return false
+end
+
 function runtime.checkAutoSpendAA()
     if not ctrl.auto_spend_aa then return false end
     if runtime.pendingAATrain then return false end
@@ -14869,23 +15129,74 @@ function runtime.checkAutoSpendAA()
     end)
     if unspent <= 0 then return false end
 
+    -- Autoload MQ2AAspend plugin if missing and auto_spend is active
+    if runtime.aaSpendLoaded and not runtime.aaSpendLoaded() then
+        if not runtime.lastAASpendAutoloadAttempt or (now - runtime.lastAASpendAutoloadAttempt) > 15.0 then
+            runtime.lastAASpendAutoloadAttempt = now
+            mq.cmd('/plugin mq2aaspend load')
+        end
+    end
+
+    -- Delegation to MQ2AAspend plugin if enabled and loaded
+    if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+        local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+        if unspent >= threshold then
+            runtime.lastAutoSpendAAAt = now
+            local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+            mq.cmdf('/aaspend bank %d', threshold)
+            mq.cmd('/aaspend ' .. mode)
+            print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
+                mode, unspent, threshold))
+            return true
+        end
+        return false
+    end
+
     -- 1. Check prioritized AAs
     if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
         local candidates = {}
         for nm, enabled in pairs(ctrl.auto_aa_priorities) do
             if enabled then
                 local rank, maxRank, cost = 0, 0, 0
+                if runtime.cachedAAData and runtime.cachedAAData[nm] then
+                    local cd = runtime.cachedAAData[nm]
+                    if cd.rank ~= nil then rank = cd.rank end
+                    if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
+                    if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
+                end
+                if (rank == 0 or maxRank == 0 or cost == 0) and runtime.scannedAAs then
+                    for _, itm in ipairs(runtime.scannedAAs) do
+                        if itm.name == nm then
+                            if rank == 0 and itm.rank then rank = itm.rank end
+                            if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
+                            if cost == 0 and itm.cost then cost = itm.cost end
+                            break
+                        end
+                    end
+                end
                 pcall(function()
                     local ma = mq.TLO.Me.AltAbility(nm)
                     if ma and ma() then
-                        rank = tonumber(ma.Rank and ma.Rank() or 0) or 0
-                        maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
-                        cost = tonumber(ma.Cost and ma.Cost() or 0) or 0
+                        if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
+                        if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
+                        if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
+                    end
+                end)
+                pcall(function()
+                    if maxRank == 0 or cost == 0 then
+                        local ga = mq.TLO.AltAbility(nm)
+                        if ga and ga() then
+                            if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
+                            if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
+                        end
                     end
                 end)
                 local fullyTrained = (maxRank > 0 and rank >= maxRank)
-                if not fullyTrained and cost > 0 and unspent >= cost then
-                    candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
+                if not fullyTrained then
+                    if cost <= 0 then cost = (rank > 0) and (rank + 1) or 1 end
+                    if unspent >= cost then
+                        candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
+                    end
                 end
             end
         end
@@ -14922,6 +15233,15 @@ function runtime.checkAutoSpendAA()
 end
 
 function runtime.manualSpendAA(targetName)
+    if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+        local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+        local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+        mq.cmdf('/aaspend bank %d', threshold)
+        mq.cmd('/aaspend ' .. mode)
+        print(string.format('\ag[Triune]\ax Issued MQ2AAspend manual command (/aaspend %s).', mode))
+        return true
+    end
+
     local effectiveName = targetName or ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
     local unspent = 0
     pcall(function()
@@ -14929,14 +15249,39 @@ function runtime.manualSpendAA(targetName)
         unspent = tonumber(raw or 0) or 0
     end)
     local cost = 0
-    pcall(function()
-        local ma = mq.TLO.Me.AltAbility(effectiveName)
-        if ma and ma() and ma.Cost then
-            cost = tonumber(ma.Cost() or 0) or 0
+    if runtime.cachedAAData and runtime.cachedAAData[effectiveName] and runtime.cachedAAData[effectiveName].cost then
+        cost = tonumber(runtime.cachedAAData[effectiveName].cost) or 0
+    end
+    if cost == 0 and runtime.scannedAAs then
+        for _, itm in ipairs(runtime.scannedAAs) do
+            if itm.name == effectiveName and itm.cost and itm.cost > 0 then
+                cost = itm.cost
+                break
+            end
         end
-    end)
+    end
     if cost == 0 then
-        cost = tonumber(ctrl.auto_spend_aa_cost) or 25
+        pcall(function()
+            local ma = mq.TLO.Me.AltAbility(effectiveName)
+            if ma and ma() and ma.Cost then
+                cost = tonumber(ma.Cost() or 0) or 0
+            end
+        end)
+    end
+    if cost == 0 then
+        pcall(function()
+            local ga = mq.TLO.AltAbility(effectiveName)
+            if ga and ga() and ga.Cost then
+                cost = tonumber(ga.Cost() or 0) or 0
+            end
+        end)
+    end
+    if cost == 0 then
+        if not targetName or targetName == '' or targetName:lower():find('firework') then
+            cost = tonumber(ctrl.auto_spend_aa_cost) or 25
+        else
+            cost = 1
+        end
     end
 
     if unspent < cost then
@@ -19708,6 +20053,38 @@ local function triuneCommand(...)
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Auto-Summon Fireworks %s (/alt activate %d).',
             ctrl.auto_summon_fireworks and '\agENABLED\ax' or '\arDISABLED\ax', ctrl.auto_spend_aa_id or 17788))
+    elseif cmd == 'aaspend' or cmd == 'mq2aaspend' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or sub == 'enable' then
+            ctrl.auto_aa_delegate_aaspend = true
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Delegated AA spending to MQ2AAspend \agENABLED\ax.')
+        elseif sub == 'off' or sub == '0' or sub == 'disable' then
+            ctrl.auto_aa_delegate_aaspend = false
+            runtime.saveLoadout(true)
+            print('\ag[Triune]\ax Delegated AA spending to MQ2AAspend \arDISABLED\ax.')
+        elseif sub == 'auto' or sub == 'brute' then
+            ctrl.auto_aa_aaspend_mode = sub
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax MQ2AAspend Mode set to: %s.', sub))
+        elseif sub == 'sync' or sub == 'inisync' then
+            if runtime.syncAAsToMQ2AASpendIni then
+                runtime.syncAAsToMQ2AASpendIni(false)
+            end
+        elseif sub == 'now' then
+            if runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+                mq.cmdf('/aaspend bank %d', ctrl.auto_spend_aa_threshold or 0)
+                mq.cmd('/aaspend ' .. ((ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'))
+                print(string.format('\ag[Triune]\ax Triggered: /aaspend %s now', ctrl.auto_aa_aaspend_mode or 'auto'))
+            else
+                print('\ar[Triune]\ax MQ2AAspend is not loaded. Type /plugin mq2aaspend load.')
+            end
+        else
+            ctrl.auto_aa_delegate_aaspend = not ctrl.auto_aa_delegate_aaspend
+            runtime.saveLoadout(true)
+            print(string.format('\ag[Triune]\ax Delegated AA spending to MQ2AAspend: %s.',
+                ctrl.auto_aa_delegate_aaspend and '\agENABLED\ax' or '\arDISABLED\ax'))
+        end
     elseif cmd == 'aatrain' or cmd == 'trainwindow' or cmd == 'trainaa' or cmd == 'spendnow' or cmd == 'spendaa' or cmd == 'spendpoints' then
         if runtime.manualSpendAA then runtime.manualSpendAA() end
     elseif cmd == 'summonnow' or cmd == 'summonfireworks' then
@@ -20158,8 +20535,15 @@ function runtime.autoloadRequiredPlugins()
         mq.cmd('/plugin mq2moveutils')
         needWait = true
     end
+    if runtime.aaSpendLoaded and not runtime.aaSpendLoaded() then
+        mq.cmd('/plugin mq2aaspend load')
+        needWait = true
+    end
     if needWait and mq.delay then
-        mq.delay(250, function() return navLoaded() and stickLoaded() end)
+        mq.delay(250, function()
+            local aaOk = (not runtime.aaSpendLoaded) or runtime.aaSpendLoaded()
+            return navLoaded() and stickLoaded() and aaOk
+        end)
     end
 end
 runtime.autoloadRequiredPlugins()

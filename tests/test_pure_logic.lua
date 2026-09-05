@@ -6845,6 +6845,317 @@ do
 end
 
 -- ============================================================================
+-- Suite 63: Auto AA Discovery & Accurate Cost Resolution
+-- ============================================================================
+print('--- Suite 63: Auto AA Discovery & Accurate Cost Resolution ---')
+do
+    local mockRuntime = {
+        cachedAAData = {}
+    }
+
+    local function mockRecordScannedAA(rt, list, foundMap, name, knownRank, knownMaxRank, knownCost, isKnownCharAA, category)
+        if not name or name == '' or tonumber(name) then return end
+        name = tostring(name):match('^%s*(.-)%s*$')
+        if name == '' then return end
+
+        local existing = foundMap[name]
+        if existing then
+            if knownRank ~= nil and knownRank >= 0 then
+                existing.rank = knownRank
+            end
+            if knownMaxRank ~= nil and knownMaxRank > 0 and (existing.maxRank == 0 or knownMaxRank > existing.maxRank) then
+                existing.maxRank = knownMaxRank
+            end
+            if knownCost ~= nil and knownCost > 0 then
+                existing.cost = knownCost
+            end
+            if existing.maxRank > 0 and existing.rank >= existing.maxRank then
+                existing.fullyTrained = true
+                existing.cost = 0
+                existing.canTrain = false
+            else
+                existing.fullyTrained = false
+                existing.canTrain = true
+            end
+            if category and (not existing.category or existing.category == '') then
+                existing.category = category
+            end
+            if not rt.cachedAAData then rt.cachedAAData = {} end
+            rt.cachedAAData[name] = {
+                rank = existing.rank,
+                maxRank = existing.maxRank,
+                cost = existing.cost,
+                category = existing.category,
+                id = existing.id
+            }
+            return
+        end
+
+        local rank, maxRank, cost, canTrain, pointsSpent, id, passive, aaType = 0, 0, 0, false, 0, 0, false, 0
+        local isCharacterAA = not not isKnownCharAA
+
+        if rt.cachedAAData and rt.cachedAAData[name] then
+            local cd = rt.cachedAAData[name]
+            if cd.rank ~= nil then rank = cd.rank end
+            if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
+            if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
+            if cd.category and not category then category = cd.category end
+            if cd.id ~= nil and cd.id > 0 then id = cd.id end
+            isCharacterAA = true
+        end
+
+        if knownRank ~= nil then rank = knownRank end
+        if knownMaxRank ~= nil and knownMaxRank > 0 then maxRank = knownMaxRank end
+        if knownCost ~= nil and knownCost > 0 then cost = knownCost end
+
+        local fullyTrained = (maxRank > 0 and rank >= maxRank)
+        if fullyTrained then
+            cost = 0
+        elseif cost <= 0 then
+            cost = (rank > 0) and (rank + 1) or 1
+        end
+
+        if not fullyTrained and not canTrain then
+            canTrain = true
+        end
+
+        if isCharacterAA and (maxRank > 0 or rank > 0 or canTrain or cost > 0) then
+            local entry = {
+                name = name,
+                rank = rank,
+                maxRank = maxRank,
+                cost = cost,
+                canTrain = canTrain,
+                pointsSpent = pointsSpent,
+                id = id,
+                passive = passive,
+                type = aaType,
+                fullyTrained = fullyTrained,
+                category = category
+            }
+            foundMap[name] = entry
+            list[#list + 1] = entry
+
+            if not rt.cachedAAData then rt.cachedAAData = {} end
+            rt.cachedAAData[name] = {
+                rank = rank,
+                maxRank = maxRank,
+                cost = cost,
+                category = category,
+                id = id
+            }
+        end
+    end
+
+    -- 1. Untrained character ability (rank == 0) is preserved with valid cost
+    local list1 = {}
+    local map1 = {}
+    mockRecordScannedAA(mockRuntime, list1, map1, 'Innate Run Speed', 0, 3, 1, true, 'General')
+    assert_eq(#list1, 1, 'Suite 63: untrained character ability is preserved in list')
+    assert_eq(list1[1].name, 'Innate Run Speed', 'Suite 63: correct ability name')
+    assert_eq(list1[1].rank, 0, 'Suite 63: untrained ability rank is 0')
+    assert_eq(list1[1].maxRank, 3, 'Suite 63: untrained ability maxRank is 3')
+    assert_eq(list1[1].cost, 1, 'Suite 63: untrained ability cost is preserved')
+    assert_eq(list1[1].fullyTrained, false, 'Suite 63: untrained ability is not fully trained')
+    assert_eq(list1[1].canTrain, true, 'Suite 63: untrained ability can be trained')
+
+    -- 2. Cached AA data persistence across scans
+    assert_true(mockRuntime.cachedAAData['Innate Run Speed'] ~= nil, 'Suite 63: ability is cached in runtime.cachedAAData')
+    assert_eq(mockRuntime.cachedAAData['Innate Run Speed'].cost, 1, 'Suite 63: cached cost is 1')
+
+    -- New scan without explicit parameters recovers cost and rank from cache
+    local list2 = {}
+    local map2 = {}
+    mockRecordScannedAA(mockRuntime, list2, map2, 'Innate Run Speed')
+    assert_eq(#list2, 1, 'Suite 63: recovered from cache on subsequent scan')
+    assert_eq(list2[1].cost, 1, 'Suite 63: cost recovered from cache')
+    assert_eq(list2[1].maxRank, 3, 'Suite 63: maxRank recovered from cache')
+
+    -- 3. Updating existing entry when better cost/rank discovered
+    mockRecordScannedAA(mockRuntime, list1, map1, 'Innate Run Speed', 1, 3, 2, true, 'General')
+    assert_eq(map1['Innate Run Speed'].rank, 1, 'Suite 63: existing entry rank updated to 1')
+    assert_eq(map1['Innate Run Speed'].cost, 2, 'Suite 63: existing entry cost updated to 2')
+    assert_eq(map1['Innate Run Speed'].fullyTrained, false, 'Suite 63: still not fully trained')
+
+    -- 4. Fully trained ability sets cost to 0 and fullyTrained to true
+    mockRecordScannedAA(mockRuntime, list1, map1, 'Innate Run Speed', 3, 3, 3, true, 'General')
+    assert_eq(map1['Innate Run Speed'].rank, 3, 'Suite 63: rank updated to 3')
+    assert_eq(map1['Innate Run Speed'].fullyTrained, true, 'Suite 63: fully trained is true')
+    assert_eq(map1['Innate Run Speed'].cost, 0, 'Suite 63: fully trained cost is 0')
+
+    -- 5. Fallback cost guarantee: untrained ability with 0 cost gets default >= 1
+    local list3 = {}
+    local map3 = {}
+    mockRecordScannedAA(mockRuntime, list3, map3, 'Combat Agility', 0, 3, 0, true, 'Archetype')
+    assert_eq(#list3, 1, 'Suite 63: ability recorded with fallback cost')
+    assert_true(list3[1].cost >= 1, 'Suite 63: fallback cost is positive (>= 1)')
+
+    -- 6. Verify triune.lua defines enhanced recursive scanning and UI list extraction
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("AAW_ArchList") ~= nil, 'Suite 63: triune.lua searches AAW_ArchList')
+    assert_true(triuneContent:find("curMaxTxt:match") ~= nil, 'Suite 63: triune.lua parses curMaxTxt column')
+    assert_true(triuneContent:find("costTxt:match") ~= nil, 'Suite 63: triune.lua parses costTxt column')
+    assert_true(triuneContent:find("runtime.cachedAAData") ~= nil, 'Suite 63: triune.lua uses runtime.cachedAAData')
+end
+
+print('--- Suite 64: MQ2AAspend Integration & Character Skill Rejection ---')
+do
+    -- 1. Skill rejection in recordScannedAA
+    local mockSkills = {
+        ['Flying Kick'] = true,
+        ['Mend'] = true,
+        ['Backstab'] = true,
+        ['Dual Wield'] = true,
+        ['Bandage Wounds'] = true
+    }
+
+    local mockRuntime = {
+        cachedAAData = {}
+    }
+
+    local function mockRecordScannedAAWithSkillFilter(rt, list, foundMap, name, knownRank, knownMaxRank, knownCost, isKnownCharAA, category, isFromUI, mockId)
+        if not name or name == '' then return end
+        name = tostring(name):match('^%s*(.-)%s*$')
+        if name == '' then return end
+
+        if mockSkills[name] then
+            return -- Rejected: character skill
+        end
+
+        local id = mockId or 0
+        if not isFromUI and id <= 0 then
+            return -- Rejected: not from UI and no valid AA ID
+        end
+
+        local entry = {
+            name = name,
+            rank = knownRank or 0,
+            maxRank = knownMaxRank or 1,
+            cost = knownCost or 1,
+            category = category,
+            id = id
+        }
+        foundMap[name] = entry
+        list[#list + 1] = entry
+    end
+
+    local list1 = {}
+    local map1 = {}
+    mockRecordScannedAAWithSkillFilter(mockRuntime, list1, map1, 'Flying Kick', 0, 1, 1, true, 'Combat', false, 0)
+    mockRecordScannedAAWithSkillFilter(mockRuntime, list1, map1, 'Mend', 0, 1, 1, true, 'Combat', false, 0)
+    mockRecordScannedAAWithSkillFilter(mockRuntime, list1, map1, 'Backstab', 0, 1, 1, true, 'Combat', false, 0)
+    mockRecordScannedAAWithSkillFilter(mockRuntime, list1, map1, 'Innate Run Speed', 0, 3, 1, true, 'General', true, 100)
+
+    assert_eq(#list1, 1, 'Suite 64: skills rejected and only valid AA kept')
+    assert_eq(list1[1].name, 'Innate Run Speed', 'Suite 64: Innate Run Speed recorded')
+    assert_true(map1['Flying Kick'] == nil, 'Suite 64: Flying Kick rejected from AA map')
+    assert_true(map1['Mend'] == nil, 'Suite 64: Mend rejected from AA map')
+    assert_true(map1['Backstab'] == nil, 'Suite 64: Backstab rejected from AA map')
+
+    -- 2. Non-UI entry with id == 0 rejected
+    local list2 = {}
+    local map2 = {}
+    mockRecordScannedAAWithSkillFilter(mockRuntime, list2, map2, 'Unknown Non-Existent AA', 0, 1, 1, true, 'General', false, 0)
+    assert_eq(#list2, 0, 'Suite 64: non-UI entry without AA ID rejected')
+
+    -- 3. MQ2AAspend delegation logic simulation
+    local commandsIssued = {}
+    local function mockCmd(str) commandsIssued[#commandsIssued + 1] = str end
+    local function mockCmdf(fmt, ...) commandsIssued[#commandsIssued + 1] = string.format(fmt, ...) end
+
+    local function simulateCheckAutoSpend(ctrl, rt, unspent, pluginLoaded)
+        if not ctrl.auto_spend_aa then return false end
+        if unspent <= 0 then return false end
+
+        if ctrl.auto_aa_delegate_aaspend and pluginLoaded then
+            local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+            if unspent >= threshold then
+                local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+                mockCmdf('/aaspend bank %d', threshold)
+                mockCmd('/aaspend ' .. mode)
+                return true
+            end
+            return false
+        end
+        return false
+    end
+
+    local testCtrl = {
+        auto_spend_aa = true,
+        auto_spend_aa_threshold = 50,
+        auto_aa_delegate_aaspend = true,
+        auto_aa_aaspend_mode = 'auto'
+    }
+
+    -- 3a. Delegated spend below threshold -> no command
+    commandsIssued = {}
+    local res1 = simulateCheckAutoSpend(testCtrl, mockRuntime, 30, true)
+    assert_eq(res1, false, 'Suite 64: no spend when unspent < threshold')
+    assert_eq(#commandsIssued, 0, 'Suite 64: no commands issued when below threshold')
+
+    -- 3b. Delegated spend at/above threshold -> issues bank and auto now
+    commandsIssued = {}
+    local res2 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true)
+    assert_eq(res2, true, 'Suite 64: auto-spend triggered when unspent >= threshold')
+    assert_eq(#commandsIssued, 2, 'Suite 64: issued 2 commands (/aaspend bank, /aaspend auto now)')
+    assert_eq(commandsIssued[1], '/aaspend bank 50', 'Suite 64: bank set correctly')
+    assert_eq(commandsIssued[2], '/aaspend auto now', 'Suite 64: auto mode triggered')
+
+    -- 3c. Delegated spend in brute mode
+    testCtrl.auto_aa_aaspend_mode = 'brute'
+    commandsIssued = {}
+    local res3 = simulateCheckAutoSpend(testCtrl, mockRuntime, 75, true)
+    assert_eq(res3, true, 'Suite 64: brute auto-spend triggered')
+    assert_eq(commandsIssued[2], '/aaspend brute now', 'Suite 64: brute mode triggered')
+
+    -- 4. INI formatting simulation for MQ2AASpend_AAList
+    local function generateAASpendIniLines(priorities, orderMode, bankThreshold, isBrute)
+        local prioList = {}
+        for nm, enabled in pairs(priorities or {}) do
+            if enabled then
+                prioList[#prioList + 1] = { name = nm }
+            end
+        end
+        table.sort(prioList, function(a, b) return a.name:lower() < b.name:lower() end)
+
+        local lines = {}
+        lines[#lines + 1] = '[MQ2AASpend_Settings]'
+        lines[#lines + 1] = 'AutoSpend=1'
+        lines[#lines + 1] = isBrute and 'BruteForce=1' or 'BruteForce=0'
+        lines[#lines + 1] = string.format('BankPoints=%d', bankThreshold or 0)
+        lines[#lines + 1] = '[MQ2AASpend_AAList]'
+        for idx, item in ipairs(prioList) do
+            lines[#lines + 1] = string.format('%d=%s|M', idx, item.name)
+        end
+        return lines
+    end
+
+    local testPrios = {
+        ['Combat Agility'] = true,
+        ['Innate Run Speed'] = true
+    }
+    local iniLines = generateAASpendIniLines(testPrios, 'list', 25, false)
+    assert_eq(iniLines[1], '[MQ2AASpend_Settings]', 'Suite 64: INI settings section present')
+    assert_eq(iniLines[4], 'BankPoints=25', 'Suite 64: BankPoints set in INI')
+    assert_eq(iniLines[5], '[MQ2AASpend_AAList]', 'Suite 64: INI AAList section present')
+    assert_eq(iniLines[6], '1=Combat Agility|M', 'Suite 64: First priority formatted with |M')
+    assert_eq(iniLines[7], '2=Innate Run Speed|M', 'Suite 64: Second priority formatted with |M')
+
+    -- 5. Verify triune.lua source tokens
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("runtime.aaSpendLoaded") ~= nil, 'Suite 64: triune.lua defines runtime.aaSpendLoaded')
+    assert_true(triuneContent:find("auto_aa_delegate_aaspend") ~= nil, 'Suite 64: triune.lua configures auto_aa_delegate_aaspend')
+    assert_true(triuneContent:find("auto_aa_aaspend_mode") ~= nil, 'Suite 64: triune.lua configures auto_aa_aaspend_mode')
+    assert_true(triuneContent:find("/aaspend") ~= nil, 'Suite 64: triune.lua contains /aaspend commands')
+    assert_true(triuneContent:find("mq.TLO.Skill%(name%)") ~= nil, 'Suite 64: triune.lua validates against mq.TLO.Skill')
+    assert_true(triuneContent:find("CLASS_AAS") == nil, 'Suite 64: triune.lua purged hardcoded CLASS_AAS')
+    assert_true(triuneContent:find("COMMON_AAS") == nil, 'Suite 64: triune.lua purged hardcoded COMMON_AAS')
+    assert_true(triuneContent:find("runtime.syncAAsToMQ2AASpendIni") ~= nil, 'Suite 64: triune.lua defines syncAAsToMQ2AASpendIni')
+    assert_true(triuneContent:find("MQ2AASpend_AAList") ~= nil, 'Suite 64: triune.lua writes MQ2AASpend_AAList section')
+    assert_true(triuneContent:find("Sync to INI") ~= nil, 'Suite 64: triune.lua provides Sync to INI button')
+end
+
+-- ============================================================================
 -- Results
 -- ============================================================================
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

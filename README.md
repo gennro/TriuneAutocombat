@@ -251,6 +251,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
 | `/ac autoaa [on\|off]` | `/ac autospendaa`, `/ac autospend`, `/ac fireworks` | Toggle automatic AA priority training & cap protection |
+| `/ac aaspend [on\|off\|auto\|brute\|now]` | `/ac mq2aaspend` | Delegate AA spending to MQ2AAspend plugin (toggles, sets mode, or triggers now) |
 | `/ac aascan` | `/ac scanaa`, `/ac aarefresh` | Re-scan all character Alternate Advancement abilities |
 | `/ac aaprio <name>` | `/ac prioritizeaa` | Toggle priority auto-training for a specific AA ability |
 | `/ac autofw [on\|off]` | `/ac summonfw` | Toggle automatic fireworks summoning (/alt activate) & autoinventory |
