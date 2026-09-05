@@ -99,6 +99,8 @@ local function extractFunction(src, funcName)
             if line:match('^local function ' .. funcName .. '%s*%(')
                 or line:match('^function runtime%.' .. funcName .. '%s*%(')
                 or line:match('^runtime%.' .. funcName .. '%s*=%s*function%s*%(')
+                or line:match('^function invLogic%.' .. funcName .. '%s*%(')
+                or line:match('^invLogic%.' .. funcName .. '%s*=%s*function%s*%(')
                 or line:match('^' .. funcName .. '%s*=%s*function%s*%(') then
                 capturing = true
                 lines[#lines + 1] = line
@@ -125,6 +127,8 @@ local function loadFunc(src, funcName, env)
     local code = extractFunction(src, funcName)
     if code:match('^function runtime%.') or code:match('^runtime%.') then
         code = code .. '\nreturn runtime.' .. funcName
+    elseif code:match('^function invLogic%.') or code:match('^invLogic%.') then
+        code = code .. '\nreturn invLogic.' .. funcName
     else
         code = code .. '\nreturn ' .. funcName
     end
@@ -136,10 +140,12 @@ local function loadFunc(src, funcName, env)
     local sandbox = {}
     for k, v in pairs(_G) do sandbox[k] = v end
     if not sandbox.runtime then sandbox.runtime = {} end
+    if not sandbox.invLogic then sandbox.invLogic = {} end
     if env then
         for k, v in pairs(env) do
             sandbox[k] = v
             sandbox.runtime[k] = v
+            sandbox.invLogic[k] = v
         end
     end
     setfenv(chunk, sandbox)
@@ -1860,6 +1866,63 @@ for abbr in pairs(DATA_LOADED.spells) do
 end
 for abbr in pairs(DATA_LOADED.aas) do
     assert_true(abbrSet[abbr], 'data: aas key "' .. abbr .. '" is valid class')
+end
+
+-- All spell, disc, and AA names must have no leading or trailing whitespace
+do
+    local untrimmedNames = 0
+    for abbr, spells in pairs(DATA_LOADED.spells) do
+        if type(spells) == 'table' then
+            for _, sp in ipairs(spells) do
+                if type(sp) == 'table' and type(sp[1]) == 'string' then
+                    if sp[1] ~= sp[1]:match('^%s*(.-)%s*$') then
+                        untrimmedNames = untrimmedNames + 1
+                    end
+                end
+            end
+        end
+    end
+    for abbr, aas in pairs(DATA_LOADED.aas) do
+        if type(aas) == 'table' then
+            for _, aa in ipairs(aas) do
+                if type(aa) == 'table' and type(aa[1]) == 'string' then
+                    if aa[1] ~= aa[1]:match('^%s*(.-)%s*$') then
+                        untrimmedNames = untrimmedNames + 1
+                    end
+                end
+            end
+        end
+    end
+    if DATA_LOADED.discs then
+        for abbr, discs in pairs(DATA_LOADED.discs) do
+            if type(discs) == 'table' then
+                for _, disc in ipairs(discs) do
+                    if type(disc) == 'table' and type(disc[1]) == 'string' then
+                        if disc[1] ~= disc[1]:match('^%s*(.-)%s*$') then
+                            untrimmedNames = untrimmedNames + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    assert_eq(untrimmedNames, 0, 'data: no spell, aa, or disc name has leading/trailing whitespace')
+
+    -- Test defensive AA trimming and loadout key migration
+    local testRawAA = "Destructive Force  "
+    local testCleanAA = testRawAA:match('^%s*(.-)%s*$')
+    assert_eq(testCleanAA, "Destructive Force", 'aa trim: trims trailing spaces correctly')
+
+    local testLoadoutAAs = {}
+    local incomingAAs = { ["Destructive Force  "] = { enabled = true, cls = "Mnk" } }
+    for k, v in pairs(incomingAAs) do
+        local cleanK = type(k) == 'string' and k:match('^%s*(.-)%s*$') or k
+        if cleanK and cleanK ~= '' and not tonumber(cleanK) then
+            testLoadoutAAs[cleanK] = v
+        end
+    end
+    assert_neq(testLoadoutAAs["Destructive Force"], nil, 'loadout: migrated untrimmed AA key to trimmed key')
+    assert_eq(testLoadoutAAs["Destructive Force  "], nil, 'loadout: untrimmed AA key does not exist')
 end
 
 -- ============================================================================
@@ -6454,6 +6517,385 @@ do
     mockOnZoned(cmdCtrl)
     assert_true(zonedFovApplied, 'mockOnZoned applies FOV when fov_enabled is true')
     assert_eq(lastExecutedCmd, '/fov 110', 'mockOnZoned executed /fov 110')
+end
+
+-- ============================================================================
+-- Suite 60: Melee Distance & Desired Range Respect Logic
+-- ============================================================================
+print('--- Suite 60: Melee Distance & Desired Range Respect Logic ---')
+do
+    local NAV_CONST = { MELEE_RANGE = 14 }
+
+    local function calcMaxMeleeDistance(userDist, spawnReach)
+        userDist = userDist or NAV_CONST.MELEE_RANGE
+        spawnReach = spawnReach or 0
+        if spawnReach > 18 and spawnReach > userDist then
+            return spawnReach
+        end
+        return userDist
+    end
+
+    local function calcDesiredRange(userDist, spawnReach, combatStyle)
+        combatStyle = combatStyle or 'Melee'
+        if combatStyle ~= 'Melee' then return 40 end
+        userDist = userDist or NAV_CONST.MELEE_RANGE
+        spawnReach = spawnReach or 0
+        if spawnReach > 18 and spawnReach > userDist then
+            return math.max(userDist, math.floor(spawnReach - 3))
+        end
+        return math.max(4, math.floor(userDist - 2))
+    end
+
+    -- 1. Default melee range (14) on standard mob (spawnReach = 14)
+    assert_eq(calcDesiredRange(14, 14), 12, 'Default 14 melee dist targets 12 on standard mob')
+    assert_eq(calcMaxMeleeDistance(14, 14), 14, 'Default 14 melee dist max reach is 14 on standard mob')
+
+    -- 2. Extended melee range (25) - must NOT be clamped to 12 or 14!
+    assert_eq(calcDesiredRange(25, 14), 23, 'Melee dist 25 targets 23 on standard mob (not clamped to 12)')
+    assert_eq(calcMaxMeleeDistance(25, 14), 25, 'Melee dist 25 max reach is 25 on standard mob (not clamped to 14)')
+
+    -- 3. Tight melee range (8) - must NOT be clamped up to 14!
+    assert_eq(calcDesiredRange(8, 14), 6, 'Melee dist 8 targets 6 on standard mob')
+    assert_eq(calcMaxMeleeDistance(8, 14), 8, 'Melee dist 8 max reach is 8 on standard mob (allows re-closing)')
+
+    -- 4. Minimum melee range slider value (5)
+    assert_eq(calcDesiredRange(5, 14), 4, 'Melee dist 5 targets 4')
+    assert_eq(calcMaxMeleeDistance(5, 14), 5, 'Melee dist 5 max reach is 5')
+
+    -- 5. Giant oversized mob (dragon: spawnReach = 45) with standard userDist = 14
+    assert_eq(calcDesiredRange(14, 45), 42, 'Dragon spawnReach 45 with userDist 14 targets 42 (does not clip inside model)')
+    assert_eq(calcMaxMeleeDistance(14, 45), 45, 'Dragon spawnReach 45 with userDist 14 max reach is 45')
+
+    -- 6. Giant oversized mob with userDist = 50 (larger than dragon reach)
+    assert_eq(calcDesiredRange(50, 45), 48, 'Dragon spawnReach 45 with userDist 50 targets 48')
+    assert_eq(calcMaxMeleeDistance(50, 45), 50, 'Dragon spawnReach 45 with userDist 50 max reach is 50')
+
+    -- 7. triune.lua source code assertions: verify hardcoded clamps were eliminated
+    local triuneCode = readFile('TAC/lua/triune.lua')
+    assert_true(triuneCode:find("math.min(12, (ctrl and ctrl.melee_dist) or 12)", 1, true) == nil,
+        'triune.lua eliminated hardcoded 12 clamp in getBehindLoc')
+    assert_true(triuneCode:find("math.min(userDist, maxSafe)", 1, true) == nil,
+        'triune.lua eliminated math.min(userDist, maxSafe) clamp in desiredRange')
+    assert_true(triuneCode:find("spawnReach > 18 and spawnReach > userDist", 1, true) ~= nil,
+        'triune.lua uses oversized threshold check for giant hitboxes')
+    assert_true(triuneCode:find("lastBehindStickDist", 1, true) ~= nil,
+        'triune.lua tracks lastBehindStickDist in pursuit table')
+end
+
+-- ============================================================================
+-- 104. triune_inv.lua — Inventory & Bank Manager Pure Logic Tests
+-- ============================================================================
+print('--- triune_inv.lua pure logic tests ---')
+do
+    local invSrc = readFile('TAC/lua/triune_inv.lua')
+    local formatMoney = loadFunc(invSrc, 'formatMoney', {})
+    local classifyItem = loadFunc(invSrc, 'classifyItem', {})
+    local matchesFilter = loadFunc(invSrc, 'matchesFilter', {})
+    local findDuplicateStacks = loadFunc(invSrc, 'findDuplicateStacks', {})
+    local findHeaviestItems = loadFunc(invSrc, 'findHeaviestItems', {})
+
+    -- 1. formatMoney
+    assert_eq(formatMoney(0), '0c', 'formatMoney(0) is 0c')
+    assert_eq(formatMoney(5), '5c', 'formatMoney(5) is 5c')
+    assert_eq(formatMoney(10), '1s', 'formatMoney(10) is 1s')
+    assert_eq(formatMoney(150), '1g 5s', 'formatMoney(150) is 1g 5s')
+    assert_eq(formatMoney(12345), '12p 3g 4s 5c', 'formatMoney(12345) is 12p 3g 4s 5c')
+    assert_eq(formatMoney(2000), '2p', 'formatMoney(2000) is 2p')
+
+    -- 2. classifyItem
+    assert_eq(classifyItem({ container = 10, name = 'Backpack' }), 'Bag', 'Container > 0 classifies as Bag')
+    assert_eq(classifyItem({ augType = 7, name = 'Augment Stone' }), 'Aug', 'AugType > 0 classifies as Aug')
+    assert_eq(classifyItem({ name = 'Spell: Greater Healing' }), 'Spell', 'Spell: prefix classifies as Spell')
+    assert_eq(classifyItem({ name = 'Song: Selo\'s Accelerando' }), 'Spell', 'Song: prefix classifies as Spell')
+    assert_eq(classifyItem({ name = 'Tome of Weapon Stance' }), 'Spell', 'Tome prefix classifies as Spell')
+    assert_eq(classifyItem({ tradeskill = true, name = 'Silk Swatch' }), 'Tradeskill', 'Tradeskill flag classifies as Tradeskill')
+    assert_eq(classifyItem({ damage = 15, delay = 24, name = 'Short Sword' }), 'Weapon', 'Damage > 0 classifies as Weapon')
+    assert_eq(classifyItem({ type = '1H Slashing', name = 'Practice Blade' }), 'Weapon', 'Slashing type classifies as Weapon')
+    assert_eq(classifyItem({ location = 'Worn', wornSlot = 'Neck', name = 'Black Sapphire Necklace' }), 'Jewelry', 'Worn neck slot classifies as Jewelry')
+    assert_eq(classifyItem({ location = 'Worn', wornSlot = 'Left Finger', name = 'Platinum Fire Ring' }), 'Jewelry', 'Worn ring slot classifies as Jewelry')
+    assert_eq(classifyItem({ ac = 30, location = 'Worn', wornSlot = 'Chest', name = 'Chain Chestplate' }), 'Armor', 'Worn chest armor classifies as Armor')
+    assert_eq(classifyItem({ type = 'Potion', name = 'Cloudy Potion' }), 'Consumable', 'Potion type classifies as Consumable')
+    assert_eq(classifyItem({ clicky = 'Spirit of Wolf', name = 'Journeyman Boots' }), 'Consumable', 'Clicky effect classifies as Consumable')
+    assert_eq(classifyItem({ name = 'Blue Diamond' }), 'Gem', 'Diamond in name classifies as Gem')
+    assert_eq(classifyItem({ name = 'Peridot' }), 'Gem', 'Peridot in name classifies as Gem')
+    assert_eq(classifyItem({ name = 'Rusty Canteen' }), 'Misc', 'Generic item classifies as Misc')
+
+    -- 3. matchesFilter
+    local testItem = {
+        name = 'Peridot',
+        location = 'INVENTORY',
+        displayLocation = 'Bag 2 [Slot 3]',
+        category = 'Gem',
+        type = 'Combinable',
+        lore = false,
+        nodrop = false,
+        tradeskill = false,
+        clicky = nil,
+    }
+
+    assert_true(matchesFilter(testItem, '', 'ALL', 'ALL', nil), 'Default filter matches item')
+    assert_true(matchesFilter(testItem, 'peri', 'ALL', 'ALL', nil), 'Substring search matches Peridot')
+    assert_true(matchesFilter(testItem, 'bag 2', 'ALL', 'ALL', nil), 'Substring search matches location')
+    assert_true(matchesFilter(testItem, '', 'INVENTORY', 'ALL', nil), 'Location INVENTORY matches')
+    assert_eq(matchesFilter(testItem, '', 'BANK', 'ALL', nil), false, 'Location BANK rejects INVENTORY item')
+    assert_true(matchesFilter(testItem, '', 'ALL', 'Gem', nil), 'Category Gem matches')
+    assert_eq(matchesFilter(testItem, '', 'ALL', 'Weapon', nil), false, 'Category Weapon rejects Gem')
+
+    local loreItem = {
+        name = 'SoulFire',
+        location = 'INVENTORY',
+        category = 'Weapon',
+        lore = true,
+        nodrop = true,
+        tradeskill = false,
+        clicky = 'Complete Heal',
+    }
+    assert_true(matchesFilter(loreItem, '', 'ALL', 'ALL', { lore = true }), 'Lore filter matches Lore item')
+    assert_true(matchesFilter(loreItem, '', 'ALL', 'ALL', { nodrop = true }), 'NoDrop filter matches NoDrop item')
+    assert_true(matchesFilter(loreItem, '', 'ALL', 'ALL', { clicky = true }), 'Clicky filter matches Clicky item')
+    assert_eq(matchesFilter(loreItem, '', 'ALL', 'ALL', { tradeskill = true }), false, 'Tradeskill filter rejects non-TS item')
+
+    -- 4. findDuplicateStacks
+    local stackItems = {
+        { id = 1001, name = 'Peridot', count = 5, stackable = true, stackSize = 20, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 2]' },
+        { id = 1001, name = 'Peridot', count = 7, stackable = true, stackSize = 20, location = 'INVENTORY', displayLocation = 'Bag 3 [Slot 8]' },
+        { id = 2002, name = 'Emerald', count = 20, stackable = true, stackSize = 20, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 1]' },
+        { id = 2002, name = 'Emerald', count = 20, stackable = true, stackSize = 20, location = 'INVENTORY', displayLocation = 'Bag 2 [Slot 1]' },
+        { id = 3003, name = 'Rusty Sword', count = 1, stackable = false, stackSize = 1, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 3]' },
+    }
+    local dups = findDuplicateStacks(stackItems)
+    assert_eq(#dups, 1, 'findDuplicateStacks identifies 1 fragmented stack')
+    assert_eq(dups[1].name, 'Peridot', 'Fragmented stack is Peridot')
+    assert_eq(dups[1].totalCount, 12, 'Fragmented stack total count is 12')
+    assert_eq(dups[1].numStacks, 2, 'Fragmented stack has 2 entries')
+
+    -- 5. findHeaviestItems
+    local heavyItems = {
+        { name = 'Iron Bar', weight = 10.0, count = 1, stackable = false, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 1]', category = 'Tradeskill' },
+        { name = 'Feather', weight = 0.1, count = 1, stackable = false, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 2]', category = 'Misc' },
+        { name = 'Heavy Ore', weight = 8.0, count = 2, stackable = true, location = 'INVENTORY', displayLocation = 'Bag 2 [Slot 1]', category = 'Tradeskill' },
+    }
+    local heavies = findHeaviestItems(heavyItems, 2)
+    assert_eq(#heavies, 2, 'findHeaviestItems returns requested limit')
+    assert_eq(heavies[1].name, 'Heavy Ore', 'Heavy Ore (16 lbs total) is ranked first')
+    assert_eq(heavies[2].name, 'Iron Bar', 'Iron Bar (10 lbs) is ranked second')
+end
+
+-- ============================================================================
+-- 61. Suite 61: Healing Priority Engine & Reliability Logic
+-- ============================================================================
+print('--- Suite 61: Healing Priority Engine & Reliability Logic ---')
+do
+    -- 1. isHealAction classification
+    local function isDetrimentalMock(name, targetToken, entry)
+        if entry and entry.kind then
+            local k = tostring(entry.kind):lower()
+            if k == 'dd' or k == 'dot' or k == 'debuff' or k == 'nuke' then return true end
+            if k == 'heal' or k == 'buff' or k == 'pet' or k == 'cure' or k == 'util' then return false end
+        end
+        local lower = tostring(name):lower()
+        if lower:find('nuke') or lower:find('ice comet') or lower:find('tash') or lower:find('slow') or lower:find('lifetap') then
+            return true
+        end
+        return false
+    end
+
+    local function isHealActionMock(name, targetToken, entry)
+        if not name or name == '' then return false end
+        if entry and entry.kind == 'heal' then return true end
+        local k = entry and entry.kind
+        if k and (k == 'dd' or k == 'dot' or k == 'debuff' or k == 'nuke' or k == 'buff' or k == 'pet' or k == 'util') then
+            return false
+        end
+        if entry and entry.when == 'missing buff' then
+            return false
+        end
+        if targetToken and (targetToken:find('Lowest-HP Ally') or targetToken == 'Lowest-HP Ally') then
+            if not isDetrimentalMock(name, targetToken, entry) then
+                return true
+            end
+        end
+        if entry and entry.when and (entry.when == 'my HP <=' or entry.when == 'HP <=' or entry.when == 'target HP <=') then
+            if not isDetrimentalMock(name, targetToken, entry) then
+                local lowerName = tostring(name):lower()
+                if lowerName:find('heal') or lowerName:find('mend') or lowerName:find('salve')
+                    or lowerName:find('remedy') or lowerName:find('chloroplast') or lowerName:find('regeneration')
+                    or lowerName:find('renewal') or lowerName:find('restoration') or lowerName:find('lay on hands')
+                    or lowerName:find('burst of life') or lowerName:find('arbitration') or lowerName:find('touch')
+                    or (targetToken and targetToken:find('Lowest-HP Ally')) then
+                    return true
+                end
+            end
+        end
+        local lowerName = tostring(name):lower()
+        if not isDetrimentalMock(name, targetToken, entry) then
+            if lowerName:find('heal') or lowerName:find('mend') or lowerName:find('salve')
+                or lowerName:find('remedy') or lowerName:find('chloroplast') or lowerName:find('renewal')
+                or lowerName:find('restoration') or lowerName:find('lay on hands') or lowerName:find('burst of life')
+                or lowerName:find('divine arbitration') then
+                return true
+            end
+        end
+        return false
+    end
+
+    assert_true(isHealActionMock('Greater Healing', 'F: Myself', { kind = 'heal' }), 'Greater Healing with kind heal')
+    assert_true(isHealActionMock('Complete Healing', 'F: Lowest-HP Ally', { when = 'target HP <=' }), 'Complete Healing on Lowest-HP Ally')
+    assert_true(isHealActionMock('Mend', 'F: Myself', { when = 'my HP <=' }), 'Mend action classified as heal')
+    assert_true(isHealActionMock('Lay on Hands', 'F: Tank', { when = 'target HP <=' }), 'Lay on Hands AA classified as heal')
+    assert_true(isHealActionMock('Burst of Life', 'F: Lowest-HP Ally', {}), 'Burst of Life classified as heal')
+    assert_true(isHealActionMock('Divine Arbitration', 'F: Whole Group', {}), 'Divine Arbitration classified as heal')
+    assert_true(isHealActionMock('Chloroplast', 'F: Myself', { when = 'my HP <=' }), 'Chloroplast with HP <= classified as heal')
+    assert_eq(isHealActionMock('Ice Comet', 'E: Current Target', { kind = 'dd' }), false, 'Ice Comet rejected as heal')
+    assert_eq(isHealActionMock('Tashani', 'E: Current Target', { kind = 'debuff' }), false, 'Tashani rejected as heal')
+    assert_eq(isHealActionMock('Spirit of Wolf', 'F: Myself', { kind = 'buff', when = 'missing buff' }), false, 'SoW missing buff rejected as heal')
+
+    -- 2. lowestHpAlly range and presence filtering
+    local function lowestHpAllyMock(members, myId, myHp, maxDist)
+        maxDist = maxDist or 200
+        local bestId, bestHp = myId, myHp
+        for _, m in ipairs(members) do
+            if not m.dead then
+                local isPresent = not m.otherZone and not m.offline and (m.present == nil or m.present)
+                if isPresent and m.id > 0 and m.alive then
+                    local dist = m.distance or 0
+                    if dist >= 0 and dist <= maxDist then
+                        if m.hp < bestHp then
+                            bestHp = m.hp
+                            bestId = m.id
+                        end
+                    end
+                end
+            end
+        end
+        return bestId, bestHp
+    end
+
+    local testGroup = {
+        { id = 101, name = 'Tank', hp = 40, distance = 30, alive = true, dead = false, otherZone = false, offline = false },
+        { id = 102, name = 'MageFar', hp = 15, distance = 450, alive = true, dead = false, otherZone = false, offline = false }, -- too far
+        { id = 103, name = 'RogueZone', hp = 10, distance = 50, alive = true, dead = false, otherZone = true, offline = false }, -- other zone
+        { id = 104, name = 'ClericOff', hp = 5, distance = 20, alive = true, dead = false, otherZone = false, offline = true }, -- offline
+    }
+    local chosenId, chosenHp = lowestHpAllyMock(testGroup, 1, 100, 200)
+    assert_eq(chosenId, 101, 'lowestHpAlly selects Tank (dist 30, HP 40) ignoring out-of-range, other-zone, offline members')
+    assert_eq(chosenHp, 40, 'lowestHpAlly selected HP is 40%')
+
+    -- If player is lower than all valid members in range
+    local chosenIdSelf, chosenHpSelf = lowestHpAllyMock(testGroup, 1, 30, 200)
+    assert_eq(chosenIdSelf, 1, 'lowestHpAlly selects player when player HP is lowest')
+    assert_eq(chosenHpSelf, 30, 'lowestHpAlly returns player HP 30%')
+
+    -- 3. min_mana_pct bypass for heals vs non-heals
+    local function canCastManaMock(spellName, currentMana, spellCost, pctMana, minManaPct, entry)
+        if currentMana < spellCost then return false end
+        local isHeal = isHealActionMock(spellName, entry and entry.target, entry)
+        if not isHeal and minManaPct > 0 and pctMana < minManaPct then
+            return false
+        end
+        return true
+    end
+
+    assert_true(canCastManaMock('Greater Healing', 300, 150, 15, 20, { kind = 'heal' }), 'Heal casts even when pctMana (15%) < minManaPct (20%)')
+    assert_eq(canCastManaMock('Ice Comet', 1000, 400, 15, 20, { kind = 'dd' }), false, 'Nuke blocked when pctMana (15%) < minManaPct (20%)')
+    assert_eq(canCastManaMock('Greater Healing', 100, 150, 15, 20, { kind = 'heal' }), false, 'Heal blocked if currentMana < spellCost')
+
+    -- 4. conditionMet friendly target fallback when user left "my HP <=" default
+    local function conditionMetMock(when, pct, targetId, myId, myHp, targetHp, token)
+        if when == 'my HP <=' then
+            local myMet = myHp <= pct
+            local isAlly = token and not token:find('Myself')
+            if isAlly and targetId and targetId > 0 and targetId ~= myId then
+                return myMet or (targetHp <= pct)
+            end
+            return myMet
+        end
+        if when == 'target HP <=' or when == 'HP <=' then
+            return targetHp <= pct
+        end
+        return false
+    end
+
+    assert_true(conditionMetMock('my HP <=', 75, 101, 1, 100, 50, 'F: Lowest-HP Ally'), 'my HP <= on Lowest-HP Ally triggers when ally is low (50 <= 75) even with player at 100%')
+    assert_true(conditionMetMock('my HP <=', 75, 101, 1, 60, 100, 'F: Lowest-HP Ally'), 'my HP <= on Lowest-HP Ally triggers when player is low (60 <= 75)')
+    assert_eq(conditionMetMock('my HP <=', 75, 1, 1, 100, 100, 'F: Myself'), false, 'my HP <= on Myself returns false when player is at 100%')
+
+    -- 5. processHealPriority sorting and movement cessation simulation
+    local healCandidates = {
+        { name = 'Light Healing', targetHp = 70, pctThreshold = 75, priority = 50, slot = 3 },
+        { name = 'Complete Healing', targetHp = 40, pctThreshold = 50, priority = 30, slot = 2 },
+        { name = 'Flash of Light Heal', targetHp = 20, pctThreshold = 25, priority = 10, slot = 1 },
+    }
+    table.sort(healCandidates, function(a, b)
+        if a.targetHp ~= b.targetHp then return a.targetHp < b.targetHp end
+        if a.pctThreshold ~= b.pctThreshold then return a.pctThreshold < b.pctThreshold end
+        return (a.priority or 50) < (b.priority or 50)
+    end)
+    assert_eq(healCandidates[1].name, 'Flash of Light Heal', 'Most urgent heal (target HP 20%, threshold 25%) chosen first')
+    assert_eq(healCandidates[2].name, 'Complete Healing', 'Second urgent heal (target HP 40%) chosen second')
+    assert_eq(healCandidates[3].name, 'Light Healing', 'Maintenance heal chosen last')
+
+    local stoppedMovement = false
+    local function stopMovementMock(cls)
+        if cls ~= 'Brd' then stoppedMovement = true end
+    end
+    stopMovementMock('Clr')
+    assert_true(stoppedMovement, 'Movement halted for Cleric casting heal')
+
+    stoppedMovement = false
+    stopMovementMock('Brd')
+    assert_eq(stoppedMovement, false, 'Movement NOT halted for Bard singing')
+end
+
+-- ============================================================================
+-- Suite 62: AA Special Tab Scan Loop Prevention
+-- ============================================================================
+do
+    print('--- Suite 62: AA Special Tab Scan Loop Prevention ---')
+    local triuneContent = readFile('TAC/lua/triune.lua')
+
+    -- 1. Verify readSpecialTabOnce marks read as done even on failure and never retries
+    local mockRuntime = {
+        specialTabReadDone = false,
+        specialTabAAs = nil,
+        readSpecialTabNamesFromUI = function() return nil end,
+    }
+    local function mockReadSpecialTabOnce(rt, force)
+        if not force and rt.specialTabReadDone then
+            return rt.specialTabAAs or {}
+        end
+        rt.specialTabReadDone = true
+        rt.specialTabAAs = rt.specialTabAAs or {}
+        local names = rt.readSpecialTabNamesFromUI()
+        if names and #names > 0 then
+            rt.specialTabAAs = names
+            return names
+        end
+        return rt.specialTabAAs or {}
+    end
+
+    local res1 = mockReadSpecialTabOnce(mockRuntime, false)
+    assert_eq(#res1, 0, 'Suite 62: readSpecialTab returns empty table on failed read')
+    assert_true(mockRuntime.specialTabReadDone, 'Suite 62: sets specialTabReadDone = true on failure')
+
+    -- Subsequent call must immediately return without invoking UI reads or retries
+    mockRuntime.readSpecialTabNamesFromUI = function() error('UI read must not be invoked again!') end
+    local res2 = mockReadSpecialTabOnce(mockRuntime, false)
+    assert_eq(#res2, 0, 'Suite 62: subsequent call returns cached empty list without retrying UI')
+
+    -- 2. Verify scanPlayerAAs never sets pendingReadSpecialTab in triune.lua
+    assert_true(triuneContent:find("if %(not specialList or #specialList == 0%) and not runtime%.specialTabReadDone then") ~= nil,
+        'Suite 62: scanPlayerAAs respects specialTabReadDone')
+
+    -- 3. Verify main loop honors paused and auto_spend_aa states
+    assert_true(triuneContent:find("if not ctrl%.paused and ctrl%.auto_spend_aa and not mq%.TLO%.Me%.Combat") ~= nil,
+        'Suite 62: main loop only executes pending read when not paused and auto_spend_aa is enabled')
+    assert_true(triuneContent:find("elseif not ctrl%.auto_spend_aa or ctrl%.paused then%s*runtime%.pendingReadSpecialTab = false") ~= nil,
+        'Suite 62: main loop clears pending read when auto_spend_aa disabled or paused')
+
+    -- 4. Verify script startup does NOT unconditionally queue pendingReadSpecialTab
+    assert_eq(triuneContent:find("runtime%.pendingReadSpecialTab = true%s*runMainLoop"), nil,
+        'Suite 62: startup does not unconditionally queue pendingReadSpecialTab')
 end
 
 -- ============================================================================

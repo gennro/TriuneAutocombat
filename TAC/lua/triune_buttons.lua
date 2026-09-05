@@ -418,7 +418,8 @@ local function getCooldown(btn)
     elseif tt == 'Ability' then
         return parseTloTimer(tlo(function() return mq.TLO.Me.AbilityTimer(tostring(key)) end))
     elseif tt == 'AA' then
-        return parseTloTimer(tlo(function() return mq.TLO.Me.AltAbilityTimer(tostring(key)) end))
+        local aaKey = tostring(key):match('^%s*(.-)%s*$')
+        return parseTloTimer(tlo(function() return mq.TLO.Me.AltAbilityTimer(aaKey) end))
     elseif tt == 'Disc' then
         return parseTloTimer(tlo(function()
             local cat = mq.TLO.Me.CombatAbilityTimer(tostring(key))

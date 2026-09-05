@@ -552,6 +552,8 @@ local pursuit = {
     nonXtarEngageAt = 0,
     lastCombatFaceAt = 0,
     lastStickDist = 0,
+    lastBehindStickDist = 0,
+    lastFrontStickDist = 0,
     -- Detour state machine fields
     detourActive = false,
     detourX = 0,
@@ -805,6 +807,8 @@ local function isGemMatching(slotOrName, targetSpellName)
 end
 
 local function hasAA(nm)
+    if not nm or nm == "" or tonumber(nm) ~= nil then return false end
+    if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
     if not nm or nm == "" or tonumber(nm) ~= nil then return false end
     local now = os.clock()
     runtime.hasAACache = runtime.hasAACache or {}
@@ -1792,6 +1796,8 @@ local function stopMoving()
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
     pursuit.lastStickDist = 0
+    pursuit.lastBehindStickDist = 0
+    pursuit.lastFrontStickDist = 0
     pursuit.detourActive = false
     pursuit.detourX = 0
     pursuit.detourY = 0
@@ -2144,6 +2150,8 @@ local function findMaPcId(maName)
 end
 
 local function isDetrimentalSpell(name, targetId, kind, targetToken)
+    if not name or name == '' then return false end
+    if type(name) == 'string' then name = name:match('^%s*(.-)%s*$') end
     if not name or name == '' then return false end
 
     -- 1. Check kind tag if explicitly provided ('heal', 'buff', 'pet', 'cure', 'util' -> beneficial; 'dd', 'dot', 'debuff', 'nuke' -> detrimental)
@@ -4110,7 +4118,10 @@ function runtime.applyEntry(e)
     if type(e.aas) == 'table' then
         for k, v in pairs(e.aas) do
             if not tonumber(k) and type(v) == 'table' then
-                loadout.aas[k] = v
+                local cleanK = type(k) == 'string' and k:match('^%s*(.-)%s*$') or k
+                if cleanK and cleanK ~= '' and not tonumber(cleanK) then
+                    loadout.aas[cleanK] = v
+                end
             end
         end
     end
@@ -5559,7 +5570,7 @@ function runtime.onCharacterChanged()
     runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
     runtime.specialTabAAs = nil
     runtime.specialTabReadDone = false
-    runtime.pendingReadSpecialTab = true
+    runtime.pendingReadSpecialTab = false
     lvlMin, lvlMax = 1, 65
     if ALLDATA[myName] then
         runtime.applyEntry(ALLDATA[myName])
@@ -6948,6 +6959,7 @@ function UI.drawAATab()
                     if aaTier(secNum) == tier and type(list) == 'table' then
                         for _, item in ipairs(list) do
                             local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
+                            if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
                             if not tonumber(nm) and (not ctrl.aa_purchased_only or hasAA(nm)) then
                                 any = true
                                 ImGui.PushID('aa_' .. tier .. '_' .. cls .. '_' .. nm)
@@ -11357,7 +11369,8 @@ function UI.getTrackedCooldownItems()
 
     -- 2. Alternate Advancements (AAs)
     if loadout and loadout.aas then
-        for nm, entry in pairs(loadout.aas) do
+        for rawNm, entry in pairs(loadout.aas) do
+            local nm = type(rawNm) == 'string' and rawNm:match('^%s*(.-)%s*$') or rawNm
             if entry and entry.enabled then
                 local isReady = false
                 local timerSec = 0
@@ -12697,7 +12710,8 @@ local function hasSpellReagents(spellName)
     return has
 end
 
-function runtime.lowestHpAlly()
+function runtime.lowestHpAlly(maxDist)
+    maxDist = maxDist or 200
     local bestId, bestHp = mq.TLO.Me.ID(), (mq.TLO.Me.PctHPs() or 100)
     local total = 0
     pcall(function() total = mq.TLO.Group.Members() or 0 end)
@@ -12705,9 +12719,23 @@ function runtime.lowestHpAlly()
         local m = nil
         pcall(function() m = mq.TLO.Group.Member(i) end)
         if m and m() and not m.Dead() then
-            local hp = m.PctHPs() or 100
-            if hp < bestHp then
-                bestHp = hp; bestId = m.ID()
+            local isPresent = true
+            pcall(function()
+                if m.Present ~= nil and not m.Present() then isPresent = false end
+                if m.OtherZone ~= nil and m.OtherZone() then isPresent = false end
+                if m.Offline ~= nil and m.Offline() then isPresent = false end
+            end)
+            if isPresent then
+                local mid = m.ID() or 0
+                if mid > 0 and isSpawnAlive(mid) then
+                    local dist = distToId(mid)
+                    if dist >= 0 and dist <= maxDist then
+                        local hp = m.PctHPs() or 100
+                        if hp < bestHp then
+                            bestHp = hp; bestId = mid
+                        end
+                    end
+                end
             end
         end
     end
@@ -12787,6 +12815,79 @@ function runtime.isDetrimentalAction(name, targetToken, entry)
     return isDetrimentalSpell(name, nil, k, targetToken)
 end
 
+-- Returns true if an action (spell, AA, disc, skill, clickie) is a healing action.
+function runtime.isHealAction(name, targetToken, entry)
+    if not name or name == '' then return false end
+    if entry and entry.kind == 'heal' then return true end
+    local k = entry and entry.kind
+    if k and (k == 'dd' or k == 'dot' or k == 'debuff' or k == 'nuke' or k == 'buff' or k == 'pet' or k == 'util') then
+        return false
+    end
+    if entry and entry.when == 'missing buff' then
+        return false
+    end
+    -- Target check: Lowest-HP Ally is almost certainly a heal if not offensive
+    if targetToken and baseTok(targetToken) == 'Lowest-HP Ally' then
+        if not runtime.isDetrimentalAction(name, targetToken, entry) then
+            return true
+        end
+    end
+    -- Condition check: HP threshold conditions on friendly actions
+    if entry and entry.when and (entry.when == 'my HP <=' or entry.when == 'HP <=' or entry.when == 'target HP <=') then
+        if not runtime.isDetrimentalAction(name, targetToken, entry) then
+            local lowerName = tostring(name):lower()
+            if not isFeignDeathAbility(name) then
+                if lowerName:find('heal') or lowerName:find('mend') or lowerName:find('salve')
+                    or lowerName:find('remedy') or lowerName:find('chloroplast') or lowerName:find('regeneration')
+                    or lowerName:find('renewal') or lowerName:find('restoration') or lowerName:find('lay on hands')
+                    or lowerName:find('burst of life') or lowerName:find('arbitration') or lowerName:find('touch')
+                    or (targetToken and baseTok(targetToken) == 'Lowest-HP Ally') then
+                    return true
+                end
+            end
+        end
+    end
+    -- TLO Spell Category check
+    local isHealCat = false
+    pcall(function()
+        local sp = mq.TLO.Spell(name)
+        if sp and sp() then
+            local cat = tostring(sp.Category() or ''):lower()
+            local subcat = tostring(sp.Subcategory() or ''):lower()
+            if cat:find('heal') or subcat:find('heal') or cat:find('restore') or subcat:find('restore') then
+                isHealCat = true
+            end
+        end
+    end)
+    if isHealCat then return true end
+
+    -- Check database (DATA.spells) if loaded
+    if DATA and DATA.spells then
+        for _, list in pairs(DATA.spells) do
+            if type(list) == 'table' then
+                for _, it in ipairs(list) do
+                    if it[1] == name then
+                        if it[4] == 'heal' then return true end
+                        if it[4] == 'dd' or it[4] == 'dot' or it[4] == 'debuff' or it[4] == 'buff' then return false end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback name heuristic for recognized heals
+    local lowerName = tostring(name):lower()
+    if not runtime.isDetrimentalAction(name, targetToken, entry) and not isFeignDeathAbility(name) then
+        if lowerName:find('heal') or lowerName:find('mend') or lowerName:find('salve')
+            or lowerName:find('remedy') or lowerName:find('chloroplast') or lowerName:find('renewal')
+            or lowerName:find('restoration') or lowerName:find('lay on hands') or lowerName:find('burst of life')
+            or lowerName:find('divine arbitration') then
+            return true
+        end
+    end
+    return false
+end
+
 function runtime.isTargetInRange(name, targetId)
     if not targetId or targetId == 0 then return false end
     local myId = mq.TLO.Me.ID() or 0
@@ -12806,7 +12907,12 @@ function runtime.isTargetInRange(name, targetId)
         end)
     end
     if maxRange == 0 then
-        maxRange = (runtime.maxMeleeDistance and runtime.maxMeleeDistance(targetId)) or 15
+        local isBene = not runtime.isDetrimentalAction(name, nil, nil)
+        if isBene then
+            maxRange = 100
+        else
+            maxRange = (runtime.maxMeleeDistance and runtime.maxMeleeDistance(targetId)) or 15
+        end
     end
 
     return dist <= (maxRange + 2)
@@ -13626,7 +13732,13 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
     end
 
     if when == 'my Mana <=' then return (mq.TLO.Me.PctMana() or 100) <= pct end
-    if when == 'my HP <=' then return pctHP(mq.TLO.Me.ID()) <= pct end
+    if when == 'my HP <=' then
+        local myMet = pctHP(mq.TLO.Me.ID()) <= pct
+        if token and baseTok(token) ~= 'Myself' and targetId and targetId > 0 and targetId ~= mq.TLO.Me.ID() then
+            return myMet or (pctHP(targetId) <= pct)
+        end
+        return myMet
+    end
     if when == 'HP <=' or when == 'target HP <=' then
         if token and baseTok(token) == 'Whole Group' then
             return pctHP(runtime.lowestHpAlly()) <= pct
@@ -13841,15 +13953,20 @@ function runtime.castGem(i, g, id)
     local spMana = tonumber(sp.Mana() or 0) or 0
     local curMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
     if curMana < spMana then return false end
+    local isHeal = runtime.isHealAction(g.spell, g.target, g)
     local minMana = tonumber(ctrl and ctrl.min_mana_pct) or 0
     local pctMana = tonumber(mq.TLO.Me.PctMana() or 100) or 100
-    if not ctrl.burn and minMana > 0 and pctMana < minMana then return false end
+    if not isHeal and not ctrl.burn and minMana > 0 and pctMana < minMana then return false end
     if not mq.TLO.Me.SpellReady(g.spell)() then return false end
 
     local dur = 0
     pcall(function() dur = tonumber(sp.Duration()) or 0 end)
     dur = tonumber(dur) or 0
     if dur > 0 and buffActive(id, g.spell) and not (g.cls == 'Brd' and g.when == 'twist while fighting') then
+        return false
+    end
+
+    if id and id > 0 and id ~= mq.TLO.Me.ID() and not runtime.isTargetInRange(g.spell, id) then
         return false
     end
 
@@ -13971,6 +14088,9 @@ function runtime.castGem(i, g, id)
 end
 
 function runtime.fireAA(name, a, id)
+    if not name or name == '' then return false end
+    if type(name) == 'string' then name = name:match('^%s*(.-)%s*$') end
+    if not name or name == '' then return false end
     local isFD = isFeignDeathAbility(name)
     if not isFD and (isSitting() or isDucking()) then
         mq.cmd('/stand')
@@ -14300,63 +14420,40 @@ function runtime.readSpecialTabNamesFromUI()
 end
 
 function runtime.readSpecialTabOnce(force)
-    if not force and runtime.specialTabReadDone and runtime.specialTabAAs and #runtime.specialTabAAs > 0 then
-        return runtime.specialTabAAs
+    if not force and runtime.specialTabReadDone then
+        return runtime.specialTabAAs or {}
     end
+    runtime.specialTabReadDone = true
+    runtime.specialTabAAs = runtime.specialTabAAs or {}
 
     -- 1. Try non-blocking read if already populated in UI
     local names = runtime.readSpecialTabNamesFromUI()
     if names and #names > 0 then
         runtime.specialTabAAs = names
-        runtime.specialTabReadDone = true
         return names
     end
 
-    -- 2. Open AAWindow if not open, select tab 4, read, and restore window state
+    -- 2. If AAWindow is already open, try selecting Tab 4 (Special) safely
     local wasOpen = false
     pcall(function()
         local w = mq.TLO.Window('AAWindow')
         if w and w() and w.Open and w.Open() then wasOpen = true end
     end)
 
-    if not wasOpen then
+    if wasOpen then
         pcall(function()
-            local w = mq.TLO.Window('AAWindow')
-            if w and w() and w.DoOpen then w.DoOpen() end
+            local win = mq.TLO.Window('AAWindow')
+            if win and win() then
+                local sub = runtime.findChildRecursive(win, 'AAW_Subwindows')
+                if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(4) end
+            end
         end)
-        mq.cmd('/windowstate AAWindow open')
-        mq.cmd('/nomodkey /keypress alt_advancement')
-        mq.delay(250)
-    end
-
-    -- Select Tab 4 (Special)
-    mq.cmd('/nomodkey /notify AAWindow AAW_Subwindows tabselect 4')
-    mq.cmd('/nomodkey /notify AAWindow AA_Subwindows tabselect 4')
-    pcall(function()
-        local win = mq.TLO.Window('AAWindow')
-        if win and win() then
-            local sub = runtime.findChildRecursive(win, 'AAW_Subwindows') or runtime.findChildRecursive(win, 'AA_Subwindows')
-            if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(4) end
+        mq.delay(50)
+        names = runtime.readSpecialTabNamesFromUI()
+        if names and #names > 0 then
+            runtime.specialTabAAs = names
+            print(string.format('\ag[Triune]\ax Read %d abilities from AA Special tab.', #names))
         end
-    end)
-    mq.delay(150)
-
-    names = runtime.readSpecialTabNamesFromUI()
-    if names and #names > 0 then
-        runtime.specialTabAAs = names
-        runtime.specialTabReadDone = true
-        print(string.format('\ag[Triune]\ax Read %d abilities from AA Special tab.', #names))
-    else
-        runtime.specialTabReadDone = true
-    end
-
-    if not wasOpen then
-        pcall(function()
-            local w = mq.TLO.Window('AAWindow')
-            if w and w() and w.DoClose then w.DoClose() end
-        end)
-        mq.cmd('/windowstate AAWindow close')
-        mq.cmd('/nomodkey /keypress alt_advancement')
     end
 
     return runtime.specialTabAAs or {}
@@ -14417,6 +14514,7 @@ function runtime.scanPlayerAAs(force)
                 if type(aList) == 'table' then
                     for _, item in ipairs(aList) do
                         local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
+                        if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
                         runtime.recordScannedAA(list, foundMap, nm)
                     end
                 end
@@ -14445,14 +14543,12 @@ function runtime.scanPlayerAAs(force)
 
     -- 4. Scan Special tab abilities (from one-time read of the Special tab)
     local specialList = runtime.specialTabAAs
-    if not specialList or #specialList == 0 then
+    if (not specialList or #specialList == 0) and not runtime.specialTabReadDone then
         local uiNames = runtime.readSpecialTabNamesFromUI()
         if uiNames and #uiNames > 0 then
             runtime.specialTabAAs = uiNames
             runtime.specialTabReadDone = true
             specialList = uiNames
-        else
-            runtime.pendingReadSpecialTab = true
         end
     end
     if specialList and #specialList > 0 then
@@ -14558,6 +14654,7 @@ end
 function runtime.startAATrainWorkflow(targetName)
     if runtime.pendingAATrain then return false end
     targetName = targetName or ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
+    if type(targetName) == 'string' then targetName = targetName:match('^%s*(.-)%s*$') end
 
     local aaId = 0
     local aaType = 0
@@ -15260,6 +15357,243 @@ runtime.useClickie = function(c, id)
 end
 
 -- ============================================================================
+-- HEALING PRIORITY ENGINE
+-- Prioritizes reactive healing (Gems, AAs, Actions, Discs, Clickies) over all
+-- movement, targeting, auto-attack, and offensive actions.
+-- ============================================================================
+function runtime.processHealPriority()
+    if isCasting() or isCastingOrStarting() then return false end
+    if not loadout then return false end
+
+    local eligibleHeals = {}
+
+    -- 1. Scan Gems for Heals
+    if loadout.gems then
+        for i = 1, #loadout.gems do
+            local g = loadout.gems[i]
+            if g and g.spell and g.spell ~= '' then
+                if runtime.isHealAction(g.spell, g.target, g) then
+                    local assignedGem = tonumber(g.gem) or math.min(i, 12)
+                    local actualGem = assignedGem
+                    local isMemmed = isGemMatching(assignedGem, g.spell)
+                    if not isMemmed then
+                        local otherSlot = nil
+                        pcall(function() otherSlot = mq.TLO.Me.Gem(g.spell)() end)
+                        if otherSlot and otherSlot > 0 then
+                            actualGem = otherSlot
+                            isMemmed = true
+                        end
+                    end
+                    if isMemmed then
+                        local pctVal = tonumber(g.pct) or 75
+                        if pctVal > 0 then
+                            local id = runtime.resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal, g)
+                            if id and isSpawnAlive(id) then
+                                local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(g.spell, id)
+                                if rangeOk then
+                                    local lockedOut = castTracker and castTracker.isLockedOut(g.spell, id, g.kind)
+                                    if not lockedOut and runtime.conditionMet(g.when, pctVal, g.spell, id, g.cls, g.target, g) then
+                                        local sp = mq.TLO.Spell(g.spell)
+                                        local spMana = (sp and sp() and tonumber(sp.Mana() or 0)) or 0
+                                        local curMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
+                                        local ready = false
+                                        pcall(function() ready = mq.TLO.Me.SpellReady(g.spell)() end)
+                                        if ready and curMana >= spMana and hasSpellReagents(g.spell) then
+                                            local targetHp = pctHP(id) or 100
+                                            eligibleHeals[#eligibleHeals + 1] = {
+                                                type = 'gem',
+                                                name = g.spell,
+                                                slot = actualGem,
+                                                entry = g,
+                                                targetId = id,
+                                                targetHp = targetHp,
+                                                pctThreshold = pctVal,
+                                                priority = tonumber(g.priority) or 50,
+                                                cls = g.cls,
+                                            }
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Scan Activated AAs for Heals
+    if loadout.aas then
+        for rawName, a in pairs(loadout.aas) do
+            local name = type(rawName) == 'string' and rawName:match('^%s*(.-)%s*$') or rawName
+            if a.enabled and runtime.isHealAction(name, a.target, a) then
+                local aPct = tonumber(a.pct) or 50
+                if aPct > 0 and (not a.burn_only or ctrl.burn) then
+                    local id = runtime.resolveTargetId(a.target, a.cls, a.when, name, aPct, a)
+                    if id and isSpawnAlive(id) then
+                        local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(name, id)
+                        if rangeOk and runtime.conditionMet(a.when, aPct, name, id, a.cls, a.target, a) then
+                            local ready = false
+                            pcall(function() ready = mq.TLO.Me.AltAbilityReady(name)() end)
+                            if ready then
+                                local targetHp = pctHP(id) or 100
+                                eligibleHeals[#eligibleHeals + 1] = {
+                                    type = 'aa',
+                                    name = name,
+                                    entry = a,
+                                    targetId = id,
+                                    targetHp = targetHp,
+                                    pctThreshold = aPct,
+                                    priority = tonumber(a.priority) or 15,
+                                    cls = a.cls,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Scan Actions (/doability, e.g. Mend) for Heals
+    if loadout.actions then
+        for name, act in pairs(loadout.actions) do
+            if act.enabled and runtime.isHealAction(name, act.target, act) then
+                local actPct = tonumber(act.pct) or 50
+                if actPct > 0 and (not act.burn_only or ctrl.burn) then
+                    local id = runtime.resolveTargetId(act.target, act.cls, act.when, name, actPct, act)
+                    if id and isSpawnAlive(id) then
+                        local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(name, id)
+                        if rangeOk and runtime.conditionMet(act.when, actPct, name, id, act.cls, act.target, act) then
+                            if runtime.isSkillReady(name) then
+                                local targetHp = pctHP(id) or 100
+                                eligibleHeals[#eligibleHeals + 1] = {
+                                    type = 'action',
+                                    name = name,
+                                    entry = act,
+                                    targetId = id,
+                                    targetHp = targetHp,
+                                    pctThreshold = actPct,
+                                    priority = tonumber(act.priority) or 10,
+                                    cls = act.cls,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 4. Scan Clickies for Heals
+    if loadout.clickies and #loadout.clickies > 0 then
+        for _, c in ipairs(loadout.clickies) do
+            local effName = (c.spell and c.spell ~= '') and c.spell or c.name
+            if (c.enabled ~= false) and runtime.isHealAction(effName, c.target, c) then
+                local cPct = tonumber(c.pct) or 60
+                if cPct > 0 and (not c.burn_only or ctrl.burn) then
+                    local id = runtime.resolveTargetId(c.target, 'ALL', c.when, effName, cPct, c)
+                    if id and isSpawnAlive(id) then
+                        local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(effName, id)
+                        local lockedOut = castTracker and castTracker.isLockedOut(effName, id, c.kind)
+                        if rangeOk and not lockedOut and runtime.conditionMet(c.when, cPct, effName, id, 'ALL', c.target, c) then
+                            local ready = (not runtime.isClickieReady) or runtime.isClickieReady(c)
+                            if ready then
+                                local targetHp = pctHP(id) or 100
+                                eligibleHeals[#eligibleHeals + 1] = {
+                                    type = 'clickie',
+                                    name = effName,
+                                    entry = c,
+                                    targetId = id,
+                                    targetHp = targetHp,
+                                    pctThreshold = cPct,
+                                    priority = tonumber(c.priority) or 30,
+                                    cls = c.cls or 'ALL',
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 5. Scan Disciplines for Heals
+    if loadout.discs then
+        for name, d in pairs(loadout.discs) do
+            if d.enabled and runtime.isHealAction(name, d.target, d) then
+                local dPct = tonumber(d.pct) or 30
+                if dPct > 0 and (not d.burn_only or ctrl.burn) then
+                    local id = runtime.resolveTargetId(d.target, d.cls, d.when, name, dPct, d)
+                    if id and isSpawnAlive(id) then
+                        local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(name, id)
+                        if rangeOk and runtime.conditionMet(d.when, dPct, name, id, d.cls, d.target, d) then
+                            if runtime.isDiscReady(name) then
+                                local targetHp = pctHP(id) or 100
+                                eligibleHeals[#eligibleHeals + 1] = {
+                                    type = 'disc',
+                                    name = name,
+                                    entry = d,
+                                    targetId = id,
+                                    targetHp = targetHp,
+                                    pctThreshold = dPct,
+                                    priority = tonumber(d.priority) or 20,
+                                    cls = d.cls,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #eligibleHeals == 0 then return false end
+
+    -- Sort eligible heals:
+    -- 1. Lowest target HP percentage (most damaged target first)
+    -- 2. Lowest condition threshold (emergency 25% threshold before maintenance 75%)
+    -- 3. Lowest priority setting (higher priority setting)
+    table.sort(eligibleHeals, function(a, b)
+        if a.targetHp ~= b.targetHp then
+            return a.targetHp < b.targetHp
+        end
+        if a.pctThreshold ~= b.pctThreshold then
+            return a.pctThreshold < b.pctThreshold
+        end
+        return (a.priority or 50) < (b.priority or 50)
+    end)
+
+    local best = eligibleHeals[1]
+    if not best then return false end
+
+    -- PRIORITIZE HEALING OVER MOVEMENT:
+    if isSitting() or isDucking() then
+        mq.cmd('/stand')
+        mq.delay(50)
+    end
+
+    if best.cls ~= 'Brd' then
+        runtime.stopMovementForCast(best.cls, best.name)
+    end
+
+    if best.type == 'gem' then
+        return runtime.castGem(best.slot, best.entry, best.targetId)
+    elseif best.type == 'aa' then
+        return runtime.fireAA(best.name, best.entry, best.targetId)
+    elseif best.type == 'action' then
+        return runtime.fireSkill(best.name, best.entry, best.targetId)
+    elseif best.type == 'disc' then
+        return runtime.fireDisc(best.name, best.entry, best.targetId)
+    elseif best.type == 'clickie' then
+        return runtime.useClickie(best.entry, best.targetId)
+    end
+
+    return false
+end
+
+
+-- ============================================================================
 -- MOVEMENT (phase 2, slice 2). Same pattern autocombat.lua proved: prefer MQ2Nav
 -- when it's loaded and a path actually exists; otherwise fall back to /stick.
 -- If neither plugin is loaded, movement is skipped and the character just fights
@@ -15308,9 +15642,10 @@ local function maxMeleeDistance(id)
             end)
         end
     end
-    if spawnReach > 0 then
-        -- Allow reasonable reach bounded by user preference and true hitbox
-        return math.max(userDist, math.min(spawnReach, userDist + 10))
+    -- If target is an oversized mob (dragon, giant, etc.) with a huge physical hitbox reach
+    -- exceeding the user's configured distance, expand reach to prevent clipping inside the model
+    if spawnReach > 18 and spawnReach > userDist then
+        return spawnReach
     end
     return userDist
 end
@@ -15343,11 +15678,12 @@ local function desiredRange(id)
             end)
         end
     end
-    if spawnReach > 0 then
-        local maxSafe = math.max(5, spawnReach - 2)
-        return math.max(5, math.min(userDist, maxSafe))
+    -- For oversized mobs with hitboxes exceeding user distance, position near the outer edge
+    if spawnReach > 18 and spawnReach > userDist then
+        return math.max(userDist, math.floor(spawnReach - 3))
     end
-    return math.max(5, math.floor(userDist - 2))
+    -- Position slightly inside user's max melee distance to avoid edge jitter
+    return math.max(4, math.floor(userDist - 2))
 end
 runtime.desiredRange = desiredRange
 
@@ -15708,7 +16044,7 @@ function runtime.getBehindLoc(targetId, dist)
     local sx, sy, sz = s.X() or 0, s.Y() or 0, s.Z() or 0
     local sHead = 0
     pcall(function() sHead = s.Heading.Degrees() or s.Heading() or 0 end)
-    local behindDist = dist or math.max(6, math.min(12, (ctrl and ctrl.melee_dist) or 12))
+    local behindDist = dist or runtime.desiredRange(targetId)
     local hRad = math.rad(sHead)
     -- Facing unit vector is (sin(hRad), cos(hRad))
     -- Behind is target minus facing vector * dist
@@ -15729,12 +16065,13 @@ function runtime.positionBehindTarget(targetId, targetDist)
             local sActive = mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON'
             local sTarget = mq.TLO.Stick.StickTarget() or 0
             local sBehind = mq.TLO.Stick.MoveBehind() or false
-            if sActive and sTarget == targetId and sBehind then
+            if sActive and sTarget == targetId and sBehind and pursuit.lastBehindStickDist == stickDist then
                 needStick = false
             end
         end)
         if needStick and not runtime.isCasting() then
             mq.cmdf('/stick id %d %d behind', targetId, stickDist)
+            pursuit.lastBehindStickDist = stickDist
         end
         return true
     end
@@ -17977,6 +18314,15 @@ local function combatTick()
         checkAggroSwitch()
     end
 
+    -- ========================================================================
+    -- HEALING PRIORITY DISPATCH
+    -- Prioritize reactive healing (spells, AAs, clickies, actions, discs)
+    -- over movement, targeting, auto-attack, and offensive casting.
+    -- ========================================================================
+    if runtime.processHealPriority and runtime.processHealPriority() then
+        return
+    end
+
     local numXtar = countNPCXtarget()
     local t = mq.TLO.Target
     local haveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse'
@@ -18540,8 +18886,10 @@ local function combatTick()
                             -- Assistant currently has aggro: suspend behind positioning to prevent circular spinning while tanking
                             if stickLoaded() then
                                 pcall(function()
-                                    if (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') and mq.TLO.Stick.MoveBehind() then
-                                        mq.cmdf('/stick id %d %d', tid, math.floor(desiredRange(tid)))
+                                    local dRange = math.floor(desiredRange(tid))
+                                    if (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') and (mq.TLO.Stick.MoveBehind() or pursuit.lastFrontStickDist ~= dRange) then
+                                        mq.cmdf('/stick id %d %d', tid, dRange)
+                                        pursuit.lastFrontStickDist = dRange
                                     end
                                 end)
                             end
@@ -18763,7 +19111,8 @@ local function combatTick()
     -- activated AAs are instant and off the spell timer: fire every eligible one,
     -- and don't let them block (or be blocked by) the spell cast below
     if combatReady then
-        for name, a in pairs(loadout.aas) do
+        for rawName, a in pairs(loadout.aas) do
+            local name = type(rawName) == 'string' and rawName:match('^%s*(.-)%s*$') or rawName
             local aPct = tonumber(a.pct)
             if aPct == nil then aPct = 30 end
             local isDet = isDetrimentalAction(name, a.target, a)
@@ -18910,7 +19259,7 @@ local function combatTick()
                 if not lockedOut then
                     local condOk = id and conditionMet(c.when, cPct, effName, id, 'ALL', c.target)
                     if condOk then
-                        local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(effName, id))
+                        local targetValid = (id == mq.TLO.Me.ID()) or (not isDet and runtime.isTargetInRange(effName, id)) or (isDet and isHostileTarget(id) and isTargetInRange(effName, id))
                         if targetValid and runtime.useClickie(c, id) then
                             if c.when == 'missing buff' and c.spell and c.spell ~= '' then
                                 local bene = false
@@ -18937,7 +19286,16 @@ local function combatTick()
             end
         end
         if loadout.gems then
+            local gemOrder = {}
             for i = 1, #loadout.gems do
+                local g = loadout.gems[i]
+                if g and g.spell and g.spell ~= '' and runtime.isHealAction(g.spell, g.target, g) then
+                    table.insert(gemOrder, 1, i)
+                else
+                    table.insert(gemOrder, i)
+                end
+            end
+            for _, i in ipairs(gemOrder) do
                 local g = loadout.gems[i]
                 if g and g.spell and g.spell ~= '' then
                     local assignedGem = tonumber(g.gem) or math.min(i, 12)
@@ -18976,7 +19334,7 @@ local function combatTick()
                                         end
                                     end
                                     if castLimitOk then
-                                        local targetValid = not isDet or (isHostileTarget(id) and isTargetInRange(g.spell, id))
+                                        local targetValid = (id == mq.TLO.Me.ID()) or (not isDet and runtime.isTargetInRange(g.spell, id)) or (isDet and isHostileTarget(id) and isTargetInRange(g.spell, id))
                                         if targetValid and castGem(actualGem, g, id) then
                                             gemCasted = true
                                             if g.when == 'missing buff' then
@@ -20291,10 +20649,14 @@ local function runMainLoop()
             runtime.aaFilterDirty = true
             if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
         end
-        if runtime.pendingReadSpecialTab and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isCasting() then
-            runtime.pendingReadSpecialTab = false
-            if runtime.readSpecialTabOnce then runtime.readSpecialTabOnce(false) end
-            if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+        if runtime.pendingReadSpecialTab then
+            if not ctrl.paused and ctrl.auto_spend_aa and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isCasting() then
+                runtime.pendingReadSpecialTab = false
+                if runtime.readSpecialTabOnce then runtime.readSpecialTabOnce(false) end
+                if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
+            elseif not ctrl.auto_spend_aa or ctrl.paused then
+                runtime.pendingReadSpecialTab = false
+            end
         end
         local currentSpentAA = nil
         pcall(function() currentSpentAA = tonumber(mq.TLO.Me.AAPointsSpent() or 0) or 0 end)
@@ -20359,7 +20721,6 @@ local function runMainLoop()
     end
 end
 
-runtime.pendingReadSpecialTab = true
 runMainLoop()
 if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
 runtime.saveLoadout(true)

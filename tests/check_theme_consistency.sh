@@ -25,8 +25,10 @@ SATELLITES=(
     "$LUA_DIR/triune_buffbot.lua"
     "$LUA_DIR/triune_cursor.lua"
     "$LUA_DIR/triune_dps.lua"
+    "$LUA_DIR/triune_inv.lua"
     "$LUA_DIR/triune_map.lua"
     "$LUA_DIR/triune_spellbook.lua"
+    "$LUA_DIR/triune_test.lua"
     "$LUA_DIR/triune_track.lua"
     "$LUA_DIR/triune_updater.lua"
 )
