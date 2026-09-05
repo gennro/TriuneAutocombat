@@ -29,8 +29,6 @@ SATELLITES=(
     "$LUA_DIR/triune_map.lua"
     "$LUA_DIR/triune_spellbook.lua"
     "$LUA_DIR/triune_test.lua"
-    "$LUA_DIR/triune_track.lua"
-    "$LUA_DIR/triune_updater.lua"
 )
 
 # Extract just the color/var tuples from a pushTheme function body.

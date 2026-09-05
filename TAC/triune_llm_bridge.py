@@ -18,8 +18,9 @@ import urllib.request
 import urllib.error
 import argparse
 import traceback
+import threading
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Default fallback URLs
 DEFAULT_URLS = {
@@ -45,35 +46,44 @@ def find_default_watch_dir():
     return os.getcwd()
 
 
-def call_llm(endpoint_url, api_key, model, messages, temperature=0.2, timeout=60):
-    """Make HTTP POST to OpenAI-compatible endpoint."""
-    payload = {
-        "model": model or "default",
-        "messages": messages,
-        "temperature": float(temperature) if temperature is not None else 0.2,
-    }
-    data = json.dumps(payload).encode("utf-8")
+def call_llm(endpoint_url, api_key, model, messages, temperature=0.2, timeout=60, force_json=True):
+    """Make HTTP POST to OpenAI-compatible endpoint with optional JSON grammar enforcement."""
+    def _do_post(include_json_format):
+        payload = {
+            "model": model or "default",
+            "messages": messages,
+            "temperature": float(temperature) if temperature is not None else 0.2,
+        }
+        if include_json_format:
+            payload["response_format"] = {"type": "json_object"}
 
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": f"TriuneLLMBridge/{VERSION}",
-    }
-    if api_key and api_key.strip():
-        headers["Authorization"] = f"Bearer {api_key.strip()}"
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"TriuneLLMBridge/{VERSION}",
+        }
+        if api_key and api_key.strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
 
-    req = urllib.request.Request(endpoint_url, data=data, headers=headers, method="POST")
-
-    try:
+        req = urllib.request.Request(endpoint_url, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
             parsed = json.loads(body)
-            # Standard OpenAI completion format
             choices = parsed.get("choices", [])
             if choices and len(choices) > 0:
                 msg = choices[0].get("message", {})
                 content = msg.get("content", "")
                 return {"ok": True, "content": content, "raw": parsed}
             return {"ok": True, "content": body, "raw": parsed}
+
+    try:
+        try:
+            return _do_post(include_json_format=force_json)
+        except urllib.error.HTTPError as he:
+            # If server rejects response_format (e.g. 400 Bad Request), retry once without it
+            if force_json and he.code == 400:
+                return _do_post(include_json_format=False)
+            raise
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
@@ -85,6 +95,17 @@ def call_llm(endpoint_url, api_key, model, messages, temperature=0.2, timeout=60
         return {"ok": False, "error": f"Network error: {e.reason}"}
     except Exception as e:
         return {"ok": False, "error": f"Request exception: {str(e)}"}
+
+
+def heartbeat_worker(heartbeat_file, stop_event):
+    """Background thread that pulses heartbeat every 1 second without blocking."""
+    while not stop_event.is_set():
+        try:
+            with open(heartbeat_file, "w") as hf:
+                hf.write(f"{time.time():.3f}\n")
+        except Exception:
+            pass
+        stop_event.wait(1.0)
 
 
 def run_bridge(watch_dir):
@@ -108,20 +129,12 @@ def run_bridge(watch_dir):
         except OSError:
             pass
 
-    last_heartbeat = 0
+    stop_event = threading.Event()
+    hb_thread = threading.Thread(target=heartbeat_worker, args=(heartbeat_file, stop_event), daemon=True)
+    hb_thread.start()
 
     try:
         while True:
-            now = time.time()
-            # Update heartbeat every 1 second
-            if now - last_heartbeat >= 1.0:
-                try:
-                    with open(heartbeat_file, "w") as hf:
-                        hf.write(f"{now:.3f}\n")
-                    last_heartbeat = now
-                except Exception as e:
-                    print(f"[WARN] Failed to update heartbeat: {e}", file=sys.stderr)
-
             # Check if a request is ready
             if os.path.exists(req_ready):
                 print(f"[{time.strftime('%H:%M:%S')}] Detected incoming request from MacroQuest...")
@@ -180,6 +193,7 @@ def run_bridge(watch_dir):
     except KeyboardInterrupt:
         print("\nStopping Triune LLM Bridge...")
     finally:
+        stop_event.set()
         # Cleanup
         for f in [heartbeat_file, req_ready, res_ready]:
             try:

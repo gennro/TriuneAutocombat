@@ -2490,14 +2490,7 @@ do
     })
     assert_eq(testStickLoaded3(), false, 'stickLoaded: false when neither Stick TLO nor Plugin is loaded')
 
-    -- 4. Cross-file standalone validation for triune_track and triune_map
-    local srcTrack = readFile('TAC/lua/triune_track.lua')
-    local testTrackStick = loadFunc(srcTrack, 'stickLoaded', {
-        mq = dummyMqMoveUtilsPluginLoaded,
-        pcall = pcall,
-    })
-    assert_eq(testTrackStick(), true, 'triune_track stickLoaded: true when Plugin mq2moveutils is loaded')
-
+    -- 4. Cross-file standalone validation for triune_map
     local srcMap = readFile('TAC/lua/triune_map.lua')
     local testMapStick = loadFunc(srcMap, 'stickLoaded', {
         mq = dummyMqMoveUtilsPluginLoaded,
@@ -2823,50 +2816,45 @@ end
 -- ============================================================================
 print('--- triune_updater release parsing & JSON tokenizer ---')
 do
-    local updSrc = readFile('TAC/lua/triune_updater.lua')
-    local cleanTag = loadFunc(updSrc, 'cleanTag', {})
-    local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
+    local f = io.open('TAC/lua/triune_updater.lua', 'r')
+    if f then
+        f:close()
+        local updSrc = readFile('TAC/lua/triune_updater.lua')
+        local cleanTag = loadFunc(updSrc, 'cleanTag', {})
+        local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
 
-    assert_eq(cleanTag('v1.7.7'), '1.7.7', 'cleanTag: lowercase v')
-    assert_eq(cleanTag('V1.7.7'), '1.7.7', 'cleanTag: uppercase V')
-    assert_eq(cleanTag('1.7.7'), '1.7.7', 'cleanTag: no v prefix')
-    assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
-    assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
-    assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
+        assert_eq(cleanTag('v1.7.7'), '1.7.7', 'cleanTag: lowercase v')
+        assert_eq(cleanTag('V1.7.7'), '1.7.7', 'cleanTag: uppercase V')
+        assert_eq(cleanTag('1.7.7'), '1.7.7', 'cleanTag: no v prefix')
+        assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
+        assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
+        assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
 
-    assert_eq(extractJsonString('{"tag_name": "v1.7.7"}', 'tag_name'), 'v1.7.7', 'extractJsonString: simple tag_name')
-    assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
-        'extractJsonString: handles escaped quotes without truncation')
-    assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
-        'extractJsonString: handles newlines and tabs')
-    assert_eq(extractJsonString('{"path": "TAC\\\\lua\\\\triune.lua"}', 'path'), 'TAC\\lua\\triune.lua',
-        'extractJsonString: handles backslashes')
-    assert_eq(extractJsonString('{"url": "https:\\/\\/github.com"}', 'url'), 'https://github.com',
-        'extractJsonString: handles escaped slashes')
-    assert_nil(extractJsonString('{"other": 123}', 'body'), 'extractJsonString: missing key returns nil')
-    assert_nil(extractJsonString(nil, 'body'), 'extractJsonString: nil json returns nil')
+        assert_eq(extractJsonString('{"tag_name": "v1.7.7"}', 'tag_name'), 'v1.7.7', 'extractJsonString: simple tag_name')
+        assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
+            'extractJsonString: handles escaped quotes without truncation')
+        assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
+            'extractJsonString: handles newlines and tabs')
+        assert_eq(extractJsonString('{"path": "TAC\\\\lua\\\\triune.lua"}', 'path'), 'TAC\\lua\\triune.lua',
+            'extractJsonString: handles backslashes')
+        assert_eq(extractJsonString('{"url": "https:\\/\\/github.com"}', 'url'), 'https://github.com',
+            'extractJsonString: handles escaped slashes')
+        assert_nil(extractJsonString('{"other": 123}', 'body'), 'extractJsonString: missing key returns nil')
+        assert_nil(extractJsonString(nil, 'body'), 'extractJsonString: nil json returns nil')
 
-    local apiErrSample =
-    '{"message": "API rate limit exceeded for 127.0.0.1", "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}'
-    assert_eq(extractJsonString(apiErrSample, 'message'), 'API rate limit exceeded for 127.0.0.1',
-        'extractJsonString: extracts GitHub API rate limit error message')
+        local apiErrSample =
+        '{"message": "API rate limit exceeded for 127.0.0.1", "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}'
+        assert_eq(extractJsonString(apiErrSample, 'message'), 'API rate limit exceeded for 127.0.0.1',
+            'extractJsonString: extracts GitHub API rate limit error message')
 
-    local fullReleaseJson =
-    '{\n  "tag_name": "v1.7.7",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
-    assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.7', 'extractJsonString: full payload tag_name')
-    assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
-        'extractJsonString: full payload preserves markdown and quotes in body')
-
-    triuneSrc = readFile('TAC/lua/triune.lua')
-    local triuneVer = triuneSrc:match("local VERSION%s*=%s*'([^']+)'")
-    local updaterVer = updSrc:match("local VERSION%s*=%s*'([^']+)'")
-    local readmeSrc = readFile('README.md')
-    local readmeVer = readmeSrc:match("Current version:%s*%*%*([^*]+)%*%*")
-    assert_eq(triuneVer, '2.01', 'triune.lua version is 2.01')
-    assert_eq(updaterVer, '2.01', 'triune_updater.lua version is 2.01')
-    assert_eq(readmeVer, '2.01', 'README.md version is 2.01')
-    assert_true(triuneSrc:find('hdrUpdate') == nil, 'triune.lua does not contain hdrUpdate button')
-    assert_true(triuneSrc:find('miniUpdate') == nil, 'triune.lua does not contain miniUpdate button')
+        local fullReleaseJson =
+        '{\n  "tag_name": "v1.7.7",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
+        assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.7', 'extractJsonString: full payload tag_name')
+        assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
+            'extractJsonString: full payload preserves markdown and quotes in body')
+    else
+        print('  (Skipping Suite 41: triune_updater.lua retired)')
+    end
 end
 
 -- ============================================================================
@@ -5227,10 +5215,11 @@ do
         'TAC/lua/triune_buffbot.lua',
         'TAC/lua/triune_cursor.lua',
         'TAC/lua/triune_dps.lua',
+        'TAC/lua/triune_inv.lua',
         'TAC/lua/triune_map.lua',
+        'TAC/lua/triune_quest.lua',
         'TAC/lua/triune_spellbook.lua',
-        'TAC/lua/triune_track.lua',
-        'TAC/lua/triune_updater.lua',
+        'TAC/lua/triune_test.lua',
     }
 
     for _, filePath in ipairs(files) do

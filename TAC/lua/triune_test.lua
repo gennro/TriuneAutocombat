@@ -13,6 +13,7 @@
 
 local mq    = require('mq')
 local ImGui = require('ImGui')
+_G.mq       = _G.mq or mq
 
 local VERSION     = '1.0'
 local CONFIG_NAME = 'triune_test_config.lua'
@@ -312,24 +313,25 @@ local State = {
     lastBridgeCheck  = 0,
 
     -- Test Execution Engine
-    testMode         = 'Scenario', -- 'Scenario' or 'Freeform'
-    selectedScenario = 1,
-    freeformPrompt   = 'Verify that switching to Assist mode targets the group leader target and begins attack.',
-    testStatus       = 'IDLE',    -- 'IDLE', 'WAITING_LLM', 'EXECUTING_ACTION', 'PAUSED_DELAY', 'COMPLETE', 'FAILED'
-    stepCount        = 0,
-    maxSteps         = 6,
-    activeRequestId  = 0,
-    requestStartTime = 0,
-    delayUntilTime   = 0,
+    testMode            = 'Scenario', -- 'Scenario' or 'Freeform'
+    selectedScenario    = 1,
+    freeformPrompt      = 'Verify that switching to Assist mode targets the group leader target and begins attack.',
+    testStatus          = 'IDLE',    -- 'IDLE', 'WAITING_LLM', 'EXECUTING_ACTION', 'PAUSED_DELAY', 'COMPLETE', 'FAILED'
+    stepCount           = 0,
+    maxSteps            = 6,
+    activeRequestId     = 0,
+    requestStartTime    = 0,
+    delayUntilTime      = 0,
+    conversationHistory = {},
 
     -- Log console
-    logs             = {},
-    lastTloQuery     = 'Me.Combat',
-    lastTloResult    = '',
+    logs                = {},
+    lastTloQuery        = 'Me.Combat',
+    lastTloResult       = '',
 
     -- Telemetry snapshot
-    snapshot         = {},
-    lastSnapshotTime = 0,
+    snapshot            = {},
+    lastSnapshotTime    = 0,
 }
 
 local Config = {
@@ -365,20 +367,60 @@ local PROVIDER_DEFAULTS = {
 
 local SCENARIOS = {
     {
-        title = '1. Combat Mode Switch & Persistence',
-        goal  = 'Test switching Triune combat mode to Tank, then Assist, then Kite. Verify via /triune status or inspection that the mode transitions properly without errors.',
+        title = '1. Combat Modes: Manual & Puller (/ac manual, /ac puller hunt/camp)',
+        goal  = 'Test primary solo combat modes: switch to /ac manual, then /ac puller hunt, then /ac puller camp. Issue /ac status to verify mode transitions cleanly and query Me.Combat.',
     },
     {
-        title = '2. Target Acquisition & Distance',
-        goal  = 'Test acquiring the nearest NPC target via slash command, inspect target distance and line-of-sight, and evaluate if target is within combat engagement range.',
+        title = '2. Combat Modes: Assist Trio Roles (/ac assist chase/camp/backline)',
+        goal  = 'Test box/assist combat submodes: switch between /ac assist chase (melee follower), /ac assist camp (camp guard), and /ac assist backline (ranged caster). Query Me.Combat and verify /ac status.',
     },
     {
-        title = '3. Spell Gem Inspection & Mana Check',
-        goal  = 'Inspect all memorized spell gems 1 through 8. Verify character has sufficient mana to cast gem 1 and evaluate mana threshold status.',
+        title = '3. Engine Execution & Burn Toggles (/ac run, /ac pause, /ac burn)',
+        goal  = 'Test starting and pausing the autocombat engine using /ac run and /ac pause. Toggle burn mode using /ac burn on and /ac burn off. Verify state updates properly.',
     },
     {
-        title = '4. Group & XTarget Aggro Monitor',
-        goal  = 'Inspect group status and Extended Target list count. Verify no hostile mobs are currently aggroing the player while sitting/standing.',
+        title = '4. Combat Style & Range Configuration (/ac style, /ac range)',
+        goal  = 'Test configuring combat styles using /ac style melee, /ac style ranged, and /ac style spell. Test adjusting melee/ranged distance with /ac range 14 and /ac range 40.',
+    },
+    {
+        title = '5. Spell Gems, Auto-Memorize & Lockouts (/ac importbar, /ac memall, /ac clear lockouts)',
+        goal  = 'Test auto-populating spell gems from current gems via /ac importbar, queue missing spells via /ac memall, and clear active backoffs via /ac clear lockouts. Query Me.PctMana.',
+    },
+    {
+        title = '6. Auto AA Point Spending & Thresholds (/ac autoaa, /ac aathreshold, /ac aacost)',
+        goal  = 'Test enabling and configuring the AA auto-spender using /ac autoaa on, /ac aathreshold 100, and /ac aacost 25. Query Me.AAPoints to inspect unspent points.',
+    },
+    {
+        title = '7. Trio Pet Management & Out-of-Combat Hold (/ac pet status, /ac pethold, /ac petassist)',
+        goal  = 'Test pet system commands: query /ac pet status, toggle out-of-combat hold via /ac pethold on and /ac pethold off, and configure pet assist percentage via /ac petassist 95.',
+    },
+    {
+        title = '8. Main Assist & Follow Distance (/ac ma, /ac chasedist, /ac selfdefense, /ac assistbehind)',
+        goal  = 'Test setting Main Assist via /ac ma target, configure chase follow distance with /ac chasedist 15, toggle /ac selfdefense on, and /ac assistbehind on.',
+    },
+    {
+        title = '9. Puller Faction Filters & Rest HP Thresholds (/ac pullcon, /ac pullhp)',
+        goal  = 'Test Puller configuration: set faction consideration presets using /ac pullcon preset hostile and /ac pullcon preset all. Configure pull resting threshold via /ac pullhp 50.',
+    },
+    {
+        title = '10. Hunter Floor Height & Vertical Z-Planes (/ac zplane, /ac huntz)',
+        goal  = 'Test hunter height filters: configure same-floor Tier 1 threshold via /ac zplane 15 and max vertical difference Tier 2 threshold via /ac huntz 75.',
+    },
+    {
+        title = '11. Waypoint Patrol Route Navigation (/ac wp add, /ac wp list, /ac wp on/off)',
+        goal  = 'Test waypoint patrol engine: add current location with /ac wp add TestWP, list waypoints via /ac wp list, toggle patrol via /ac wp on and /ac wp off, and reset with /ac wp clear.',
+    },
+    {
+        title = '12. Loadout Presets & Inventory Utilities (/ac preset list, /ac clearcursor)',
+        goal  = 'Test loadout preset management: list saved presets via /ac preset list, test saving /ac preset save QATest, and verify cursor clearance via /ac clearcursor.',
+    },
+    {
+        title = '13. Target Telemetry & Line of Sight (Target TLO Queries)',
+        goal  = 'Target the nearest NPC via /target npc, query Target.CleanName, Target.Level, Target.PctHPs, Target.Distance, and Target.LineOfSight to evaluate combat eligibility.',
+    },
+    {
+        title = '14. Full Suite Control Surface Regression (Rapid Sweep)',
+        goal  = 'Perform a complete rapid regression test across the core control surface: /ac manual -> /ac puller hunt -> /ac assist chase -> /ac style melee -> /ac range 14 -> /ac burn off -> /ac pause.',
     },
 }
 
@@ -516,12 +558,30 @@ end
 -- TLO evaluator
 local function evaluateTlo(path)
     if not path or path == '' then return 'nil' end
-    local code = 'return tostring(mq.TLO.' .. path .. '())'
+    -- Strip leading mq.TLO. or TLO. or mq. if LLM included it
+    local cleanPath = path:gsub('^mq%.TLO%.', ''):gsub('^TLO%.', ''):gsub('^mq%.', '')
+
+    -- If path doesn't end with a closing parenthesis, append '()'
+    local callPath = cleanPath
+    if not callPath:match('%)$') then
+        callPath = callPath .. '()'
+    end
+
+    local code = 'local m = mq or _G.mq; return tostring(m.TLO.' .. callPath .. ')'
     local loadFunc = loadstring or load
     local chunk, err = loadFunc(code)
     if not chunk then
-        return 'Syntax Error: ' .. tostring(err)
+        -- Fallback: try raw cleanPath without ()
+        code = 'local m = mq or _G.mq; return tostring(m.TLO.' .. cleanPath .. ')'
+        chunk, err = loadFunc(code)
+        if not chunk then
+            return 'Syntax Error: ' .. tostring(err)
+        end
     end
+
+    local env = setmetatable({ mq = mq }, { __index = _G })
+    if setfenv then pcall(setfenv, chunk, env) end
+
     local ok, res = pcall(chunk)
     if ok then
         return tostring(res)
@@ -539,11 +599,16 @@ local function checkHeartbeat()
         local line = f:read('*l')
         f:close()
         local t = tonumber(line)
-        if t and (os.time() - t <= 3.0) then
+        if t and (os.time() - t <= 6.0) then
             State.bridgeOnline = true
             State.lastHeartbeat = t
             return
         end
+    end
+    -- Keep bridge online while a request is in flight to prevent UI status flicker
+    if State.testStatus == 'WAITING_LLM' and (os.time() - State.requestStartTime < 65) then
+        State.bridgeOnline = true
+        return
     end
     State.bridgeOnline = false
 end
@@ -592,6 +657,9 @@ local function dispatchLLMRequest(messages)
     return true
 end
 
+-- Forward declaration of prompt continuation helper
+local continueTestWithPrompt
+
 -- Build system prompt and initial user message
 local function buildTestPrompt()
     local goal = (State.testMode == 'Scenario')
@@ -602,21 +670,97 @@ local function buildTestPrompt()
     local snapJson = JSON.encode(snap)
 
     local systemPrompt = [[
-You are an autonomous in-game QA testing agent for EverQuest MacroQuest and TriuneAutocombat.
-Your goal is to test in-game functionality by observing telemetry, issuing safe commands, and evaluating assertions.
+You are an autonomous in-game QA testing agent for EverQuest (EQ) running inside the MacroQuest (MQ) environment.
+You are testing the TriuneAutocombat autocombat engine.
 
-You MUST respond strictly with a valid JSON object in this exact schema (no markdown, no surrounding text):
+CRITICAL INSTRUCTIONS & GROUNDING:
+1. This is EverQuest (EQ), NOT World of Warcraft. Never output WoW APIs (UnitName, CastSpell, etc.) or generic OS commands.
+2. In EverQuest MacroQuest, all game queries are executed via TLOs (Top-Level Objects like Me.Name, Me.Level, Me.Combat, Target.Distance, Me.PctMana).
+3. Triune commands are issued via "/ac <command>" (or "/triune <command>").
+4. IMPORTANT: Triune DOES NOT have a "tank" mode or "kite" mode! NEVER output "/triune mode tank" or "/ac mode tank".
+5. Triune Combat Modes are strictly:
+   - "/ac manual"               : Fights current/acquired target; no auto-roam or follow.
+   - "/ac puller hunt"          : Hunter mode; roams within radius looking for valid mobs and kills them on the spot.
+   - "/ac puller camp"          : Puller camp mode; pulls mobs within radius back to set camp location and fights at camp.
+   - "/ac assist chase"         : Assist mode; follows Main Assist (MA) everywhere and assists on MA target.
+   - "/ac assist camp"          : Assist mode; holds camp spot and assists MA on mobs brought into camp.
+   - "/ac assist backline"      : Assist mode; caster/healer support; assists MA safely at range without charging melee.
+
+COMPLETE TRIUNE /ac COMMAND REFERENCE:
+- Execution & Controls:
+  * /ac run (or /ac start)      : Start / unpause autocombat execution
+  * /ac pause (or /ac stop)     : Pause autocombat execution & stop movement / disengage pet
+  * /ac status                  : Print current running state and combat mode to chat
+  * /ac debug                   : Toggle live combat debug telemetry in chat
+  * /ac compact                 : Toggle compact Mini HUD
+  * /ac pausezone [on|off]      : Toggle automatic script pause when zoning (default: on)
+  * /ac fov [50-150|on|off]     : Configure camera Field of View
+- Combat Style & Positioning:
+  * /ac style [melee|ranged|spell] : Set combat style
+  * /ac range [5-50 or 5-200]   : Set melee range (5-50) or ranged distance (5-200)
+  * /ac assistbehind [on|off]   : Toggle positioning behind NPC in Assist mode (default: on)
+  * /ac selfdefense [on|off]    : Toggle Assist mode self-defense when attacked while MA has no target
+  * /ac chasedist [5-100]       : Following distance to stay back from Main Assist (ft)
+  * /ac xtardist [25-300]       : Max XTarget / assist engagement chase distance (units)
+- Main Assist (MA):
+  * /ac ma target               : Set Main Assist to current PC target
+  * /ac ma clear                : Clear Main Assist
+  * /ac ma <name|id>            : Set Main Assist by player name or spawn ID
+- Spells & Loadouts:
+  * /ac importbar               : Auto-populate spell lines from currently memorized spell gems
+  * /ac memall                  : Queue all missing or mismatched priority spells to gem bar
+  * /ac clear lockouts          : Clear active spell lockouts, non-stacking buff backoffs, and mob immunities
+  * /ac preset [save|load|delete|list] <name> : Manage named spell loadout presets
+- Burn Mode:
+  * /ac burn [on|off]           : Toggle burn mode for big cooldowns and burn-only abilities
+- Trio Pet Management:
+  * /ac pet status              : Print live status, HP, target, and class for all active trio pets
+  * /ac petscan                 : Re-scan zone for active pets belonging to player
+  * /ac pethold [on|off]        : Toggle automatic out-of-combat Pet Hold
+  * /ac petassist [1-100]       : Set mob HP % threshold before releasing pets to attack
+  * /ac pet <verb>              : Server #petcmd (attack, back, follow, guard, sit, feign, taunt on/off, etc.)
+- Puller & Hunter Configuration:
+  * /ac pullhp [0-95]           : Minimum HP % threshold before pausing pulling to rest (0 = disabled)
+  * /ac zplane [5-100]          : Configure Hunter Tier 1 same-floor / Z plane height threshold (default 15)
+  * /ac huntz [10-300]          : Configure Hunter Tier 2 max vertical height difference (default 75)
+  * /ac pullcon preset [all|hostile|indifferent|none] : Configure faction consideration filter preset
+  * /ac pullcon <tier> [on|off] : Toggle single consideration (e.g. Scowling, Threateningly, Dubious, Apprehensive, Indifferent)
+- Waypoint Patrol:
+  * /ac wp [add|clear|delete|on|off|toggle|radius|scan|list] : Manage waypoint patrol routes
+- Alternate Advancements:
+  * /ac autoaa [on|off]         : Toggle automatic AA priority training & cap protection
+  * /ac aathreshold [25-100]    : Unspent AA threshold for automatic purchases
+  * /ac aacost [1-50]           : AA cost per rank
+  * /ac spendnow                : Immediately purchase 1 rank of configured AA
+  * /ac summonnow               : Immediately summon fireworks via AA
+  * /ac aascan                  : Re-scan all character Alternate Advancement abilities
+  * /ac aaprio <name>           : Toggle priority auto-training for specific AA
+  * /ac autofw [on|off]         : Toggle automatic fireworks summoning & autoinventory
+- Tools & Windows:
+  * /ac cd                      : Toggle popout Cooldown & Ability Monitor
+  * /ac spellbook               : Toggle standalone Spellbook Browser
+  * /ac cursorui                : Toggle standalone Cursor Manager
+  * /ac clearcursor             : Dump items on cursor to inventory
+  * /ac buffbot                 : Toggle standalone Interactive Buffbot window
+  * /ac track                   : Toggle standalone Zone NPC Tracker window
+  * /ac dps                     : Toggle standalone DPS parser window
+
+RESPONSE FORMAT:
+You MUST respond strictly with a valid JSON object matching the schema below.
+Never output conversational markdown, explanations, or code fences outside the JSON object.
+
+JSON Schema:
 {
-  "thought": "Brief explanation of your observation and what you will do next.",
+  "thought": "Brief analysis of current state and planned test action.",
   "action": "COMMAND" | "QUERY" | "DELAY" | "ASSERT" | "FINISH",
   "param": "Command string, TLO query string, delay in ms, or assertion condition",
   "assert_status": "PASS" | "FAIL",
-  "explanation": "Why the assertion passed or failed, or summary of the step."
+  "explanation": "Why the assertion passed/failed, or final test summary."
 }
 
 Available actions:
-- "COMMAND": Execute an MQ slash command (e.g. "/triune mode tank", "/target a_fire_beetle", "/stand").
-- "QUERY": Request the value of an MQ TLO (e.g. "Me.Combat", "Target.Distance", "Me.PctMana").
+- "COMMAND": Execute an MQ slash command (e.g. "/ac manual", "/ac assist chase", "/ac burn on", "/target npc").
+- "QUERY": Request the value of an MQ TLO (e.g. "Me.Name", "Me.Combat", "Me.PctMana", "Target.Distance", "Target.LineOfSight").
 - "DELAY": Request an in-game pause in milliseconds (e.g. 1000) for a command to take effect.
 - "ASSERT": Assert a condition. Set "assert_status" to "PASS" or "FAIL", and provide "explanation".
 - "FINISH": Conclude the test run with final summary in "explanation".
@@ -645,8 +789,8 @@ local function startTest()
     local goal = (State.testMode == 'Scenario') and SCENARIOS[State.selectedScenario].title or 'Freeform Test'
     addLog('INFO', 'Target Scenario: ' .. goal)
 
-    local messages = buildTestPrompt()
-    dispatchLLMRequest(messages)
+    State.conversationHistory = buildTestPrompt()
+    dispatchLLMRequest(State.conversationHistory)
 end
 
 local function stopTest(reason)
@@ -654,18 +798,67 @@ local function stopTest(reason)
     addLog('WARN', 'Test stopped: ' .. (reason or 'User requested.'))
 end
 
+local function extractJson(content)
+    if not content or content == '' then return nil end
+
+    -- 1. Try markdown fenced code block
+    local block = content:match('```json%s*(%b{})%s*```') or content:match('```%s*(%b{})%s*```')
+    if block then
+        local obj = JSON.decode(block)
+        if obj and type(obj) == 'table' then return obj end
+    end
+
+    -- 2. Try to find the first balanced { ... } anywhere in the text
+    local braceIdx = content:find('{')
+    if braceIdx then
+        local sub = content:sub(braceIdx)
+        local rawObj = sub:match('^(%b{})')
+        if rawObj then
+            local obj = JSON.decode(rawObj)
+            if obj and type(obj) == 'table' then return obj end
+        end
+    end
+
+    -- 3. Fallback: standard cleanup
+    local clean = content:gsub('^%s*```json%s*', ''):gsub('^%s*```%s*', ''):gsub('%s*```%s*$', ''):match('^%s*(.-)%s*$')
+    return JSON.decode(clean)
+end
+
+-- Continue conversation with preserved message history
+continueTestWithPrompt = function(userText)
+    if State.stepCount >= State.maxSteps then
+        addLog('INFO', string.format('Test reached maximum steps limit (%d). Test complete.', State.maxSteps))
+        State.testStatus = 'COMPLETE'
+        return
+    end
+    table.insert(State.conversationHistory, { role = 'user', content = userText })
+    -- Keep conversation history bounded to prevent context overflow (preserve system prompt at index 1)
+    while #State.conversationHistory > 11 do
+        table.remove(State.conversationHistory, 2)
+    end
+    dispatchLLMRequest(State.conversationHistory)
+end
+
 -- ============================================================================
 -- Main Test Action Executor
 -- ============================================================================
 local function executeAgentResponse(content)
-    -- Try to parse JSON from content
-    -- Sometimes LLMs wrap in ```json ... ```, strip that if present
-    local clean = content:gsub('^%s*```json%s*', ''):gsub('^%s*```%s*', ''):gsub('%s*```%s*$', '')
-    local parsed = JSON.decode(clean)
+    -- Record assistant turn in conversation history
+    table.insert(State.conversationHistory, { role = 'assistant', content = content })
+
+    local parsed = extractJson(content)
 
     if not parsed or type(parsed) ~= 'table' then
-        addLog('ERR', 'Failed to parse JSON response from LLM: ' .. tostring(content):sub(1, 100))
-        State.testStatus = 'FAILED'
+        -- If LLM replied conversationally without strict JSON, display its thought gracefully
+        local snippet = content:gsub('\r', ''):match('^%s*(.-)%s*$')
+        if snippet and snippet ~= '' then
+            addLog('THOUGHT', snippet)
+            addLog('INFO', 'LLM completed response.')
+            State.testStatus = 'COMPLETE'
+        else
+            addLog('ERR', 'Empty or unparseable response from LLM.')
+            State.testStatus = 'FAILED'
+        end
         return
     end
 
@@ -689,16 +882,7 @@ local function executeAgentResponse(content)
     elseif action == 'QUERY' then
         local val = evaluateTlo(param)
         addLog('QUERY', string.format('TLO Query [%s] = %s', tostring(param), tostring(val)))
-        -- Provide query result back to LLM in next step
-        if State.stepCount >= State.maxSteps then
-            addLog('WARN', 'Reached maximum steps (' .. State.maxSteps .. '). Test complete.')
-            State.testStatus = 'COMPLETE'
-        else
-            local nextMessages = {
-                { role = 'user', content = string.format('TLO Query result for [%s]: %s\nTelemetry updated:\n%s\nProceed to next step.', param, val, JSON.encode(collectSnapshot())) }
-            }
-            dispatchLLMRequest(nextMessages)
-        end
+        continueTestWithPrompt(string.format('TLO Query result for [%s]: %s\nUpdated snapshot:\n%s\nProceed to next step.', param, val, JSON.encode(collectSnapshot())))
 
     elseif action == 'DELAY' then
         local ms = tonumber(param) or 1000
@@ -712,16 +896,7 @@ local function executeAgentResponse(content)
         else
             addLog('FAIL', string.format('ASSERT FAIL: %s (%s)', tostring(param), expl))
         end
-
-        if State.stepCount >= State.maxSteps then
-            addLog('INFO', 'Test assertions complete.')
-            State.testStatus = 'COMPLETE'
-        else
-            local nextMessages = {
-                { role = 'user', content = 'Assertion recorded. Telemetry:\n' .. JSON.encode(collectSnapshot()) .. '\nProceed or FINISH.' }
-            }
-            dispatchLLMRequest(nextMessages)
-        end
+        continueTestWithPrompt('Assertion recorded. Updated snapshot:\n' .. JSON.encode(collectSnapshot()) .. '\nProceed or FINISH.')
 
     elseif action == 'FINISH' then
         addLog('PASS', 'Test Completed Successfully! Summary: ' .. expl)
@@ -773,14 +948,24 @@ local function drawConsoleTab()
     ImGui.Spacing()
 
     if State.testMode == 'Scenario' then
-        ImGui.Text('Select Scenario:')
-        for i, sc in ipairs(SCENARIOS) do
-            if ImGui.RadioButton(sc.title, State.selectedScenario == i) then
-                State.selectedScenario = i
+        ImGui.Text('Select Test Suite (%d available):', #SCENARIOS)
+        ImGui.SetNextItemWidth(-1)
+        if ImGui.BeginCombo('##ScenarioCombo', SCENARIOS[State.selectedScenario] and SCENARIOS[State.selectedScenario].title or '') then
+            for i, sc in ipairs(SCENARIOS) do
+                local isSelected = (State.selectedScenario == i)
+                if ImGui.Selectable(sc.title, isSelected) then
+                    State.selectedScenario = i
+                end
+                if isSelected then
+                    ImGui.SetItemDefaultFocus()
+                end
             end
+            ImGui.EndCombo()
         end
         ImGui.Spacing()
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Objective: ' .. SCENARIOS[State.selectedScenario].goal)
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Objective:')
+        ImGui.SameLine()
+        ImGui.TextWrapped('%s', SCENARIOS[State.selectedScenario].goal)
     else
         ImGui.Text('Custom Prompt / Test Objective:')
         local text, changed = ImGui.InputTextMultiline('##FreeformPrompt', State.freeformPrompt, 500, 60)
@@ -822,7 +1007,10 @@ local function drawConsoleTab()
 
     -- Live Log Output Window
     ImGui.Text('Execution Log:')
-    if ImGui.BeginChild('LogConsoleChild', 0, 240, true) then
+    if ImGui.BeginChild('LogConsoleChild', 0, 300, true) then
+        local ImGuiColType = mq.imgui.Col or _G.ImGuiCol
+        local enumText = ImGuiColType and ImGuiColType.Text or 0
+
         for _, log in ipairs(State.logs) do
             local col = MUTED
             if log.type == 'ACTION' then col = WARN
@@ -832,12 +1020,17 @@ local function drawConsoleTab()
             elseif log.type == 'QUERY' then col = GOLD
             end
 
-            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '[' .. log.time .. ']')
+            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format('[%s]', log.time))
             ImGui.SameLine()
-            ImGui.TextColored(col[1], col[2], col[3], col[4], string.format('[%s] %s', log.type, log.text))
+            ImGui.TextColored(col[1], col[2], col[3], col[4], string.format('[%s]', log.type))
+            ImGui.SameLine()
+
+            pcall(mq.imgui.PushStyleColor, enumText, col[1], col[2], col[3], col[4])
+            ImGui.TextWrapped('%s', log.text)
+            pcall(mq.imgui.PopStyleColor, 1)
         end
         -- Auto scroll to bottom
-        if ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 20 then
+        if ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 30 then
             ImGui.SetScrollHereY(1.0)
         end
     end
@@ -919,7 +1112,11 @@ local function drawSettingsTab()
 
     -- API Key
     ImGui.Text('API Key (Masked):')
-    local key, keyChanged = ImGui.InputText('##ApiKey', Config.apiKey, 256, mq.imgui.InputTextFlags.Password)
+    local pwdFlag = (_G.ImGuiInputTextFlags and _G.ImGuiInputTextFlags.Password)
+        or (ImGui.InputTextFlags and ImGui.InputTextFlags.Password)
+        or (mq.imgui and mq.imgui.InputTextFlags and mq.imgui.InputTextFlags.Password)
+        or 0x400
+    local key, keyChanged = ImGui.InputText('##ApiKey', Config.apiKey, 256, pwdFlag)
     if keyChanged then Config.apiKey = key end
 
     -- Temperature
@@ -1030,16 +1227,7 @@ while State.isRunning do
 
     elseif State.testStatus == 'PAUSED_DELAY' then
         if now >= State.delayUntilTime then
-            if State.stepCount >= State.maxSteps then
-                addLog('INFO', 'Test completed max steps limit.')
-                State.testStatus = 'COMPLETE'
-            else
-                -- Advance to next step
-                local nextMessages = {
-                    { role = 'user', content = 'Delay complete. Current telemetry:\n' .. JSON.encode(collectSnapshot()) .. '\nProceed with test.' }
-                }
-                dispatchLLMRequest(nextMessages)
-            end
+            continueTestWithPrompt('Action execution delay complete. Updated telemetry:\n' .. JSON.encode(collectSnapshot()) .. '\nProceed with test.')
         end
     end
 
