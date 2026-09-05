@@ -133,7 +133,8 @@ local function loadFunc(src, funcName, env)
         code = code .. '\nreturn ' .. funcName
     end
 
-    local chunk, err = loadstring(code, funcName)
+    local loadFunc = loadstring or load
+    local chunk, err = loadFunc(code, funcName)
     if not chunk then error('loadstring failed for ' .. funcName .. ': ' .. err) end
 
     -- Merge env onto a copy of _G so standard library is available
@@ -2812,50 +2813,6 @@ do
 end
 
 -- ============================================================================
--- Suite 41: triune_updater release parsing & JSON tokenizer
--- ============================================================================
-print('--- triune_updater release parsing & JSON tokenizer ---')
-do
-    local f = io.open('TAC/lua/triune_updater.lua', 'r')
-    if f then
-        f:close()
-        local updSrc = readFile('TAC/lua/triune_updater.lua')
-        local cleanTag = loadFunc(updSrc, 'cleanTag', {})
-        local extractJsonString = loadFunc(updSrc, 'extractJsonString', {})
-
-        assert_eq(cleanTag('v1.7.7'), '1.7.7', 'cleanTag: lowercase v')
-        assert_eq(cleanTag('V1.7.7'), '1.7.7', 'cleanTag: uppercase V')
-        assert_eq(cleanTag('1.7.7'), '1.7.7', 'cleanTag: no v prefix')
-        assert_eq(cleanTag('  v1.8.0  '), '1.8.0', 'cleanTag: trims surrounding whitespace')
-        assert_eq(cleanTag(nil), '', 'cleanTag: nil tag returns empty string')
-        assert_eq(cleanTag(''), '', 'cleanTag: empty tag returns empty string')
-
-        assert_eq(extractJsonString('{"tag_name": "v1.7.7"}', 'tag_name'), 'v1.7.7', 'extractJsonString: simple tag_name')
-        assert_eq(extractJsonString('{"body": "Added \\"Follow Player\\" mode"}', 'body'), 'Added "Follow Player" mode',
-            'extractJsonString: handles escaped quotes without truncation')
-        assert_eq(extractJsonString('{"body": "Line 1\\r\\nLine 2\\tTabbed"}', 'body'), "Line 1\r\nLine 2\tTabbed",
-            'extractJsonString: handles newlines and tabs')
-        assert_eq(extractJsonString('{"path": "TAC\\\\lua\\\\triune.lua"}', 'path'), 'TAC\\lua\\triune.lua',
-            'extractJsonString: handles backslashes')
-        assert_eq(extractJsonString('{"url": "https:\\/\\/github.com"}', 'url'), 'https://github.com',
-            'extractJsonString: handles escaped slashes')
-        assert_nil(extractJsonString('{"other": 123}', 'body'), 'extractJsonString: missing key returns nil')
-        assert_nil(extractJsonString(nil, 'body'), 'extractJsonString: nil json returns nil')
-
-        local apiErrSample =
-        '{"message": "API rate limit exceeded for 127.0.0.1", "documentation_url": "https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}'
-        assert_eq(extractJsonString(apiErrSample, 'message'), 'API rate limit exceeded for 127.0.0.1',
-            'extractJsonString: extracts GitHub API rate limit error message')
-
-        local fullReleaseJson =
-        '{\n  "tag_name": "v1.7.7",\n  "body": "## 2026-08-29\\r\\n- Standalone 2D Map (`triune_map.lua`)\\r\\n  - Added \\"Follow Player\\" and \\"Pathable Only\\" filters\\r\\n"\n}'
-        assert_eq(extractJsonString(fullReleaseJson, 'tag_name'), 'v1.7.7', 'extractJsonString: full payload tag_name')
-        assert_true(string.find(extractJsonString(fullReleaseJson, 'body'), '"Follow Player"') ~= nil,
-            'extractJsonString: full payload preserves markdown and quotes in body')
-    else
-        print('  (Skipping Suite 41: triune_updater.lua retired)')
-    end
-end
 
 -- ============================================================================
 -- Suite 42: triune_map Smart Auto-Z & Depth Fading

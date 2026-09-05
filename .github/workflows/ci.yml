@@ -43,18 +43,15 @@ jobs:
         id: ver
         run: |
           MAIN=$(grep -oP "^local VERSION\s+= '\K[^']+" TAC/lua/triune.lua)
-          UPDATER=$(grep -oP "^local VERSION = '\K[^']+" TAC/lua/triune_updater.lua)
           README=$(grep -oP "Current version: \*\*\K[^*]+" README.md)
           echo "main=$MAIN"    >> "$GITHUB_OUTPUT"
-          echo "updater=$UPDATER" >> "$GITHUB_OUTPUT"
           echo "readme=$README"   >> "$GITHUB_OUTPUT"
-          echo "triune.lua=$MAIN | triune_updater.lua=$UPDATER | README.md=$README"
+          echo "triune.lua=$MAIN | README.md=$README"
 
       - name: Fail on version drift
         run: |
-          if [ "${{ steps.ver.outputs.main }}" != "${{ steps.ver.outputs.updater }}" ] || \
-             [ "${{ steps.ver.outputs.main }}" != "${{ steps.ver.outputs.readme }}" ]; then
-            echo "::error::Version mismatch — triune.lua (${{ steps.ver.outputs.main }}), triune_updater.lua (${{ steps.ver.outputs.updater }}) and README.md (${{ steps.ver.outputs.readme }}) must all carry the same version."
+          if [ "${{ steps.ver.outputs.main }}" != "${{ steps.ver.outputs.readme }}" ]; then
+            echo "::error::Version mismatch — triune.lua (${{ steps.ver.outputs.main }}) and README.md (${{ steps.ver.outputs.readme }}) must carry the same version."
             exit 1
           fi
           echo "All versions in sync: ${{ steps.ver.outputs.main }}"

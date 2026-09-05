@@ -569,10 +569,11 @@ local function evaluateTlo(path)
 
     local code = 'local m = mq or _G.mq; return tostring(m.TLO.' .. callPath .. ')'
     local loadFunc = loadstring or load
-    local chunk, err = loadFunc(code)
+    local chunk = loadFunc(code)
     if not chunk then
         -- Fallback: try raw cleanPath without ()
         code = 'local m = mq or _G.mq; return tostring(m.TLO.' .. cleanPath .. ')'
+        local err
         chunk, err = loadFunc(code)
         if not chunk then
             return 'Syntax Error: ' .. tostring(err)

@@ -23,17 +23,17 @@ extracting a shared module.
 
 | File | Role |
 |---|---|
-| `lua/triune.lua` | Main engine: UI with theme, loadout, combat loop, persistence. Entry point. |
-| `lua/triune_buttons.lua` | Standalone quick-action hot-button toolbar window with theme. |
-| `lua/triune_buffbot.lua` | Standalone tell-driven automated buffing station with theme. |
-| `lua/triune_cursor.lua` | Standalone cursor item manager window with theme. |
-| `lua/triune_dps.lua` | Standalone live DPS parser with its own independent version number. |
-| `lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window with theme. |
-| `lua/triune_track.lua` | Standalone zone NPC tracker + navigation window with theme. |
-| `lua/triune_quest.lua` | Standalone interactive quest guide + radar + dialogue & turn-in helper with theme. |
-| `lua/triune_updater.lua` | Standalone in-game release updater (GitHub Releases). |
-| `lua/kissedit/` | Legacy standalone KissAssist INI editor suite (pre-convention code, not part of the main suite). |
-| `config/triune_data.lua` | Era-correct spell/disc/AA database (generated, not hand-edited). |
+| `TAC/lua/triune.lua` | Main engine: UI with theme, loadout, combat loop, persistence. Entry point. |
+| `TAC/lua/triune_buttons.lua` | Standalone quick-action hot-button toolbar window with theme. |
+| `TAC/lua/triune_buffbot.lua` | Standalone tell-driven automated buffing station with theme. |
+| `TAC/lua/triune_cursor.lua` | Standalone cursor item manager window with theme. |
+| `TAC/lua/triune_dps.lua` | Standalone live DPS parser with its own independent version number. |
+| `TAC/lua/triune_inv.lua` | Standalone inventory & bank manager window with theme. |
+| `TAC/lua/triune_map.lua` | Standalone 2D in-game map, Norrath Zone Atlas & live NPC radar/tracker with theme. |
+| `TAC/lua/triune_quest.lua` | Standalone interactive quest guide + radar + dialogue & turn-in helper with theme. |
+| `TAC/lua/triune_spellbook.lua` | Standalone spellbook browser + memorization queue window with theme. |
+| `TAC/lua/triune_test.lua` | Standalone in-game LLM test harness & QA agent window with theme. |
+| `TAC/config/triune_data.lua` | Era-correct spell/disc/AA database (generated, not hand-edited). |
 | `CHANGELOG.md` | Full history of changes, newest date first. |
 | `README.md` | User-facing documentation including commands, features, file structure. |
 
@@ -86,29 +86,26 @@ Rules:
 
 ### Version Number Locations
 
-The canonical version is defined in `lua/triune.lua`:
+The canonical version is defined in `TAC/lua/triune.lua`:
 ```lua
-local VERSION           = '1.6.12'
+local VERSION           = '2.01'
 ```
 
 The README must always reflect this value:
 ```markdown
-Current version: **1.6.12**
+Current version: **2.01**
 ```
 
-`lua/triune_updater.lua` carries the SAME version string (`local VERSION = '1.6.12'`)
-because it compares its own VERSION against the latest GitHub release tag to decide
-whether an update is available — a mismatch makes fresh installs report phantom
-updates. When you bump the version, update BOTH files and the README.
-CI (`.github/workflows/ci.yml`) fails if these three drift apart.
+When you bump the version, update `TAC/lua/triune.lua` and the `README.md`.
+CI (`.github/workflows/ci.yml`) fails if these drift apart.
 
 ### Binary Files Policy (Do NOT use Git LFS)
 
 The committed binaries (MacroQuest DLLs/EXEs, navmeshes, ItemDB, etc.) must stay
 as regular git objects. Do NOT migrate them to Git LFS: GitHub source archives
 and `git archive` emit LFS *pointer files* instead of real content, which would
-corrupt every distribution path (release zips, repo ZIP downloads, and the
-Python updater's tag-archive download).
+corrupt every distribution path (release zips, repo ZIP downloads, and
+release asset downloads).
 
 ---
 

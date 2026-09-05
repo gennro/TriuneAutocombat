@@ -214,7 +214,6 @@ Triune comes packed with handy standalone tools you can open right from the main
 | 📜 **Quest Guide & Lookup** | `/lua run triune_quest` | Standalone interactive quest guide and atlas across 32 expansions with live NPC radar, dialogue triggers, inventory scanner, Norrath Zone Directory, and global quest search. |
 | 🎒 **Inventory & Bank Manager** | `/lua run triune_inv` | Standalone universal inventory, worn equipment, bank, and shared bank search, container grid visualizer, stack consolidator, and offline bank cache persistence. |
 | 🤖 **LLM Test Harness & QA Agent** | `/lua run triune_test` | Standalone in-game testing harness interfacing with local LLMs (LM Studio) and cloud LLMs (Google Gemini, OpenCode) for autonomous QA testing via non-blocking bridge. |
-| 🔄 **Release Updater** | `/ac update` | Checks GitHub for new Triune updates and lets you update your files with a single click. |
 
 ---
 
@@ -274,7 +273,6 @@ You can control almost everything using simple in-game chat commands:
 | `/ac buffbot` | `/ac buff` | Open the Buffbot window |
 | `/ac track` | `/ac zone` | Open the Zone NPC Tracker |
 | `/ac map` | `/ac mapui` | Open the 2D Map & Norrath Zone Atlas |
-| `/ac update` | `/ac checkupdate` | Check for updates via in-game release updater |
 | `/dps` | `/triunedps` | Open/toggle the DPS parser |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
 | `/lua run triune_buttons` | `/lua stop triune_buttons` | Launch or stop the standalone Hot Buttons toolbar |
@@ -289,23 +287,18 @@ You can control almost everything using simple in-game chat commands:
 ```
 TriuneAutocombat/
 ├── TAC/
-│   ├── triune_updater.py    # Python updater script
 │   ├── triune_llm_bridge.py # External asynchronous Python bridge daemon for LLM testing
 │   ├── start_bridge.bat     # Windows LLM bridge launcher
 │   ├── start_bridge.sh      # Linux/macOS LLM bridge launcher
-│   ├── update.bat           # Windows updater launcher
-│   ├── update.sh            # Linux updater launcher
 │   ├── tools/
 │   │   └── build_triune_quest.py # Quest database compilation script
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
 │   │   ├── triune_buttons.lua   # Standalone ImGui hot button toolbar
 │   │   ├── triune_map.lua       # Standalone 2D in-game map, Norrath Zone Atlas & NPC tracker
-│   │   ├── triune_track.lua     # Zone NPC tracker & navigation tool
 │   │   ├── triune_quest.lua     # Standalone Quest Guide, radar & dialogue assistant
 │   │   ├── triune_inv.lua       # Standalone Inventory & Bank manager
 │   │   ├── triune_test.lua      # Standalone In-Game LLM Test Harness & QA Agent
-│   │   ├── triune_updater.lua   # In-game updater window
 │   │   ├── triune_spellbook.lua # Spellbook browser & loadout helper
 │   │   ├── triune_cursor.lua    # Cursor item manager
 │   │   ├── triune_buffbot.lua   # Automated tell buffbot

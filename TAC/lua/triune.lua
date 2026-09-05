@@ -5940,7 +5940,6 @@ function UI.drawHelpTab()
                 { cmd = '/ac clear lockouts',                 desc = 'Clear all active spell lockouts, non-stacking buff backoffs, and mob immunities' },
                 { cmd = '/ac buffbot / /ac buff',             desc = 'Toggle the standalone Interactive Buffbot window' },
                 { cmd = '/ac track / /ac zone',               desc = 'Toggle the standalone Zone NPC Tracker window for live targeting & navigation' },
-                { cmd = '/ac update',                         desc = 'Check for GitHub updates and launch the Triune Release Updater' },
                 { cmd = '/ac dps / /dps',                     desc = 'Toggle or launch the standalone DPS Parser window' },
                 { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
                 { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
@@ -19548,7 +19547,6 @@ local function triuneCommand(...)
         print('  \ag/ac range [dist]\ax - Configure melee or ranged distance')
         print('  \ag/ac buffbot | buff\ax - Toggle interactive buffbot window')
         print('  \ag/ac track | zone\ax - Toggle zone NPC tracker window')
-        print('  \ag/ac update | updater\ax - Toggle release updater window')
         print('  \ag/ac cd | cooldowns\ax - Toggle popout Cooldown & Ability Monitor window')
         print('  \ag/ac dps | /dps\ax - Toggle DPS parser window')
         print('  \ag/ac zplane [5-100]\ax - Configure Hunter Tier 1 same-floor / Z plane height threshold')
@@ -19911,8 +19909,6 @@ local function triuneCommand(...)
         end
     elseif cmd == 'clearcursor' or cmd == 'autoinv' or cmd == 'cursor' then
         clearCursor()
-    elseif cmd == 'update' or cmd == 'updater' or cmd == 'checkupdate' then
-        mq.cmd('/lua run triune_updater')
     elseif cmd == 'map' or cmd == 'mapui' or cmd == 'triunemap' or cmd == 'track' or cmd == 'tracker' or cmd == 'trackui' or cmd == 'zone' then
         if UI.toggleTool('triune_map') == 'started' then
             print('\ag[Triune]\ax launching map & tracker window...')
@@ -20139,7 +20135,7 @@ local function triuneCommand(...)
         return
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|track|buffbot|update|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|track|buffbot|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 

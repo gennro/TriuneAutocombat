@@ -74,7 +74,7 @@ jobs:
       - name: Package Release Archives
         run: |
           git archive --format=zip -o TriuneAutocombat-Update.zip HEAD TAC/lua TAC/config TAC/resources/triune_quest README.md CHANGELOG.md
-          git archive --format=zip -o TriuneAutocombat-full.zip HEAD TAC/lua TAC/config TAC/triune_updater.py TAC/update.bat TAC/update.sh TAC/resources README.md CHANGELOG.md
+          git archive --format=zip -o TriuneAutocombat-full.zip HEAD TAC/lua TAC/config TAC/triune_llm_bridge.py TAC/start_bridge.bat TAC/start_bridge.sh TAC/resources README.md CHANGELOG.md
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:
