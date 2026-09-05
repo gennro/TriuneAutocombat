@@ -1,5 +1,20 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-05
+
+- **Hostile Target Self-Healing & Beneficial Spell Target Correction (`triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Hostile NPC Targeting Retention for Self-Directed Heals (`runtime.castGem`, `runtime.useClickie`, `runtime.fireAA`)**: When casting single-target heals or beneficial spells on oneself (`id == mq.TLO.Me.ID()`) while currently attacking or targeting a hostile NPC (`isHostileTarget(Target.ID())`), Triune no longer changes target to the player. In EverQuest, casting a beneficial spell while targeting a hostile entity automatically redirects the spell onto the player without losing target on the enemy.
+  - **Target Lock Override Prevention (`getActiveTargetRequiredCastingId`)**: Updated active casting target resolution to return `nil` instead of `Me.ID()` whenever the player has a hostile NPC targeted during a self-cast heal or buff. This prevents `combatTick`'s mid-cast target lock from dispatching `/target id <Me.ID>`, which previously broke auto-attack melee combat, cleared target from the engaged mob, and left the character idling on itself post-cast.
+  - **Context-Aware Beneficial Ally Targeting**: Retained explicit target switching to `Me.ID()` only when the active target is a friendly ally or pet, ensuring self-heals do not accidentally land on group members while idle or between pulls.
+  - **Post-Cast Target Restoration Safety**: Ensured post-cast restoration logic preserves the hostile mob target throughout the cast, keeping auto-attack active without interruption.
+  - **Automated Regression Prevention (`Suite 46`)**: Added unit test assertions verifying that self-healing while targeting an enemy NPC sets `targetRequired = false`, returns `nil` from `getActiveTargetRequiredCastingId()`, and retains target lock on the hostile mob throughout the cast.
+- **Plugin Command Guards for MQ2Map & MQ2FOV (`triune.lua`).**
+  - **MQ2Map Plugin Gate (`runtime.mapLoaded`, `runtime.clearMapRadiusVisuals`, `runtime.updateMapRadiusVisuals`)**: Added `runtime.mapLoaded()` probe checking `mq.TLO.Map` and `mq.TLO.Plugin('mq2map')` before executing map drawing commands. If `MQ2Map` is not loaded, Triune gracefully suppresses `/mapfilter` and `/maploc` execution, eliminating `DoCommand - Couldn't parse '/maploc remove'` and `/mapfilter` red chat errors when running without the map plugin.
+  - **MQ2FOV Plugin Gate (`runtime.fovLoaded`, `runtime.applyFov`)**: Added `runtime.fovLoaded()` probe checking `mq.TLO.Plugin('mq2fov')` before dispatching `/fov <val>` commands. Prevents `DoCommand - Couldn't parse '/fov 150'` red errors on MacroQuest installations that do not have the legacy FOV plugin loaded.
+  - **Settings UI Status Indicators**: Added telemetry notices in the Settings tab indicating when `MQ2Map` or `MQ2FOV` are not loaded, providing clear feedback on feature availability.
+
+---
+
 ## 2026-09-04
 
 - **Project Version Bump (v2.0-beta) (`triune.lua`, `triune_updater.lua`, `README.md`, `tests/test_pure_logic.lua`).**

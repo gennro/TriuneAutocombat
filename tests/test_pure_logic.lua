@@ -4220,9 +4220,20 @@ do
         return false
     end
 
+    local myId = 1
+    local function isHostile(id)
+        return id and id >= 1000 and id < 2000
+    end
+
     local function getActiveTargetRequiredCastingId()
         if not isCastingOrStarting() then return nil end
         if mockState.castTracker.targetRequired and mockState.castTracker.activeTargetId and mockState.castTracker.activeTargetId > 0 then
+            if mockState.castTracker.activeTargetId == myId then
+                local tid = mockState.currentTargetId or 0
+                if tid > 0 and isHostile(tid) then
+                    return nil
+                end
+            end
             return mockState.castTracker.activeTargetId
         end
         return nil
@@ -4318,6 +4329,39 @@ do
 
     mockState.isCasting = false
     mockState.castTracker.activeSpell = nil
+
+    -- 3. Self-healing while attacking an enemy mob #1001
+    -- When fighting enemy mob #1001, character casts Greater Healing on self (myId)
+    setTarget(1001)
+    assert_eq(mockState.currentTargetId, 1001, 'targeting enemy mob 1001')
+    local isSelf = (myId == myId)
+    local curT = mockState.currentTargetId
+    local isHostileT = (curT > 0 and isHostile(curT))
+    local needT = (not isSelf) or (not isHostileT and curT > 0 and curT ~= myId)
+    assert_eq(needT, false, 'self-heal on hostile target does not need to select self')
+    assert_eq(mockState.currentTargetId, 1001, 'target remains on enemy mob 1001')
+
+    -- Cast starts
+    mockState.isCasting = true
+    mockState.castTracker.activeSpell = 'Greater Healing'
+    mockState.castTracker.activeTargetId = myId
+    if isSelf and isHostileT then
+        mockState.castTracker.targetRequired = false
+    else
+        mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing')
+    end
+    mockState.castTracker.castStartTime = os.clock()
+
+    assert_eq(mockState.castTracker.targetRequired, false, 'self-heal targetRequired is false on hostile target')
+    assert_eq(getActiveTargetRequiredCastingId(), nil, 'self-heal with hostile target: getActiveTargetRequiredCastingId returns nil')
+    assert_eq(mockState.currentTargetId, 1001, 'target preserved on mob 1001 during self-heal')
+
+    -- Finish cast
+    mockState.isCasting = false
+    mockState.castTracker.activeSpell = nil
+    mockState.castTracker.activeTargetId = nil
+    mockState.castTracker.targetRequired = false
+    assert_eq(mockState.currentTargetId, 1001, 'post-heal: character still targeting enemy mob 1001')
 end
 
 -- ============================================================================

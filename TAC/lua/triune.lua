@@ -1718,6 +1718,27 @@ local function stickLoaded()
     return ok and (loaded == true)
 end
 
+function runtime.mapLoaded()
+    local ok, loaded = pcall(function()
+        if mq.TLO.Map and mq.TLO.Map() ~= nil then
+            return true
+        end
+        local p = mq.TLO.Plugin('mq2map') or mq.TLO.Plugin('MQ2Map') or mq.TLO.Plugin('map')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
+function runtime.fovLoaded()
+    local ok, loaded = pcall(function()
+        local p = mq.TLO.Plugin('mq2fov') or mq.TLO.Plugin('MQ2FOV') or mq.TLO.Plugin('fov')
+        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        return false
+    end)
+    return ok and (loaded == true)
+end
+
 local function isMoveActive()
     local navActive, moveActive, moveToActive, nativeActive = false, false, false, false
     if navLoaded() then
@@ -2569,6 +2590,12 @@ local function getActiveTargetRequiredCastingId()
     if not isCastingOrStarting() then return nil end
 
     if castTracker and castTracker.targetRequired and castTracker.activeTargetId and castTracker.activeTargetId > 0 then
+        if castTracker.activeTargetId == mq.TLO.Me.ID() then
+            local tid = mq.TLO.Target.ID() or 0
+            if tid > 0 and isHostileTarget and isHostileTarget(tid) then
+                return nil
+            end
+        end
         return castTracker.activeTargetId
     end
 
@@ -2591,6 +2618,12 @@ local function getActiveTargetRequiredCastingId()
                 pcall(function() tid = mq.TLO.Target.ID() end)
             end
             if tid and tid > 0 then
+                if tid == mq.TLO.Me.ID() then
+                    local curT = mq.TLO.Target.ID() or 0
+                    if curT > 0 and isHostileTarget and isHostileTarget(curT) then
+                        return nil
+                    end
+                end
                 return tid
             end
         end
@@ -5490,6 +5523,7 @@ end
 -- Field of View (FOV) Camera Management
 function runtime.applyFov()
     if not ctrl.fov_enabled then return end
+    if not runtime.fovLoaded() then return end
     local val = tonumber(ctrl.fov) or 100
     if val < 50 then val = 50 end
     if val > 150 then val = 150 end
@@ -10700,6 +10734,7 @@ function UI.drawSettingsTab()
                 .. 'When disabled, autocombat remains active and continues running across zone transitions.')
         end
 
+        local mapAvail = runtime.mapLoaded and runtime.mapLoaded()
         local mapRadVal = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius or false)
         if mapRadVal ~= (ctrl.show_map_radius or false) then
             ctrl.show_map_radius = mapRadVal
@@ -10708,7 +10743,12 @@ function UI.drawSettingsTab()
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
                 'Draws green radius circles on the in-game map window\n'
-                .. 'for Hunter, Anchor, and Pull/Camp radii.')
+                .. 'for Hunter, Anchor, and Pull/Camp radii.'
+                .. (mapAvail and '' or '\n\ayNOTE: MQ2Map plugin is not loaded (/mapfilter and /maploc commands inactive).\ax'))
+        end
+        if not mapAvail then
+            ImGui.SameLine()
+            ImGui.TextColored(0.7, 0.7, 0.7, 1.0, '(MQ2Map not loaded)')
         end
         ImGui.SameLine()
         local critVal = ImGui.Checkbox('Critical Hit Floating Text', ctrl.show_crit_floaters or false)
@@ -10745,6 +10785,7 @@ function UI.drawSettingsTab()
         end
 
         accent(GOLD, 'Camera & Viewport:')
+        local fovAvail = runtime.fovLoaded and runtime.fovLoaded()
         local fovVal = ImGui.Checkbox('Maintain Field of View (/fov)##fovEnabled', ctrl.fov_enabled or false)
         if fovVal ~= (ctrl.fov_enabled or false) then
             ctrl.fov_enabled = fovVal
@@ -10754,7 +10795,11 @@ function UI.drawSettingsTab()
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.')
+            if fovAvail then
+                ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.')
+            else
+                ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.\n\ayNOTE: MQ2FOV plugin is not loaded (/fov commands will not execute).\ax')
+            end
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(200)
@@ -10767,7 +10812,11 @@ function UI.drawSettingsTab()
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\nMoving the slider automatically enables FOV persistence across zoning.')
+            if fovAvail then
+                ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\nMoving the slider automatically enables FOV persistence across zoning.')
+            else
+                ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\n\ayNOTE: MQ2FOV plugin is not loaded (/fov commands will not execute).\ax')
+            end
         end
         ImGui.SameLine()
         if ImGui.Button('Apply##applyFovBtn') then
@@ -10776,7 +10825,12 @@ function UI.drawSettingsTab()
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(string.format('Executes /fov %d now and saves the setting.', ctrl.fov or 100))
+            ImGui.SetTooltip(string.format('Executes /fov %d now and saves the setting.%s', ctrl.fov or 100,
+                fovAvail and '' or '\n\ayNOTE: MQ2FOV plugin is not loaded.\ax'))
+        end
+        if not fovAvail then
+            ImGui.SameLine()
+            ImGui.TextColored(0.7, 0.7, 0.7, 1.0, '(MQ2FOV not loaded)')
         end
     end
 
@@ -13771,7 +13825,9 @@ function runtime.castGem(i, g, id)
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    if not selfCast and not runtime.setTarget(id) then return false end
+    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
+    local needsTarget = (not selfCast) or (not hostileTarget and orig > 0 and orig ~= id)
+    if needsTarget and not runtime.setTarget(id) then return false end
 
     local pauseAttack = isFD and wasAttacking
     if pauseAttack then
@@ -13779,13 +13835,18 @@ function runtime.castGem(i, g, id)
         mq.delay(50, function() return not mq.TLO.Me.Combat() end)
     end
 
+    local isDet = runtime.isDetrimentalAction(g.spell, g.target, g)
     castTracker.lastSpell      = g.spell
     castTracker.lastTime       = os.clock()
     castTracker.failed         = false
     castTracker.activeSpell    = g.spell
     castTracker.activeTargetId = id
     castTracker.activeKind     = g.kind
-    castTracker.targetRequired = isTargetRequiredSpell(g.spell) or (id and id > 0 and id ~= mq.TLO.Me.ID())
+    if selfCast and hostileTarget then
+        castTracker.targetRequired = false
+    else
+        castTracker.targetRequired = isDet or (isTargetRequiredSpell(g.spell) and (not selfCast or orig == id))
+    end
     castTracker.castStartTime  = os.clock()
     clearCursor()
     if ctrl.debug_mode then
@@ -13863,7 +13924,7 @@ function runtime.castGem(i, g, id)
             mq.cmd('/stopsong')
         end
     end
-    if not selfCast and orig ~= id and orig > 0 then
+    if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
         if g.cls ~= 'Brd' then
             -- Spell has a cast time: keep target on ally until cast finishes, then restore combat target!
             runtime.restoreTargetId = orig
@@ -13911,7 +13972,9 @@ function runtime.fireAA(name, a, id)
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    if not selfCast and not runtime.setTarget(id) then return false end
+    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
+    local needsTarget = (not selfCast) or (not hostileTarget and orig > 0 and orig ~= id)
+    if needsTarget and not runtime.setTarget(id) then return false end
     clearCursor()
 
     local pauseAttack = isFD and wasAttacking
@@ -13927,12 +13990,18 @@ function runtime.fireAA(name, a, id)
         if stillMoving then return false end
     end
 
+    local isDet = runtime.isDetrimentalAction(name, a and a.target, a)
     castTracker.lastSpell      = name
     castTracker.lastTime       = now
     castTracker.failed         = false
     castTracker.activeSpell    = name
     castTracker.activeTargetId = id
     castTracker.activeKind     = a and a.kind
+    if selfCast and hostileTarget then
+        castTracker.targetRequired = false
+    else
+        castTracker.targetRequired = isDet or (isTargetRequiredSpell(name) and (not selfCast or orig == id))
+    end
     castTracker.castStartTime  = now
     mq.cmdf('/alt act %d', aa.ID())
 
@@ -13956,7 +14025,7 @@ function runtime.fireAA(name, a, id)
     runtime.lastCast[key] = now + aaReuse
 
     print('\ag[Triune]\ax AA fired: ' .. name)
-    if not selfCast and orig ~= id then
+    if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
         mq.delay(60)
         if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
     end
@@ -15077,15 +15146,22 @@ runtime.useClickie = function(c, id)
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    if not selfCast and not runtime.setTarget(id) then return false end
+    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
+    local needsTarget = (not selfCast) or (not hostileTarget and orig > 0 and orig ~= id)
+    if needsTarget and not runtime.setTarget(id) then return false end
 
+    local isDet = runtime.isDetrimentalAction(effName, c.target, c)
     castTracker.lastSpell      = effName
     castTracker.lastTime       = os.clock()
     castTracker.failed         = false
     castTracker.activeSpell    = effName
     castTracker.activeTargetId = id
     castTracker.activeKind     = c.kind
-    castTracker.targetRequired = isTargetRequiredSpell(effName) or (id and id > 0 and id ~= mq.TLO.Me.ID())
+    if selfCast and hostileTarget then
+        castTracker.targetRequired = false
+    else
+        castTracker.targetRequired = isDet or (isTargetRequiredSpell(effName) and (not selfCast or orig == id))
+    end
     castTracker.castStartTime  = os.clock()
 
     clearCursor()
@@ -15138,7 +15214,7 @@ runtime.useClickie = function(c, id)
         runtime.recordPetBuff(id, cSpell, durSec)
     end
 
-    if not selfCast and orig ~= id and orig > 0 then
+    if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
         if castMs > 0 then
             runtime.restoreTargetId = orig
         else
@@ -19396,6 +19472,9 @@ local function triuneCommand(...)
         local sub = args[2] and string.lower(args[2]) or ''
         local num = tonumber(args[2])
         if num then
+            if not runtime.fovLoaded() then
+                print('\ay[Triune WARNING]\ax MQ2FOV plugin is not loaded! Cannot execute /fov (load via \ay/plugin mq2fov\ax).')
+            end
             if num < 50 then num = 50 end
             if num > 150 then num = 150 end
             ctrl.fov = math.floor(num)
@@ -19404,6 +19483,9 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Field of View set to \ag%d\ax units (Maintain on Zone: ENABLED).', ctrl.fov))
         elseif sub == 'on' or sub == '1' or sub == 'enable' or sub == 'true' then
+            if not runtime.fovLoaded() then
+                print('\ay[Triune WARNING]\ax MQ2FOV plugin is not loaded! Cannot execute /fov (load via \ay/plugin mq2fov\ax).')
+            end
             ctrl.fov_enabled = true
             if runtime.applyFov then runtime.applyFov() end
             runtime.saveLoadout(true)
@@ -19413,8 +19495,9 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print('\ag[Triune]\ax Maintain Field of View: \arDISABLED\ax.')
         else
-            print(string.format('\ag[Triune]\ax Field of View: %d units (Maintain on Zone: %s). Usage: /ac fov [50-150|on|off]',
-                ctrl.fov or 100, ctrl.fov_enabled and '\agENABLED\ax' or '\arDISABLED\ax'))
+            print(string.format('\ag[Triune]\ax Field of View: %d units (Maintain on Zone: %s%s). Usage: /ac fov [50-150|on|off]',
+                ctrl.fov or 100, ctrl.fov_enabled and '\agENABLED\ax' or '\arDISABLED\ax',
+                runtime.fovLoaded() and '' or ' -- \arMQ2FOV NOT LOADED\ax'))
         end
     elseif cmd == 'chasedist' or cmd == 'chase' or cmd == 'chaserange' or cmd == 'followdist' then
         local arg2 = args[2] and string.lower(args[2]) or ''
@@ -19974,6 +20057,7 @@ runtime.checkStartupPluginStatus()
 -- ============================================================================
 
 runtime.clearMapRadiusVisuals = function()
+    if not runtime.mapLoaded() then return end
     mq.cmd('/maploc remove')
     mq.cmd('/mapfilter pullradius 0')
     mq.cmd('/mapfilter castradius 0')
@@ -19981,6 +20065,7 @@ runtime.clearMapRadiusVisuals = function()
 end
 
 runtime.updateMapRadiusVisuals = function()
+    if not runtime.mapLoaded() then return end
     if not ctrl.show_map_radius then
         if runtime.lastMapDraw and runtime.lastMapDraw.active then
             runtime.clearMapRadiusVisuals()
