@@ -45,7 +45,8 @@ jobs:
           ### 🆕 New Installation
           1. Go here and grab the latest macroquest release https://github.com/macroquest/macroquest/releases and extract under your user folder.
           2. Download TriuneAutocombat-full.zip below and extract contents of TAC into the root of your macroquest folder.
-          3. Start **`MacroQuest.exe`** before launching EverQuest.
+          3. If running windows add an exception to your MQ folder before running.
+          4. Start **`MacroQuest.exe`** before launching EverQuest.
 
           - **Existing install
             - Download **`TriuneAutocombat-Update.zip`** from the Assets below.
