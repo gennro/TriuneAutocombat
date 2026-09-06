@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '2.01'
+local VERSION           = '2.03'
 local open              = true
 local cfg               = mq.configDir
 
@@ -1094,7 +1094,10 @@ local function isSpawnAlive(id)
     pcall(function() dead = s.Dead() end)
     pcall(function() tp = s.Type() end)
     pcall(function() state = s.State() end)
-    return (not dead) and (tp ~= 'Corpse') and (state ~= 'DEAD')
+    if dead or tp == 'Corpse' or state == 'DEAD' then return false end
+    local okHp, curHp = pcall(function() return s.CurrentHPs() end)
+    if okHp and curHp and curHp <= 0 then return false end
+    return true
 end
 
 local function isSpawnMyPet(s_or_id)
@@ -2062,9 +2065,16 @@ isHostileTarget = function(id)
     if not s or not s() then return false end
     if s.Dead and s.Dead() then return false end
 
+    local okHp, curHp = pcall(function() return s.CurrentHPs() end)
+    if okHp and curHp and curHp <= 0 then return false end
+
     local stype = ''
     pcall(function() stype = s.Type() or '' end)
     if stype ~= 'NPC' and stype ~= 'Pet' then return false end
+
+    local state = ''
+    pcall(function() state = s.State() or '' end)
+    if state == 'DEAD' then return false end
 
     return true
 end
@@ -2074,12 +2084,23 @@ local function isXTargetId(id)
     if isGroupOrRaidMember(id) or isSpawnPetOrPlayer(id) then return false end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) == id
-            and not xt.Dead() and (xt.Type() or '') ~= 'Corpse'
-            and not (isIgnored and isIgnored(xt.CleanName())) then
-            local stype = xt.Type() or ''
-            if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
-                return true
+        if xt() and (xt.ID() or 0) == id then
+            local isDead = false
+            local stype = ''
+            pcall(function()
+                local dead = xt.Dead and xt.Dead() or false
+                local tp = xt.Type and xt.Type() or ''
+                local state = xt.State and xt.State() or ''
+                local curHp = xt.CurrentHPs and xt.CurrentHPs()
+                if dead or tp == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0) then
+                    isDead = true
+                end
+                stype = tp
+            end)
+            if not isDead and not (isIgnored and isIgnored(xt.CleanName())) then
+                if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
+                    return true
+                end
             end
         end
     end
@@ -2131,8 +2152,17 @@ local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, m
                         if okDist and sDist then dist = sDist end
                         local okZ, sz = pcall(function() return s.Z() end)
                         local zOk = (not maxZ) or (okZ and sz and math.abs(sz - myZ) <= maxZ)
+                        local isDead = false
+                        pcall(function()
+                            local dead = s.Dead and s.Dead() or false
+                            local state = s.State and s.State() or ''
+                            local curHp = s.CurrentHPs and s.CurrentHPs()
+                            if dead or stype == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0) then
+                                isDead = true
+                            end
+                        end)
                         if (stype == 'NPC' or stype == 'Pet')
-                            and not s.Dead() and stype ~= 'Corpse'
+                            and not isDead
                             and isHostileTarget(id)
                             and dist <= maxDist
                             and zOk
@@ -12332,6 +12362,10 @@ function runtime.setTarget(id)
     end
     local s = mq.TLO.Spawn(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
+    local curHp = nil
+    pcall(function() curHp = s.CurrentHPs() end)
+    if curHp and curHp <= 0 then return false end
+    if (s.State() or '') == 'DEAD' then return false end
     if mq.TLO.Target.ID() == id then return true end
     local wasCombat = mq.TLO.Me.Combat()
     mq.cmdf('/target id %d', id)
@@ -12814,8 +12848,17 @@ function runtime.countNPCXtarget(includeUnreachable)
                 if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
                     local s = mq.TLO.Spawn(id)
                     local stype = (s() and s.Type()) or ''
+                    local isDead = false
+                    pcall(function()
+                        local dead = s and s() and s.Dead and s.Dead() or false
+                        local state = s and s() and s.State and s.State() or ''
+                        local curHp = s and s() and s.CurrentHPs and s.CurrentHPs()
+                        if dead or stype == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0) then
+                            isDead = true
+                        end
+                    end)
                     if (stype == 'NPC' or stype == 'Pet')
-                        and not s.Dead() and stype ~= 'Corpse'
+                        and not isDead
                         and isHostileTarget(id)
                         and not isIgnored(s.CleanName())
                         and (includeUnreachable or not isUnreachable(id)) then
@@ -12831,7 +12874,16 @@ function runtime.countNPCXtarget(includeUnreachable)
             local t = mq.TLO.Target
             if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID()) then
                 local stype = t.Type() or ''
-                if (stype == 'NPC' or stype == 'Pet') and not t.Dead() and stype ~= 'Corpse'
+                local isDead = false
+                pcall(function()
+                    local dead = t.Dead and t.Dead() or false
+                    local state = t.State and t.State() or ''
+                    local curHp = t.CurrentHPs and t.CurrentHPs()
+                    if dead or stype == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0) then
+                        isDead = true
+                    end
+                end)
+                if (stype == 'NPC' or stype == 'Pet') and not isDead
                     and not isIgnored(t.CleanName()) and not isUnreachable(t.ID()) then
                     cnt = 1
                 end
@@ -12852,12 +12904,23 @@ isXTargetId = function(id)
     if isGroupOrRaidMember(id) or isSpawnPetOrPlayer(id) then return false end
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
-        if xt() and (xt.ID() or 0) == id
-            and not xt.Dead() and (xt.Type() or '') ~= 'Corpse'
-            and not isIgnored(xt.CleanName()) then
-            local stype = xt.Type() or ''
-            if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
-                return true
+        if xt() and (xt.ID() or 0) == id then
+            local isDead = false
+            local stype = ''
+            pcall(function()
+                local dead = xt.Dead and xt.Dead() or false
+                local tp = xt.Type and xt.Type() or ''
+                local state = xt.State and xt.State() or ''
+                local curHp = xt.CurrentHPs and xt.CurrentHPs()
+                if dead or tp == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0) then
+                    isDead = true
+                end
+                stype = tp
+            end)
+            if not isDead and not isIgnored(xt.CleanName()) then
+                if (stype == 'NPC' or stype == 'Pet') and isHostileTarget(id) then
+                    return true
+                end
             end
         end
     end
@@ -17551,7 +17614,18 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
             local sid = s.ID() or 0
             if sid > 0 then
                 local sname = s.CleanName()
-                if runtime.isPullAllowed(sname) and runtime.isConAllowed(s) and not isSpawnPetOrPlayer(sid) and not isUnreachable(sid) then
+                local dead = false
+                local stype = ''
+                local state = ''
+                local curHp = nil
+                pcall(function()
+                    dead = s.Dead() or false
+                    stype = s.Type() or ''
+                    state = s.State() or ''
+                    curHp = s.CurrentHPs()
+                end)
+                local isDead = dead or stype == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0)
+                if not isDead and runtime.isPullAllowed(sname) and runtime.isConAllowed(s) and not isSpawnPetOrPlayer(sid) and not isUnreachable(sid) then
                     local sy = s.Y() or 0
                     local sx = s.X() or 0
                     if not outsideAnchor(sy, sx) then
@@ -18784,9 +18858,25 @@ local function combatTick()
         return
     end
 
-    local numXtar = countNPCXtarget()
     local t = mq.TLO.Target
-    local haveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse'
+    local tDead = false
+    local tType = ''
+    local tState = ''
+    local tCurHp = nil
+    pcall(function()
+        if t() then
+            tDead = t.Dead() or false
+            tType = t.Type() or ''
+            tState = t.State() or ''
+            tCurHp = t.CurrentHPs()
+        end
+    end)
+    local isTargetDead = t() and (tDead or tType == 'Corpse' or tState == 'DEAD' or (tCurHp and tCurHp <= 0))
+    if isTargetDead then
+        clearTarget()
+    end
+    local numXtar = countNPCXtarget()
+    local haveNPC = t() and not isTargetDead and (tType == 'NPC' or tType == 'Pet')
         and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())
     if haveNPC and ctrl.mode == 'Puller' then
         if isIgnored(t.CleanName()) then
@@ -18884,7 +18974,18 @@ local function combatTick()
                 local tspawn = mq.TLO.Spawn(tid)
                 -- Add hysteresis buffer (+35 units for waypoint patrol, +30% for free roam) so boundary spawns are not dropped
                 local dropDist = hasWps and (maxScan + 35) or (maxScan * 1.3 + 50)
-                if not tspawn() or tspawn.Dead() or tspawn.Type() == 'Corpse' or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
+                local tsDead = false
+                local tsType = ''
+                local tsCurHp = nil
+                pcall(function()
+                    if tspawn() then
+                        tsDead = tspawn.Dead() or false
+                        tsType = tspawn.Type() or ''
+                        tsCurHp = tspawn.CurrentHPs()
+                    end
+                end)
+                local tsIsDead = not tspawn() or tsDead or tsType == 'Corpse' or (tspawn.State and (tspawn.State() or '') == 'DEAD') or (tsCurHp and tsCurHp <= 0)
+                if tsIsDead or isUnreachable(tid) or isIgnored(tspawn.CleanName()) then
                     haveNPC = false
                     clearTarget()
                 elseif isXTargetId(tid) then
@@ -20932,6 +21033,38 @@ end)
 mq.event('TriuneDotCrit', '#*#critical dot#*#(#1#)#*#', function(_, dmgStr)
     local dmg = tonumber(dmgStr) or 0
     runtime.spawnCritFloater(string.format('CRIT DOT! %d', dmg), 'spellcrit', dmg)
+end)
+
+-- Mob slain detection: immediately clear dead target and schedule fast combat tick to acquire next mob
+mq.event('TriuneSlain1', 'You have slain #*#!', function()
+    local t = mq.TLO.Target
+    local isDead = false
+    pcall(function()
+        if t() then
+            local curHp = t.CurrentHPs()
+            isDead = t.Dead() or t.Type() == 'Corpse' or (t.State() or '') == 'DEAD' or (curHp and curHp <= 0) or ((t.PctHPs() or 0) <= 0)
+        end
+    end)
+    if isDead then
+        runtime.clearTarget()
+        runtime.lastTick = 0
+    end
+end)
+
+mq.event('TriuneSlain2', '#1# has been slain by #*#!', function(_, mobName)
+    local t = mq.TLO.Target
+    local isDead = false
+    pcall(function()
+        if t() then
+            local curHp = t.CurrentHPs()
+            local matches = (mobName and t.CleanName() == mobName)
+            isDead = matches or t.Dead() or t.Type() == 'Corpse' or (t.State() or '') == 'DEAD' or (curHp and curHp <= 0) or ((t.PctHPs() or 0) <= 0)
+        end
+    end)
+    if isDead then
+        runtime.clearTarget()
+        runtime.lastTick = 0
+    end
 end)
 
 mq.imgui.init('TriuneCritOverlay', UI.drawCritOverlay)

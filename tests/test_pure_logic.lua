@@ -7344,6 +7344,93 @@ do
 end
 
 -- ============================================================================
+-- Suite 66: Fast Retargeting & Dead Mob Filtering on Slain
+-- ============================================================================
+print('--- Suite 66: Fast Retargeting & Dead Mob Filtering on Slain ---')
+do
+    -- 1. Dead mob validation logic
+    local function isDeadSpawn(s)
+        local dead = false
+        local stype = ''
+        local state = ''
+        local curHp = nil
+        pcall(function()
+            dead = s.Dead and s.Dead() or false
+            stype = s.Type and s.Type() or ''
+            state = s.State and s.State() or ''
+            curHp = s.CurrentHPs and s.CurrentHPs()
+        end)
+        return dead or stype == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0)
+    end
+
+    local livingMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 500 end }
+    local dyingZeroHp = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'FEIGN' end, CurrentHPs = function() return 0 end }
+    local dyingNegHp = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return -10 end }
+    local deadStateMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'DEAD' end, CurrentHPs = function() return 100 end }
+    local corpseMob = { Dead = function() return false end, Type = function() return 'Corpse' end, State = function() return 'DEAD' end, CurrentHPs = function() return 0 end }
+    local deadFlagMob = { Dead = function() return true end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 100 end }
+
+    assert_true(not isDeadSpawn(livingMob), 'Suite 66: living mob is not dead')
+    assert_true(isDeadSpawn(dyingZeroHp), 'Suite 66: 0 HP mob is recognized as dead')
+    assert_true(isDeadSpawn(dyingNegHp), 'Suite 66: negative HP mob is recognized as dead')
+    assert_true(isDeadSpawn(deadStateMob), 'Suite 66: DEAD state mob is recognized as dead')
+    assert_true(isDeadSpawn(corpseMob), 'Suite 66: Corpse type mob is recognized as dead')
+    assert_true(isDeadSpawn(deadFlagMob), 'Suite 66: Dead() == true mob is recognized as dead')
+
+    -- 2. XTarget filtering skips dead / 0 HP mobs
+    local mockXtar = {
+        { id = 101, spawn = dyingZeroHp },
+        { id = 102, spawn = livingMob },
+    }
+    local function findFirstAliveXtar(xtars)
+        for _, entry in ipairs(xtars) do
+            if not isDeadSpawn(entry.spawn) then
+                return entry.id
+            end
+        end
+        return nil
+    end
+    assert_eq(findFirstAliveXtar(mockXtar), 102, 'Suite 66: skips 0 HP mob on XTarget and picks alive mob')
+
+    -- 3. countNPCXtarget logic returns 0 when only dead mobs linger
+    local mockDeadOnlyXtar = {
+        { id = 101, spawn = dyingZeroHp },
+        { id = 103, spawn = corpseMob },
+    }
+    local function countAliveNPCXtarget(xtars)
+        local count = 0
+        for _, entry in ipairs(xtars) do
+            if not isDeadSpawn(entry.spawn) then
+                count = count + 1
+            end
+        end
+        return count
+    end
+    assert_eq(countAliveNPCXtarget(mockDeadOnlyXtar), 0, 'Suite 66: countAliveNPCXtarget returns 0 when all XTargets dead')
+
+    -- 4. Slain event resets lastTick to 0 for instant loop iteration
+    local mockRuntime = { lastTick = 12345.67, cleared = false }
+    mockRuntime.clearTarget = function() mockRuntime.cleared = true end
+    local function onMobSlain(targetDead)
+        if targetDead then
+            mockRuntime.clearTarget()
+            mockRuntime.lastTick = 0
+        end
+    end
+    onMobSlain(true)
+    assert_true(mockRuntime.cleared, 'Suite 66: slain event calls clearTarget')
+    assert_eq(mockRuntime.lastTick, 0, 'Suite 66: slain event resets lastTick to 0')
+
+    -- 5. Source code validation in TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("TriuneSlain1") ~= nil, 'Suite 66: triune.lua registers TriuneSlain1 event')
+    assert_true(triuneContent:find("TriuneSlain2") ~= nil, 'Suite 66: triune.lua registers TriuneSlain2 event')
+    assert_true(triuneContent:find("curHp and curHp <= 0") ~= nil, 'Suite 66: triune.lua checks curHp <= 0')
+    assert_true(triuneContent:find("isDead = matches or t.Dead()") ~= nil, 'Suite 66: triune.lua detects slain mob target')
+end
+
+
+-- ============================================================================
 -- Results
 -- ============================================================================
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

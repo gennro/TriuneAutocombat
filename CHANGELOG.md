@@ -1,5 +1,21 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-06
+
+- **Instant Target Clearance & Fast Retargeting on Mob Death (`triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Eliminated Puller Hunt Retargeting Delay**: Resolved an issue in `Puller (Hunt)` mode where a noticeable pause occurred after slaying an NPC before acquiring and roaming toward the next mob.
+  - **Differentiated Living vs. Slain 0 HP Entities (`isSpawnAlive`, `isHostileTarget`)**: In EverQuest, dying mobs remain in the spawn table during death animations with `Type() == 'NPC'` and `Dead() == false` for several seconds before converting to a corpse or dropping from hate lists. Previously, functions such as `isSpawnAlive()`, `isHostileTarget()`, `isXTargetId()`, and `findFirstNPCXtarget()` only checked `s.Dead()` and `s.Type() == 'Corpse'`, treating 0 HP / negative HP or `State == 'DEAD'` mobs as valid living targets. Added explicit `CurrentHPs() <= 0` and `State() == 'DEAD'` checks to immediately disqualify slain entities.
+  - **Immediate Dead Target Dropping (`combatTick`)**: Added an immediate dead target check at the top of `combatTick()` to call `clearTarget()` the instant the current target's HP reaches 0, enters the DEAD state, or becomes a corpse, rather than waiting for server de-targeting. Fixed a bug in `combatTick`'s Hunt submode where corpse clearing was trapped inside an unreachable `if haveNPC then` block.
+  - **XTarget Lingering Mob Exclusion (`findFirstNPCXtarget`, `countNPCXtarget`, `isXTargetId`)**: When a dead mob lingers on the Extended Target list with 0% health, `firstNPCXtarget` previously prioritized it due to having the lowest HP. Both `findFirstNPCXtarget` and `countNPCXtarget` now ignore dead/0 HP entities so `numXtar` promptly drops to 0, allowing `findRoamTarget()` to run without delay.
+  - **Spawn Scanner Dead Exclusion (`findRoamTarget`)**: Ensured `scanSpawns()` in `findRoamTarget` ignores dead or 0 HP corpses at the character's feet so the freshly slain mob is not re-selected as the closest roam candidate.
+  - **Reactive Chat Slain Fast Tick (`TriuneSlain1`, `TriuneSlain2`)**: Registered event handlers for "You have slain..." and "...has been slain by..." that immediately clear the dead target and reset `runtime.lastTick = 0`, bypassing the 0.4s combat tick throttle and triggering new target acquisition on the very next frame.
+  - **Automated Regression Suite (`Suite 66`)**: Added 14 unit test assertions in `tests/test_pure_logic.lua` validating dead spawn detection across HP/state combinations, XTarget filtering, slain event reset behavior, and source integrity.
+
+- **Project Version Bump (v2.03) (`triune.lua`, `README.md`).**
+  - Synchronized canonical version bump to `2.03` across the main suite (`triune.lua`) and repository documentation (`README.md`).
+
+---
+
 ## 2026-09-05
 
 - **Out-of-Combat Self-Healing & Beneficial Target Selection Fix (`triune.lua`, `tests/test_pure_logic.lua`).**

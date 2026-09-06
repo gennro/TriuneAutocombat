@@ -333,6 +333,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **2.01**
+Current version: **2.03**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.
