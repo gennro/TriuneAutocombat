@@ -4339,17 +4339,17 @@ do
     mockState.castTracker.activeSpell = nil
 
     -- 3. Self-healing while attacking an enemy mob #1001
-    -- When fighting enemy mob #1001, character casts Greater Healing on self (myId)
+    -- In combat with a hostile target, character casts Greater Healing on self (myId) without switching target
     setTarget(1001)
     assert_eq(mockState.currentTargetId, 1001, 'targeting enemy mob 1001')
     local isSelf = (myId == myId)
     local curT = mockState.currentTargetId
     local isHostileT = (curT > 0 and isHostile(curT))
-    local needT = (not isSelf) or (not isHostileT and curT > 0 and curT ~= myId)
+    local needT = (curT ~= myId) and not (isSelf and isHostileT)
     assert_eq(needT, false, 'self-heal on hostile target does not need to select self')
     assert_eq(mockState.currentTargetId, 1001, 'target remains on enemy mob 1001')
 
-    -- Cast starts
+    -- Cast starts (in-combat self-cast)
     mockState.isCasting = true
     mockState.castTracker.activeSpell = 'Greater Healing'
     mockState.castTracker.activeTargetId = myId
@@ -4370,6 +4370,58 @@ do
     mockState.castTracker.activeTargetId = nil
     mockState.castTracker.targetRequired = false
     assert_eq(mockState.currentTargetId, 1001, 'post-heal: character still targeting enemy mob 1001')
+
+    -- 4. Self-healing OUT OF COMBAT (no target, curT == 0)
+    -- Out of combat, you DO have to select yourself to cast beneficial/heal spells
+    clearTarget()
+    assert_eq(mockState.currentTargetId, 0, 'out of combat: idle with no target')
+    curT = mockState.currentTargetId
+    isHostileT = (curT > 0 and isHostile(curT))
+    needT = (curT ~= myId) and not (isSelf and isHostileT)
+    assert_eq(needT, true, 'out of combat with no target: self-heal MUST select self')
+    if needT then setTarget(myId) end
+    assert_eq(mockState.currentTargetId, myId, 'target set to self (myId) for out-of-combat heal')
+
+    -- Cast starts (out-of-combat self-cast)
+    mockState.isCasting = true
+    mockState.castTracker.activeSpell = 'Greater Healing'
+    mockState.castTracker.activeTargetId = myId
+    if isSelf and isHostileT then
+        mockState.castTracker.targetRequired = false
+    else
+        mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing')
+    end
+    mockState.castTracker.castStartTime = os.clock()
+
+    assert_eq(mockState.castTracker.targetRequired, true, 'out-of-combat self-heal targetRequired is true')
+    assert_eq(getActiveTargetRequiredCastingId(), myId, 'out-of-combat self-heal locks target to self')
+    assert_eq(mockState.currentTargetId, myId, 'target locked on self during out-of-combat heal')
+
+    -- Attempt to clear or change target while casting out of combat should be blocked
+    assert_eq(clearTarget(), false, 'cannot clear target while casting out-of-combat self-heal')
+    assert_eq(mockState.currentTargetId, myId, 'target remains on self')
+
+    -- Finish cast
+    mockState.isCasting = false
+    mockState.castTracker.activeSpell = nil
+    mockState.castTracker.activeTargetId = nil
+    mockState.castTracker.targetRequired = false
+
+    -- 5. Self-healing OUT OF COMBAT while targeting a non-hostile NPC/player (curT == 5000)
+    setTarget(5000)
+    assert_eq(mockState.currentTargetId, 5000, 'targeting neutral NPC 5000')
+    curT = mockState.currentTargetId
+    isHostileT = (curT > 0 and isHostile(curT))
+    needT = (curT ~= myId) and not (isSelf and isHostileT)
+    assert_eq(needT, true, 'out of combat targeting non-hostile: self-heal MUST select self')
+    local restoreId = (curT ~= myId and curT > 0 and not (isSelf and isHostileT)) and curT or nil
+    assert_eq(restoreId, 5000, 'restoreTargetId saved as 5000')
+    if needT then setTarget(myId) end
+    assert_eq(mockState.currentTargetId, myId, 'target switched to self for heal')
+
+    -- Finish cast and restore target
+    if restoreId then setTarget(restoreId) end
+    assert_eq(mockState.currentTargetId, 5000, 'target successfully restored to neutral NPC 5000')
 end
 
 -- ============================================================================
@@ -7141,7 +7193,54 @@ do
     assert_eq(iniLines[6], '1=Combat Agility|M', 'Suite 64: First priority formatted with |M')
     assert_eq(iniLines[7], '2=Innate Run Speed|M', 'Suite 64: Second priority formatted with |M')
 
-    -- 5. Verify triune.lua source tokens
+    -- 5. Special tab AA detection & exclusion from MQ2AAspend INI
+    local function simulateIsSpecialTabAA(name, cachedData)
+        if not name or name == '' then return false end
+        local lower = tostring(name):lower()
+        if lower:find('firework') then return true end
+        if cachedData and cachedData[name] then
+            local cat = cachedData[name].category
+            if cat and cat:lower():find('special') then return true end
+        end
+        return false
+    end
+
+    local sampleCache = {
+        ['Alternately Advanced Fireworks'] = { category = 'Special', cost = 25, rank = 0, maxRank = 1 },
+        ['Glyph of Courage'] = { category = 'Special', cost = 10, rank = 0, maxRank = 1 },
+        ['Combat Agility'] = { category = 'Archetype', cost = 3, rank = 1, maxRank = 5 }
+    }
+    assert_true(simulateIsSpecialTabAA('Alternately Advanced Fireworks', sampleCache), 'Suite 64: fireworks is special tab')
+    assert_true(simulateIsSpecialTabAA('Glyph of Courage', sampleCache), 'Suite 64: glyph is special tab')
+    assert_true(not simulateIsSpecialTabAA('Combat Agility', sampleCache), 'Suite 64: combat agility is not special tab')
+
+    -- INI sync must exclude Special tab abilities so MQ2AAspend does not fail
+    local mixedPrios = {
+        ['Combat Agility'] = true,
+        ['Alternately Advanced Fireworks'] = true,
+        ['Innate Run Speed'] = true
+    }
+    local function generateFilteredIniLines(priorities, cachedData)
+        local prioList = {}
+        for nm, enabled in pairs(priorities or {}) do
+            if enabled and not simulateIsSpecialTabAA(nm, cachedData) then
+                prioList[#prioList + 1] = { name = nm }
+            end
+        end
+        table.sort(prioList, function(a, b) return a.name:lower() < b.name:lower() end)
+        local lines = {}
+        for idx, item in ipairs(prioList) do
+            lines[#lines + 1] = string.format('%d=%s|M', idx, item.name)
+        end
+        return lines
+    end
+
+    local filteredIni = generateFilteredIniLines(mixedPrios, sampleCache)
+    assert_eq(#filteredIni, 2, 'Suite 64: only 2 non-special AAs written to INI')
+    assert_eq(filteredIni[1], '1=Combat Agility|M', 'Suite 64: first filtered AA')
+    assert_eq(filteredIni[2], '2=Innate Run Speed|M', 'Suite 64: second filtered AA')
+
+    -- 6. Verify triune.lua source tokens
     local triuneContent = readFile('TAC/lua/triune.lua')
     assert_true(triuneContent:find("runtime.aaSpendLoaded") ~= nil, 'Suite 64: triune.lua defines runtime.aaSpendLoaded')
     assert_true(triuneContent:find("auto_aa_delegate_aaspend") ~= nil, 'Suite 64: triune.lua configures auto_aa_delegate_aaspend')
@@ -7153,6 +7252,95 @@ do
     assert_true(triuneContent:find("runtime.syncAAsToMQ2AASpendIni") ~= nil, 'Suite 64: triune.lua defines syncAAsToMQ2AASpendIni')
     assert_true(triuneContent:find("MQ2AASpend_AAList") ~= nil, 'Suite 64: triune.lua writes MQ2AASpend_AAList section')
     assert_true(triuneContent:find("Sync to INI") ~= nil, 'Suite 64: triune.lua provides Sync to INI button')
+    assert_true(triuneContent:find("runtime.isSpecialTabAA") ~= nil, 'Suite 64: triune.lua defines isSpecialTabAA')
+    assert_true(triuneContent:find("Special tab ability") ~= nil, 'Suite 64: triune.lua trains Special tab abilities natively')
+end
+
+-- ============================================================================
+-- Suite 65: Unreachable Target Abandonment & Pursuit Stall Watchdog Logic
+-- ============================================================================
+print('--- Suite 65: Unreachable Target Abandonment & Pursuit Stall Logic ---')
+do
+    -- 1. Unreachable tracking and TTL
+    local unreachableIds = {}
+    local function markUnreachable(id, now)
+        unreachableIds[id] = now or os.clock()
+    end
+    local function isUnreachable(id, now)
+        local t = unreachableIds[id]
+        if not t then return false end
+        now = now or os.clock()
+        if (now - t) > 60 then
+            unreachableIds[id] = nil
+            return false
+        end
+        return true
+    end
+
+    markUnreachable(1001, 100.0)
+    assert_true(isUnreachable(1001, 110.0), 'Suite 65: mob 1001 is unreachable at +10s')
+    assert_true(isUnreachable(1001, 159.0), 'Suite 65: mob 1001 is unreachable at +59s')
+    assert_true(not isUnreachable(1001, 161.0), 'Suite 65: mob 1001 expires after 60s TTL')
+    assert_true(not isUnreachable(1002, 110.0), 'Suite 65: mob 1002 was never marked unreachable')
+
+    -- 2. XTarget selection skips unreachable mob IDs
+    local mockXtargets = {
+        { id = 1001, name = 'orc_pawn', hp = 80 },
+        { id = 1002, name = 'orc_centurion', hp = 90 },
+    }
+    markUnreachable(1001, 100.0)
+    local function selectFirstXtarget(xtList, now)
+        for _, xt in ipairs(xtList) do
+            if not isUnreachable(xt.id, now) then
+                return xt.id
+            end
+        end
+        return nil
+    end
+
+    local chosen = selectFirstXtarget(mockXtargets, 110.0)
+    assert_eq(chosen, 1002, 'Suite 65: skips unreachable 1001 and selects 1002')
+
+    -- 3. 15-second approach watchdog logic
+    local pursuitState = { approachTargetId = 0, approachStartedAt = 0 }
+    local function evaluateApproachWatchdog(tid, inReach, inCombatEngaged, now)
+        if tid <= 0 then
+            pursuitState.approachTargetId = 0
+            pursuitState.approachStartedAt = 0
+            return 'NO_TARGET'
+        end
+        if pursuitState.approachTargetId ~= tid then
+            pursuitState.approachTargetId = tid
+            pursuitState.approachStartedAt = now
+        end
+        if inReach or inCombatEngaged then
+            pursuitState.approachStartedAt = now
+            return 'ENGAGED'
+        elseif (now - pursuitState.approachStartedAt) > 15.0 then
+            pursuitState.approachTargetId = 0
+            pursuitState.approachStartedAt = 0
+            return 'UNREACHABLE_TIMEOUT'
+        end
+        return 'APPROACHING'
+    end
+
+    assert_eq(evaluateApproachWatchdog(500, false, false, 1000.0), 'APPROACHING', 'Suite 65: start approaching at 1000s')
+    assert_eq(evaluateApproachWatchdog(500, false, false, 1010.0), 'APPROACHING', 'Suite 65: still approaching at 1010s (+10s)')
+    assert_eq(evaluateApproachWatchdog(500, false, false, 1015.1), 'UNREACHABLE_TIMEOUT', 'Suite 65: times out after 15.1s unable to reach')
+
+    -- 4. In-reach / engaged resets approach timer
+    assert_eq(evaluateApproachWatchdog(600, false, false, 2000.0), 'APPROACHING', 'Suite 65: mob 600 approaching')
+    assert_eq(evaluateApproachWatchdog(600, true, true, 2012.0), 'ENGAGED', 'Suite 65: mob 600 in reach at 12s resets timer')
+    assert_eq(evaluateApproachWatchdog(600, false, false, 2020.0), 'APPROACHING', 'Suite 65: mob 600 approaching again (8s after reset)')
+    assert_eq(evaluateApproachWatchdog(600, false, false, 2028.0), 'UNREACHABLE_TIMEOUT', 'Suite 65: mob 600 times out 16s after last in-reach')
+
+    -- 5. Source code validation in triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("pursuit.noPathFails") ~= nil, 'Suite 65: triune.lua tracks noPathFails')
+    assert_true(triuneContent:find("No navigation path to target") ~= nil, 'Suite 65: triune.lua logs no navigation path to target')
+    assert_true(triuneContent:find("Target #%%d %(%%s%) obstructed after 4 \"cannot hit\" attempts") ~= nil, 'Suite 65: triune.lua abandons after 4 cannot hit attempts')
+    assert_true(triuneContent:find("pursuit.approachStartedAt") ~= nil, 'Suite 65: triune.lua implements approachStartedAt watchdog')
+    assert_true(triuneContent:find("giving up on target") ~= nil, 'Suite 65: triune.lua maintains giving up on target')
 end
 
 -- ============================================================================

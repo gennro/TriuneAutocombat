@@ -14029,7 +14029,7 @@ function runtime.castGem(i, g, id)
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
-    local needsTarget = (not selfCast) or (not hostileTarget and orig > 0 and orig ~= id)
+    local needsTarget = (orig ~= id) and not (selfCast and hostileTarget)
     if needsTarget and not runtime.setTarget(id) then return false end
 
     local pauseAttack = isFD and wasAttacking
@@ -14048,7 +14048,7 @@ function runtime.castGem(i, g, id)
     if selfCast and hostileTarget then
         castTracker.targetRequired = false
     else
-        castTracker.targetRequired = isDet or (isTargetRequiredSpell(g.spell) and (not selfCast or orig == id))
+        castTracker.targetRequired = isDet or isTargetRequiredSpell(g.spell)
     end
     castTracker.castStartTime  = os.clock()
     clearCursor()
@@ -14179,7 +14179,7 @@ function runtime.fireAA(name, a, id)
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
-    local needsTarget = (not selfCast) or (not hostileTarget and orig > 0 and orig ~= id)
+    local needsTarget = (orig ~= id) and not (selfCast and hostileTarget)
     if needsTarget and not runtime.setTarget(id) then return false end
     clearCursor()
 
@@ -14206,7 +14206,7 @@ function runtime.fireAA(name, a, id)
     if selfCast and hostileTarget then
         castTracker.targetRequired = false
     else
-        castTracker.targetRequired = isDet or (isTargetRequiredSpell(name) and (not selfCast or orig == id))
+        castTracker.targetRequired = isDet or isTargetRequiredSpell(name)
     end
     castTracker.castStartTime  = now
     mq.cmdf('/alt act %d', aa.ID())
@@ -14232,8 +14232,12 @@ function runtime.fireAA(name, a, id)
 
     print('\ag[Triune]\ax AA fired: ' .. name)
     if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
-        mq.delay(60)
-        if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+        if castMs > 0 then
+            runtime.restoreTargetId = orig
+        else
+            mq.delay(60)
+            if orig > 0 and mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+        end
     end
     if not isFD and wasAttacking and not mq.TLO.Me.Combat() then
         mq.cmd('/attack on')
@@ -14283,6 +14287,26 @@ function runtime.findChildRecursive(parent, targetName)
     return nil
 end
 
+function runtime.isSpecialTabAA(name)
+    if not name or name == '' then return false end
+    local lower = tostring(name):lower()
+    if lower:find('firework') then return true end
+    if runtime.cachedAAData and runtime.cachedAAData[name] then
+        local cat = runtime.cachedAAData[name].category
+        if cat and cat:lower():find('special') then return true end
+    end
+    if runtime.scannedAAs then
+        for _, itm in ipairs(runtime.scannedAAs) do
+            if itm.name == name then
+                if itm.category and itm.category:lower():find('special') then return true end
+                if itm.type == 4 then return true end
+                break
+            end
+        end
+    end
+    return false
+end
+
 function runtime.findAAInWindowLists(targetName)
     local win = nil
     pcall(function()
@@ -14309,10 +14333,10 @@ function runtime.findAAInWindowLists(targetName)
     }
 
     local cleanTarget = tostring(targetName or ''):lower():gsub('[^%a%d]', '')
-    local isFireworks = cleanTarget:find('firework') ~= nil
+    local isSpecial = cleanTarget:find('firework') ~= nil or (runtime.isSpecialTabAA and runtime.isSpecialTabAA(targetName))
 
-    -- If searching for Fireworks, prioritize Special tab listbox
-    if isFireworks then
+    -- If searching for a Special tab ability (like Fireworks), prioritize Special tab listbox
+    if isSpecial then
         table.sort(listCandidates, function(a, b)
             if a.tab == 4 and b.tab ~= 4 then return true end
             if b.tab == 4 and a.tab ~= 4 then return false end
@@ -14336,7 +14360,7 @@ function runtime.findAAInWindowLists(targetName)
                             matched = true
                         elseif cleanRow ~= '' and cleanTarget ~= '' and (cleanRow:find(cleanTarget, 1, true) or cleanTarget:find(cleanRow, 1, true)) then
                             matched = true
-                        elseif isFireworks and cleanRow:find('firework') then
+                        elseif isSpecial and cleanRow:find('firework') then
                             matched = true
                         end
                         if matched then
@@ -14844,7 +14868,7 @@ function runtime.startAATrainWorkflow(targetName)
     end
 
     local prefTab = 1
-    if aaType == 4 or targetName:lower():find('firework') then
+    if aaType == 4 or targetName:lower():find('firework') or (runtime.isSpecialTabAA and runtime.isSpecialTabAA(targetName)) then
         prefTab = 4
     elseif aaType == 3 then
         prefTab = 3
@@ -14927,9 +14951,10 @@ function runtime.processAATrainWorkflow()
 
         -- Select the target tab page first so its listbox is active
         mq.cmdf('/nomodkey /notify AAWindow AAW_Subwindows tabselect %d', targetTab)
+        mq.cmdf('/nomodkey /notify AAWindow Subwindows tabselect %d', targetTab)
         pcall(function()
             if win and win() then
-                local sub = runtime.findChildRecursive(win, 'AAW_Subwindows')
+                local sub = runtime.findChildRecursive(win, 'AAW_Subwindows') or runtime.findChildRecursive(win, 'Subwindows')
                 if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(targetTab) end
             end
         end)
@@ -15066,7 +15091,7 @@ function runtime.syncAAsToMQ2AASpendIni(silent)
     local prioList = {}
     if ctrl.auto_aa_priorities then
         for nm, enabled in pairs(ctrl.auto_aa_priorities) do
-            if enabled then
+            if enabled and (not runtime.isSpecialTabAA or not runtime.isSpecialTabAA(nm)) then
                 local cost = 0
                 if runtime.cachedAAData and runtime.cachedAAData[nm] then
                     cost = runtime.cachedAAData[nm].cost or 0
@@ -15137,21 +15162,6 @@ function runtime.checkAutoSpendAA()
         end
     end
 
-    -- Delegation to MQ2AAspend plugin if enabled and loaded
-    if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
-        local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
-        if unspent >= threshold then
-            runtime.lastAutoSpendAAAt = now
-            local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-            mq.cmdf('/aaspend bank %d', threshold)
-            mq.cmd('/aaspend ' .. mode)
-            print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
-                mode, unspent, threshold))
-            return true
-        end
-        return false
-    end
-
     -- 1. Check prioritized AAs
     if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
         local candidates = {}
@@ -15211,6 +15221,32 @@ function runtime.checkAutoSpendAA()
                 end)
             end
             local target = candidates[1]
+
+            -- If candidate is a Special tab ability (such as Fireworks), MQ2AAspend cannot purchase it.
+            -- Train it directly via Triune's native window workflow!
+            if runtime.isSpecialTabAA and runtime.isSpecialTabAA(target.name) then
+                runtime.lastAutoSpendAAAt = now
+                print(string.format('\ag[Triune]\ax Auto-spending AA on Special tab ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
+                    target.name, target.rank, target.maxRank, target.cost, unspent))
+                return runtime.startAATrainWorkflow(target.name)
+            end
+
+            -- For regular general/class abilities, if MQ2AAspend is active, delegate:
+            if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+                local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+                if unspent >= threshold then
+                    runtime.lastAutoSpendAAAt = now
+                    local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+                    mq.cmdf('/aaspend bank %d', threshold)
+                    mq.cmd('/aaspend ' .. mode)
+                    print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
+                        mode, unspent, threshold))
+                    return true
+                end
+                return false
+            end
+
+            -- Otherwise, train via Triune's native workflow
             runtime.lastAutoSpendAAAt = now
             print(string.format('\ag[Triune]\ax Auto-spending AA on prioritized ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
                 target.name, target.rank, target.maxRank, target.cost, unspent))
@@ -15218,21 +15254,63 @@ function runtime.checkAutoSpendAA()
         end
     end
 
-    -- 2. Fallback: Cap threshold spender (Fireworks)
+    -- 2. Fallback: Cap threshold spender (Fireworks or general delegation)
     local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 100
     local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
     local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
 
-    if cost > 0 and unspent >= threshold and unspent >= cost then
-        runtime.lastAutoSpendAAAt = now
-        print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
-            effectiveName, threshold, cost, unspent))
-        return runtime.startAATrainWorkflow(effectiveName)
+    if unspent >= threshold then
+        -- If user has Fireworks / Special tab ability configured as cap spender, buy it natively:
+        if (runtime.isSpecialTabAA and runtime.isSpecialTabAA(effectiveName)) and unspent >= cost then
+            runtime.lastAutoSpendAAAt = now
+            print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on Special tab "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
+                effectiveName, threshold, cost, unspent))
+            return runtime.startAATrainWorkflow(effectiveName)
+        end
+
+        -- Delegation to MQ2AAspend plugin for cap dumping if loaded
+        if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+            runtime.lastAutoSpendAAAt = now
+            local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+            mq.cmdf('/aaspend bank %d', threshold)
+            mq.cmd('/aaspend ' .. mode)
+            print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
+                mode, unspent, threshold))
+            return true
+        end
+
+        if cost > 0 and unspent >= cost then
+            runtime.lastAutoSpendAAAt = now
+            print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
+                effectiveName, threshold, cost, unspent))
+            return runtime.startAATrainWorkflow(effectiveName)
+        end
     end
     return false
 end
 
 function runtime.manualSpendAA(targetName)
+    -- If a specific ability is being trained, always train that specific ability natively!
+    if targetName and targetName ~= '' then
+        return runtime.startAATrainWorkflow(targetName)
+    end
+
+    -- Generic spend clicked (e.g. from Spend Now button)
+    -- If top prioritized ability is Special tab, train it natively:
+    if ctrl.auto_aa_priorities then
+        for nm, enabled in pairs(ctrl.auto_aa_priorities) do
+            if enabled and runtime.isSpecialTabAA and runtime.isSpecialTabAA(nm) then
+                return runtime.startAATrainWorkflow(nm)
+            end
+        end
+    end
+
+    -- If Fireworks is configured cap spender and no other prios:
+    local fallbackName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
+    if runtime.isSpecialTabAA and runtime.isSpecialTabAA(fallbackName) and (not ctrl.auto_aa_priorities or not next(ctrl.auto_aa_priorities)) then
+        return runtime.startAATrainWorkflow(fallbackName)
+    end
+
     if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
         local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
         local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
@@ -15242,19 +15320,18 @@ function runtime.manualSpendAA(targetName)
         return true
     end
 
-    local effectiveName = targetName or ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
     local unspent = 0
     pcall(function()
         local raw = mq.TLO.Me.AAPoints()
         unspent = tonumber(raw or 0) or 0
     end)
     local cost = 0
-    if runtime.cachedAAData and runtime.cachedAAData[effectiveName] and runtime.cachedAAData[effectiveName].cost then
-        cost = tonumber(runtime.cachedAAData[effectiveName].cost) or 0
+    if runtime.cachedAAData and runtime.cachedAAData[fallbackName] and runtime.cachedAAData[fallbackName].cost then
+        cost = tonumber(runtime.cachedAAData[fallbackName].cost) or 0
     end
     if cost == 0 and runtime.scannedAAs then
         for _, itm in ipairs(runtime.scannedAAs) do
-            if itm.name == effectiveName and itm.cost and itm.cost > 0 then
+            if itm.name == fallbackName and itm.cost and itm.cost > 0 then
                 cost = itm.cost
                 break
             end
@@ -15262,7 +15339,7 @@ function runtime.manualSpendAA(targetName)
     end
     if cost == 0 then
         pcall(function()
-            local ma = mq.TLO.Me.AltAbility(effectiveName)
+            local ma = mq.TLO.Me.AltAbility(fallbackName)
             if ma and ma() and ma.Cost then
                 cost = tonumber(ma.Cost() or 0) or 0
             end
@@ -15270,7 +15347,7 @@ function runtime.manualSpendAA(targetName)
     end
     if cost == 0 then
         pcall(function()
-            local ga = mq.TLO.AltAbility(effectiveName)
+            local ga = mq.TLO.AltAbility(fallbackName)
             if ga and ga() and ga.Cost then
                 cost = tonumber(ga.Cost() or 0) or 0
             end
@@ -15285,11 +15362,11 @@ function runtime.manualSpendAA(targetName)
     end
 
     if unspent < cost then
-        print(string.format('\ay[Triune]\ax Cannot purchase %s: have %d unspent AA, need %d AA.', effectiveName, unspent, cost))
+        print(string.format('\ay[Triune]\ax Cannot purchase %s: have %d unspent AA, need %d AA.', fallbackName, unspent, cost))
         return false
     end
 
-    return runtime.startAATrainWorkflow(effectiveName)
+    return runtime.startAATrainWorkflow(fallbackName)
 end
 
 function runtime.checkAutoSummonFireworks()
@@ -15619,7 +15696,7 @@ runtime.useClickie = function(c, id)
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
     local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
-    local needsTarget = (not selfCast) or (not hostileTarget and orig > 0 and orig ~= id)
+    local needsTarget = (orig ~= id) and not (selfCast and hostileTarget)
     if needsTarget and not runtime.setTarget(id) then return false end
 
     local isDet = runtime.isDetrimentalAction(effName, c.target, c)
@@ -15632,7 +15709,7 @@ runtime.useClickie = function(c, id)
     if selfCast and hostileTarget then
         castTracker.targetRequired = false
     else
-        castTracker.targetRequired = isDet or (isTargetRequiredSpell(effName) and (not selfCast or orig == id))
+        castTracker.targetRequired = isDet or isTargetRequiredSpell(effName)
     end
     castTracker.castStartTime  = os.clock()
 
@@ -16555,7 +16632,7 @@ function runtime.moveToward(id, dist, followOnly)
             pursuit.id = 0
             return true
         end
-        if ctrl.mode == 'Puller' then
+        if not followOnly then
             print(string.format(
                 '\ay[Triune]\ax giving up on target %d -- %s (likely elevated/blocked despite a ground path existing).',
                 id,
@@ -16563,16 +16640,23 @@ function runtime.moveToward(id, dist, followOnly)
                 ('no progress for ' .. NAV_CONST.PURSUIT_STALL_TIMEOUT .. 's')))
             runtime.markUnreachable(id)
             stopMoving()
+            clearTarget()
             pursuit.id = 0
+            pursuit.lastNavTargetId = 0
+            pursuit.noPathFails = 0
+            runtime.pullTargetId = 0
+            runtime.pullState = 'IDLE'
             return false
         end
     end
 
     -- Movement Stage 1: MQ2Nav
     if navLoaded() then
+        local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
         local ok = false
         pcall(function() ok = mq.TLO.Navigation.PathExists('id ' .. id)() end)
         if ok then
+            pursuit.noPathFails = 0
             local navActiveNow = mq.TLO.Navigation.Active()
             if pursuit.wasNavActive and not navActiveNow then
                 pursuit.navStalls = pursuit.navStalls + 1
@@ -16581,6 +16665,24 @@ function runtime.moveToward(id, dist, followOnly)
             if pursuit.lastNavTargetId ~= id or not navActiveNow then
                 mq.cmdf('/nav id %d distance=%d', id, math.floor(targetDist))
                 pursuit.lastNavTargetId = id
+            end
+            return false
+        elseif meshOk and meshLoaded and not followOnly and (d > effectiveArrivalDist or not losOk) then
+            -- Zone navmesh is confirmed loaded, but MQ2Nav reports no valid path to target
+            pursuit.noPathFails = (pursuit.noPathFails or 0) + 1
+            if pursuit.noPathFails >= 3 then
+                print(string.format(
+                    '\ay[Triune]\ax No navigation path to target #%d -- marking unreachable & finding new target.',
+                    id))
+                runtime.markUnreachable(id)
+                stopMoving()
+                clearTarget()
+                pursuit.id = 0
+                pursuit.lastNavTargetId = 0
+                pursuit.noPathFails = 0
+                runtime.pullTargetId = 0
+                runtime.pullState = 'IDLE'
+                return false
             end
             return false
         end
@@ -16636,8 +16738,7 @@ local function repositionCloser()
         '\ay[Triune]\ax Target too far away (dist %.1f) -- repositioning closer (%d units) on target #%d.', currentDist,
         targetDist, tid))
 
-    -- Reset pursuit tracking so moveToward doesn't short-circuit on stale arrival flags
-    pursuit.id = 0
+    -- Reset navigation target cache so moveToward/reposition issues a fresh movement command
     pursuit.lastNavTargetId = 0
     pursuit.lastStickDist = 0
     if runtime.clearDetour then runtime.clearDetour() end
@@ -16679,6 +16780,21 @@ local function handleCantHitFromHere()
     end
     pursuit.lastCantHitAt = now
 
+    if pursuit.cantHitCount >= 4 then
+        print(string.format(
+            '\ay[Triune]\ax Target #%d (%s) obstructed after 4 "cannot hit" attempts -- marking unreachable & picking new target.',
+            tid, tostring(tgt.CleanName())))
+        runtime.markUnreachable(tid)
+        stopMoving()
+        clearTarget()
+        pursuit.cantHitCount = 0
+        pursuit.id = 0
+        pursuit.lastNavTargetId = 0
+        runtime.pullTargetId = 0
+        runtime.pullState = 'IDLE'
+        return
+    end
+
     local curDist = distToId(tid)
     print(string.format(
         '\ay[Triune]\ax "Cannot hit from here" (dist %.1f) on #%d (%s) -- opening doors and repositioning.',
@@ -16689,8 +16805,7 @@ local function handleCantHitFromHere()
         print('\ay[Triune]\ax Clicked nearby door/switch to clear line of sight.')
     end
 
-    -- Reset pursuit tracking so moveToward doesn't short-circuit on stale arrival flags
-    pursuit.id = 0
+    -- Reset navigation target cache so reposition issues a fresh movement command
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
     pursuit.lastStickDist = 0
@@ -16700,8 +16815,7 @@ local function handleCantHitFromHere()
 
     -- If we have repeated failures in quick succession (e.g. wedged on doorway frame or wall corner),
     -- execute a brief backup + strafe jump to break geometric collision snags.
-    if pursuit.cantHitCount >= 3 then
-        pursuit.cantHitCount = 0
+    if pursuit.cantHitCount == 3 then
         mq.cmd('/keypress back hold')
         mq.delay(250)
         mq.cmd('/keypress back')
@@ -17459,7 +17573,8 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                             local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
                                             if meshOk and meshLoaded then
                                                 local dist = s.Distance3D() or 999
-                                                if dist > 25 then
+                                                local closeReach = desiredRange(sid) or 14
+                                                if dist > closeReach or not hasLoS(sid) then
                                                     local hasPath = false
                                                     local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
                                                     if ok and not hasPath then
@@ -17679,7 +17794,8 @@ function runtime.pullerTick()
         -- If current target is right next to camp (within 25 units), fight it directly
         local pt = mq.TLO.Target
         if pt() and (pt.Type() == 'NPC' or pt.Type() == 'Pet') and not pt.Dead() and pt.Type() ~= 'Corpse'
-            and not isSpawnPetOrPlayer(pt.ID()) and isHostileTarget(pt.ID()) and distToId(pt.ID()) <= 25 then
+            and not isSpawnPetOrPlayer(pt.ID()) and isHostileTarget(pt.ID()) and distToId(pt.ID()) <= 25
+            and not isUnreachable(pt.ID()) and not isIgnored(pt.CleanName()) then
             runtime.pullTargetId = pt.ID()
             runtime.pullState = 'FIGHTING'
             return
@@ -17768,6 +17884,7 @@ function runtime.pullerTick()
         elseif isUnreachable(runtime.pullTargetId) then
             print('\ay[Triune]\ax pull target unreachable -- picking a different mob.')
             runtime.pullState = 'IDLE'; runtime.pullTargetId = 0; stopMoving()
+            clearTarget()
         else
             local pullStyle = ctrl.pull_style or 'Melee'
             local reqRange
@@ -18695,6 +18812,7 @@ local function combatTick()
     if ctrl.mode == 'Manual' then
         if haveNPC and isUnreachable(mq.TLO.Target.ID()) then
             haveNPC = false
+            clearTarget()
         end
 
         local autoXtar = (ctrl.manual_auto_xtarget ~= false)
@@ -18731,6 +18849,12 @@ local function combatTick()
             pullerTick()
             local pt = mq.TLO.Target
             haveNPC = pt() and pt.Type() == 'NPC' and not pt.Dead() and pt.Type() ~= 'Corpse'
+            if haveNPC and (isUnreachable(pt.ID()) or isIgnored(pt.CleanName())) then
+                haveNPC = false
+                clearTarget()
+                runtime.pullState = 'IDLE'
+                runtime.pullTargetId = 0
+            end
             if haveNPC and runtime.pullState == 'FIGHTING' then
                 local id = pt.ID()
                 if moveToward(id, desiredRange(id)) then
@@ -19123,38 +19247,47 @@ local function combatTick()
         end
     end
 
-    -- Non-XTarget engagement timeout check (only when far away and unable to reach target in Puller mode):
-    if haveNPC and ctrl.mode == 'Puller' then
+    -- Target pursuit / approach timeout check:
+    -- If we have an active target but cannot get in striking range or establish LoS after 15s,
+    -- mark it unreachable and switch to a different mob.
+    local inCombatNow = mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')
+    if haveNPC and (ctrl.mode ~= 'Manual' or isXTargetId(mq.TLO.Target.ID() or 0) or inCombatNow) then
         local tid = mq.TLO.Target.ID() or 0
-        if tid > 0 and not isXTargetId(tid) and distToId(tid) > 30 then
-            if pursuit.nonXtarTargetId ~= tid then
-                pursuit.nonXtarTargetId = tid
-                pursuit.nonXtarEngageAt = 0
+        if tid > 0 then
+            if pursuit.approachTargetId ~= tid then
+                pursuit.approachTargetId = tid
+                pursuit.approachStartedAt = os.clock()
             end
-            if engage or mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then
-                if pursuit.nonXtarEngageAt == 0 then
-                    pursuit.nonXtarEngageAt = os.clock()
-                elseif (os.clock() - pursuit.nonXtarEngageAt) > 15.0 then
-                    print(string.format(
-                        '\ay[Triune]\ax Target #%d (%s) unreachable after 15s -- marking unreachable & moving to next NPC.',
-                        tid, tostring(mq.TLO.Target.CleanName())))
-                    markUnreachable(tid)
-                    stopMoving()
-                    clearTarget()
-                    haveNPC = false
-                    engage = false
-                    pursuit.id = 0
-                    pursuit.nonXtarTargetId = 0
-                    pursuit.nonXtarEngageAt = 0
-                end
-            else
+            local curDist = distToId(tid)
+            local inReach = (curDist <= (desiredRange(tid) + 4)) and hasLoS(tid)
+            if inReach or (inCombatNow and engage and hasLoS(tid)) then
+                pursuit.approachStartedAt = os.clock()
+            elseif (os.clock() - (pursuit.approachStartedAt or os.clock())) > 15.0 then
+                print(string.format(
+                    '\ay[Triune]\ax Target #%d (%s) unreachable after 15s -- marking unreachable & moving to next NPC.',
+                    tid, tostring(mq.TLO.Target.CleanName())))
+                markUnreachable(tid)
+                stopMoving()
+                clearTarget()
+                haveNPC = false
+                engage = false
+                pursuit.id = 0
+                pursuit.approachTargetId = 0
+                pursuit.approachStartedAt = 0
+                pursuit.nonXtarTargetId = 0
                 pursuit.nonXtarEngageAt = 0
+                runtime.pullTargetId = 0
+                runtime.pullState = 'IDLE'
             end
         else
+            pursuit.approachTargetId = 0
+            pursuit.approachStartedAt = 0
             pursuit.nonXtarTargetId = 0
             pursuit.nonXtarEngageAt = 0
         end
     else
+        pursuit.approachTargetId = 0
+        pursuit.approachStartedAt = 0
         pursuit.nonXtarTargetId = 0
         pursuit.nonXtarEngageAt = 0
     end
