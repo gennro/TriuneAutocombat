@@ -6694,7 +6694,11 @@ do
     local classifyItem = loadFunc(invSrc, 'classifyItem', {})
     local matchesFilter = loadFunc(invSrc, 'matchesFilter', {})
     local findDuplicateStacks = loadFunc(invSrc, 'findDuplicateStacks', {})
+    local findNextCombineMove = loadFunc(invSrc, 'findNextCombineMove', {})
     local findHeaviestItems = loadFunc(invSrc, 'findHeaviestItems', {})
+    local formatAugs = loadFunc(invSrc, 'formatAugs', {})
+    local parseAugs = loadFunc(invSrc, 'parseAugs', {})
+    local planBagAlphaSort = loadFunc(invSrc, 'planBagAlphaSort', {})
 
     -- 1. formatMoney
     assert_eq(formatMoney(0), '0c', 'formatMoney(0) is 0c')
@@ -6757,6 +6761,15 @@ do
     assert_true(matchesFilter(loreItem, '', 'ALL', 'ALL', { clicky = true }), 'Clicky filter matches Clicky item')
     assert_eq(matchesFilter(loreItem, '', 'ALL', 'ALL', { tradeskill = true }), false, 'Tradeskill filter rejects non-TS item')
 
+    local armorItem = {
+        name = 'Chain Chestplate',
+        location = 'WORN',
+        category = 'Armor',
+        augs = { { slot = 1, name = 'Ruby of Ancient Knowledge' }, { slot = 2, name = 'Focus of Ice' } },
+    }
+    assert_true(matchesFilter(armorItem, 'ruby of ancient', 'ALL', 'ALL', nil), 'Search matches socketed augment name')
+    assert_eq(matchesFilter(armorItem, 'peridot', 'ALL', 'ALL', nil), false, 'Search rejects armor without matching aug')
+
     -- 4. findDuplicateStacks
     local stackItems = {
         { id = 1001, name = 'Peridot', count = 5, stackable = true, stackSize = 20, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 2]' },
@@ -6771,7 +6784,55 @@ do
     assert_eq(dups[1].totalCount, 12, 'Fragmented stack total count is 12')
     assert_eq(dups[1].numStacks, 2, 'Fragmented stack has 2 entries')
 
-    -- 5. findHeaviestItems
+    -- 5. findNextCombineMove
+    local move = findNextCombineMove({
+        stackSize = 20,
+        stacks = {
+            { count = 5, notifyCmd = 'in pack1 2', location = 'INVENTORY' },
+            { count = 7, notifyCmd = 'in pack3 8', location = 'INVENTORY' },
+        },
+    })
+    assert_eq(move.fromCmd, 'in pack1 2', 'combine moves smaller stack onto larger')
+    assert_eq(move.toCmd, 'in pack3 8', 'combine destination is fullest partial stack')
+
+    local noMoveFull = findNextCombineMove({
+        stackSize = 20,
+        stacks = {
+            { count = 20, notifyCmd = 'in pack1 1', location = 'INVENTORY' },
+            { count = 5, notifyCmd = 'in pack2 1', location = 'INVENTORY' },
+        },
+    })
+    assert_eq(noMoveFull, nil, 'combine skips when destination stacks are already full')
+
+    local noMoveCross = findNextCombineMove({
+        stackSize = 20,
+        stacks = {
+            { count = 5, notifyCmd = 'in pack1 1', location = 'INVENTORY' },
+            { count = 7, notifyCmd = 'in bank1 1', location = 'BANK' },
+        },
+    })
+    assert_eq(noMoveCross, nil, 'combine skips cross-location stacks')
+
+    local noMoveSingle = findNextCombineMove({
+        stackSize = 20,
+        stacks = {
+            { count = 5, notifyCmd = 'in pack1 1', location = 'INVENTORY' },
+        },
+    })
+    assert_eq(noMoveSingle, nil, 'combine is a no-op for a single stack')
+
+    local triple = findNextCombineMove({
+        stackSize = 20,
+        stacks = {
+            { count = 3, notifyCmd = 'in pack1 1', location = 'INVENTORY' },
+            { count = 8, notifyCmd = 'in pack1 2', location = 'INVENTORY' },
+            { count = 12, notifyCmd = 'in pack2 1', location = 'INVENTORY' },
+        },
+    })
+    assert_eq(triple.fromCmd, 'in pack1 2', 'combine prefers next-fullest source onto fullest dest')
+    assert_eq(triple.toCmd, 'in pack2 1', 'combine destination is the fullest partial')
+
+    -- 6. findHeaviestItems
     local heavyItems = {
         { name = 'Iron Bar', weight = 10.0, count = 1, stackable = false, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 1]', category = 'Tradeskill' },
         { name = 'Feather', weight = 0.1, count = 1, stackable = false, location = 'INVENTORY', displayLocation = 'Bag 1 [Slot 2]', category = 'Misc' },
@@ -6781,6 +6842,59 @@ do
     assert_eq(#heavies, 2, 'findHeaviestItems returns requested limit')
     assert_eq(heavies[1].name, 'Heavy Ore', 'Heavy Ore (16 lbs total) is ranked first')
     assert_eq(heavies[2].name, 'Iron Bar', 'Iron Bar (10 lbs) is ranked second')
+
+    -- 7. formatAugs / parseAugs
+    assert_eq(formatAugs(nil), '', 'formatAugs nil is empty')
+    assert_eq(formatAugs({}), '', 'formatAugs missing augs is empty')
+    assert_eq(formatAugs({ augs = { { name = 'Ruby of AA' }, { name = 'Focus of Ice' } } }), 'Ruby of AA, Focus of Ice', 'formatAugs joins names')
+    local parsed = parseAugs('Ruby of AA|Focus of Ice')
+    assert_eq(#parsed, 2, 'parseAugs splits pipe-separated names')
+    assert_eq(parsed[1].name, 'Ruby of AA', 'parseAugs first name')
+    assert_eq(parsed[2].name, 'Focus of Ice', 'parseAugs second name')
+
+    -- 8. planBagAlphaSort
+    local alreadySorted = {
+        slot = 1, capacity = 3,
+        slots = {
+            [1] = { name = 'Apple', subSlot = 1 },
+            [2] = { name = 'Mango', subSlot = 2 },
+        },
+    }
+    assert_eq(#planBagAlphaSort(alreadySorted, 'pack'), 0, 'already-sorted bag needs no moves')
+
+    local zebra = { name = 'Zebra', subSlot = 1 }
+    local apple = { name = 'Apple', subSlot = 2 }
+    local mango = { name = 'Mango', subSlot = 4 }
+    local unsorted = {
+        slot = 1, capacity = 4,
+        slots = { [1] = zebra, [2] = apple, [4] = mango },
+    }
+    local sortMoves = planBagAlphaSort(unsorted, 'pack')
+    assert_eq(#sortMoves, 3, 'unsorted bag with a hole plans 3 moves')
+    assert_eq(sortMoves[1].fromCmd, 'in pack1 2', 'first sort move picks Apple')
+    assert_eq(sortMoves[1].toCmd, 'in pack1 1', 'first sort move drops onto slot 1')
+    assert_eq(sortMoves[1].completeSwap, true, 'first sort move swaps occupied dest')
+    assert_eq(sortMoves[3].completeSwap, false, 'final sort move places into empty slot')
+
+    local bankBag = {
+        slot = 3, capacity = 2,
+        slots = {
+            [1] = { name = 'Zinger', subSlot = 1 },
+            [2] = { name = 'Amber', subSlot = 2 },
+        },
+    }
+    local bankMoves = planBagAlphaSort(bankBag, 'bank')
+    assert_eq(bankMoves[1].fromCmd, 'in bank3 2', 'bank sort uses bank notify cmds')
+    assert_eq(bankMoves[1].toCmd, 'in bank3 1', 'bank sort destination is slot 1')
+
+    apple = { name = 'Cloudy Potion', type = 'Potion', subSlot = 1 }
+    zebra = { name = 'Rusty Sword', type = '1H Slashing', subSlot = 2 }
+    sortMoves = planBagAlphaSort({
+        slot = 2, capacity = 2,
+        slots = { [1] = apple, [2] = zebra },
+    }, 'pack', 'type')
+    assert_eq(sortMoves[1].fromCmd, 'in pack2 2', 'type sort moves 1H Slashing before Potion')
+    assert_eq(sortMoves[1].toCmd, 'in pack2 1', 'type sort destination is first slot')
 end
 
 -- ============================================================================

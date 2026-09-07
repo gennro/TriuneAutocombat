@@ -298,6 +298,7 @@ local state = {
     bankLastSync = 'Never',
     statusMsg = 'System Ready.',
     pendingAction = nil, -- Table: { type = '...', ... }
+    combineAllActive = false,
     dragSource = nil,
     itemDefs = {},
     tableCache = {
@@ -387,6 +388,99 @@ function invLogic.classifyItem(itemData)
     return 'Misc'
 end
 
+function invLogic.formatAugs(item)
+    if not item or type(item.augs) ~= 'table' or #item.augs == 0 then
+        return ''
+    end
+    local names = {}
+    for _, a in ipairs(item.augs) do
+        if type(a) == 'table' and a.name and a.name ~= '' then
+            table.insert(names, a.name)
+        elseif type(a) == 'string' and a ~= '' then
+            table.insert(names, a)
+        end
+    end
+    return table.concat(names, ', ')
+end
+
+function invLogic.parseAugs(value)
+    if type(value) == 'table' then
+        return value
+    end
+    if type(value) ~= 'string' or value == '' then
+        return {}
+    end
+    local list = {}
+    local i = 0
+    for name in string.gmatch(value, '[^|]+') do
+        i = i + 1
+        table.insert(list, { slot = i, name = name })
+    end
+    return list
+end
+
+function invLogic.planBagAlphaSort(bag, packKind, mode)
+    if not bag or (bag.capacity or 0) < 2 then return {} end
+    local function cmd(sub)
+        if packKind == 'bank' then
+            return string.format('in bank%d %d', bag.slot, sub)
+        end
+        return string.format('in pack%d %d', bag.slot, sub)
+    end
+
+    local layout = {}
+    local items = {}
+    for s = 1, bag.capacity do
+        local it = bag.slots and bag.slots[s]
+        if it then
+            layout[s] = it
+            table.insert(items, it)
+        else
+            layout[s] = false
+        end
+    end
+    if #items < 2 then return {} end
+
+    table.sort(items, function(a, b)
+        if mode == 'type' then
+            local ta = string.lower(tostring(a.type or a.category or ''))
+            local tb = string.lower(tostring(b.type or b.category or ''))
+            if ta ~= tb then return ta < tb end
+        end
+        local na = string.lower(tostring(a.name or ''))
+        local nb = string.lower(tostring(b.name or ''))
+        if na == nb then
+            return (tonumber(a.subSlot) or 0) < (tonumber(b.subSlot) or 0)
+        end
+        return na < nb
+    end)
+
+    local moves = {}
+    for dest = 1, #items do
+        local wanted = items[dest]
+        local src = nil
+        for s = 1, bag.capacity do
+            if layout[s] == wanted then
+                src = s
+                break
+            end
+        end
+        if src and src ~= dest then
+            local destOccupied = layout[dest] and true or false
+            table.insert(moves, {
+                fromCmd = cmd(src),
+                toCmd = cmd(dest),
+                completeSwap = destOccupied,
+            })
+            layout[src], layout[dest] = layout[dest], layout[src]
+            if not destOccupied then
+                layout[src] = false
+            end
+        end
+    end
+    return moves
+end
+
 function invLogic.matchesFilter(item, searchStr, locFilter, catFilter, flags)
     if not item then return false end
 
@@ -420,12 +514,25 @@ function invLogic.matchesFilter(item, searchStr, locFilter, catFilter, flags)
         local hayType = string.lower(item.type or '')
         local hayClicky = string.lower(item.clicky or '')
         local hayCat = string.lower(item.category or '')
+        local hayAugs = ''
+        if type(item.augs) == 'table' then
+            local parts = {}
+            for _, a in ipairs(item.augs) do
+                if type(a) == 'table' then
+                    table.insert(parts, tostring(a.name or ''))
+                elseif type(a) == 'string' then
+                    table.insert(parts, a)
+                end
+            end
+            hayAugs = string.lower(table.concat(parts, ', '))
+        end
 
         if not (string.find(hayName, needle, 1, true) or
                 string.find(hayLoc, needle, 1, true) or
                 string.find(hayType, needle, 1, true) or
                 string.find(hayClicky, needle, 1, true) or
-                string.find(hayCat, needle, 1, true)) then
+                string.find(hayCat, needle, 1, true) or
+                string.find(hayAugs, needle, 1, true)) then
             return false
         end
     end
@@ -471,6 +578,35 @@ function invLogic.findDuplicateStacks(items)
 
     table.sort(consolidations, function(a, b) return a.name < b.name end)
     return consolidations
+end
+
+function invLogic.findNextCombineMove(item)
+    if not item or not item.stacks or #item.stacks < 2 then return nil end
+    local stacks = {}
+    for _, s in ipairs(item.stacks) do
+        table.insert(stacks, s)
+    end
+    table.sort(stacks, function(a, b) return (a.count or 1) > (b.count or 1) end)
+    local stackSize = item.stackSize or 1
+    for i = 2, #stacks do
+        local src = stacks[i]
+        local srcCount = src.count or 1
+        local srcCmd = tostring(src.notifyCmd or '')
+        if srcCount < stackSize and srcCmd ~= '' then
+            for j = 1, i - 1 do
+                local dst = stacks[j]
+                local dstCount = dst.count or 1
+                local dstCmd = tostring(dst.notifyCmd or '')
+                if dstCount < stackSize
+                    and dstCmd ~= ''
+                    and dstCmd ~= srcCmd
+                    and dst.location == src.location then
+                    return { fromCmd = srcCmd, toCmd = dstCmd, from = src, to = dst }
+                end
+            end
+        end
+    end
+    return nil
 end
 
 function invLogic.findHeaviestItems(items, limit)
@@ -531,7 +667,8 @@ function scanner.saveBankCache(bankItems, bankContainers, force)
     f:write('-- Triune Inventory Bank Cache\n')
     f:write(string.format('return {\n  syncTime = %q,\n  items = {\n', os.date('%Y-%m-%d %H:%M:%S')))
     for _, it in ipairs(bankItems) do
-        f:write(string.format('    { id=%d, icon=%d, name=%q, location=%q, slotIndex=%d, subSlot=%s, displayLocation=%q, notifyCmd=%q, count=%d, stackable=%s, stackSize=%d, weight=%.2f, value=%d, type=%q, category=%q, lore=%s, nodrop=%s, tradeskill=%s, clicky=%q, ac=%d, hp=%d, mana=%d, damage=%d, delay=%d },\n',
+        local augStr = invLogic.formatAugs(it):gsub(', ', '|')
+        f:write(string.format('    { id=%d, icon=%d, name=%q, location=%q, slotIndex=%d, subSlot=%s, displayLocation=%q, notifyCmd=%q, count=%d, stackable=%s, stackSize=%d, weight=%.2f, value=%d, type=%q, category=%q, lore=%s, nodrop=%s, tradeskill=%s, clicky=%q, ac=%d, hp=%d, mana=%d, damage=%d, delay=%d, augs=%q },\n',
             it.id or 0,
             it.icon or 0,
             it.name or 'Unknown',
@@ -555,7 +692,8 @@ function scanner.saveBankCache(bankItems, bankContainers, force)
             it.hp or 0,
             it.mana or 0,
             it.damage or 0,
-            it.delay or 0
+            it.delay or 0,
+            augStr
         ))
     end
     f:write('  },\n  containers = {\n')
@@ -579,6 +717,7 @@ function scanner.loadBankCache()
         lastSavedBankCount = #(data.items or {})
         if data.items then
             for _, it in ipairs(data.items) do
+                it.augs = invLogic.parseAugs(it.augs)
                 if it.id and it.id > 0 and not state.itemDefs[it.id] then
                     state.itemDefs[it.id] = it
                 end
@@ -612,7 +751,7 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         local isNoDrop = false
         local isTS = false
         local clickySpell = nil
-        local acVal, hpVal, manaVal, dmgVal, dlyVal = 0, 0, 0, 0, 0
+        local acVal, hpVal, manaVal, dmgVal, dlyVal, augTypeVal = 0, 0, 0, 0, 0, 0
 
         pcall(function()
             name = tostring(itemObj.Name() or 'Unknown')
@@ -641,6 +780,7 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
             manaVal = tonumber(itemObj.Mana()) or 0
             dmgVal = tonumber(itemObj.Damage()) or 0
             dlyVal = tonumber(itemObj.ItemDelay()) or 0
+            augTypeVal = tonumber(itemObj.AugType()) or 0
         end)
 
         def = {
@@ -662,6 +802,7 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
             mana = manaVal,
             damage = dmgVal,
             delay = dlyVal,
+            augType = augTypeVal,
         }
         def.category = invLogic.classifyItem(def)
         state.itemDefs[itemId] = def
@@ -708,6 +849,31 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         notifyCmd = ''
     end
 
+    local augs = {}
+    pcall(function()
+        for i = 1, 6 do
+            local slot = itemObj.AugSlot(i)
+            if slot then
+                local n = nil
+                pcall(function()
+                    if slot.Empty and slot.Empty() then return end
+                    n = slot.Name()
+                end)
+                if (not n or n == '') and slot.Item then
+                    pcall(function()
+                        local augItem = slot.Item
+                        if augItem and augItem() then
+                            n = augItem.Name()
+                        end
+                    end)
+                end
+                if n and n ~= '' then
+                    table.insert(augs, { slot = i, name = tostring(n) })
+                end
+            end
+        end
+    end)
+
     return {
         id = def.id,
         icon = def.icon,
@@ -736,6 +902,8 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         mana = def.mana,
         damage = def.damage,
         delay = def.delay,
+        augType = def.augType,
+        augs = augs,
     }
 end
 
@@ -1168,6 +1336,11 @@ function UI.drawTooltip(it)
         ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Effect: " .. it.clicky)
     end
 
+    local augText = invLogic.formatAugs(it)
+    if augText ~= '' then
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Augs: " .. augText)
+    end
+
     local tags = {}
     if it.lore then table.insert(tags, "LORE") end
     if it.nodrop then table.insert(tags, "NO TRADE") end
@@ -1245,14 +1418,13 @@ function UI.drawItemsTable()
     ImGui.Dummy(0, 2)
 
     local tableFlags = ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg + ImGuiTableFlags.Resizable + ImGuiTableFlags.ScrollY + ImGuiTableFlags.Sortable
-    if ImGui.BeginTable("InvItemsTable", 8, tableFlags, ImVec2(0, 0)) then
+    if ImGui.BeginTable("InvItemsTable", 7, tableFlags, ImVec2(0, 0)) then
         ImGui.TableSetupColumn("Location##colLoc", ImGuiTableColumnFlags.WidthFixed, 110)
         ImGui.TableSetupColumn("Item Name##colName", ImGuiTableColumnFlags.WidthStretch)
-        ImGui.TableSetupColumn("Category##colCat", ImGuiTableColumnFlags.WidthFixed, 80)
+        ImGui.TableSetupColumn("Augs##colAugs", ImGuiTableColumnFlags.WidthStretch)
         ImGui.TableSetupColumn("Qty##colQty", ImGuiTableColumnFlags.WidthFixed, 55)
         ImGui.TableSetupColumn("Wt##colWt", ImGuiTableColumnFlags.WidthFixed, 45)
         ImGui.TableSetupColumn("Value##colVal", ImGuiTableColumnFlags.WidthFixed, 75)
-        ImGui.TableSetupColumn("Flags##colFlags", ImGuiTableColumnFlags.WidthFixed, 85)
         ImGui.TableSetupColumn("Actions##colAct", ImGuiTableColumnFlags.WidthFixed, 140)
         ImGui.TableHeadersRow()
 
@@ -1282,9 +1454,14 @@ function UI.drawItemsTable()
                 UI.drawTooltip(it)
             end
 
-            -- Col 2: Category
+            -- Col 2: Augs
             ImGui.TableSetColumnIndex(2)
-            ImGui.TextDisabled(it.category or 'Misc')
+            local augText = invLogic.formatAugs(it)
+            if augText ~= '' then
+                ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], augText)
+            else
+                ImGui.TextDisabled("-")
+            end
 
             -- Col 3: Qty
             ImGui.TableSetColumnIndex(3)
@@ -1302,17 +1479,8 @@ function UI.drawItemsTable()
             ImGui.TableSetColumnIndex(5)
             ImGui.TextDisabled(invLogic.formatMoney(it.value or 0))
 
-            -- Col 6: Flags
+            -- Col 6: Actions
             ImGui.TableSetColumnIndex(6)
-            local fStr = ""
-            if it.lore then fStr = fStr .. "L " end
-            if it.nodrop then fStr = fStr .. "ND " end
-            if it.tradeskill then fStr = fStr .. "TS " end
-            if it.clicky then fStr = fStr .. "CLK" end
-            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], fStr)
-
-            -- Col 7: Actions
-            ImGui.TableSetColumnIndex(7)
             if ImGui.SmallButton("Inspect##ins" .. idx) then
                 state.pendingAction = { type = 'inspect', item = it }
             end
@@ -1351,6 +1519,51 @@ function UI.drawItemsTable()
 
         ImGui.EndTable()
     end
+end
+
+local function optimisticTakeSlot(bag, s)
+    if not bag or not bag.slots then return nil end
+    local it = bag.slots[s]
+    if not it then return nil end
+    bag.slots[s] = nil
+    bag.used = math.max(0, (bag.used or 1) - 1)
+    state.tableCache.dirty = true
+    return it
+end
+
+local function findContainerBag(location, slotIndex)
+    local list = (location == 'BANK') and state.containers.bank or state.containers.inventory
+    for _, bag in ipairs(list or {}) do
+        if bag.slot == slotIndex then return bag end
+    end
+    return nil
+end
+
+local function optimisticSwapToSlot(destBag, destSlot, destItem, destCmd)
+    local src = state.dragSource
+    if not src or not src.slotIndex or not src.subSlot then return end
+    local srcBag = findContainerBag(src.location, src.slotIndex)
+    if not srcBag or not srcBag.slots then return end
+    srcBag.slots[src.subSlot] = destItem
+    if destItem then
+        destItem.slotIndex = src.slotIndex
+        destItem.subSlot = src.subSlot
+        destItem.location = src.location
+        destItem.notifyCmd = src.notifyCmd
+    else
+        srcBag.used = math.max(0, (srcBag.used or 1) - 1)
+        destBag.used = (destBag.used or 0) + 1
+    end
+    destBag.slots[destSlot] = src
+    src.slotIndex = destBag.slot
+    src.subSlot = destSlot
+    src.notifyCmd = destCmd
+    if destCmd:find('bank', 1, true) then
+        src.location = 'BANK'
+    else
+        src.location = 'INVENTORY'
+    end
+    state.tableCache.dirty = true
 end
 
 function UI.drawVisualizer()
@@ -1407,6 +1620,23 @@ function UI.drawVisualizer()
             if ImGui.SmallButton("Open##openBag" .. bIdx) then
                 state.pendingAction = { type = 'open_bag', slot = bag.slot }
             end
+            ImGui.SameLine()
+            local canSort = (bag.used or 0) >= 2
+            if not canSort then ImGui.BeginDisabled() end
+            if ImGui.SmallButton("Sort A-Z##sortBag" .. bIdx) then
+                local moves = invLogic.planBagAlphaSort(bag, 'pack')
+                if #moves > 0 then
+                    state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
+                end
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton("Sort Type##sortBagType" .. bIdx) then
+                local moves = invLogic.planBagAlphaSort(bag, 'pack', 'type')
+                if #moves > 0 then
+                    state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
+                end
+            end
+            if not canSort then ImGui.EndDisabled() end
 
             -- Slot grid (up to 10 columns)
             local cols = math.min(bag.capacity, 10)
@@ -1495,6 +1725,7 @@ function UI.drawVisualizer()
                             fromCmd = tostring(fromCmd or '')
                             local toCmd = it and it.notifyCmd or string.format('in pack%d %d', bag.slot, s)
                             if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
+                                optimisticSwapToSlot(bag, s, it, toCmd)
                                 state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd }
                             end
                             state.dragSource = nil
@@ -1509,6 +1740,7 @@ function UI.drawVisualizer()
                             local targetCmd = it and it.notifyCmd or string.format('in pack%d %d', bag.slot, s)
                             state.pendingAction = { type = 'pickup', notifyCmd = targetCmd }
                         elseif it then
+                            optimisticTakeSlot(bag, s)
                             state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                         end
                     elseif rClicked and it and not state.pendingAction then
@@ -1546,6 +1778,25 @@ function UI.drawVisualizer()
                 ImGui.TextColored(barCol[1], barCol[2], barCol[3], barCol[4], string.format("Bank %d: %s", bag.slot, bag.name))
                 ImGui.SameLine()
                 ImGui.TextDisabled(string.format("(%d/%d slots)", bag.used, bag.capacity))
+                if state.bankLive then
+                    ImGui.SameLine()
+                    local canSortBank = (bag.used or 0) >= 2
+                    if not canSortBank then ImGui.BeginDisabled() end
+                    if ImGui.SmallButton("Sort A-Z##sortBank" .. tostring(bag.slot)) then
+                        local moves = invLogic.planBagAlphaSort(bag, 'bank')
+                        if #moves > 0 then
+                            state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
+                        end
+                    end
+                    ImGui.SameLine()
+                    if ImGui.SmallButton("Sort Type##sortBankType" .. tostring(bag.slot)) then
+                        local moves = invLogic.planBagAlphaSort(bag, 'bank', 'type')
+                        if #moves > 0 then
+                            state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
+                        end
+                    end
+                    if not canSortBank then ImGui.EndDisabled() end
+                end
 
                 local cols = math.min(bag.capacity, 10)
                 if cols > 0 then
@@ -1638,6 +1889,7 @@ function UI.drawVisualizer()
                                     fromCmd = tostring(fromCmd or '')
                                     local toCmd = it and it.notifyCmd or string.format('in bank%d %d', bag.slot, s)
                                     if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
+                                        optimisticSwapToSlot(bag, s, it, toCmd)
                                         state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd }
                                     end
                                     state.dragSource = nil
@@ -1654,6 +1906,7 @@ function UI.drawVisualizer()
                                     local targetCmd = it and it.notifyCmd or string.format('in bank%d %d', bag.slot, s)
                                     state.pendingAction = { type = 'pickup', notifyCmd = targetCmd }
                                 elseif it then
+                                    optimisticTakeSlot(bag, s)
                                     state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                                 end
                             elseif it then
@@ -1698,6 +1951,16 @@ function UI.drawOrganizer()
     if ImGui.Button("Auto-Inventory Cursor##orgAutoInv", 160, 24) then
         state.pendingAction = { type = 'autoinv' }
     end
+    local dups = invLogic.findDuplicateStacks(state.items)
+    ImGui.SameLine()
+    if #dups == 0 then ImGui.BeginDisabled() end
+    if ImGui.Button("Combine All Stacks##orgCombineAll", 160, 24) then
+        if #dups > 0 then
+            state.combineAllActive = true
+            state.pendingAction = { type = 'combine_stacks' }
+        end
+    end
+    if #dups == 0 then ImGui.EndDisabled() end
 
     ImGui.Dummy(0, 10)
 
@@ -1705,16 +1968,15 @@ function UI.drawOrganizer()
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "FRAGMENTED STACKS (STACK CONSOLIDATION OPPORTUNITIES)")
     ImGui.TextDisabled("Items below are stackable and have multiple partial stacks scattered across your bags or bank.")
     ImGui.Dummy(0, 2)
-
-    local dups = invLogic.findDuplicateStacks(state.items)
     if #dups == 0 then
         ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "✓ All stackable items are fully consolidated! No fragmented stacks found.")
     else
-        if ImGui.BeginTable("DupStacksTable", 4, ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg) then
+        if ImGui.BeginTable("DupStacksTable", 5, ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg) then
             ImGui.TableSetupColumn("Item Name", ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn("Stacks", ImGuiTableColumnFlags.WidthFixed, 60)
             ImGui.TableSetupColumn("Total Count", ImGuiTableColumnFlags.WidthFixed, 90)
             ImGui.TableSetupColumn("Locations & Partial Counts", ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 70)
             ImGui.TableHeadersRow()
 
             for _, d in ipairs(dups) do
@@ -1728,6 +1990,15 @@ function UI.drawOrganizer()
                     table.insert(locParts, string.format("%s (%dx)", st.displayLocation, st.count or 1))
                 end
                 ImGui.TextDisabled(table.concat(locParts, ", "))
+                ImGui.TableSetColumnIndex(4)
+                if (d.numStacks or #d.stacks) > 1 then
+                    if ImGui.SmallButton("Combine##" .. tostring(d.id or d.name)) then
+                        state.combineAllActive = false
+                        state.pendingAction = { type = 'combine_stacks', item = d }
+                    end
+                else
+                    ImGui.TextDisabled("-")
+                end
             end
             ImGui.EndTable()
         end
@@ -1873,6 +2144,38 @@ scanner.scanAll()
 
 print(string.format('\ag[Triune Inventory] v%s\ax initialized. Close window or /lua stop triune_inv to exit.', VERSION))
 
+local function quantityWndOpen()
+    local open = false
+    pcall(function()
+        local w = mq.TLO.Window('QuantityWnd')
+        open = w and w() and w.Open()
+    end)
+    return open
+end
+
+local function acceptQuantityWnd()
+    if not quantityWndOpen() then
+        mq.delay(15)
+        if not quantityWndOpen() then return end
+    end
+    pcall(function()
+        mq.cmd('/notify QuantityWnd QTYW_Accept_Button leftmouseup')
+    end)
+    mq.delay(20)
+    if quantityWndOpen() then
+        pcall(function() mq.cmd('/yes') end)
+        mq.delay(20)
+    end
+end
+
+local function notifyLeft(cmd)
+    if not cmd or cmd == '' then return end
+    pcall(function()
+        mq.cmdf('/nomodkey /itemnotify %s leftmouseup', cmd)
+    end)
+    acceptQuantityWnd()
+end
+
 -- Main loop (coroutine thread: yields via mq.delay)
 while isRunning do
     -- Process queued action
@@ -1905,26 +2208,94 @@ while isRunning do
                 mq.cmd('/keypress close_inv_bags')
             end)
         elseif actType == 'pickup' and act.notifyCmd then
-            local cmd = tostring(act.notifyCmd)
-            if cmd ~= '' then
-                pcall(function()
-                    mq.cmdf('/nomodkey /itemnotify %s leftmouseup', cmd)
-                end)
-            end
+            notifyLeft(tostring(act.notifyCmd))
         elseif actType == 'move' and act.fromCmd and act.toCmd then
-            pcall(function()
-                mq.cmdf('/nomodkey /itemnotify %s leftmouseup', act.fromCmd)
-            end)
-            mq.delay(120)
-            pcall(function()
-                mq.cmdf('/nomodkey /itemnotify %s leftmouseup', act.toCmd)
-            end)
+            notifyLeft(act.fromCmd)
+            mq.delay(40)
+            notifyLeft(act.toCmd)
         elseif actType == 'autoinv' then
             pcall(function()
                 mq.cmd('/autoinventory')
             end)
+        elseif actType == 'combine_stacks' then
+            local dups = invLogic.findDuplicateStacks(state.items)
+            local item = nil
+            if act.item then
+                local key = tostring(act.item.id or act.item.name)
+                for _, d in ipairs(dups) do
+                    if tostring(d.id or d.name) == key then
+                        item = d
+                        break
+                    end
+                end
+            end
+            if not item and state.combineAllActive and #dups > 0 then
+                item = dups[1]
+            end
+
+            local move = invLogic.findNextCombineMove(item)
+            if not move and state.combineAllActive then
+                for _, d in ipairs(dups) do
+                    move = invLogic.findNextCombineMove(d)
+                    if move then
+                        item = d
+                        break
+                    end
+                end
+            end
+
+            if move then
+                notifyLeft(move.fromCmd)
+                mq.delay(80)
+                notifyLeft(move.toCmd)
+                mq.delay(80)
+                local hasCursor = false
+                pcall(function()
+                    hasCursor = mq.TLO.Cursor() and (mq.TLO.Cursor.ID() or 0) > 0
+                end)
+                if hasCursor then
+                    pcall(function() mq.cmd('/autoinventory') end)
+                    mq.delay(100)
+                end
+                if state.combineAllActive then
+                    state.pendingAction = { type = 'combine_stacks' }
+                else
+                    state.pendingAction = { type = 'combine_stacks', item = item }
+                end
+            else
+                state.combineAllActive = false
+            end
+        elseif actType == 'sort_bag' then
+            local moves = act.moves or {}
+            local idx = tonumber(act.index) or 1
+            local step = moves[idx]
+            if step and step.fromCmd and step.toCmd then
+                notifyLeft(step.fromCmd)
+                mq.delay(80)
+                notifyLeft(step.toCmd)
+                if step.completeSwap then
+                    mq.delay(80)
+                    notifyLeft(step.fromCmd)
+                end
+                mq.delay(80)
+                local hasCursor = false
+                pcall(function()
+                    hasCursor = mq.TLO.Cursor() and (mq.TLO.Cursor.ID() or 0) > 0
+                end)
+                if hasCursor then
+                    pcall(function() mq.cmd('/autoinventory') end)
+                    mq.delay(100)
+                end
+                if idx < #moves then
+                    state.pendingAction = { type = 'sort_bag', moves = moves, index = idx + 1 }
+                end
+            end
         end
-        mq.delay(100)
+        if actType == 'pickup' or actType == 'move' then
+            mq.delay(20)
+        else
+            mq.delay(100)
+        end
         scanner.scanAll()
     end
 

@@ -5917,6 +5917,13 @@ function UI.drawHeaderBar()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Toggles the standalone popout Cooldown & Ability Monitor window.')
     end
+    ImGui.SameLine()
+    if ImGui.Button('Inv Manager##hdrInv') then
+        mq.cmd('/lua run triune_inv')
+    end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Launches the standalone Triune Inventory & Bank Manager.')
+    end
 
     if not DATA_OK then
         accent(WARN,
