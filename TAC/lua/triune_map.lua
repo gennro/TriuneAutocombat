@@ -117,9 +117,11 @@ local CON_COLOR_MAP = {
     ['GRAY']       = { r = 0.60, g = 0.60, b = 0.60, badge = '[GRY]' },
 }
 
+local UNKNOWN_CON_STYLE = { r = 0.70, g = 0.70, b = 0.70, badge = '[UNK]' }
+
 local function getConStyle(conStr)
     local upper = string.upper(tostring(conStr or ''))
-    return CON_COLOR_MAP[upper] or { r = 0.70, g = 0.70, b = 0.70, badge = '[UNK]' }
+    return CON_COLOR_MAP[upper] or UNKNOWN_CON_STYLE
 end
 
 local CON_OPTIONS = {
@@ -184,8 +186,22 @@ local state = {
     currentZoneName     = 'Unknown Zone',
     statusMsg           = 'Ready',
     lastScanTime        = 0,
-    scanIntervalMs      = 300,
+    scanIntervalMs      = 500,
     lastZoneCheckTime   = 0,
+
+    -- Per-tick cached gameplay fields (refreshed once per main-loop pass to
+    -- cut per-frame TLO marshal churn in the render callback). prev/interpAt
+    -- drive the smooth player-marker interpolation between cache writes.
+    lastPlayer          = { x = 0, y = 0, z = 0, heading = 0, updatedAt = 0, prevX = 0, prevY = 0, prevZ = 0, interpAt = 0, interpSeeded = false },
+    lastTargetId        = 0,
+
+    -- Throttled Line-of-Sight cache for NPCs, [id] = { los = bool, ts = time }
+    losCache            = {},
+
+    -- Incremental spawn-scan progress (work is spread across frames so the
+    -- render callback never stalls behind a large synchronous scan pass).
+    scanChunk           = { phase = 'idle', fetchIdx = 1, fetchTotal = 0, losIdx = 1, losSpent = 0 },
+
     -- Maps Directory & Subfolder Management
     baseMapsDirectory   = nil,
     activeMapsDirectory = nil,
@@ -241,11 +257,12 @@ local state = {
         isLoaded            = false,
         lastSyncTime        = 0,
         charName            = '',
+        loadoutPath         = nil, -- resolved triune_loadout.lua path
         campLoc             = nil, -- { x = 0, y = 0, z = 0 }
-        campRadius          = 50,
-        combatRadius        = 100,
-        hunterRadius        = 250,
-        pullRadius          = 200,
+        campRadius          = 100,
+        hunterRadius        = 1500,
+        hunterAnchor        = nil, -- { x = 0, y = 0, z = 0 } hunter/puller combat anchor
+        hunterCombatRadius  = 250,
         useWaypoints        = false,
         waypoints           = {},
         waypointRadius      = 20,
@@ -292,7 +309,7 @@ local ctrl = {
     showPullRadius      = true,
     showWaypoints       = true,
     showHazards         = true,
-    customSearchRadius  = 200,
+    showAnchor          = true,
 
     -- Layer Visibility Toggles (Layer 0, 1, 2, 3, Labels)
     layer0              = true,
@@ -340,7 +357,6 @@ local mapData = {
 local spawns = {
     allNPCs             = {},
     filteredNPCs        = {},
-    allPCs              = {},
     groupMembers        = {},
     totalCount          = 0,
 }
@@ -353,6 +369,7 @@ local navState = {
     queueHead           = 1,  -- O(1) dequeue pointer
     queueSet            = {}, -- lookup set to prevent queue duplicates
     batchSize           = 4,
+    cacheFreshMs        = 15000,
     lastQueueProcessTime = 0,
 }
 
@@ -490,7 +507,7 @@ local function saveConfig(silent)
         showPullRadius      = ctrl.showPullRadius,
         showWaypoints       = ctrl.showWaypoints,
         showHazards         = ctrl.showHazards,
-        customSearchRadius  = ctrl.customSearchRadius,
+        showAnchor          = ctrl.showAnchor,
 
         -- Map Layers 0-3
         layer0              = ctrl.layer0,
@@ -575,7 +592,7 @@ local function loadConfig()
         if cData.showPullRadius ~= nil then ctrl.showPullRadius = (cData.showPullRadius == true) end
         if cData.showWaypoints ~= nil then ctrl.showWaypoints = (cData.showWaypoints == true) end
         if cData.showHazards ~= nil then ctrl.showHazards = (cData.showHazards == true) end
-        if cData.customSearchRadius ~= nil then ctrl.customSearchRadius = tonumber(cData.customSearchRadius) or 200 end
+        if cData.showAnchor ~= nil then ctrl.showAnchor = (cData.showAnchor == true) end
 
         if cData.layer0 ~= nil then ctrl.layer0 = (cData.layer0 == true) end
         if cData.layer1 ~= nil then ctrl.layer1 = (cData.layer1 == true) end
@@ -1519,21 +1536,121 @@ end
 -- ============================================================================
 -- TRIUNE LOADOUT & COMBAT RADIUS / WAYPOINTS SYNC
 -- ============================================================================
-local function syncTriuneLoadout()
-    local cfgDir = mq.configDir
-    if not cfgDir then return end
+local TRIUNE_LOADOUT_CANDIDATES = nil
 
-    local fn = loadfile(cfgDir .. '/triune_loadout.lua')
+-- Per-character loadout tag/name. Mirrors triune.lua's loadout writing so this
+-- client syncs ONLY its own character's file (only one client can write it).
+local function triuneLoadoutTag()
+    local serverName = ''
+    pcall(function() serverName = mq.TLO.EverQuest.ServerName() or '' end)
+    if not serverName or serverName == '' then
+        pcall(function() serverName = mq.TLO.Zone.Server() or '' end)
+    end
+    local charName = ''
+    pcall(function() charName = mq.TLO.Me.CleanName() or '' end)
+    return (tostring(serverName or '') .. '_' .. tostring(charName or 'unknown')):gsub('[^%w%_-]', '_')
+end
+
+local function triuneLoadoutBaseName()
+    return 'triune_loadout_' .. triuneLoadoutTag() .. '.lua'
+end
+
+local function triuneLoadoutCandidates()
+    if TRIUNE_LOADOUT_CANDIDATES then return TRIUNE_LOADOUT_CANDIDATES end
+    local lfn = triuneLoadoutBaseName()
+    local legacy = 'triune_loadout.lua'
+    local candidates = {}
+    local function add(p)
+        candidates[#candidates + 1] = p
+    end
+    if mq.configDir then
+        add(mq.configDir .. '/' .. lfn)
+        add(mq.configDir .. '/' .. legacy)
+        add(mq.configDir .. '/../TAC/config/' .. lfn)
+        add(mq.configDir .. '/../TAC/config/' .. legacy)
+        add(mq.configDir .. '/../../TAC/config/' .. lfn)
+        add(mq.configDir .. '/../../TAC/config/' .. legacy)
+    end
+    if mq.luaDir then
+        add(mq.luaDir .. '/' .. lfn)
+        add(mq.luaDir .. '/' .. legacy)
+        add(mq.luaDir .. '/../config/' .. lfn)
+        add(mq.luaDir .. '/../config/' .. legacy)
+    end
+    add('TAC/config/' .. lfn)
+    add('TAC/config/' .. legacy)
+    add('config/' .. lfn)
+    add('config/' .. legacy)
+    add(lfn)
+    add(legacy)
+    TRIUNE_LOADOUT_CANDIDATES = candidates
+    return candidates
+end
+
+local function findTriuneLoadoutFile()
+    for _, path in ipairs(triuneLoadoutCandidates()) do
+        local f = io.open(path, 'r')
+        if f then
+            f:close()
+            return path
+        end
+    end
+    return nil
+end
+
+local function syncTriuneLoadout(verbose)
+    local td = state.triuneData
+
+    -- Prefer THIS character's own loadout file (per-character filenames keep
+    -- multibox clients from reading/writing each other's data). Falls back to
+    -- the previously-resolved path, then to multi-path discovery + legacy name.
+    local loadoutPath = td.loadoutPath
+    local fn = nil
+
+    local perCharPath = mq.configDir and (mq.configDir .. '/' .. triuneLoadoutBaseName()) or nil
+    if perCharPath then
+        local pf = io.open(perCharPath, 'r')
+        if pf then
+            pf:close()
+            loadoutPath = perCharPath
+            fn = loadfile(perCharPath)
+        end
+    end
+
+    if not fn and loadoutPath then
+        fn = loadfile(loadoutPath)
+    end
+
     if not fn then
-        state.triuneData.isLoaded = false
+        local found = findTriuneLoadoutFile()
+        local f2 = found and loadfile(found)
+        if f2 then
+            loadoutPath = found
+            fn = f2
+        end
+    end
+
+    if not fn then
+        td.isLoaded = false
+        td.loadoutPath = nil
+        if verbose then
+            print('\ar[Triune Map]\ax triune_loadout.lua not found. Searched: ' .. table.concat(triuneLoadoutCandidates(), ' | '))
+            print('\ar[Triune Map]\ax Run /lua run triune once on this character to create it, then Sync again.')
+        end
         return
     end
 
     local ok, allData = pcall(fn)
     if not ok or type(allData) ~= 'table' then
-        state.triuneData.isLoaded = false
+        -- Keep the previous state (overlays stay up) and retry next sync
+        -- rather than blanking out on a transient mid-write read.
+        if verbose then
+            print('\ar[Triune Map]\ax triune_loadout.lua failed to parse: ' .. tostring(ok and '' or tostring(allData)))
+        end
         return
     end
+
+    td.loadoutPath = loadoutPath
 
     local myName = nil
     local okName, nameVal = pcall(function() return mq.TLO.Me.CleanName() end)
@@ -1542,21 +1659,14 @@ local function syncTriuneLoadout()
     local charData = myName and allData[myName]
     local charCtrl = (type(charData) == 'table' and type(charData.control) == 'table') and charData.control or {}
 
-    local td = state.triuneData
     td.charName = myName or 'Unknown'
     td.isLoaded = true
     td.lastSyncTime = mq.gettime()
 
     -- Camp & Combat Radii
-    td.campRadius          = tonumber(charCtrl.camp_radius or 50) or 50
-    td.combatRadius        = tonumber(charCtrl.combat_radius or 100) or 100
-    td.hunterRadius        = tonumber(charCtrl.hunter_radius or 250) or 250
-    td.pullRadius          = tonumber(charCtrl.pull_radius or 200) or 200
+    td.campRadius          = tonumber(charCtrl.camp_radius or 100) or 100
+    td.hunterRadius        = tonumber(charCtrl.hunter_radius or 1500) or 1500
     td.waypointScanRadius  = tonumber(charCtrl.waypoint_scan_radius or 100) or 100
-
-    if charCtrl.pull_radius or charCtrl.hunter_radius or charCtrl.combat_radius then
-        ctrl.customSearchRadius = tonumber(charCtrl.pull_radius or charCtrl.hunter_radius or charCtrl.combat_radius) or 200
-    end
 
     -- Camp Location
     if type(charCtrl.camp_loc) == 'table' and charCtrl.camp_loc.x and charCtrl.camp_loc.y then
@@ -1567,6 +1677,18 @@ local function syncTriuneLoadout()
         }
     else
         td.campLoc = nil
+    end
+
+    -- Hunter / Puller Combat Anchor (roam point)
+    td.hunterCombatRadius = tonumber(charCtrl.hunter_combat_radius or 250) or 250
+    if type(charCtrl.hunter_combat_loc) == 'table' and charCtrl.hunter_combat_loc.x and charCtrl.hunter_combat_loc.y then
+        td.hunterAnchor = {
+            x = tonumber(charCtrl.hunter_combat_loc.x) or 0,
+            y = tonumber(charCtrl.hunter_combat_loc.y) or 0,
+            z = tonumber(charCtrl.hunter_combat_loc.z) or 0,
+        }
+    else
+        td.hunterAnchor = nil
     end
 
     -- Waypoints: Character-level vs Zone-level
@@ -1625,6 +1747,14 @@ local function syncTriuneLoadout()
         end
     end
     td.zoneHazards = hazards
+
+    if verbose then
+        print(string.format('\ag[Triune Map]\ax Triune data synced from %s -- WPs: %d | Camp: %s | Anchor: %s | Hazards: %d',
+            tostring(loadoutPath), #td.waypoints,
+            ((td.campLoc and td.campLoc.x) and 'set' or 'none'),
+            ((td.hunterAnchor and td.hunterAnchor.x) and 'set' or 'none'),
+            #td.zoneHazards))
+    end
 end
 
 local Z_FILTER_MODE_OPTIONS = {
@@ -1809,180 +1939,230 @@ end
 -- ============================================================================
 -- SPAWN SCANNER & FILTER ENGINE
 -- ============================================================================
-local function scanZoneSpawns()
-    local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
-    if okZone and zoneName then state.currentZoneName = zoneName end
+-- Chunk sizes for the incremental spawn scan. Keeping these small means each
+-- main-loop pass does only a bounded amount of work, so the ImGui draw
+-- callback stays responsive between mq.delay yields.
+local SCAN_FETCH_CHUNK = 12
+local SCAN_LOS_CHUNK   = 4
+local SCAN_LOS_BUDGET  = 16
 
-    navState.meshLoaded = navMeshLoaded()
+-- Player marker interpolation window. The main loop rewrites lastPlayer once per
+-- pass (~40ms cadence); the draw callback lerps the marker/pan toward the new
+-- position over this window so movement stays fluid even though the cache writes
+-- at 25Hz.
+local PLAYER_INTERP_MS = 40
 
-    local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
-    navState.navActive = (okNavAct and isNavAct) or false
+-- Incremental spawn scanner. Processes a bounded slice of the (up to 120-mob)
+-- fetch plus a slice of the throttled LoS refresh per call, returning nonzero
+-- when the cycle is still in progress and nil when it is finished. On init and
+-- zone changes the caller passes true (forceComplete) to do everything in one
+-- synchronous pass so the map has data immediately.
+local function scanZoneSpawns(forceComplete)
+    local cs = state.scanChunk
 
-    local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
-    if not okCount or not count or count <= 0 then
+    -- A fresh cycle begins when idle or when a force-complete is requested.
+    if forceComplete or cs.phase == 'idle' then
+        navState.meshLoaded = navMeshLoaded()
+        local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
+        navState.navActive = (okNavAct and isNavAct) or false
+
+        local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
+        if okZone and zoneName then state.currentZoneName = zoneName end
+
+        local myX, myY, myZ = 0, 0, 0
+        local okMeX, pX = pcall(function() return mq.TLO.Me.X() end)
+        local okMeY, pY = pcall(function() return mq.TLO.Me.Y() end)
+        local okMeZ, pZ = pcall(function() return mq.TLO.Me.Z() end)
+        if okMeX and pX then myX = pX end
+        if okMeY and pY then myY = pY end
+        if okMeZ and pZ then myZ = pZ end
+        updateSmartFloorBounds(myX, myY, myZ)
+
+        local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
+        if not okCount or not count or count <= 0 then
+            if forceComplete or cs.phase == 'idle' then
+                spawns.allNPCs = {}
+                spawns.filteredNPCs = {}
+                spawns.groupMembers = {}
+                spawns.totalCount = 0
+            end
+            cs.phase = 'idle'
+            return nil
+        end
+        spawns.totalCount = count
+        cs.fetchTotal = math.min(count, 120)
+        cs.fetchIdx = 1
+        cs.losIdx = 1
+        cs.losSpent = 0
         spawns.allNPCs = {}
-        spawns.filteredNPCs = {}
-        spawns.totalCount = 0
-        return
+        cs.phase = 'fetch'
     end
 
-    spawns.totalCount = count
     local nowTime = mq.gettime()
-    local maxFetch = math.min(count, 120)
-    local newNpcList = {}
 
-    local myX, myY, myZ = 0, 0, 0
-    local okMeX, pX = pcall(function() return mq.TLO.Me.X() end)
-    local okMeY, pY = pcall(function() return mq.TLO.Me.Y() end)
-    local okMeZ, pZ = pcall(function() return mq.TLO.Me.Z() end)
-    if okMeX and pX then myX = pX end
-    if okMeY and pY then myY = pY end
-    if okMeZ and pZ then myZ = pZ end
+    -- -- FETCH PHASE: pull a bounded slice of NearestSpawn entries.
+    if cs.phase == 'fetch' then
+        local chunkEnd = forceComplete and cs.fetchTotal or math.min(cs.fetchTotal, cs.fetchIdx + SCAN_FETCH_CHUNK - 1)
+        while cs.fetchIdx <= chunkEnd do
+            local i = cs.fetchIdx
+            local okSpawn, s = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
+            if okSpawn and s and s() then
+                local okData, sId, cleanName, level, classShort, conColor, distance, sx, sy, sz, pctHPs, hate = pcall(function()
+                    local dead = s.Dead()
+                    if dead then return nil end
+                    return s.ID(), s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.Distance3D(), s.X(), s.Y(), s.Z(), s.PctHPs(), s.Aggressive()
+                end)
+                if okData and sId and sId > 0 then
+                    local losCacheEntry = state.losCache[sId]
+                    spawns.allNPCs[#spawns.allNPCs + 1] = {
+                        id          = sId,
+                        cleanName   = cleanName or 'Unknown NPC',
+                        level       = level or 0,
+                        class       = classShort or 'WAR',
+                        conColor    = string.upper(tostring(conColor or 'GREY')),
+                        distance    = distance or 99999,
+                        lineOfSight = (losCacheEntry and losCacheEntry.los) or false,
+                        x           = sx or 0,
+                        y           = sy or 0,
+                        z           = sz or 0,
+                        pctHPs      = pctHPs or 100,
+                        isAggro     = hate or false,
+                    }
+                end
+            end
+            cs.fetchIdx = cs.fetchIdx + 1
+        end
+        if cs.fetchIdx <= cs.fetchTotal then
+            return 1  -- more fetch slices remain
+        end
+        cs.phase = 'los'
+        -- Fall through into the LoS phase for this same pass.
+    end
 
-    updateSmartFloorBounds(myX, myY, myZ)
-    local sf = state.smartFloor
+    -- -- LOS PHASE: resolve a small throttled subset of stale raycasts,
+    -- capped at the per-cycle budget (matches prior per-scan behavior).
+    if cs.phase == 'los' then
+        local list = spawns.allNPCs
+        local budgetEnd = cs.losSpent + (forceComplete and SCAN_LOS_BUDGET or SCAN_LOS_CHUNK)
+        if budgetEnd > SCAN_LOS_BUDGET then budgetEnd = SCAN_LOS_BUDGET end
+        while cs.losSpent < budgetEnd and cs.losIdx <= #list do
+            local mob = list[cs.losIdx]
+            cs.losIdx = cs.losIdx + 1
+            local needRefresh = forceComplete
+            if not forceComplete then
+                local losE = state.losCache[mob.id]
+                needRefresh = (not losE) or ((nowTime - losE.ts) > 5000)
+            end
+            if needRefresh then
+                local losVal = false
+                local okSp, spawnObj = pcall(function() return mq.TLO.Spawn(mob.id) end)
+                if okSp and spawnObj and spawnObj() then
+                    local okLos, los = pcall(function() return spawnObj.LineOfSight() end)
+                    losVal = (okLos and los) or false
+                end
+                state.losCache[mob.id] = { los = losVal, ts = nowTime }
+                mob.lineOfSight = losVal
+                cs.losSpent = cs.losSpent + 1
+            end
+        end
+        if cs.losSpent < SCAN_LOS_BUDGET and cs.losIdx <= #list then
+            return 1  -- budget still open and slices remain -- keep draining
+        end
+        cs.phase = 'finalize'
+    end
 
-    for i = 1, maxFetch do
-        local okSpawn, s = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
-        if okSpawn and s and s() then
-            local okData, sId, cleanName, level, classShort, conColor, distance, lineOfSight, sx, sy, sz, pctHPs, hate = pcall(function()
-                local dead = s.Dead()
-                if dead then return nil end
-                return s.ID(), s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.Distance3D(), s.LineOfSight(), s.X(), s.Y(), s.Z(), s.PctHPs(), s.Aggressive()
-            end)
+    -- -- FINALIZE PHASE: filtering, sorting and group snapshot (in-memory/
+    -- -- small; cheap enough to run in one pass).
+    do
+        local newNpcList = spawns.allNPCs
+        local filtered = {}
+        local searchLower = string.lower(state.searchText or '')
+        local filterIdx = state.conFilterIndex
+        local sf = state.smartFloor
 
-            if okData and sId and sId > 0 then
-                local mobEntry = {
-                    id          = sId,
-                    cleanName   = cleanName or 'Unknown NPC',
-                    level       = level or 0,
-                    class       = classShort or 'WAR',
-                    conColor    = string.upper(tostring(conColor or 'GREY')),
-                    distance    = distance or 99999,
-                    lineOfSight = lineOfSight or false,
-                    x           = sx or 0,
-                    y           = sy or 0,
-                    z           = sz or 0,
-                    pctHPs      = pctHPs or 100,
-                    isAggro     = hate or false,
-                }
-                newNpcList[#newNpcList + 1] = mobEntry
+        for _, mob in ipairs(newNpcList) do
+            local keep = true
+            if searchLower ~= '' then
+                local nameMatch = string.lower(mob.cleanName):find(searchLower, 1, true)
+                local idMatch = tostring(mob.id):find(searchLower, 1, true)
+                if not nameMatch and not idMatch then keep = false end
+            end
+            if keep and filterIdx > 1 then
+                local con = mob.conColor
+                if filterIdx == 2 and con ~= 'RED' and con ~= 'DARK RED' then keep = false
+                elseif filterIdx == 3 and con ~= 'YELLOW' then keep = false
+                elseif filterIdx == 4 and con ~= 'WHITE' then keep = false
+                elseif filterIdx == 5 and con ~= 'BLUE' then keep = false
+                elseif filterIdx == 6 and con ~= 'LIGHT BLUE' then keep = false
+                elseif filterIdx == 7 and con ~= 'GREEN' then keep = false
+                elseif filterIdx == 8 and con ~= 'GREY' and con ~= 'GRAY' then keep = false
+                end
+            end
+            if keep and (mob.level < state.minLevel or mob.level > state.maxLevel) then keep = false end
+            if keep and (mob.distance > state.maxDistance) then keep = false end
+            if keep and state.losOnly and not mob.lineOfSight then keep = false end
+            if keep and ctrl.zFilterMode ~= 3 then
+                if mob.z < sf.minZ or mob.z > sf.maxZ then keep = false end
+            end
 
-                -- Enqueue for background navmesh validation if not in cache
-                local cached = navState.cache[sId]
-                if not cached or (nowTime - cached.checkedAt) > 6000 then
-                    if not navState.queueSet[sId] then
-                        navState.checkQueue[#navState.checkQueue + 1] = sId
-                        navState.queueSet[sId] = true
+            local wantOnMap = keep
+            if keep and state.pathableOnly then
+                local c = navState.cache[mob.id]
+                if not c or not c.hasPath then keep = false end
+            end
+            if keep then filtered[#filtered + 1] = mob end
+
+            if wantOnMap and state.viewMode ~= 'ATLAS' then
+                local cached = navState.cache[mob.id]
+                if not cached or (nowTime - cached.checkedAt) > navState.cacheFreshMs then
+                    if not navState.queueSet[mob.id] then
+                        navState.checkQueue[#navState.checkQueue + 1] = mob.id
+                        navState.queueSet[mob.id] = true
                     end
                 end
             end
         end
-    end
 
-    spawns.allNPCs = newNpcList
-
-    -- Apply Filters
-    local filtered = {}
-    local searchLower = string.lower(state.searchText or '')
-    local filterIdx = state.conFilterIndex
-
-    for _, mob in ipairs(newNpcList) do
-        local keep = true
-
-        -- Search text filter
-        if searchLower ~= '' then
-            local nameMatch = string.lower(mob.cleanName):find(searchLower, 1, true)
-            local idMatch = tostring(mob.id):find(searchLower, 1, true)
-            if not nameMatch and not idMatch then keep = false end
-        end
-
-        -- Consideration filter
-        if keep and filterIdx > 1 then
-            local con = mob.conColor
-            if filterIdx == 2 and con ~= 'RED' and con ~= 'DARK RED' then keep = false
-            elseif filterIdx == 3 and con ~= 'YELLOW' then keep = false
-            elseif filterIdx == 4 and con ~= 'WHITE' then keep = false
-            elseif filterIdx == 5 and con ~= 'BLUE' then keep = false
-            elseif filterIdx == 6 and con ~= 'LIGHT BLUE' then keep = false
-            elseif filterIdx == 7 and con ~= 'GREEN' then keep = false
-            elseif filterIdx == 8 and con ~= 'GREY' and con ~= 'GRAY' then keep = false
+        local sIdx = state.sortIndex
+        table.sort(filtered, function(a, b)
+            if sIdx == 1 then return a.distance < b.distance
+            elseif sIdx == 2 then return a.distance > b.distance
+            elseif sIdx == 3 then
+                if a.level == b.level then return a.distance < b.distance end
+                return a.level > b.level
+            elseif sIdx == 4 then
+                if a.level == b.level then return a.distance < b.distance end
+                return a.level < b.level
+            elseif sIdx == 5 then
+                return a.cleanName:lower() < b.cleanName:lower()
             end
-        end
+            return a.distance < b.distance
+        end)
+        spawns.filteredNPCs = filtered
 
-        -- Level filter
-        if keep and (mob.level < state.minLevel or mob.level > state.maxLevel) then
-            keep = false
-        end
-
-        -- Distance filter
-        if keep and (mob.distance > state.maxDistance) then
-            keep = false
-        end
-
-        -- Line of Sight filter
-        if keep and state.losOnly and not mob.lineOfSight then
-            keep = false
-        end
-
-        -- Z-Height & Smart Auto-Z filter
-        if keep and ctrl.zFilterMode ~= 3 then
-            if mob.z < sf.minZ or mob.z > sf.maxZ then
-                keep = false
-            end
-        end
-
-        -- Pathable only filter
-        if keep and state.pathableOnly then
-            local c = navState.cache[mob.id]
-            if not c or not c.hasPath then keep = false end
-        end
-
-        if keep then
-            filtered[#filtered + 1] = mob
-        end
-    end
-
-    -- Sort filtered list
-    local sIdx = state.sortIndex
-    table.sort(filtered, function(a, b)
-        if sIdx == 1 then return a.distance < b.distance
-        elseif sIdx == 2 then return a.distance > b.distance
-        elseif sIdx == 3 then
-            if a.level == b.level then return a.distance < b.distance end
-            return a.level > b.level
-        elseif sIdx == 4 then
-            if a.level == b.level then return a.distance < b.distance end
-            return a.level < b.level
-        elseif sIdx == 5 then
-            return a.cleanName:lower() < b.cleanName:lower()
-        end
-        return a.distance < b.distance
-    end)
-
-    spawns.filteredNPCs = filtered
-
-    -- Scan Group Members
-    local groupList = {}
-    local okGrp, grpCount = pcall(function() return mq.TLO.Group.Members() end)
-    if okGrp and grpCount and grpCount > 0 then
-        for g = 1, grpCount do
-            local okMem, mem = pcall(function() return mq.TLO.Group.Member(g) end)
-            if okMem and mem and mem() then
-                local okMData, mName, mX, mY, mZ, mHp = pcall(function()
-                    return mem.CleanName(), mem.X(), mem.Y(), mem.Z(), mem.PctHPs()
-                end)
-                if okMData and mX and mY then
-                    groupList[#groupList + 1] = {
-                        name = mName or ('Group ' .. g),
-                        x = mX, y = mY, z = mZ or 0,
-                        pctHPs = mHp or 100,
-                    }
+        local groupList = {}
+        local okGrp, grpCount = pcall(function() return mq.TLO.Group.Members() end)
+        if okGrp and grpCount and grpCount > 0 then
+            for g = 1, grpCount do
+                local okMem, mem = pcall(function() return mq.TLO.Group.Member(g) end)
+                if okMem and mem and mem() then
+                    local okMData, mName, mX, mY, mZ, mHp = pcall(function()
+                        return mem.CleanName(), mem.X(), mem.Y(), mem.Z(), mem.PctHPs()
+                    end)
+                    if okMData and mX and mY then
+                        groupList[#groupList + 1] = {
+                            name = mName or ('Group ' .. g),
+                            x = mX, y = mY, z = mZ or 0,
+                            pctHPs = mHp or 100,
+                        }
+                    end
                 end
             end
         end
+        spawns.groupMembers = groupList
+        cs.phase = 'idle'
     end
-    spawns.groupMembers = groupList
+    return nil
 end
 
 -- ============================================================================
@@ -2003,16 +2183,16 @@ local function processNavBatch()
 
         if mobId and mobId > 0 then
             navState.queueSet[mobId] = nil
+            -- Only ask for path existence here; the expensive PathLength is
+            -- resolved lazily on hover (see hover tooltip) and cached.
             local okPath, hasPath = pcall(function()
                 return mq.TLO.Navigation.PathExists(string.format('id %d', mobId))()
             end)
-            local okLen, pathLen = pcall(function()
-                return mq.TLO.Navigation.PathLength(string.format('id %d', mobId))()
-            end)
 
+            local cached = navState.cache[mobId]
             navState.cache[mobId] = {
                 hasPath   = (okPath and hasPath) or false,
-                length    = (okLen and pathLen) or 0,
+                length    = (cached and cached.length) or 0,
                 checkedAt = now,
             }
             count = count + 1
@@ -2021,6 +2201,16 @@ local function processNavBatch()
 
     if navState.queueHead > #navState.checkQueue then
         navState.checkQueue = {}
+        navState.queueHead = 1
+    elseif navState.queueHead > 128 then
+        -- Compact to avoid indefinite nil-hole growth in checkQueue
+        local compact = {}
+        for i = navState.queueHead, #navState.checkQueue do
+            if navState.checkQueue[i] and navState.checkQueue[i] > 0 then
+                compact[#compact + 1] = navState.checkQueue[i]
+            end
+        end
+        navState.checkQueue = compact
         navState.queueHead = 1
     end
 end
@@ -2056,6 +2246,143 @@ end
 -- ============================================================================
 -- 2D MAP CANVAS RENDERING
 -- ============================================================================
+
+local triuneOverlaysErrorAt = 0
+
+local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, playerY)
+    local td = state.triuneData
+
+    -- Draw Triune Patrol Waypoints & Connecting Paths
+    if ctrl.showWaypoints and td.waypoints and #td.waypoints > 0 then
+        local wps = td.waypoints
+        -- Draw Connecting Path Lines
+        local wpLineCol = ImGui.GetColorU32(0.20, 0.85, 0.95, 0.75)
+        for i = 1, #wps - 1 do
+            local wsx1, wsy1 = worldToScreen(wps[i].x, wps[i].y, cX, cY, availW, availH)
+            local wsx2, wsy2 = worldToScreen(wps[i + 1].x, wps[i + 1].y, cX, cY, availW, availH)
+            drawList:AddLine(ImVec2(wsx1, wsy1), ImVec2(wsx2, wsy2), ImGui.GetColorU32(0, 0, 0, 0.6), 3.0)
+            drawList:AddLine(ImVec2(wsx1, wsy1), ImVec2(wsx2, wsy2), wpLineCol, 1.8)
+        end
+        if td.waypointLoop and #wps > 1 then
+            local wsxN, wsyN = worldToScreen(wps[#wps].x, wps[#wps].y, cX, cY, availW, availH)
+            local wsx1, wsy1 = worldToScreen(wps[1].x, wps[1].y, cX, cY, availW, availH)
+            drawList:AddLine(ImVec2(wsxN, wsyN), ImVec2(wsx1, wsy1), ImGui.GetColorU32(0, 0, 0, 0.6), 2.5)
+            drawList:AddLine(ImVec2(wsxN, wsyN), ImVec2(wsx1, wsy1), ImGui.GetColorU32(0.35, 0.90, 0.75, 0.55), 1.5)
+        end
+
+        -- Draw Waypoint Nodes, Arrival Radius & Scan Radius
+        for i, wp in ipairs(wps) do
+            local wsx, wsy = worldToScreen(wp.x, wp.y, cX, cY, availW, availH)
+            if wsx >= cX - 100 and wsx <= cX + availW + 100 and wsy >= cY - 100 and wsy <= cY + availH + 100 then
+                local isCurrentWp = (i == (td.currentWaypointIdx or 1))
+
+                -- Waypoint Scan / Search Radius (e.g. 100yd)
+                if ctrl.showSearchRadius then
+                    local scanRadScreen = (td.waypointScanRadius or 100) * viewport.zoom
+                    if scanRadScreen > 4.0 then
+                        local scanCol = isCurrentWp and ImGui.GetColorU32(1.0, 0.85, 0.20, 0.30) or ImGui.GetColorU32(0.20, 0.75, 0.90, 0.15)
+                        drawList:AddCircle(ImVec2(wsx, wsy), scanRadScreen, scanCol, 0, 1.2)
+                    end
+                end
+
+                -- Waypoint Arrival Radius Circle (e.g. 20yd)
+                local wpRadScreen = (td.waypointRadius or 20) * viewport.zoom
+                if wpRadScreen > 3.0 then
+                    drawList:AddCircle(ImVec2(wsx, wsy), wpRadScreen, ImGui.GetColorU32(0.2, 0.85, 0.95, 0.35), 0, 1.0)
+                end
+
+                if isCurrentWp then
+                    local wpPulse = math.sin(os.clock() * 5.0) * 2.0
+                    drawList:AddCircle(ImVec2(wsx, wsy), 8.0 + wpPulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.8), 0, 1.8)
+                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 5.5, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0), 0)
+                else
+                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0.15, 0.75, 0.90, 0.9), 0)
+                    drawList:AddCircle(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                end
+
+                -- Label text
+                local wpLabel = string.format('#%d %s', i, wp.name)
+                drawList:AddText(ImVec2(wsx + 7, wsy - 7), ImGui.GetColorU32(0, 0, 0, 0.9), wpLabel)
+                drawList:AddText(ImVec2(wsx + 6, wsy - 8), ImGui.GetColorU32(0.4, 0.9, 1.0, 0.95), wpLabel)
+            end
+        end
+    end
+
+    -- Draw Triune Camp & Combat Radius
+    if ctrl.showCampRadius and td.campLoc and td.campLoc.x and td.campLoc.y then
+        local csx, csy = worldToScreen(td.campLoc.x, td.campLoc.y, cX, cY, availW, availH)
+        local campRadScreen = (td.campRadius or 50) * viewport.zoom
+
+        if campRadScreen > 2.0 then
+            drawList:AddCircleFilled(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.10, 0.70, 0.85, 0.08), 0)
+            drawList:AddCircle(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.20, 0.85, 1.00, 0.60), 0, 1.8)
+
+            -- Camp Anchor center pin
+            drawList:AddCircleFilled(ImVec2(csx, csy), 5.0, ImGui.GetColorU32(0.20, 0.90, 1.00, 1.0), 0)
+            drawList:AddCircle(ImVec2(csx, csy), 8.0, ImGui.GetColorU32(1.0, 1.0, 1.0, 0.8), 0, 1.5)
+
+            local campText = string.format('Camp (Radius: %dyd)', td.campRadius or 50)
+            drawList:AddText(ImVec2(csx + 10, csy - 8), ImGui.GetColorU32(0, 0, 0, 0.9), campText)
+            drawList:AddText(ImVec2(csx + 9, csy - 9), ImGui.GetColorU32(0.3, 0.9, 1.0, 1.0), campText)
+        end
+    end
+
+    -- Draw Hunter / Puller Combat Anchor (Roam Point)
+    if ctrl.showAnchor and td.hunterAnchor and td.hunterAnchor.x and td.hunterAnchor.y then
+        local hax, hay = worldToScreen(td.hunterAnchor.x, td.hunterAnchor.y, cX, cY, availW, availH)
+        local haRadScreen = (td.hunterCombatRadius or 250) * viewport.zoom
+
+        if haRadScreen > 2.0 then
+            drawList:AddCircleFilled(ImVec2(hax, hay), haRadScreen, ImGui.GetColorU32(0.85, 0.30, 0.90, 0.05), 0)
+            drawList:AddCircle(ImVec2(hax, hay), haRadScreen, ImGui.GetColorU32(0.85, 0.40, 0.95, 0.55), 0, 1.4)
+        end
+
+        drawList:AddCircleFilled(ImVec2(hax, hay), 6.0, ImGui.GetColorU32(0.90, 0.35, 1.00, 1.0), 0)
+        drawList:AddCircle(ImVec2(hax, hay), 9.0, ImGui.GetColorU32(1.0, 0.9, 1.0, 0.85), 0, 1.5)
+
+        local haText = string.format('Anchor (Roam R: %dyd)', td.hunterCombatRadius or 250)
+        drawList:AddText(ImVec2(hax + 10, hay - 8), ImGui.GetColorU32(0, 0, 0, 0.9), haText)
+        drawList:AddText(ImVec2(hax + 9, hay - 9), ImGui.GetColorU32(0.9, 0.5, 1.0, 1.0), haText)
+    end
+
+    -- Draw Search / Pull / Roam Radius Circle (anchored at the player so it is
+    -- always visible around the toon, independent of where camp/anchor sit)
+    if ctrl.showSearchRadius or ctrl.showPullRadius then
+        local anchorX, anchorY = playerX or 0, playerY or 0
+
+        if anchorX and anchorY then
+            local asx, asy = worldToScreen(anchorX, anchorY, cX, cY, availW, availH)
+            local searchYards = td.hunterRadius or 1500
+            local searchRadScreen = searchYards * viewport.zoom
+
+            if searchRadScreen > 2.0 then
+                -- Subtle amber fill + ring
+                drawList:AddCircleFilled(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.80, 0.20, 0.03), 0)
+                drawList:AddCircle(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.75, 0.20, 0.65), 0, 1.5)
+
+                local labelText = string.format('Search / Pull / Roam Radius (%dyd)', searchYards)
+                drawList:AddText(ImVec2(asx - 45, asy - searchRadScreen - 14), ImGui.GetColorU32(0, 0, 0, 0.95), labelText)
+                drawList:AddText(ImVec2(asx - 46, asy - searchRadScreen - 15), ImGui.GetColorU32(1.0, 0.85, 0.3, 1.0), labelText)
+            end
+        end
+    end
+
+    -- Draw Triune Hazard Avoidance Hotspots (Stuck Memory)
+    if ctrl.showHazards and td.zoneHazards and #td.zoneHazards > 0 then
+        for _, hz in ipairs(td.zoneHazards) do
+            local hsx, hsy = worldToScreen(hz.x, hz.y, cX, cY, availW, availH)
+            if hsx >= cX - 40 and hsx <= cX + availW + 40 and hsy >= cY - 40 and hsy <= cY + availH + 40 then
+                local hzRadScreen = math.max(12.0 * viewport.zoom, 7.0)
+                drawList:AddCircleFilled(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.20, 0.20, 0.20), 0)
+                drawList:AddCircle(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.25, 0.25, 0.75), 0, 1.5)
+                local hzText = string.format('Hazard (%d hits)', hz.hits or 1)
+                drawList:AddText(ImVec2(hsx + 8, hsy - 6), ImGui.GetColorU32(0, 0, 0, 0.9), hzText)
+                drawList:AddText(ImVec2(hsx + 7, hsy - 7), ImGui.GetColorU32(1.0, 0.4, 0.4, 0.9), hzText)
+            end
+        end
+    end
+end
+
 local function DrawMapCanvas(availW, availH)
     local sf = state.smartFloor
 
@@ -2213,14 +2540,34 @@ local function DrawMapCanvas(availW, availH)
         end
     end
 
-    -- Player altitude for Z-filtering & Smart Auto-Z
+    -- Player position for Z-filtering, Smart Auto-Z, camera follow & the player
+    -- marker. Reads the per-pass cache and interpolates between the previous
+    -- and current cached positions so the marker and camera-pan stay fluid
+    -- between the ~25Hz cache writes. Falling back to live TLO reads before the
+    -- first refresh completes.
     local playerX, playerY, playerZ = 0, 0, 0
-    local okPX, pXVal = pcall(function() return mq.TLO.Me.X() end)
-    local okPY, pYVal = pcall(function() return mq.TLO.Me.Y() end)
-    local okPZ, pZVal = pcall(function() return mq.TLO.Me.Z() end)
-    if okPX and pXVal then playerX = pXVal end
-    if okPY and pYVal then playerY = pYVal end
-    if okPZ and pZVal then playerZ = pZVal end
+    local lp = state.lastPlayer
+    if lp.updatedAt > 0 then
+        local frac = 1
+        if lp.interpSeeded and lp.interpAt > 0 then
+            frac = (mq.gettime() - lp.interpAt) / PLAYER_INTERP_MS
+            if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+        end
+        if frac >= 1 then
+            playerX, playerY, playerZ = lp.x, lp.y, lp.z
+        else
+            playerX = lp.prevX + (lp.x - lp.prevX) * frac
+            playerY = lp.prevY + (lp.y - lp.prevY) * frac
+            playerZ = lp.prevZ + (lp.z - lp.prevZ) * frac
+        end
+    else
+        local okPX, pXVal = pcall(function() return mq.TLO.Me.X() end)
+        local okPY, pYVal = pcall(function() return mq.TLO.Me.Y() end)
+        local okPZ, pZVal = pcall(function() return mq.TLO.Me.Z() end)
+        if okPX and pXVal then playerX = pXVal end
+        if okPY and pYVal then playerY = pYVal end
+        if okPZ and pZVal then playerZ = pZVal end
+    end
 
     updateSmartFloorBounds(playerX, playerY, playerZ)
     sf = state.smartFloor
@@ -2268,7 +2615,16 @@ local function DrawMapCanvas(availW, availH)
                     if isVis and alphaMult > 0.01 then
                         local sx1, sy1 = worldToScreen(seg.x1, seg.y1, cX, cY, availW, availH)
                         local sx2, sy2 = worldToScreen(seg.x2, seg.y2, cX, cY, availW, availH)
-                        local col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
+                        local col
+                        if alphaMult >= 0.999 then
+                            -- Lazily precompute the opaque color once per segment,
+                            -- then cache it so steady-state frames skip the
+                            -- GetColorU32 marshal entirely.
+                            if not seg.colBase then seg.colBase = ImGui.GetColorU32(seg.r, seg.g, seg.b, 1.0) end
+                            col = seg.colBase
+                        else
+                            col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
+                        end
                         drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, lineThick)
                     end
                 end
@@ -2288,134 +2644,27 @@ local function DrawMapCanvas(availW, availH)
                 end
                 if isVis and alphaMult > 0.01 then
                     local sx, sy = worldToScreen(lb.x, lb.y, cX, cY, availW, availH)
-                    local col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.90 * alphaMult)
+                    local col
+                    if alphaMult >= 0.999 then
+                        if not lb.colBase90 then lb.colBase90 = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.90) end
+                        col = lb.colBase90
+                    else
+                        col = ImGui.GetColorU32(lb.r, lb.g, lb.b, 0.90 * alphaMult)
+                    end
                     drawList:AddText(ImVec2(sx, sy), col, lb.text)
                 end
             end
         end
     end
 
-    -- Draw Triune Patrol Waypoints & Connecting Paths
-    local td = state.triuneData
-    if ctrl.showWaypoints and td.waypoints and #td.waypoints > 0 then
-        local wps = td.waypoints
-        -- Draw Connecting Path Lines
-        local wpLineCol = ImGui.GetColorU32(0.20, 0.85, 0.95, 0.75)
-        for i = 1, #wps - 1 do
-            local wsx1, wsy1 = worldToScreen(wps[i].x, wps[i].y, cX, cY, availW, availH)
-            local wsx2, wsy2 = worldToScreen(wps[i + 1].x, wps[i + 1].y, cX, cY, availW, availH)
-            drawList:AddLine(ImVec2(wsx1, wsy1), ImVec2(wsx2, wsy2), ImGui.GetColorU32(0, 0, 0, 0.6), 3.0)
-            drawList:AddLine(ImVec2(wsx1, wsy1), ImVec2(wsx2, wsy2), wpLineCol, 1.8)
-        end
-        if td.waypointLoop and #wps > 1 then
-            local wsxN, wsyN = worldToScreen(wps[#wps].x, wps[#wps].y, cX, cY, availW, availH)
-            local wsx1, wsy1 = worldToScreen(wps[1].x, wps[1].y, cX, cY, availW, availH)
-            drawList:AddLine(ImVec2(wsxN, wsyN), ImVec2(wsx1, wsy1), ImGui.GetColorU32(0, 0, 0, 0.6), 2.5)
-            drawList:AddLine(ImVec2(wsxN, wsyN), ImVec2(wsx1, wsy1), ImGui.GetColorU32(0.35, 0.90, 0.75, 0.55), 1.5)
-        end
-
-        -- Draw Waypoint Nodes, Arrival Radius & Scan Radius
-        for i, wp in ipairs(wps) do
-            local wsx, wsy = worldToScreen(wp.x, wp.y, cX, cY, availW, availH)
-            if wsx >= cX - 100 and wsx <= cX + availW + 100 and wsy >= cY - 100 and wsy <= cY + availH + 100 then
-                local isCurrentWp = (i == (td.currentWaypointIdx or 1))
-
-                -- Waypoint Scan / Search Radius (e.g. 100yd)
-                if ctrl.showSearchRadius then
-                    local scanRadScreen = (td.waypointScanRadius or 100) * viewport.zoom
-                    if scanRadScreen > 4.0 then
-                        local scanCol = isCurrentWp and ImGui.GetColorU32(1.0, 0.85, 0.20, 0.30) or ImGui.GetColorU32(0.20, 0.75, 0.90, 0.15)
-                        drawList:AddCircle(ImVec2(wsx, wsy), scanRadScreen, scanCol, 0, 1.2)
-                    end
-                end
-
-                -- Waypoint Arrival Radius Circle (e.g. 20yd)
-                local wpRadScreen = (td.waypointRadius or 20) * viewport.zoom
-                if wpRadScreen > 3.0 then
-                    drawList:AddCircle(ImVec2(wsx, wsy), wpRadScreen, ImGui.GetColorU32(0.2, 0.85, 0.95, 0.35), 0, 1.0)
-                end
-
-                if isCurrentWp then
-                    local wpPulse = math.sin(os.clock() * 5.0) * 2.0
-                    drawList:AddCircle(ImVec2(wsx, wsy), 8.0 + wpPulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.8), 0, 1.8)
-                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 5.5, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0), 0)
-                else
-                    drawList:AddCircleFilled(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0.15, 0.75, 0.90, 0.9), 0)
-                    drawList:AddCircle(ImVec2(wsx, wsy), 4.5, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
-                end
-
-                -- Label text
-                local wpLabel = string.format('#%d %s', i, wp.name)
-                drawList:AddText(ImVec2(wsx + 7, wsy - 7), ImGui.GetColorU32(0, 0, 0, 0.9), wpLabel)
-                drawList:AddText(ImVec2(wsx + 6, wsy - 8), ImGui.GetColorU32(0.4, 0.9, 1.0, 0.95), wpLabel)
-            end
-        end
-    end
-
-    -- Draw Triune Camp & Combat Radius
-    if ctrl.showCampRadius and td.campLoc and td.campLoc.x and td.campLoc.y then
-        local csx, csy = worldToScreen(td.campLoc.x, td.campLoc.y, cX, cY, availW, availH)
-        local campRadScreen = (td.campRadius or 50) * viewport.zoom
-
-        if campRadScreen > 2.0 then
-            drawList:AddCircleFilled(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.10, 0.70, 0.85, 0.08), 0)
-            drawList:AddCircle(ImVec2(csx, csy), campRadScreen, ImGui.GetColorU32(0.20, 0.85, 1.00, 0.60), 0, 1.8)
-
-            -- Camp Anchor center pin
-            drawList:AddCircleFilled(ImVec2(csx, csy), 5.0, ImGui.GetColorU32(0.20, 0.90, 1.00, 1.0), 0)
-            drawList:AddCircle(ImVec2(csx, csy), 8.0, ImGui.GetColorU32(1.0, 1.0, 1.0, 0.8), 0, 1.5)
-
-            local campText = string.format('Camp (Radius: %dyd)', td.campRadius or 50)
-            drawList:AddText(ImVec2(csx + 10, csy - 8), ImGui.GetColorU32(0, 0, 0, 0.9), campText)
-            drawList:AddText(ImVec2(csx + 9, csy - 9), ImGui.GetColorU32(0.3, 0.9, 1.0, 1.0), campText)
-        end
-    end
-
-    -- Draw Search / Pull / Roam Radius Circle (Anchored to Camp if set, otherwise anchored to Player!)
-    if ctrl.showSearchRadius or ctrl.showPullRadius then
-        local anchorX, anchorY = nil, nil
-        local isCampAnchor = false
-
-        if td.campLoc and td.campLoc.x and td.campLoc.y then
-            anchorX, anchorY = td.campLoc.x, td.campLoc.y
-            isCampAnchor = true
-        else
-            local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
-            local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
-            if okMeX and okMeY and meX and meY then
-                anchorX, anchorY = meX, meY
-            end
-        end
-
-        if anchorX and anchorY then
-            local asx, asy = worldToScreen(anchorX, anchorY, cX, cY, availW, availH)
-            local searchYards = ctrl.customSearchRadius or td.pullRadius or td.hunterRadius or td.combatRadius or 200
-            local searchRadScreen = searchYards * viewport.zoom
-
-            if searchRadScreen > 2.0 then
-                -- Subtle amber fill + ring
-                drawList:AddCircleFilled(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.80, 0.20, 0.03), 0)
-                drawList:AddCircle(ImVec2(asx, asy), searchRadScreen, ImGui.GetColorU32(1.00, 0.75, 0.20, 0.65), 0, 1.5)
-
-                local labelText = isCampAnchor and string.format('Pull Radius (%dyd)', searchYards) or string.format('Search / Roam Radius (%dyd)', searchYards)
-                drawList:AddText(ImVec2(asx - 45, asy - searchRadScreen - 14), ImGui.GetColorU32(0, 0, 0, 0.95), labelText)
-                drawList:AddText(ImVec2(asx - 46, asy - searchRadScreen - 15), ImGui.GetColorU32(1.0, 0.85, 0.3, 1.0), labelText)
-            end
-        end
-    end
-
-    -- Draw Triune Hazard Avoidance Hotspots (Stuck Memory)
-    if ctrl.showHazards and td.zoneHazards and #td.zoneHazards > 0 then
-        for _, hz in ipairs(td.zoneHazards) do
-            local hsx, hsy = worldToScreen(hz.x, hz.y, cX, cY, availW, availH)
-            if hsx >= cX - 40 and hsx <= cX + availW + 40 and hsy >= cY - 40 and hsy <= cY + availH + 40 then
-                local hzRadScreen = math.max(12.0 * viewport.zoom, 7.0)
-                drawList:AddCircleFilled(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.20, 0.20, 0.20), 0)
-                drawList:AddCircle(ImVec2(hsx, hsy), hzRadScreen, ImGui.GetColorU32(0.95, 0.25, 0.25, 0.75), 0, 1.5)
-                local hzText = string.format('Hazard (%d hits)', hz.hits or 1)
-                drawList:AddText(ImVec2(hsx + 8, hsy - 6), ImGui.GetColorU32(0, 0, 0, 0.9), hzText)
-                drawList:AddText(ImVec2(hsx + 7, hsy - 7), ImGui.GetColorU32(1.0, 0.4, 0.4, 0.9), hzText)
-            end
+    -- Draw Triune Overlays (Waypoints, Camp/Pull/Anchor radii, Hazards) guarded
+    -- so a single bad overlay datum can never abort the rest of the canvas frame.
+    local okTriuneOv, triuneOvErr = pcall(drawTriuneOverlays, drawList, cX, cY, availW, availH, playerX, playerY)
+    if not okTriuneOv and triuneOvErr then
+        local nowTriEr = mq.gettime()
+        if (nowTriEr - triuneOverlaysErrorAt) >= 5000 then
+            triuneOverlaysErrorAt = nowTriEr
+            print('\ar[Triune Map]\ax Overlay draw error: ' .. tostring(triuneOvErr))
         end
     end
 
@@ -2426,7 +2675,7 @@ local function DrawMapCanvas(availW, availH)
         local px    = (poi.x ~= nil and poi.x) or 0
         local py    = (poi.y ~= nil and poi.y) or 0
         local pText = (poi.text ~= nil and poi.text) or 'Point of Interest'
-        local now   = mq.gettime()
+local now = mq.gettime()
 
         if (now - pTime) < 20000 then
             local psx, psy = worldToScreen(px, py, cX, cY, availW, availH)
@@ -2467,10 +2716,12 @@ local function DrawMapCanvas(availW, availH)
             end
         end
 
-        -- Current Target ID
-        local targetId = 0
-        local okTarg, tId = pcall(function() return mq.TLO.Target.ID() end)
-        if okTarg and tId then targetId = tId end
+        -- Current Target ID (from per-tick cache)
+        local targetId = state.lastTargetId
+        if targetId == 0 then
+            local okTarg, tId = pcall(function() return mq.TLO.Target.ID() end)
+            if okTarg and tId then targetId = tId end
+        end
 
         -- Draw NPCs and Process Click Hit-Testing
         local clickedMob = nil
@@ -2575,10 +2826,8 @@ local function DrawMapCanvas(availW, availH)
             end
         end
 
-        -- Query Real-Time Navigation Status
-        local isNavActive = false
-        local okNav, act = pcall(function() return mq.TLO.Navigation.Active() end)
-        if okNav and act then isNavActive = true end
+        -- Query Real-Time Navigation Status (cached from scan)
+        local isNavActive = navState.navActive and navState.meshLoaded or false
 
         -- Draw Active Destination / Waypoint Marker & Path Line
         local navRecentlyTriggered = state.activeNavCommandTime and ((mq.gettime() - state.activeNavCommandTime) < 5000)
@@ -2586,9 +2835,8 @@ local function DrawMapCanvas(availW, availH)
         local shouldDrawNav = ctrl.showNavLine and (isNavActive or navRecentlyTriggered or hasPendingNav or state.activeNavLoc ~= nil or (state.activeNavSpawnId and state.activeNavSpawnId > 0))
 
         if shouldDrawNav then
-            local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
-            local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
-            if okMeX and okMeY and meX and meY then
+            local meX, meY = playerX, playerY
+            if lp.updatedAt > 0 then
                 local pSx, pSy = worldToScreen(meX, meY, cX, cY, availW, availH)
                 local destX, destY = nil, nil
 
@@ -2643,11 +2891,10 @@ local function DrawMapCanvas(availW, availH)
         end
 
         -- Draw Player Marker (Arrow pointing in Heading direction)
-        local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
-        local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
-        local _, meHeading = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
+        local meX, meY = playerX, playerY
+        local meHeading = lp.heading
 
-        if okMeX and okMeY and meX and meY then
+        if lp.updatedAt > 0 then
             local psx, psy = worldToScreen(meX, meY, cX, cY, availW, availH)
 
             -- Auto-follow player
@@ -2952,12 +3199,40 @@ local function DrawMapCanvas(availW, availH)
 
     -- Hover Tooltip for NPC
     if hoveredMob then
-        local cNav = navState.cache[hoveredMob.id]
+        local hid = hoveredMob.id
+        local cNav = navState.cache[hid]
         local pathStr = 'Unchecked'
         if not navState.meshLoaded then
             pathStr = 'Mesh Not Loaded'
         elseif cNav then
+            -- Resolve the (expensive) exact path length on demand for the
+            -- hovered mob only, throttled to ~1 refresh/sec, then cache it.
+            local nowT = mq.gettime()
+            if cNav.length == 0 or (nowT - cNav.checkedAt) > 1000 then
+                local okLen, pathLen = pcall(function()
+                    return mq.TLO.Navigation.PathLength(string.format('id %d', hid))()
+                end)
+                if okLen and pathLen then
+                    cNav.length = pathLen
+                    cNav.checkedAt = nowT
+                end
+            end
             pathStr = cNav.hasPath and string.format('Valid Path (%.1f yds)', cNav.length) or 'NO PATH (Unreachable)'
+        end
+
+        -- Lazily refresh hovered mob's LoS so the tooltip stays accurate
+        local hoverLos = hoveredMob.lineOfSight
+        local hoverLosE = state.losCache[hid]
+        local loom = mq.gettime()
+        if not hoverLosE or (loom - hoverLosE.ts) > 5000 then
+            local losVal = false
+            local okSp, spawnObj = pcall(function() return mq.TLO.Spawn(hid) end)
+            if okSp and spawnObj and spawnObj() then
+                local okLos, los = pcall(function() return spawnObj.LineOfSight() end)
+                losVal = (okLos and los) or false
+            end
+            state.losCache[hid] = { los = losVal, ts = loom }
+            hoverLos = losVal
         end
 
         local tt = string.format(
@@ -2972,7 +3247,7 @@ local function DrawMapCanvas(availW, availH)
             hoveredMob.class,
             hoveredMob.conColor,
             hoveredMob.distance,
-            hoveredMob.lineOfSight and 'YES' or 'NO',
+            hoverLos and 'YES' or 'NO',
             math.abs(hoveredMob.z - playerZ),
             hoveredMob.pctHPs,
             pathStr
@@ -3464,7 +3739,6 @@ local function DrawNPCTrackerTab()
     local searchVal, searchChanged = ImGui.InputText('Search##TrackSearch', state.searchText)
     if searchChanged then
         state.searchText = searchVal
-        scanZoneSpawns()
     end
     ImGui.PopItemWidth()
 
@@ -3472,7 +3746,6 @@ local function DrawNPCTrackerTab()
         ImGui.SameLine()
         if ImGui.Button('X##ClearSearchBtn') then
             state.searchText = ''
-            scanZoneSpawns()
         end
     end
 
@@ -3481,7 +3754,6 @@ local function DrawNPCTrackerTab()
     local conIdx, conChanged = ImGui.Combo('Con##TrackCon', state.conFilterIndex, CON_OPTIONS)
     if conChanged then
         state.conFilterIndex = conIdx
-        scanZoneSpawns()
     end
     ImGui.PopItemWidth()
 
@@ -3490,7 +3762,6 @@ local function DrawNPCTrackerTab()
     local sortIdx, sortChanged = ImGui.Combo('Sort##TrackSort', state.sortIndex, SORT_OPTIONS)
     if sortChanged then
         state.sortIndex = sortIdx
-        scanZoneSpawns()
     end
     ImGui.PopItemWidth()
 
@@ -3498,14 +3769,12 @@ local function DrawNPCTrackerTab()
     local pathOnly, pathChanged = ImGui.Checkbox('Pathable Only##PathCheck', state.pathableOnly)
     if pathChanged then
         state.pathableOnly = pathOnly
-        scanZoneSpawns()
     end
 
     ImGui.SameLine()
     local losOnly, losChanged = ImGui.Checkbox('LoS Only##LoSCheck', state.losOnly)
     if losChanged then
         state.losOnly = losOnly
-        scanZoneSpawns()
     end
 
     ImGui.Separator()
@@ -3534,9 +3803,11 @@ local function DrawNPCTrackerTab()
         ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 140)
         ImGui.TableHeadersRow()
 
-        local currentTargetId = 0
-        local okTarg, targId = pcall(function() return mq.TLO.Target.ID() end)
-        if okTarg and targId then currentTargetId = targId end
+        local currentTargetId = state.lastTargetId
+        if currentTargetId == 0 then
+            local okTarg, targId = pcall(function() return mq.TLO.Target.ID() end)
+            if okTarg and targId then currentTargetId = targId end
+        end
 
         for idx, mob in ipairs(spawns.filteredNPCs) do
             ImGui.TableNextRow()
@@ -3805,6 +4076,14 @@ local function DrawSettingsTab()
     ImGui.PushItemWidth(220)
     local cmIdx, cmChanged = ImGui.Combo('Node Color Mode##ColorModeCombo', ctrl.colorModeIndex, COLOR_MODE_OPTIONS)
     if cmChanged then ctrl.colorModeIndex = cmIdx; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    ImGui.SameLine()
+    local scanVal, scanChanged = ImGui.SliderInt('Spawn Scan Interval (ms)##ScanIntervalSlider', state.scanIntervalMs, 250, 3000, '%d ms')
+    if scanChanged then
+        state.scanIntervalMs = scanVal
+        state.dirtySettings = true
+        state.dirtySettingsTime = mq.gettime()
+    end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'How often NPC positions/status are rescanned. Lower = fresher map, higher = lighter CPU load.') end
     ImGui.PopItemWidth()
 
     ImGui.Spacing()
@@ -3815,18 +4094,25 @@ local function DrawSettingsTab()
     if td.isLoaded then
         ImGui.TextColored(0.2, 0.95, 0.35, 1.0, string.format('Triune Status: Synchronized (%s)', td.charName))
         ImGui.SameLine()
-        ImGui.TextDisabled(string.format('| WPs: %d | Hazards: %d', #td.waypoints, #td.zoneHazards))
+        ImGui.TextDisabled(string.format('| WPs: %d | Hazards: %d | Anchor: %s', #td.waypoints, #td.zoneHazards,
+            ((td.hunterAnchor and td.hunterAnchor.x and td.hunterAnchor.y) and 'set' or 'none')))
+        if td.loadoutPath then
+            ImGui.TextDisabled(string.format('Source: %s', td.loadoutPath))
+        end
     else
-        ImGui.TextColored(1.0, 0.7, 0.2, 1.0, 'Triune Status: Loadout not yet detected (triune_loadout.lua)')
+        ImGui.TextColored(1.0, 0.7, 0.2, 1.0, 'Triune Status: Loadout not detected (triune_loadout.lua)')
     end
 
     ImGui.SameLine()
     if ImGui.Button('Sync Triune Data##SyncTriuneBtn') then
-        syncTriuneLoadout()
+        syncTriuneLoadout(true)
     end
 
     local ss, css = ImGui.Checkbox('Show Search / Roam Radius##ShowSearchRadiusCheck', ctrl.showSearchRadius)
     if css then ctrl.showSearchRadius = ss; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    ImGui.SameLine()
+    local sa, csa = ImGui.Checkbox('Show Anchor / Roam Point##ShowAnchorCheck', ctrl.showAnchor)
+    if csa then ctrl.showAnchor = sa; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local sc, csc = ImGui.Checkbox('Show Camp / Combat Radius##ShowCampRadiusCheck', ctrl.showCampRadius)
     if csc then ctrl.showCampRadius = sc; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
@@ -3836,11 +4122,6 @@ local function DrawSettingsTab()
     ImGui.SameLine()
     local sh, csh = ImGui.Checkbox('Show Navigation Hazard Hotspots##ShowHazardsCheck', ctrl.showHazards)
     if csh then ctrl.showHazards = sh; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
-
-    ImGui.PushItemWidth(250)
-    local srVal, srChanged = ImGui.SliderInt('Search / Pull Radius (yards)##SearchRadSlider', ctrl.customSearchRadius, 25, 600)
-    if srChanged then ctrl.customSearchRadius = srVal; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
-    ImGui.PopItemWidth()
 
     ImGui.Spacing()
     ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Multi-Level Z-Height & Smart Auto-Z')
@@ -4011,12 +4292,19 @@ local function DrawTriuneMapUI()
 
         ImGui.Separator()
 
-        -- Footer Status Bar
-        local okMeX, meX = pcall(function() return mq.TLO.Me.X() end)
-        local okMeY, meY = pcall(function() return mq.TLO.Me.Y() end)
-        local _, meZ     = pcall(function() return mq.TLO.Me.Z() end)
+        -- Footer Status Bar (from per-tick player cache)
+        local lp = state.lastPlayer
+        local meX, meY, meZ = lp.x, lp.y, lp.z
+        if lp.updatedAt == 0 then
+            local okMeX, vX = pcall(function() return mq.TLO.Me.X() end)
+            local okMeY, vY = pcall(function() return mq.TLO.Me.Y() end)
+            local okMeZ, vZ = pcall(function() return mq.TLO.Me.Z() end)
+            if okMeX and vX then meX = vX end
+            if okMeY and vY then meY = vY end
+            if okMeZ and vZ then meZ = vZ end
+        end
 
-        if okMeX and meX and okMeY and meY then
+        if meX and meY then
             ImGui.TextColored(0.4, 0.7, 0.9, 1.0, string.format('Loc: Y:%.1f, X:%.1f, Z:%.1f', meY, meX, meZ or 0))
             ImGui.SameLine()
         end
@@ -4067,7 +4355,7 @@ if not stickLoaded() then
 end
 
 syncTriuneLoadout()
-scanZoneSpawns()
+scanZoneSpawns(true)
 mq.imgui.init('TriuneMapUIWindow', DrawTriuneMapUI)
 
 print(string.format('\ag[Triune Map]\ax v%s Loaded -- In-Game Map, Norrath Atlas & NPC Tracker active. Run with /lua run triune_map', VERSION))
@@ -4091,7 +4379,7 @@ while state.isRunning do
                 loadZoneMap(curShort, false)
             end
             syncTriuneLoadout()
-            scanZoneSpawns()
+            scanZoneSpawns(true)
         end
     end
 
@@ -4106,9 +4394,47 @@ while state.isRunning do
         state.dirtySettings = false
     end
 
-    -- Regular Spawn Scanning
-    if (now - state.lastScanTime) >= state.scanIntervalMs then
+    -- Player movement cache: refreshed every main-loop pass (~40ms / ~25Hz) so
+    -- the player marker and camera-follow stay fluid, independent of the slower
+    -- NPC scan cadence. Target ID rides a slower 100ms gate since it needs no
+    -- per-loop freshness. Interpolation bookkeeping (prev + interpAt) is for
+    -- the draw callback's smooth marker/pan between cache writes.
+    local lp = state.lastPlayer
+    local prevX, prevY, prevZ = lp.x, lp.y, lp.z
+    local okX, vX = pcall(function() return mq.TLO.Me.X() end)
+    if okX and vX then lp.x = vX end
+    local okY, vY = pcall(function() return mq.TLO.Me.Y() end)
+    if okY and vY then lp.y = vY end
+    local okZ, vZ = pcall(function() return mq.TLO.Me.Z() end)
+    if okZ and vZ then lp.z = vZ end
+    local okH, vH = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
+    if okH and vH then lp.heading = vH end
+    if (now - lp.updatedAt) >= 100 then
+        local okT, vT = pcall(function() return mq.TLO.Target.ID() end)
+        if okT and vT then state.lastTargetId = vT end
+    end
+    if lp.interpSeeded then
+        lp.prevX, lp.prevY, lp.prevZ = prevX, prevY, prevZ
+        lp.interpAt = now
+    else
+        -- First write: seed prev to the live values so the draw callback never
+        -- lerps the marker across the map from world origin.
+        lp.prevX, lp.prevY, lp.prevZ = lp.x, lp.y, lp.z
+        lp.interpAt = 0
+        lp.interpSeeded = true
+    end
+    lp.updatedAt = now
+
+    -- Regular Spawn Scanning: spread one incremental chunk across each frame so
+    -- a large zone's full fetch+LoS refresh never freezes the render callback.
+    -- A new cycle starts when the interval elapsed and no cycle is mid-flight;
+    -- otherwise we keep draining the in-progress cycle one chunk per frame.
+    local scanBusy = (state.scanChunk.phase ~= 'idle')
+    if not scanBusy and (now - state.lastScanTime) >= state.scanIntervalMs then
         state.lastScanTime = now
+        scanBusy = true
+    end
+    if scanBusy then
         scanZoneSpawns()
     end
 

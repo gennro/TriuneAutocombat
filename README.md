@@ -191,7 +191,7 @@ Keep your character progressing without wasting unspent AA points with the dedic
 - **Comprehensive AA Browser**: Automatically scans and lists all available character Alternate Advancement abilities, displaying real-time ranks, max ranks, point costs, training eligibility, and total points spent.
 - **Compact Two-Row Header Layout**: Real-time unspent/spent pool metrics, master auto-spend toggle, buy order dropdown, cap threshold slider, instant search box with `X` clear, sort criteria combo, `▲ Asc / ▼ Desc` toggle, `Hide Maxed` filter, `Prio Only` filter, and live ability count badge.
 - **Instant Search & Multi-Sort**: Search abilities by name in real time, sort by **Name** (A-Z / Z-A), **Cost** (cheapest first / highest first), or **Fully Trained** status, and filter with one-click **Hide Maxed** and **Prioritized Only** checkboxes.
-- **Priority-Based Auto-Training**: Check the priority box `[x]` next to any abilities you want Triune to train. As soon as enough unspent AA points are accumulated, Triune automatically opens the in-game AA window and purchases the next rank.
+- **Priority-Based Auto-Training & Native Fallback**: Check the priority box `[x]` next to any abilities you want Triune to train. As soon as enough unspent AA points are accumulated, Triune purchases the next rank. When `MQ2AAspend` is loaded, Triune can delegate purchases to it or directly train abilities; if `MQ2AAspend` stalls or fails on server restrictions, Triune automatically falls back to its built-in native window trainer. The native window trainer commands the EverQuest UI directly, opening the AA window via internal EQ commands (`/keypress TOGGLE_ALTADVWIN`), selecting the target tab, highlighting the ability row, clicking the in-game Train button, and closing cleanly. Purchases are verified via point and rank deltas; unpurchasable abilities (due to level restrictions or missing prerequisites) are temporarily skipped so Auto AA never gets stuck and advances to subsequent priorities.
 - **Custom Buy Order**: Choose between **Cheapest First** (maximize quick rank gains by buying lowest cost abilities first) or **Alphabetical** order.
 - **Cap Protection & Fireworks Dump**: Automatically protects against the server AA cap by dumping surplus points into fireworks (or any configured ability) when your pool reaches the cap threshold (default: 100 AA).
 
@@ -251,7 +251,7 @@ You can control almost everything using simple in-game chat commands:
 | `/ac cursorui` | `/ac cursormgr` | Open the Cursor Manager |
 | `/ac clearcursor` | `/ac autoinv` | Dump cursor items to inventory |
 | `/ac autoaa [on\|off]` | `/ac autospendaa`, `/ac autospend`, `/ac fireworks` | Toggle automatic AA priority training & cap protection |
-| `/ac aaspend [on\|off\|auto\|brute\|now]` | `/ac mq2aaspend` | Delegate AA spending to MQ2AAspend plugin (toggles, sets mode, or triggers now) |
+| `/ac aaspend [on\|off\|auto\|brute\|now]` | `/ac mq2aaspend` | Delegate AA spending to MQ2AAspend plugin (toggles delegation, sets mode, or triggers now; Triune automatically falls back to native training if stalled) |
 | `/ac aascan` | `/ac scanaa`, `/ac aarefresh` | Re-scan all character Alternate Advancement abilities |
 | `/ac aaprio <name>` | `/ac prioritizeaa` | Toggle priority auto-training for a specific AA ability |
 | `/ac autofw [on\|off]` | `/ac summonfw` | Toggle automatic fireworks summoning (/alt activate) & autoinventory |

@@ -632,7 +632,7 @@ local function mapTLOCategoryToKind(sp, name)
     end
 
     -- 3. Match non-beneficial attack / damage / buff categories
-    if catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore') then
+    if bene and (catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore')) then
         return 'heal'
     elseif catStr:find('dot') or catStr:find('damage over time') or subcatStr:find('dot') or subcatStr:find('damage over time') then
         return 'dot'

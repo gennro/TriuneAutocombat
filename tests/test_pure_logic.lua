@@ -1844,6 +1844,20 @@ for _, abbr in ipairs(ALL_ABBR) do
     end
 end
 
+-- Verify Necromancer Touch of Death is classified as direct damage (dd) and detrimental (0), not heal
+local foundTod = nil
+if DATA_LOADED.spells.Nec then
+    for _, sp in ipairs(DATA_LOADED.spells.Nec) do
+        if sp[1] == 'Touch of Death' then foundTod = sp; break end
+    end
+end
+assert_neq(foundTod, nil, 'data: Touch of Death exists in Nec spells')
+if foundTod then
+    assert_eq(foundTod[2], 64, 'data: Touch of Death is level 64')
+    assert_eq(foundTod[3], 0, 'data: Touch of Death is detrimental (0)')
+    assert_eq(foundTod[4], 'dd', 'data: Touch of Death kind is dd')
+end
+
 -- Spell levels should be sane (1-70 for current era)
 local badLevels = 0
 for abbr, spells in pairs(DATA_LOADED.spells) do
@@ -2047,6 +2061,79 @@ assert_true(offsetDist >= 15, 'detour: offset distance outside hazard radius')
 local detourDest = calculateDetourWaypoint(0, 100, 100, 100, 0, 15, 200, 150, 20)
 assert_neq(detourDest, nil, 'detour: calculated waypoint with destination')
 assert_eq(detourDest.z, 10, 'detour: ground clamped Z is interpolated (0 + 20)/2 = 10')
+
+-- ============================================================================
+-- 30b. Hazard Hit Cap & Timed Decay
+-- ============================================================================
+print('--- hazard hit cap & timed decay ---')
+do
+local decayCtrl = {
+    nav_hazard_avoidance = true,
+    nav_hazard_radius = 15,
+    nav_hazard_min_hits = 2,
+    nav_hazard_max_hits = 3,
+    nav_hazard_decay_minutes = 10,
+    zone_hazards = {}
+}
+local decayGetZoneHazards = loadFunc(src, 'getZoneHazards', {
+    ctrl = decayCtrl,
+    getCurrentZoneShortName = function() return 'poknowledge' end
+})
+local decayRecord = loadFunc(src, 'recordStuckHazard', {
+    ctrl = decayCtrl,
+    getZoneHazards = decayGetZoneHazards,
+    saveLoadout = function() end,
+    getCurrentZoneShortName = function() return 'poknowledge' end
+})
+local decayIsActive = loadFunc(src, 'isCoordInActiveHazard', {
+    ctrl = decayCtrl,
+    getZoneHazards = decayGetZoneHazards
+})
+local decayZones = loadFunc(src, 'decayZoneHazards', {
+    ctrl = decayCtrl,
+    getCurrentZoneShortName = function() return 'poknowledge' end,
+    saveLoadout = function() end
+})
+
+-- Fake wall-clock so decay timing is deterministic; patch BEFORE recording so
+-- hazard timestamps align with the fake clock.
+local realOsTime = os.time
+local fakeClock = 100000
+os.time = function() return fakeClock end
+
+-- Cap: repeated stuck events cannot push hits past nav_hazard_max_hits
+decayRecord(100, 200, 10, 'poknowledge')
+decayRecord(104, 200, 10, 'poknowledge')
+decayRecord(100, 202, 10, 'poknowledge')
+decayRecord(102, 201, 10, 'poknowledge')
+local capHazard = decayGetZoneHazards('poknowledge')
+assert_eq(#capHazard, 1, 'decay: all hits clustered into one hazard')
+assert_eq(capHazard[1].hits, 3, 'decay: hits capped at nav_hazard_max_hits')
+
+-- Hasn't hit the 10-minute window yet: no decay
+assert_eq(decayZones('poknowledge'), 0, 'decay: no hits lost before decay window elapses')
+assert_eq(capHazard[1].hits, 3, 'decay: hits stable inside decay window')
+
+-- Past one 10-minute window: one hit lost
+fakeClock = fakeClock + 601
+local faded1 = decayZones('poknowledge')
+assert_eq(faded1, 1, 'decay: one hazard decayed')
+assert_eq(capHazard[1].hits, 2, 'decay: hits reduced from 3 to 2')
+
+-- Second window: drops below min_hits (2) -> present but inactive
+fakeClock = fakeClock + 601
+decayZones('poknowledge')
+assert_eq(capHazard[1].hits, 1, 'decay: hits reduced from 2 to 1')
+assert_eq(decayIsActive(100, 200, 10, 'poknowledge'), false, 'decay: below min_hits is no longer active')
+
+-- Third window: hits reach 0 -> hazard removed entirely
+fakeClock = fakeClock + 601
+local faded2 = decayZones('poknowledge')
+assert_eq(faded2, 1, 'decay: final decay removed hazard')
+assert_eq(#decayGetZoneHazards('poknowledge'), 0, 'decay: hazard forgotten at 0 hits')
+
+os.time = realOsTime
+end
 
 -- ============================================================================
 -- 31. Reverse Breadcrumbs
@@ -4150,6 +4237,23 @@ do
     playerHp = 70
     assert_eq(conditionMet('HP <=', 75, 'Mend', 2002, 'Mnk', 'E: Current Target'), true,
         'Mend fires when player is at 70% HP (<= 75%)')
+
+    -- Scenario F: Lifetap with "my HP <=" condition on an enemy target
+    -- Mob at 15% HP, Player at 100% HP, Lifetap threshold at 60%
+    playerHp = 100
+    targetHp = 15
+    condEnv.runtime.isDetrimentalAction = function(spName, tok)
+        if tok and tok:sub(1, 2) == 'E:' then return true end
+        return false
+    end
+    condEnv.isHostileTarget = function(id) return id == 2002 end
+    assert_eq(conditionMet('my HP <=', 60, 'Lifetap', 2002, 'Nec', 'E: Current Target'), false,
+        'Lifetap (my HP <= 60) does not fire when mob is at 15% but player is at 100%')
+
+    -- Player drops to 50% HP (threshold reached)
+    playerHp = 50
+    assert_eq(conditionMet('my HP <=', 60, 'Lifetap', 2002, 'Nec', 'E: Current Target'), true,
+        'Lifetap (my HP <= 60) fires when player drops below threshold (50 <= 60)')
 end
 
 -- ============================================================================
@@ -6747,6 +6851,11 @@ do
     assert_eq(isHealActionMock('Ice Comet', 'E: Current Target', { kind = 'dd' }), false, 'Ice Comet rejected as heal')
     assert_eq(isHealActionMock('Tashani', 'E: Current Target', { kind = 'debuff' }), false, 'Tashani rejected as heal')
     assert_eq(isHealActionMock('Spirit of Wolf', 'F: Myself', { kind = 'buff', when = 'missing buff' }), false, 'SoW missing buff rejected as heal')
+    assert_eq(isHealActionMock('Lifetap', 'E: Current Target', { kind = 'dd' }), false, 'Lifetap rejected as heal')
+    assert_eq(isHealActionMock('Lifedraw', 'E: Current Target', { kind = 'dd' }), false, 'Lifedraw rejected as heal')
+    assert_eq(isHealActionMock('Touch of Innoruuk', 'E: Current Target', { kind = 'dd' }), false, 'Touch of Innoruuk rejected as heal')
+    assert_eq(isHealActionMock('Touch of Death', 'E: Current Target', { kind = 'dd' }), false, 'Touch of Death rejected as heal')
+    assert_eq(isHealActionMock('Lifetap', 'E: Current Target', {}), false, 'Lifetap without kind rejected as heal due to detrimental target')
 
     -- 2. lowestHpAlly range and presence filtering
     local function lowestHpAllyMock(members, myId, myHp, maxDist)
@@ -6802,7 +6911,7 @@ do
     local function conditionMetMock(when, pct, targetId, myId, myHp, targetHp, token)
         if when == 'my HP <=' then
             local myMet = myHp <= pct
-            local isAlly = token and not token:find('Myself')
+            local isAlly = token and not token:find('Myself') and token:sub(1, 2) ~= 'E:'
             if isAlly and targetId and targetId > 0 and targetId ~= myId then
                 return myMet or (targetHp <= pct)
             end
@@ -6817,6 +6926,8 @@ do
     assert_true(conditionMetMock('my HP <=', 75, 101, 1, 100, 50, 'F: Lowest-HP Ally'), 'my HP <= on Lowest-HP Ally triggers when ally is low (50 <= 75) even with player at 100%')
     assert_true(conditionMetMock('my HP <=', 75, 101, 1, 60, 100, 'F: Lowest-HP Ally'), 'my HP <= on Lowest-HP Ally triggers when player is low (60 <= 75)')
     assert_eq(conditionMetMock('my HP <=', 75, 1, 1, 100, 100, 'F: Myself'), false, 'my HP <= on Myself returns false when player is at 100%')
+    assert_eq(conditionMetMock('my HP <=', 60, 2002, 1, 100, 40, 'E: Current Target'), false, 'my HP <= on enemy does NOT trigger on low mob HP when player is at 100%')
+    assert_true(conditionMetMock('my HP <=', 60, 2002, 1, 50, 90, 'E: Current Target'), 'my HP <= on enemy DOES trigger when player HP is low (50 <= 60)')
 
     -- 5. processHealPriority sorting and movement cessation simulation
     local healCandidates = {
@@ -7112,22 +7223,40 @@ do
 
     -- 3. MQ2AAspend delegation logic simulation
     local commandsIssued = {}
+    local nativeTrained = nil
     local function mockCmd(str) commandsIssued[#commandsIssued + 1] = str end
     local function mockCmdf(fmt, ...) commandsIssued[#commandsIssued + 1] = string.format(fmt, ...) end
 
-    local function simulateCheckAutoSpend(ctrl, rt, unspent, pluginLoaded)
+    local function simulateCheckAutoSpend(ctrl, rt, unspent, pluginLoaded, targetName, now)
         if not ctrl.auto_spend_aa then return false end
         if unspent <= 0 then return false end
+        now = now or 100.0
 
         if ctrl.auto_aa_delegate_aaspend and pluginLoaded then
             local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
             if unspent >= threshold then
+                local delegTarget = rt.lastAASpendDelegatedTarget
+                local delegAt = rt.lastAASpendDelegatedAt or 0
+                local delegPts = rt.lastAASpendDelegatedPoints or 0
+                if targetName and delegTarget == targetName and (now - delegAt) >= 2.5 and unspent >= delegPts then
+                    rt.lastAASpendDelegatedTarget = nil
+                    nativeTrained = targetName
+                    return true
+                end
+
+                rt.lastAASpendDelegatedAt = now
+                rt.lastAASpendDelegatedTarget = targetName
+                rt.lastAASpendDelegatedPoints = unspent
                 local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
                 mockCmdf('/aaspend bank %d', threshold)
                 mockCmd('/aaspend ' .. mode)
                 return true
             end
             return false
+        end
+        if targetName then
+            nativeTrained = targetName
+            return true
         end
         return false
     end
@@ -7141,13 +7270,15 @@ do
 
     -- 3a. Delegated spend below threshold -> no command
     commandsIssued = {}
-    local res1 = simulateCheckAutoSpend(testCtrl, mockRuntime, 30, true)
+    nativeTrained = nil
+    local res1 = simulateCheckAutoSpend(testCtrl, mockRuntime, 30, true, 'Combat Agility', 100.0)
     assert_eq(res1, false, 'Suite 64: no spend when unspent < threshold')
     assert_eq(#commandsIssued, 0, 'Suite 64: no commands issued when below threshold')
 
     -- 3b. Delegated spend at/above threshold -> issues bank and auto now
     commandsIssued = {}
-    local res2 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true)
+    nativeTrained = nil
+    local res2 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true, 'Combat Agility', 100.0)
     assert_eq(res2, true, 'Suite 64: auto-spend triggered when unspent >= threshold')
     assert_eq(#commandsIssued, 2, 'Suite 64: issued 2 commands (/aaspend bank, /aaspend auto now)')
     assert_eq(commandsIssued[1], '/aaspend bank 50', 'Suite 64: bank set correctly')
@@ -7156,9 +7287,30 @@ do
     -- 3c. Delegated spend in brute mode
     testCtrl.auto_aa_aaspend_mode = 'brute'
     commandsIssued = {}
-    local res3 = simulateCheckAutoSpend(testCtrl, mockRuntime, 75, true)
+    nativeTrained = nil
+    local res3 = simulateCheckAutoSpend(testCtrl, mockRuntime, 75, true, 'Combat Agility', 100.0)
     assert_eq(res3, true, 'Suite 64: brute auto-spend triggered')
     assert_eq(commandsIssued[2], '/aaspend brute now', 'Suite 64: brute mode triggered')
+
+    -- 3d. Fallback: MQ2AAspend was delegated but points did not drop after >= 2.5s -> triggers native training
+    testCtrl.auto_aa_aaspend_mode = 'auto'
+    commandsIssued = {}
+    nativeTrained = nil
+    mockRuntime.lastAASpendDelegatedTarget = 'Combat Agility'
+    mockRuntime.lastAASpendDelegatedAt = 100.0
+    mockRuntime.lastAASpendDelegatedPoints = 60
+    local res4 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true, 'Combat Agility', 103.0)
+    assert_eq(res4, true, 'Suite 64: fallback triggered after MQ2AAspend stalled')
+    assert_eq(nativeTrained, 'Combat Agility', 'Suite 64: native trainer invoked for stalled target')
+    assert_eq(#commandsIssued, 0, 'Suite 64: no /aaspend command sent on native fallback')
+
+    -- 3e. Direct native spending when delegation is disabled
+    testCtrl.auto_aa_delegate_aaspend = false
+    nativeTrained = nil
+    local res5 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true, 'Combat Agility', 104.0)
+    assert_eq(res5, true, 'Suite 64: native spending when delegation off')
+    assert_eq(nativeTrained, 'Combat Agility', 'Suite 64: native trainer invoked directly')
+    testCtrl.auto_aa_delegate_aaspend = true
 
     -- 4. INI formatting simulation for MQ2AASpend_AAList
     local function generateAASpendIniLines(priorities, orderMode, bankThreshold, isBrute)
@@ -7254,6 +7406,8 @@ do
     assert_true(triuneContent:find("Sync to INI") ~= nil, 'Suite 64: triune.lua provides Sync to INI button')
     assert_true(triuneContent:find("runtime.isSpecialTabAA") ~= nil, 'Suite 64: triune.lua defines isSpecialTabAA')
     assert_true(triuneContent:find("Special tab ability") ~= nil, 'Suite 64: triune.lua trains Special tab abilities natively')
+    assert_true(triuneContent:find("MQ2AAspend##aaDelegateMaster") ~= nil, 'Suite 64: triune.lua provides MQ2AAspend delegation checkbox')
+    assert_true(triuneContent:find("falling back to Triune native window trainer") ~= nil, 'Suite 64: triune.lua provides native fallback when MQ2AAspend stalls')
 end
 
 -- ============================================================================
@@ -7429,6 +7583,899 @@ do
     assert_true(triuneContent:find("isDead = matches or t.Dead()") ~= nil, 'Suite 66: triune.lua detects slain mob target')
 end
 
+-- ============================================================================
+-- Suite 67: Native AA Window Trainer & Robust Window Controls
+-- ============================================================================
+print('--- Suite 67: Native AA Window Trainer & Robust Window Controls ---')
+do
+    -- 1. Window resolution: AAWindow vs AAWnd fallback
+    local mockMq1 = {
+        TLO = {
+            Window = function(name)
+                if name == 'AAWindow' then
+                    return {
+                        Name = function() return 'AAWindow' end,
+                        Open = function() return false end
+                    }
+                end
+                return nil
+            end
+        }
+    }
+    local mockMq2 = {
+        TLO = {
+            Window = function(name)
+                if name == 'AAWnd' then
+                    return {
+                        Name = function() return 'AAWnd' end,
+                        Open = function() return true end
+                    }
+                end
+                return nil
+            end
+        }
+    }
+
+    local function simGetAAWindow(mqObj)
+        local win = nil
+        pcall(function()
+            local w = mqObj.TLO.Window('AAWindow')
+            if w and w.Name and w.Name() then win = w return end
+            w = mqObj.TLO.Window('AAWnd')
+            if w and w.Name and w.Name() then win = w return end
+        end)
+        return win
+    end
+
+    local function simGetAAWindowName(mqObj)
+        local name = 'AAWindow'
+        pcall(function()
+            local w = mqObj.TLO.Window('AAWindow')
+            if w and w.Name and w.Name() then name = w.Name() return end
+            w = mqObj.TLO.Window('AAWnd')
+            if w and w.Name and w.Name() then name = w.Name() return end
+        end)
+        return name
+    end
+
+    local function simIsAAWindowOpen(mqObj)
+        local isOpen = false
+        pcall(function()
+            local w = simGetAAWindow(mqObj)
+            if w and w.Open and w.Open() then isOpen = true end
+        end)
+        return isOpen
+    end
+
+    local win1 = simGetAAWindow(mockMq1)
+    assert_true(win1 ~= nil, 'Suite 67: AAWindow resolved when present')
+    assert_eq(simGetAAWindowName(mockMq1), 'AAWindow', 'Suite 67: AAWindow name resolved correctly')
+    assert_eq(simIsAAWindowOpen(mockMq1), false, 'Suite 67: AAWindow closed detected correctly')
+
+    local win2 = simGetAAWindow(mockMq2)
+    assert_true(win2 ~= nil, 'Suite 67: AAWnd resolved as fallback')
+    assert_eq(simGetAAWindowName(mockMq2), 'AAWnd', 'Suite 67: AAWnd fallback name resolved correctly')
+    assert_eq(simIsAAWindowOpen(mockMq2), true, 'Suite 67: AAWnd open detected correctly')
+
+    -- 2. Open AA Window commands sequence
+    local opened = false
+    local cmds = {}
+    local mockWinToOpen = {
+        Name = function() return 'AAWindow' end,
+        Open = function() return opened end,
+        DoOpen = function() opened = true end
+    }
+    local mockMqOpen = {
+        TLO = {
+            Window = function(name)
+                if name == 'AAWindow' then return mockWinToOpen end
+                return nil
+            end
+        },
+        cmd = function(c) cmds[#cmds + 1] = c end,
+        cmdf = function(fmt, ...) cmds[#cmds + 1] = string.format(fmt, ...) end
+    }
+
+    local function simOpenAAWindow(mqObj, winObj, attempt, invOpen)
+        if simIsAAWindowOpen(mqObj) then return true end
+        attempt = attempt or 1
+        local winName = simGetAAWindowName(mqObj)
+
+        if attempt == 1 then
+            pcall(function()
+                if winObj and winObj.DoOpen then winObj.DoOpen() end
+            end)
+            mqObj.cmdf('/windowstate %s open', winName)
+        elseif attempt == 2 then
+            mqObj.cmd('/nomodkey /keypress TOGGLE_ALTADVWIN')
+        elseif attempt == 3 then
+            mqObj.cmd('/nomodkey /keypress v alt')
+        elseif attempt == 4 then
+            mqObj.cmd('/nomodkey /keypress a alt')
+        else
+            if invOpen then
+                mqObj.cmdf('/nomodkey /notify InventoryWindow IW_AltAdvBtn leftmouseup')
+            end
+        end
+        return simIsAAWindowOpen(mqObj)
+    end
+
+    -- Attempt 1: Non-toggling /windowstate open (clean, no toggle collision)
+    local openRes1 = simOpenAAWindow(mockMqOpen, mockWinToOpen, 1)
+    assert_true(openRes1, 'Suite 67: simOpenAAWindow returns true after DoOpen')
+    assert_true(opened, 'Suite 67: DoOpen was invoked on window object')
+    assert_eq(cmds[1], '/windowstate AAWindow open', 'Suite 67: issued /windowstate open on attempt 1')
+    assert_eq(#cmds, 1, 'Suite 67: attempt 1 does not execute conflicting toggle commands')
+
+    -- Attempt 2: Native EQ toggle keypress
+    cmds = {}
+    opened = false
+    simOpenAAWindow(mockMqOpen, mockWinToOpen, 2)
+    assert_eq(cmds[1], '/nomodkey /keypress TOGGLE_ALTADVWIN', 'Suite 67: issued /keypress TOGGLE_ALTADVWIN on attempt 2')
+
+    -- Attempt 5: Only notifies Inventory if inventory is open
+    cmds = {}
+    opened = false
+    simOpenAAWindow(mockMqOpen, mockWinToOpen, 5, false) -- inventory closed
+    assert_eq(#cmds, 0, 'Suite 67: suppressed InventoryWindow IW_AltAdvBtn when inventory is closed')
+
+    opened = false
+    simOpenAAWindow(mockMqOpen, mockWinToOpen, 5, true) -- inventory open
+    assert_eq(cmds[1], '/nomodkey /notify InventoryWindow IW_AltAdvBtn leftmouseup', 'Suite 67: notified InventoryWindow IW_AltAdvBtn when inventory open')
+
+    -- 3. Recursive child traversal does not abort on hidden/closed siblings
+    local tree = {
+        FirstChild = {
+            Name = function() return 'Tab1_General' end,
+            ScreenID = function() return 'Page1' end,
+            Open = function() return true end,
+            Next = {
+                Name = function() return 'Tab2_Arch' end,
+                ScreenID = function() return 'Page2' end,
+                Open = function() return false end, -- Inactive tab!
+                Next = {
+                    Name = function() return 'Tab3_Class' end,
+                    ScreenID = function() return 'Page3' end,
+                    Open = function() return false end,
+                    Next = {
+                        Name = function() return 'AAW_TrainButton' end,
+                        ScreenID = function() return 'TrainButton' end,
+                        Open = function() return true end,
+                        Next = nil
+                    }
+                }
+            }
+        }
+    }
+    local function simFindChildRecursive(parent, targetName)
+        if not parent or not targetName or targetName == '' then return nil end
+        local tLower = targetName:lower()
+        local curr = nil
+        pcall(function() curr = parent.FirstChild end)
+        local safety = 0
+        while curr and safety < 120 do
+            safety = safety + 1
+            local match = false
+            pcall(function()
+                local nm = curr.Name and curr.Name()
+                local sid = curr.ScreenID and curr.ScreenID()
+                if (nm and nm:lower() == tLower) or (sid and sid:lower() == tLower) then
+                    match = true
+                end
+            end)
+            if match then return curr end
+            local nextSibling = nil
+            pcall(function() nextSibling = curr.Next end)
+            curr = nextSibling
+        end
+        return nil
+    end
+
+    local foundBtn = simFindChildRecursive(tree, 'AAW_TrainButton')
+    assert(foundBtn ~= nil, 'Suite 67: findChildRecursive navigated through closed tabs and found AAW_TrainButton')
+    assert_eq(foundBtn.Name(), 'AAW_TrainButton', 'Suite 67: found element name matches target')
+
+    -- 4. State machine: wait_open aborts cleanly on timeout rather than corrupt training
+    local task = {
+        name = 'Bloodlust',
+        aaId = 1234,
+        step = 'wait_open',
+        retries = 4,
+        nextStepAt = 0
+    }
+    local loggedAbort = false
+    local function simWaitOpen(t, isWinOpen)
+        if isWinOpen then
+            t.step = 'prepare_tab'
+            return
+        end
+        t.retries = (t.retries or 0) + 1
+        if t.retries <= 4 then
+            -- retry open
+        else
+            loggedAbort = true
+            t.step = 'finish'
+        end
+    end
+    simWaitOpen(task, false)
+    assert_eq(task.step, 'finish', 'Suite 67: wait_open aborts cleanly to finish when retries exceeded')
+    assert_true(loggedAbort, 'Suite 67: logged clear abort warning when window failed to open')
+
+    -- 5. Source code validation in TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("runtime.getAAWindow") ~= nil, 'Suite 67: triune.lua defines runtime.getAAWindow')
+    assert_true(triuneContent:find("runtime.getAAWindowName") ~= nil, 'Suite 67: triune.lua defines runtime.getAAWindowName')
+    assert_true(triuneContent:find("runtime.isAAWindowOpen") ~= nil, 'Suite 67: triune.lua defines runtime.isAAWindowOpen')
+    assert_true(triuneContent:find("runtime.openAAWindow") ~= nil, 'Suite 67: triune.lua defines runtime.openAAWindow')
+    assert_true(triuneContent:find("runtime.closeAAWindow") ~= nil, 'Suite 67: triune.lua defines runtime.closeAAWindow')
+    assert_true(triuneContent:find("TOGGLE_ALTADVWIN") ~= nil, 'Suite 67: triune.lua uses TOGGLE_ALTADVWIN keypress')
+    assert_true(triuneContent:find("IW_AltAdvBtn") ~= nil, 'Suite 67: triune.lua notifies IW_AltAdvBtn')
+    assert_true(triuneContent:find("AAW_ResetFilter") ~= nil, 'Suite 67: triune.lua supports AAW_ResetFilter')
+    assert_true(triuneContent:find("Failed to open AA Window after") ~= nil, 'Suite 67: triune.lua aborts cleanly when window fails to open')
+end
+
+
+-- ============================================================================
+-- Suite 68: Complete Auto AA Discovery & Unpurchased Ability Retention
+-- ============================================================================
+print('--- Suite 68: Complete Auto AA Discovery & Unpurchased Ability Retention ---')
+do
+    -- 1. Simulate recordScannedAA logic for unpurchased AAs vs character skills
+    local function simRecordScannedAA(list, foundMap, name, knownSkills, mockTloMe)
+        if not name or name == '' then return end
+        if knownSkills[name] then return end -- rejected as character skill
+
+        local cKey = name:lower():gsub('%s+', '')
+        if foundMap[cKey] then return end
+
+        local meRank = mockTloMe[name] and mockTloMe[name].Rank or 0
+        local cost = mockTloMe[name] and mockTloMe[name].Cost or 0
+        local maxRank = mockTloMe[name] and mockTloMe[name].MaxRank or 0
+
+        -- Triune fallback: unpurchased AAs cost at least 1 point
+        if cost <= 0 then cost = 1 end
+
+        local entry = {
+            name = name,
+            rank = meRank,
+            cost = cost,
+            maxRank = maxRank,
+            canTrain = (maxRank == 0 or meRank < maxRank)
+        }
+        table.insert(list, entry)
+        foundMap[cKey] = entry
+    end
+
+    local testList = {}
+    local testMap = {}
+    local skills = { ['Mend'] = true, ['Flying Kick'] = true, ['Backstab'] = true, ['Dual Wield'] = true }
+    local tloMe = {
+        ['Combat Agility'] = { Rank = 3, Cost = 2, MaxRank = 5 },
+        -- 'Bloodlust', 'Physical Enhancement', 'Extended Ingenuity', 'Fearless' are unpurchased (nil in Me.AltAbility)
+    }
+
+    -- Record purchased AA
+    simRecordScannedAA(testList, testMap, 'Combat Agility', skills, tloMe)
+    assert_true(testMap['combatagility'] ~= nil, 'Suite 68: Combat Agility recorded')
+    assert_eq(testMap['combatagility'].rank, 3, 'Suite 68: Combat Agility rank is 3')
+
+    -- Record unpurchased AAs (not in Me.AltAbility, cost 0 / id 0)
+    simRecordScannedAA(testList, testMap, 'Bloodlust', skills, tloMe)
+    simRecordScannedAA(testList, testMap, 'Physical Enhancement', skills, tloMe)
+    simRecordScannedAA(testList, testMap, 'Extended Ingenuity', skills, tloMe)
+    simRecordScannedAA(testList, testMap, 'Fearless', skills, tloMe)
+
+    assert_true(testMap['bloodlust'] ~= nil, 'Suite 68: Unpurchased Bloodlust is retained')
+    assert_eq(testMap['bloodlust'].rank, 0, 'Suite 68: Bloodlust rank is 0')
+    assert_eq(testMap['bloodlust'].cost, 1, 'Suite 68: Bloodlust cost defaults to 1')
+    assert_eq(testMap['bloodlust'].canTrain, true, 'Suite 68: Bloodlust canTrain is true')
+
+    assert_true(testMap['physicalenhancement'] ~= nil, 'Suite 68: Physical Enhancement is retained')
+    assert_true(testMap['extendedingenuity'] ~= nil, 'Suite 68: Extended Ingenuity is retained')
+    assert_true(testMap['fearless'] ~= nil, 'Suite 68: Fearless is retained')
+
+    -- Attempt to record real character skills (should be rejected)
+    simRecordScannedAA(testList, testMap, 'Mend', skills, tloMe)
+    simRecordScannedAA(testList, testMap, 'Flying Kick', skills, tloMe)
+    simRecordScannedAA(testList, testMap, 'Backstab', skills, tloMe)
+    assert_true(testMap['mend'] == nil, 'Suite 68: Skill Mend is rejected')
+    assert_true(testMap['flyingkick'] == nil, 'Suite 68: Skill Flying Kick is rejected')
+    assert_true(testMap['backstab'] == nil, 'Suite 68: Skill Backstab is rejected')
+
+    -- 2. Cache pruning simulation (Step 1.5): only prune true skills, not unpurchased AAs
+    local cache = {
+        ['combatagility'] = { name = 'Combat Agility', id = 101, maxRank = 5 },
+        ['bloodlust'] = { name = 'Bloodlust', id = 0, maxRank = 0 },
+        ['mend'] = { name = 'Mend', id = 0, maxRank = 0 }
+    }
+    for cName, cd in pairs(cache) do
+        local isSkill = skills[cd.name]
+        if isSkill then
+            cache[cName] = nil
+        end
+    end
+    assert_true(cache['combatagility'] ~= nil, 'Suite 68: Cache preserves purchased AA')
+    assert_true(cache['bloodlust'] ~= nil, 'Suite 68: Cache preserves unpurchased AA with id 0 and maxRank 0')
+    assert_true(cache['mend'] == nil, 'Suite 68: Cache pruned true character skill Mend')
+
+    -- 3. Source code inspection of TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("runtime.GENERAL_AAS = {") ~= nil, 'Suite 68: triune.lua defines GENERAL_AAS catalog')
+    assert_true(triuneContent:find("'Physical Enhancement'") ~= nil, 'Suite 68: NORRATH_AAS includes Physical Enhancement')
+    assert_true(triuneContent:find("'Bloodlust'") ~= nil, 'Suite 68: NORRATH_AAS includes Bloodlust')
+    assert_true(triuneContent:find("'Extended Ingenuity'") ~= nil, 'Suite 68: NORRATH_AAS includes Extended Ingenuity')
+    assert_true(triuneContent:find("'Fury of Magic'") ~= nil, 'Suite 68: NORRATH_AAS includes Fury of Magic')
+    assert_true(triuneContent:find("'Twinproc'") ~= nil, 'Suite 68: NORRATH_AAS includes Twinproc')
+    assert_true(triuneContent:find("'Gelid Rending'") ~= nil, 'Suite 68: NORRATH_AAS includes Gelid Rending')
+
+    -- Ensure listboxes are NOT gated behind isAAWindowOpen()
+    assert_true(triuneContent:find("if runtime.isAAWindowOpen%(%) then%s+for _, lName in ipairs%(listNames%) do") == nil,
+        'Suite 68: UI listbox scan is not gated behind isAAWindowOpen()')
+
+    -- Ensure id <= 0 is not prematurely dropping abilities
+    assert_true(triuneContent:find("if not isFromUI and id <= 0 then return end") == nil,
+        'Suite 68: recordScannedAA does not drop non-UI abilities when id <= 0')
+
+    -- 4. In-combat AA spending gating simulation
+    local function simCheckAutoSpendAA(inCombat, autoSpendEnabled, unspentPoints)
+        if not autoSpendEnabled then return false end
+        if inCombat then return false end
+        if unspentPoints <= 0 then return false end
+        return true
+    end
+
+    assert_eq(simCheckAutoSpendAA(true, true, 50), false, 'Suite 68: checkAutoSpendAA blocked during combat')
+    assert_eq(simCheckAutoSpendAA(false, true, 50), true, 'Suite 68: checkAutoSpendAA allowed out of combat')
+    assert_eq(simCheckAutoSpendAA(false, false, 50), false, 'Suite 68: checkAutoSpendAA blocked when disabled')
+    assert_eq(simCheckAutoSpendAA(false, true, 0), false, 'Suite 68: checkAutoSpendAA blocked when 0 unspent')
+
+    -- 5. Nested UI hierarchy traversal test (AAWindow -> AAW_Subwindows -> AAW_GeneralPage -> AAW_GeneralList)
+    local function simFindChildRecursive(parent, targetName)
+        if not parent or not targetName or targetName == '' then return nil end
+        local tLower = targetName:lower()
+
+        local curr = parent.FirstChild
+        local safety = 0
+        while curr and safety < 120 do
+            safety = safety + 1
+            local nm = curr.Name and curr.Name()
+            local sid = curr.ScreenID and curr.ScreenID()
+            if (nm and nm:lower() == tLower) or (sid and sid:lower() == tLower) then
+                return curr
+            end
+
+            -- Check if child has children via FirstChild or Children()
+            local hasChildren = false
+            if curr.FirstChild then
+                hasChildren = true
+            elseif curr.Children then
+                local c = curr.Children()
+                if c == true or c == 'TRUE' or tostring(c):lower() == 'true' then
+                    hasChildren = true
+                end
+            end
+            if hasChildren then
+                local found = simFindChildRecursive(curr, targetName)
+                if found then return found end
+            end
+
+            curr = curr.Next
+        end
+        return nil
+    end
+
+    local nestedUiTree = {
+        FirstChild = {
+            Name = function() return 'AAW_Subwindows' end,
+            ScreenID = function() return 'Subwindows' end,
+            FirstChild = {
+                Name = function() return 'AAW_GeneralPage' end,
+                ScreenID = function() return 'GeneralPage' end,
+                FirstChild = {
+                    Name = function() return 'AAW_GeneralList' end,
+                    ScreenID = function() return 'GeneralList' end,
+                    Items = function() return 10 end
+                }
+            }
+        }
+    }
+
+    local foundNestedList = simFindChildRecursive(nestedUiTree, 'AAW_GeneralList')
+    assert(foundNestedList ~= nil, 'Suite 68: findChildRecursive navigates 3-level deep nested hierarchy')
+    assert_eq(foundNestedList.Name(), 'AAW_GeneralList', 'Suite 68: found nested control matches AAW_GeneralList')
+
+    -- 6. Verify in-combat gate in triune.lua
+    assert_true(triuneContent:find("Strict out%-of%-combat enforcement: never spend AAs while engaged in combat") ~= nil,
+        'Suite 68: triune.lua includes strict out-of-combat gate in checkAutoSpendAA')
+    assert_true(triuneContent:find("Strict out%-of%-combat enforcement: if combat engages mid%-train") ~= nil,
+        'Suite 68: triune.lua includes mid-training combat abort in processAATrainWorkflow')
+end
+
+-- ============================================================================
+-- Suite 69: AA Purchase Verification & Unpurchasable Ability Skip Logic
+-- ============================================================================
+print('--- Suite 69: AA Purchase Verification & Unpurchasable Ability Skip Logic ---')
+do
+    -- 1. Simulation of AA verification step
+    local function simVerifyAATrainOutcome(taskName, initialPts, currentPts, initialRank, currentRank, btnDisabled, skipTable, now)
+        local purchaseSucceeded = (currentPts < initialPts) or (currentRank > initialRank)
+        if purchaseSucceeded then
+            skipTable[taskName] = nil
+            return true, 'success'
+        else
+            skipTable[taskName] = now + 300
+            local reason = btnDisabled and 'Train button disabled / unmet requirements'
+                or 'Purchase not accepted by server (unmet requirements or level too low)'
+            return false, reason
+        end
+    end
+
+    local skipTable = {}
+    local now = 1000.0
+
+    -- Test 1a: Successful purchase via points delta
+    local ok, reason = simVerifyAATrainOutcome('Runspeed', 10, 8, 0, 1, false, skipTable, now)
+    assert_true(ok, 'Suite 69: Successful purchase detected when points decrease and rank increases')
+    assert_eq(skipTable['Runspeed'], nil, 'Suite 69: Successful ability not placed in skip table')
+
+    -- Test 1b: Failed purchase (points unchanged, rank unchanged)
+    local okFail, failReason = simVerifyAATrainOutcome('Combat Agility', 8, 8, 0, 0, false, skipTable, now)
+    assert_eq(okFail, false, 'Suite 69: Purchase failure detected when points and rank are unchanged')
+    assert_eq(skipTable['Combat Agility'], 1300.0, 'Suite 69: Failed ability placed on 300s cooldown')
+    assert_true(failReason:find('Purchase not accepted by server') ~= nil, 'Suite 69: Correct server rejection reason reported')
+
+    -- Test 1c: Failed purchase with disabled train button in UI
+    local okDis, disReason = simVerifyAATrainOutcome('Planar Power', 8, 8, 0, 0, true, skipTable, now)
+    assert_eq(okDis, false, 'Suite 69: Purchase failure detected when train button is disabled')
+    assert_eq(skipTable['Planar Power'], 1300.0, 'Suite 69: Disabled ability placed on 300s cooldown')
+    assert_true(disReason:find('Train button disabled') ~= nil, 'Suite 69: Correct button disabled reason reported')
+
+    -- 2. Candidate Selection & Advancement Logic (Prevents getting stuck!)
+    local candidates = {
+        { name = 'Combat Agility', cost = 2, rank = 0, maxRank = 5 },
+        { name = 'Runspeed', cost = 2, rank = 1, maxRank = 5 },
+        { name = 'Innate Strength', cost = 1, rank = 0, maxRank = 5 }
+    }
+
+    local function simSelectNextCandidate(candList, skips, curTime, unspent)
+        for _, c in ipairs(candList) do
+            if not (skips[c.name] and curTime < skips[c.name]) then
+                if unspent >= c.cost then
+                    return c
+                end
+            end
+        end
+        return nil
+    end
+
+    -- Combat Agility is skipped, Runspeed should be selected next
+    local chosen = simSelectNextCandidate(candidates, skipTable, now + 10, 8)
+    assert(chosen ~= nil, 'Suite 69: Candidate selected when highest priority is skipped')
+    assert_eq(chosen.name, 'Runspeed', 'Suite 69: Auto AA advances to Runspeed instead of getting stuck on Combat Agility')
+
+    -- 3. Level-up reset logic
+    local function simCheckLevelChange(curLevel, lastLevel, skips)
+        if lastLevel and curLevel > 0 and curLevel ~= lastLevel then
+            return {}, curLevel
+        end
+        return skips, curLevel > 0 and curLevel or lastLevel
+    end
+
+    local updatedSkips, updatedLevel = simCheckLevelChange(60, 55, skipTable)
+    assert_eq(next(updatedSkips), nil, 'Suite 69: All AA skips cleared when character levels up')
+    assert_eq(updatedLevel, 60, 'Suite 69: Character level updated to 60')
+
+    -- 4. Manual spend clear logic
+    skipTable['Combat Agility'] = 1300.0
+    local function simManualSpend(targetName, skips)
+        if targetName and targetName ~= '' then
+            skips[targetName] = nil
+        else
+            for k in pairs(skips) do skips[k] = nil end
+        end
+    end
+    simManualSpend('Combat Agility', skipTable)
+    assert_eq(skipTable['Combat Agility'], nil, 'Suite 69: Manual spend clears skip for targeted ability')
+
+    -- 5. Static pre-check logic (MinLevel & CanTrain)
+    local function simPreCheckAA(myLevel, minLevel, canTrain)
+        if (myLevel > 0 and minLevel > 0 and myLevel < minLevel) or (canTrain == false) then
+            return false -- Cannot train
+        end
+        return true -- Eligible to attempt
+    end
+    assert_eq(simPreCheckAA(55, 60, true), false, 'Suite 69: Pre-check rejects ability when player level < minLevel')
+    assert_eq(simPreCheckAA(65, 60, false), false, 'Suite 69: Pre-check rejects ability when canTrain is false')
+    assert_eq(simPreCheckAA(65, 60, true), true, 'Suite 69: Pre-check accepts ability when level and prerequisites are met')
+
+    -- 6. Verify triune.lua source code definitions
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("task%.step == 'click_train'") ~= nil, 'Suite 69: triune.lua implements click_train step in processAATrainWorkflow')
+    assert_true(triuneContent:find("AAW_TrainButton") ~= nil, 'Suite 69: triune.lua clicks train button in UI')
+    assert_true(triuneContent:find("targetTab = prefTab") ~= nil, 'Suite 69: triune.lua sets target tab based on ability type')
+    assert_true(triuneContent:find("ImGui%.TextColored%(GOOD%[1%], GOOD%[2%], GOOD%[3%], GOOD%[4%], 'Can Train'%)") ~= nil,
+        'Suite 69: triune.lua displays Can Train status for affordable abilities in UI')
+end
+
+-- ============================================================================
+-- Suite 70: Player-Specific AA Filtering & Cross-Class Ability Rejection
+-- ============================================================================
+print('--- Suite 70: Player-Specific AA Filtering & Cross-Class Ability Rejection ---')
+do
+    -- 1. Simulation of isAAAllowedForPlayer
+    local CLASS_ARCHETYPES = {
+        War = 'Melee', Pal = 'Priest/Melee', SK = 'Caster/Melee', Rng = 'Melee/Caster',
+        Rog = 'Melee', Mnk = 'Melee', Ber = 'Melee', Brd = 'Melee/Bard',
+        Clr = 'Priest', Dru = 'Priest/Caster', Shm = 'Priest/Caster',
+        Wiz = 'Caster', Mag = 'Caster', Enc = 'Caster', Nec = 'Caster', Bst = 'Melee/Priest',
+    }
+    local ARCHETYPE_CLASSES = {
+        Melee = { War = true, Pal = true, SK = true, Rng = true, Rog = true, Mnk = true, Ber = true, Brd = true, Bst = true },
+        Priest = { Clr = true, Dru = true, Shm = true, Pal = true },
+        Caster = { Wiz = true, Mag = true, Enc = true, Nec = true, Dru = true, Shm = true, Rng = true, SK = true, Bst = true },
+        Pet = { Mag = true, Nec = true, Bst = true, Shm = true, Enc = true },
+    }
+    local ARCHETYPE_RESTRICTIONS = {
+        ['Combat Fury'] = 'Melee', ['Ambidexterity'] = 'Melee', ['Physical Enhancement'] = 'Melee',
+        ['Healing Gift'] = 'Priest', ['Healing Adept'] = 'Priest',
+        ['Spell Casting Mastery'] = 'Caster', ['Fury of Magic'] = 'Caster', ['Destructive Fury'] = 'Caster',
+        ['Mend Companion'] = 'Pet', ['Companion\'s Blessing'] = 'Pet',
+    }
+    local CLASS_SPECIFIC_ABILITIES = {
+        War = { 'Area Taunt', 'Rampage', 'Blade Guardian' },
+        Clr = { 'Divine Arbitration', 'Purify Soul', 'Celestial Regeneration' },
+        Rng = { 'Headshot', 'Endless Quiver' },
+        Wiz = { 'Mana Burn', 'Harvest of Druzzil' },
+        SK  = { 'Harm Touch', 'Leech Touch' },
+        Enc = { 'Gather Mana', 'Color Shock' },
+        Nec = { 'Life Burn', 'Swarm of Decay' },
+        Shm = { 'Cannibalization', 'Turgur\'s Swarm' },
+    }
+    local AA_CLASS_RESTRICTIONS = {}
+    for cls, abilities in pairs(CLASS_SPECIFIC_ABILITIES) do
+        for _, nm in ipairs(abilities) do
+            if not AA_CLASS_RESTRICTIONS[nm] then AA_CLASS_RESTRICTIONS[nm] = {} end
+            AA_CLASS_RESTRICTIONS[nm][cls] = true
+        end
+    end
+
+    local function isAllowed(name, playerClasses, isFromUI, mockRanks)
+        if isFromUI then return true end
+        if mockRanks and (mockRanks[name] or 0) > 0 then return true end
+        local allowedClasses = AA_CLASS_RESTRICTIONS[name]
+        if allowedClasses then
+            local matched = false
+            for _, cls in ipairs(playerClasses) do
+                if allowedClasses[cls] then matched = true; break end
+            end
+            if not matched then return false end
+        end
+        local reqArch = ARCHETYPE_RESTRICTIONS[name]
+        if reqArch then
+            local archMap = ARCHETYPE_CLASSES[reqArch]
+            if archMap then
+                local matched = false
+                for _, cls in ipairs(playerClasses) do
+                    if archMap[cls] then matched = true; break end
+                end
+                if not matched then return false end
+            end
+        end
+        return true
+    end
+
+    -- Warrior tests
+    local warClasses = { 'War' }
+    assert_true(isAllowed('Area Taunt', warClasses, false), 'Suite 70: War allowed Area Taunt')
+    assert_true(isAllowed('Combat Fury', warClasses, false), 'Suite 70: War allowed Melee archetype Combat Fury')
+    assert_true(isAllowed('Innate Run Speed', warClasses, false), 'Suite 70: War allowed general Innate Run Speed')
+    assert_true(not isAllowed('Headshot', warClasses, false), 'Suite 70: War REJECTS Ranger Headshot')
+    assert_true(not isAllowed('Mana Burn', warClasses, false), 'Suite 70: War REJECTS Wizard Mana Burn')
+    assert_true(not isAllowed('Harm Touch', warClasses, false), 'Suite 70: War REJECTS Shadowknight Harm Touch')
+    assert_true(not isAllowed('Divine Arbitration', warClasses, false), 'Suite 70: War REJECTS Cleric Divine Arbitration')
+    assert_true(not isAllowed('Fury of Magic', warClasses, false), 'Suite 70: War REJECTS Caster archetype Fury of Magic')
+    assert_true(not isAllowed('Healing Gift', warClasses, false), 'Suite 70: War REJECTS Priest archetype Healing Gift')
+
+    -- Cleric tests
+    local clrClasses = { 'Clr' }
+    assert_true(isAllowed('Divine Arbitration', clrClasses, false), 'Suite 70: Clr allowed Divine Arbitration')
+    assert_true(isAllowed('Healing Gift', clrClasses, false), 'Suite 70: Clr allowed Priest archetype Healing Gift')
+    assert_true(not isAllowed('Area Taunt', clrClasses, false), 'Suite 70: Clr REJECTS Warrior Area Taunt')
+    assert_true(not isAllowed('Headshot', clrClasses, false), 'Suite 70: Clr REJECTS Ranger Headshot')
+    assert_true(not isAllowed('Combat Fury', clrClasses, false), 'Suite 70: Clr REJECTS Melee archetype Combat Fury')
+
+    -- Bypass if already trained (Rank > 0)
+    local mockRanks = { ['Headshot'] = 1 }
+    assert_true(isAllowed('Headshot', warClasses, false, mockRanks), 'Suite 70: Already trained rank > 0 bypasses class restriction')
+
+    -- Bypass if scanned directly from in-game UI window
+    assert_true(isAllowed('Headshot', warClasses, true), 'Suite 70: isFromUI bypasses restriction')
+
+    -- Bypass if explicitly prioritized by user (custom server compatibility)
+    local function isAllowedWithPrio(name, playerClasses, isPrio)
+        if isPrio then return true end
+        return isAllowed(name, playerClasses, false)
+    end
+    assert_true(isAllowedWithPrio('Bestial Frenzy', warClasses, true), 'Suite 70: Prioritized Bestial Frenzy allowed unconditionally for custom servers')
+    assert_true(isAllowedWithPrio('Mana Burn', warClasses, true), 'Suite 70: Prioritized Mana Burn allowed unconditionally for custom servers')
+
+    -- 2. Cache pruning simulation
+    local pollutedCache = {
+        ['areataunt'] = { name = 'Area Taunt' },
+        ['combatagility'] = { name = 'Combat Agility' },
+        ['headshot'] = { name = 'Headshot' },
+        ['manaburn'] = { name = 'Mana Burn' },
+        ['harmtouch'] = { name = 'Harm Touch' },
+        ['divinearbitration'] = { name = 'Divine Arbitration' },
+    }
+    for cName, cd in pairs(pollutedCache) do
+        if not isAllowed(cd.name, warClasses, false) then
+            pollutedCache[cName] = nil
+        end
+    end
+    assert_true(pollutedCache['areataunt'] ~= nil, 'Suite 70: Cache preserves valid Area Taunt for Warrior')
+    assert_true(pollutedCache['combatagility'] ~= nil, 'Suite 70: Cache preserves valid Combat Agility for Warrior')
+    assert_true(pollutedCache['headshot'] == nil, 'Suite 70: Cache PRUNES foreign Headshot for Warrior')
+    assert_true(pollutedCache['manaburn'] == nil, 'Suite 70: Cache PRUNES foreign Mana Burn for Warrior')
+    assert_true(pollutedCache['harmtouch'] == nil, 'Suite 70: Cache PRUNES foreign Harm Touch for Warrior')
+    assert_true(pollutedCache['divinearbitration'] == nil, 'Suite 70: Cache PRUNES foreign Divine Arbitration for Warrior')
+
+    -- 3. Source code inspection of TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("runtime.CLASS_ARCHETYPES = {") ~= nil, 'Suite 70: triune.lua defines CLASS_ARCHETYPES')
+    assert_true(triuneContent:find("runtime.ARCHETYPE_CLASSES = {") ~= nil, 'Suite 70: triune.lua defines ARCHETYPE_CLASSES')
+    assert_true(triuneContent:find("runtime.ARCHETYPE_RESTRICTIONS = {") ~= nil, 'Suite 70: triune.lua defines ARCHETYPE_RESTRICTIONS')
+    assert_true(triuneContent:find("runtime.CLASS_SPECIFIC_ABILITIES = {") ~= nil, 'Suite 70: triune.lua defines CLASS_SPECIFIC_ABILITIES')
+    assert_true(triuneContent:find("runtime.buildAAClassRestrictions") ~= nil, 'Suite 70: triune.lua defines buildAAClassRestrictions')
+    assert_true(triuneContent:find("runtime.isAAAllowedForPlayer") ~= nil, 'Suite 70: triune.lua defines isAAAllowedForPlayer')
+    assert_true(triuneContent:find("if not runtime%.isAAAllowedForPlayer%(name, nil, isFromUI%) then%s+return") ~= nil,
+        'Suite 70: recordScannedAA filters foreign class abilities')
+    assert_true(triuneContent:find("if isSkill or not runtime%.isAAAllowedForPlayer%(cName, nil, false%) then") ~= nil,
+        'Suite 70: scanPlayerAAs cache pruning removes foreign class abilities')
+    assert_true(triuneContent:find("if ctrl%.auto_aa_priorities and ctrl%.auto_aa_priorities%[name%] then") ~= nil,
+        'Suite 70: isAAAllowedForPlayer permits prioritized abilities unconditionally')
+end
+
+-- ============================================================================
+-- Suite 71: Alternate Advancement Description Extraction, Text Wrapping & Hover Tooltips
+-- ============================================================================
+print('--- Suite 71: AA Description Extraction, Text Wrapping & Hover Tooltips ---')
+do
+    -- 1. Test runtime.wrapText simulation
+    local function simWrapText(text, maxLineLen)
+        if not text or text == '' then return '' end
+        maxLineLen = maxLineLen or 60
+        local lines = {}
+        for paragraph in tostring(text):gmatch("([^\r\n]+)") do
+            local line = ''
+            for word in paragraph:gmatch("%S+") do
+                if #line == 0 then
+                    line = word
+                elseif #line + 1 + #word <= maxLineLen then
+                    line = line .. ' ' .. word
+                else
+                    lines[#lines + 1] = line
+                    line = word
+                end
+            end
+            if #line > 0 then
+                lines[#lines + 1] = line
+            end
+        end
+        return table.concat(lines, '\n')
+    end
+
+    assert_eq(simWrapText(nil), '', 'Suite 71: nil text returns empty string')
+    assert_eq(simWrapText(''), '', 'Suite 71: empty text returns empty string')
+
+    local shortText = 'Short description.'
+    assert_eq(simWrapText(shortText, 50), 'Short description.', 'Suite 71: short text is untouched')
+
+    local longText = 'This ability increases your chance to avoid incoming melee attacks by 5% per rank and provides defensive mitigation.'
+    local wrapped = simWrapText(longText, 45)
+    local wrapLines = {}
+    for l in wrapped:gmatch("[^\r\n]+") do wrapLines[#wrapLines + 1] = l end
+    assert_true(#wrapLines >= 3, 'Suite 71: long text wrapped into 3+ lines')
+    for _, l in ipairs(wrapLines) do
+        assert_true(#l <= 45, string.format('Suite 71: line length %d <= 45', #l))
+    end
+
+    -- 2. Test getAADescription logic simulation
+    local itmWithDesc = { name = 'Combat Agility', rank = 3, maxRank = 5, cost = 2, description = 'Pre-cached description.' }
+    local function simGetAADescription(itm, mockTloDesc, mockCache)
+        if not itm then return '' end
+        if itm.description and itm.description ~= '' then
+            return itm.description
+        end
+        local desc = mockTloDesc or ''
+        if desc ~= '' then
+            itm.description = desc
+            if mockCache and mockCache[itm.name] then
+                mockCache[itm.name].description = desc
+            end
+        end
+        return desc
+    end
+
+    local cache = { ['Combat Agility'] = { rank = 3, maxRank = 5, cost = 2 } }
+    local d1 = simGetAADescription(itmWithDesc, 'Different mock', cache)
+    assert_eq(d1, 'Pre-cached description.', 'Suite 71: returns existing itm.description without TLO call')
+
+    local itmLazy = { name = 'Combat Agility', rank = 3, maxRank = 5, cost = 2 }
+    local d2 = simGetAADescription(itmLazy, 'Mock TLO description with 10% bonus', cache)
+    assert_eq(d2, 'Mock TLO description with 10% bonus', 'Suite 71: lazily retrieves TLO description')
+    assert_eq(itmLazy.description, 'Mock TLO description with 10% bonus', 'Suite 71: caches description on itm')
+    assert_eq(cache['Combat Agility'].description, 'Mock TLO description with 10% bonus', 'Suite 71: caches description in runtime.cachedAAData')
+
+    -- 3. Test Tooltip Construction & Percent Format Safety
+    local function simFormatAATooltip(itm, desc)
+        local wrappedDesc = (desc and desc ~= '') and simWrapText(desc, 50) or nil
+        local tip
+        if wrappedDesc and wrappedDesc ~= '' then
+            tip = string.format('%s\nCurrent Rank: %d / %d\nNext Rank Cost: %d AA\nPoints Spent: %d AA\n\n%s',
+                itm.name, itm.rank, itm.maxRank, itm.cost, itm.pointsSpent or 0, wrappedDesc)
+        else
+            tip = string.format('%s\nCurrent Rank: %d / %d\nNext Rank Cost: %d AA\nPoints Spent: %d AA',
+                itm.name, itm.rank, itm.maxRank, itm.cost, itm.pointsSpent or 0)
+        end
+        return tip
+    end
+
+    local tipWithDesc = simFormatAATooltip({ name = 'Innate Run Speed', rank = 1, maxRank = 3, cost = 2, pointsSpent = 1 }, 'Increases base run speed by 10% and movement rate by 5%.')
+    assert_true(tipWithDesc:find("Innate Run Speed") ~= nil, 'Suite 71: Tooltip includes ability name')
+    assert_true(tipWithDesc:find("Current Rank: 1 / 3") ~= nil, 'Suite 71: Tooltip includes rank')
+    assert_true(tipWithDesc:find("Next Rank Cost: 2 AA") ~= nil, 'Suite 71: Tooltip includes cost')
+    assert_true(tipWithDesc:find("Increases base run speed") ~= nil, 'Suite 71: Tooltip includes description')
+    -- Safe to pass to ImGui.SetTooltip('%s', tip) even with literal %
+    local okFormat, formatted = pcall(string.format, '%s', tipWithDesc)
+    assert_true(okFormat, 'Suite 71: Tooltip with % characters formats safely with %s specifier')
+
+    -- 4. Source code inspection of TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("function runtime.wrapText%(text, maxLineLen%)") ~= nil,
+        'Suite 71: triune.lua defines runtime.wrapText')
+    assert_true(triuneContent:find("function runtime.getAADescription%(itm%)") ~= nil,
+        'Suite 71: triune.lua defines runtime.getAADescription')
+    assert_true(triuneContent:find("function runtime.showAATooltip%(itm%)") ~= nil,
+        'Suite 71: triune.lua defines runtime.showAATooltip')
+    assert_true(triuneContent:find("description = cd.description") ~= nil,
+        'Suite 71: recordScannedAA restores description from cache')
+    assert_true(triuneContent:find("if ma.Description then%s+local d = ma.Description%(%)") ~= nil,
+        'Suite 71: recordScannedAA extracts description from Me.AltAbility')
+    assert_true(triuneContent:find("if %(not description or description == ''%) and ga.Description then%s+local d = ga.Description%(%)") ~= nil,
+        'Suite 71: recordScannedAA extracts description from AltAbility')
+    assert_true(triuneContent:find("description = description") ~= nil,
+        'Suite 71: recordScannedAA populates description in entry and cache')
+    assert_true(triuneContent:find("runtime.showAATooltip%(itm%)") ~= nil,
+        'Suite 71: UI.drawAutoAATab displays runtime.showAATooltip on hover')
+end
+
+-- ============================================================================
+-- Suite 72: Special Tab AA & Fireworks Training Reliability Logic
+-- ============================================================================
+print('--- Suite 72: Special Tab AA & Fireworks Training Reliability Logic ---')
+do
+    -- 1. Special Tab AA Detection simulation
+    local function simIsSpecialTabAA(name)
+        if not name or name == '' then return false end
+        local lower = tostring(name):lower()
+        if lower:find('firework') then return true end
+        return false
+    end
+
+    assert_true(simIsSpecialTabAA('Alternately Advanced Fireworks'), 'Suite 72: Detects Fireworks as Special tab AA')
+    assert_true(simIsSpecialTabAA('fireworks'), 'Suite 72: Detects lowercase fireworks as Special tab AA')
+    assert_eq(simIsSpecialTabAA('Combat Agility'), false, 'Suite 72: Non-fireworks ability is not Special tab')
+
+    -- 2. Repeatable Special Tab Ability Retention Logic
+    local function simIsFullyTrained(name, rank, maxRank)
+        local isSpecial = simIsSpecialTabAA(name)
+        return not isSpecial and (maxRank > 0 and rank >= maxRank)
+    end
+
+    assert_eq(simIsFullyTrained('Alternately Advanced Fireworks', 0, 1), false, 'Suite 72: Fireworks 0/1 is not fully trained')
+    assert_eq(simIsFullyTrained('Alternately Advanced Fireworks', 1, 1), false, 'Suite 72: Repeatable Fireworks 1/1 is never fully trained')
+    assert_true(simIsFullyTrained('Combat Agility', 5, 5), 'Suite 72: Standard ability 5/5 is fully trained')
+
+    -- 3. /alt buy Support Logic for Custom Servers
+    local function simCanIssueAltBuy(name, aaId)
+        if aaId and aaId > 0 then
+            return true
+        end
+        if name and name ~= '' then
+            return true
+        end
+        return false
+    end
+
+    assert_true(simCanIssueAltBuy('Alternately Advanced Fireworks', 17788), 'Suite 72: Allows /alt buy for Fireworks activation ID 17788 on custom server')
+    assert_true(simCanIssueAltBuy('Alternately Advanced Fireworks', 0), 'Suite 72: Allows /alt buy by ability name')
+    assert_true(simCanIssueAltBuy('Combat Agility', 101), 'Suite 72: Allows /alt buy for standard AA with valid ID')
+
+    -- 4. Multi-Vector Purchase Verification Logic (Points, Spent, Rank)
+    local function simVerifyPurchase(initPts, curPts, initSpent, curSpent, initRank, curRank)
+        return (curPts < initPts) or (curRank > initRank) or (curSpent > initSpent)
+    end
+
+    -- Repeatable Fireworks purchase: Rank stays 0, but unspent points decrease and spent points increase
+    assert_true(simVerifyPurchase(38, 13, 10060, 10085, 0, 0), 'Suite 72: Verifies Fireworks purchase via unspent point decrease')
+    assert_true(simVerifyPurchase(38, 38, 10060, 10085, 0, 0), 'Suite 72: Verifies Fireworks purchase via spent points increase even if unspent lag')
+    assert_true(simVerifyPurchase(10, 8, 50, 52, 1, 2), 'Suite 72: Verifies standard AA purchase via rank increase')
+    assert_eq(simVerifyPurchase(38, 38, 10060, 10060, 0, 0), false, 'Suite 72: Rejects purchase when no points or rank changed')
+
+    -- 5. Watchdog Timeout Simulation
+    local function simCheckWatchdog(startedAt, now)
+        return (now - startedAt) > 10.0
+    end
+
+    assert_eq(simCheckWatchdog(100.0, 105.0), false, 'Suite 72: Watchdog does not trigger before 10s')
+    assert_true(simCheckWatchdog(100.0, 110.1), 'Suite 72: Watchdog triggers and clears task after 10s')
+
+    -- 6. Source code inspection of TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("runtime%.pendingAATrain") ~= nil,
+        'Suite 72: triune.lua defines runtime.pendingAATrain')
+    assert_true(triuneContent:find("step = 'open'") ~= nil,
+        'Suite 72: triune.lua initializes step to open')
+    assert_true(triuneContent:find("mq%.cmdf%('/nomodkey /notify %%s %%s leftmouseup', winName, listName%)") ~= nil,
+        'Suite 72: triune.lua sends leftmouseup to list row to activate Train button')
+    assert_true(triuneContent:find("not isSpecial and %(maxRank > 0 and rank >= maxRank%)") ~= nil,
+        'Suite 72: triune.lua prevents marking repeatable Special tab abilities as fully trained')
+    assert_true(triuneContent:find("Strict anti%-pause check: never spend AAs while casting or moving") ~= nil,
+        'Suite 72: triune.lua guards checkAutoSpendAA against casting and movement to eliminate pauses')
+end
+
+-- ============================================================================
+-- Suite 73: Between-Pulling AA Purchasing Logic
+-- ============================================================================
+print('--- Suite 73: Between-Pulling AA Purchasing Logic ---')
+do
+    -- 1. Simulation of between-pull auto-spend evaluation
+    local function simBetweenPullsSpend(autoSpendEnabled, inCombat, xtarCount, isCasting, moving, allowStop, unspent, cost)
+        if not autoSpendEnabled then return false, false end
+        if inCombat or xtarCount > 0 or isCasting then return false, false end
+        if unspent < cost or cost <= 0 then return false, false end
+        -- Candidate is affordable
+        local didStop = false
+        if moving then
+            if not allowStop then return false, false end
+            didStop = true
+        end
+        return true, didStop
+    end
+
+    -- Test: Affordable AA between pulls halts movement cleanly
+    local canBuy, didStop = simBetweenPullsSpend(true, false, 0, false, true, true, 25, 25)
+    assert_true(canBuy, 'Suite 73: Purchases affordable AA between pulls')
+    assert_true(didStop, 'Suite 73: Stops movement when purchasing affordable AA between pulls')
+
+    -- Test: Unaffordable AA between pulls does not pause or stop movement
+    local canBuy2, didStop2 = simBetweenPullsSpend(true, false, 0, false, true, true, 5, 25)
+    assert_eq(canBuy2, false, 'Suite 73: Rejects unaffordable AA between pulls')
+    assert_eq(didStop2, false, 'Suite 73: Does not stop movement when AA is unaffordable')
+
+    -- Test: In combat between pulls (e.g. add on xtarget) blocks purchase
+    local canBuyCombat, _ = simBetweenPullsSpend(true, true, 1, false, false, true, 50, 25)
+    assert_eq(canBuyCombat, false, 'Suite 73: Combat or xtarget blocks between-pull AA purchase')
+
+    -- Test: Default background check without allowStop does not stop moving
+    local canBuyBg, didStopBg = simBetweenPullsSpend(true, false, 0, false, true, false, 50, 25)
+    assert_eq(canBuyBg, false, 'Suite 73: Background check without allowStop rejected while moving')
+    assert_eq(didStopBg, false, 'Suite 73: Background check does not stop movement')
+
+    -- 2. Source code inspection of TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("function runtime%.checkAutoSpendAA%(allowStop%)") ~= nil,
+        'Suite 73: triune.lua defines runtime.checkAutoSpendAA(allowStop)')
+    assert_true(triuneContent:find("function runtime%.startAATrainWorkflow%(targetName, allowStop%)") ~= nil,
+        'Suite 73: triune.lua defines runtime.startAATrainWorkflow(targetName, allowStop)')
+    assert_true(triuneContent:find("Check to see if an AA can be purchased between pulling") ~= nil,
+        'Suite 73: triune.lua checks AA purchasing between pulls')
+    assert_true(triuneContent:find("if runtime%.checkAutoSpendAA%(true%) then") ~= nil,
+        'Suite 73: triune.lua invokes checkAutoSpendAA(true) between pulls')
+    assert_true(triuneContent:find("if runtime%.pendingAATrain then%s+stopMoving%(%)%s+return%s+end") ~= nil,
+        'Suite 73: triune.lua pauses pulling while pendingAATrain is active')
+end
 
 -- ============================================================================
 -- Results

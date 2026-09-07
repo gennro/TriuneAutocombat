@@ -217,6 +217,8 @@ local function sanitizeModeConfig(c)
     if c.nav_hazard_avoidance == nil then c.nav_hazard_avoidance = true end
     if c.nav_hazard_radius == nil then c.nav_hazard_radius = 15 end
     if c.nav_hazard_min_hits == nil then c.nav_hazard_min_hits = 2 end
+    if c.nav_hazard_max_hits == nil then c.nav_hazard_max_hits = 6 end
+    if c.nav_hazard_decay_minutes == nil then c.nav_hazard_decay_minutes = 10 end
     if c.nav_reverse_breadcrumbs == nil then c.nav_reverse_breadcrumbs = true end
     if c.nav_max_path_ratio == nil then c.nav_max_path_ratio = 2.5 end
     if c.nav_proactive_doors == nil then c.nav_proactive_doors = true end
@@ -291,7 +293,7 @@ local function defaultCtrl()
         pull_engage_dist     = 100,
         pull_stand_back      = false,
         xtar_nav_dist        = 150,
-        ignore_distant_xtargets = false,
+        ignore_distant_xtargets = true,
         combat_style         = 'Melee',
         melee_dist           = 14,
         ranged_dist          = 40,
@@ -338,6 +340,8 @@ local function defaultCtrl()
         nav_hazard_avoidance     = true,
         nav_hazard_radius        = 15,
         nav_hazard_min_hits      = 2,
+        nav_hazard_max_hits      = 6,
+        nav_hazard_decay_minutes = 10,
         nav_reverse_breadcrumbs = true,
         nav_max_path_ratio       = 2.5,
         nav_proactive_doors      = true,
@@ -500,6 +504,9 @@ local runtime = {
     lastObservedAAPointsSpent = nil,
     lastObservedAAPoints = nil,
     pendingPostTrainScanAt = nil,
+    lastAATrainAttempt = {},
+    lastObservedAutoSpendPts = nil,
+    lastCharLevel = nil,
     knownDiscSet = nil,
     discExpires = {},
     discCooldown = {},
@@ -586,9 +593,7 @@ local stuckState = {
     counter = 0,
     attempts = 0,
     lastDoorClickAt = 0,
-    combatStallSince = nil,
     lastStuckRecoveryAt = nil,
-    lastCombatStallRecoveryAt = nil,
     lastCannotSeeAt = 0,
     cannotSeeAttempts = 0
 }
@@ -2280,6 +2285,7 @@ local function isDetrimentalSpell(name, targetId, kind, targetToken)
         or lowerName:find('tash') or lowerName:find('malo') or lowerName:find('snare') or lowerName:find('root')
         or lowerName:find('mez') or lowerName:find('comet') or lowerName:find('bolt') or lowerName:find('blast')
         or lowerName:find('shock') or lowerName:find('poison') or lowerName:find('disease') or lowerName:find('lifetap')
+        or lowerName:find('lifedraw') or lowerName:find('lifespike') or lowerName:find('siphon life')
         or lowerName:find('drain') or lowerName:find('scourge') or lowerName:find('torment') or lowerName:find('burn')
         or lowerName:find('fire') or lowerName:find('frost') or lowerName:find('ice') or lowerName:find('chill')
         or lowerName:find('flame') or lowerName:find('ignite') or lowerName:find('sear') or lowerName:find('doom')
@@ -3222,7 +3228,7 @@ local function mapTLOCategoryToKind(sp, name)
     end
 
     -- 3. Match remaining category strings
-    if catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore') then
+    if bene and (catStr:find('heal') or subcatStr:find('heal') or catStr:find('restore') or subcatStr:find('restore')) then
         return 'heal'
     elseif catStr:find('dot') or catStr:find('damage over time') or subcatStr:find('dot') or subcatStr:find('damage over time') then
         return 'dot'
@@ -4428,18 +4434,43 @@ local function splitByChar(s, sep)
     return out
 end
 
-function runtime.loadAll()
-    local fn = loadfile(cfg .. '/triune_loadout.lua')
-    if not fn then return end
-    local ok, t = pcall(fn)
-    if ok and type(t) == 'table' then
-        ALLDATA = t
-        if type(ALLDATA.__ignore) == 'table' then runtime.ignoreList = ALLDATA.__ignore end
-        if type(ALLDATA.__pullList) == 'table' then runtime.pullList = ALLDATA.__pullList end
-        if type(ALLDATA.__zoneHazards) == 'table' then ctrl.zone_hazards = ALLDATA.__zoneHazards end
-        if type(ALLDATA.__zoneWaypoints) == 'table' then ctrl.zone_waypoints = ALLDATA.__zoneWaypoints end
-        if type(ALLDATA.__zoneWaypointPresets) == 'table' then ctrl.zone_waypoint_presets = ALLDATA.__zoneWaypointPresets end
+-- Per-character loadout file path (multibox-safe). Each client writes ONLY its
+-- own triune_loadout_<server>_<char>.lua, so different characters never share
+-- (and never overwrite each other's) settings, ignore/pull lists, or zone data.
+local function loadoutFilePath()
+    local serverName = ''
+    pcall(function() serverName = mq.TLO.EverQuest.ServerName() or '' end)
+    if not serverName or serverName == '' then
+        pcall(function() serverName = mq.TLO.Zone.Server() or '' end)
     end
+    local tag = (tostring(serverName or '') .. '_' .. tostring(myName or 'unknown')):gsub('[^%w%_-]', '_')
+    return cfg .. '/triune_loadout_' .. tag .. '.lua'
+end
+
+function runtime.loadAll()
+    local t = nil
+    if myName then
+        local fn = loadfile(loadoutFilePath())
+        if fn then
+            local ok, t2 = pcall(fn)
+            if ok and type(t2) == 'table' then t = t2 end
+        end
+    end
+    if not t then
+        -- Legacy shared file fallback (pre-per-character migration).
+        local fn = loadfile(cfg .. '/triune_loadout.lua')
+        if fn then
+            local ok, t2 = pcall(fn)
+            if ok and type(t2) == 'table' then t = t2 end
+        end
+    end
+    if not t then return end
+    ALLDATA = t
+    if type(ALLDATA.__ignore) == 'table' then runtime.ignoreList = ALLDATA.__ignore end
+    if type(ALLDATA.__pullList) == 'table' then runtime.pullList = ALLDATA.__pullList end
+    if type(ALLDATA.__zoneHazards) == 'table' then ctrl.zone_hazards = ALLDATA.__zoneHazards end
+    if type(ALLDATA.__zoneWaypoints) == 'table' then ctrl.zone_waypoints = ALLDATA.__zoneWaypoints end
+    if type(ALLDATA.__zoneWaypointPresets) == 'table' then ctrl.zone_waypoint_presets = ALLDATA.__zoneWaypointPresets end
 end
 
 -- Snapshots the live waypoint list/settings into ctrl.zone_waypoints for the
@@ -4467,7 +4498,7 @@ runtime.saveLoadout = function(silent)
     runtime.syncCurrentZoneWaypoints()
     ALLDATA.__zoneWaypoints = ctrl.zone_waypoints
     ALLDATA.__zoneWaypointPresets = ctrl.zone_waypoint_presets
-    local f = io.open(cfg .. '/triune_loadout.lua', 'w')
+    local f = io.open(loadoutFilePath(), 'w')
     if not f then return end
     f:write('return '); serialize(ALLDATA, f, 1); f:close()
     if ctrl.auto_aa_delegate_aaspend and runtime.syncAAsToMQ2AASpendIni then
@@ -7092,6 +7123,92 @@ function UI.drawAATab()
     ImGui.EndTabItem()
 end
 
+function runtime.wrapText(text, maxLineLen)
+    if not text or text == '' then return '' end
+    maxLineLen = maxLineLen or 60
+    local lines = {}
+    for paragraph in tostring(text):gmatch("([^\r\n]+)") do
+        local line = ''
+        for word in paragraph:gmatch("%S+") do
+            if #line == 0 then
+                line = word
+            elseif #line + 1 + #word <= maxLineLen then
+                line = line .. ' ' .. word
+            else
+                lines[#lines + 1] = line
+                line = word
+            end
+        end
+        if #line > 0 then
+            lines[#lines + 1] = line
+        end
+    end
+    return table.concat(lines, '\n')
+end
+
+function runtime.getAADescription(itm)
+    if not itm then return '' end
+    if itm.description and itm.description ~= '' then
+        return itm.description
+    end
+
+    local desc = ''
+    local name = itm.name
+    local id = itm.id
+
+    pcall(function()
+        if mq.TLO.Me and mq.TLO.Me.AltAbility then
+            local ma = mq.TLO.Me.AltAbility(name)
+            if ma and ma() and ma.Description then
+                local d = ma.Description()
+                if d and d ~= '' then desc = tostring(d) end
+            end
+        end
+        if desc == '' and mq.TLO.AltAbility then
+            local ga = mq.TLO.AltAbility(name)
+            if ga and ga() and ga.Description then
+                local d = ga.Description()
+                if d and d ~= '' then desc = tostring(d) end
+            end
+            if desc == '' and id and id > 0 then
+                local gaId = mq.TLO.AltAbility(id)
+                if gaId and gaId() and gaId.Description then
+                    local d = gaId.Description()
+                    if d and d ~= '' then desc = tostring(d) end
+                end
+            end
+            if desc == '' and ga and ga() and ga.Spell and ga.Spell.Description then
+                local sd = ga.Spell.Description()
+                if sd and sd ~= '' then desc = tostring(sd) end
+            end
+        end
+    end)
+
+    if desc and desc ~= '' then
+        itm.description = desc
+        if runtime.cachedAAData and runtime.cachedAAData[name] then
+            runtime.cachedAAData[name].description = desc
+        end
+    end
+
+    return desc
+end
+
+function runtime.showAATooltip(itm)
+    if not itm then return end
+    local desc = runtime.getAADescription and runtime.getAADescription(itm)
+    local wrappedDesc = (desc and desc ~= '') and runtime.wrapText(desc, 55) or nil
+    local tip
+    if wrappedDesc and wrappedDesc ~= '' then
+        tip = string.format('%s\nCurrent Rank: %d / %d\nNext Rank Cost: %d AA\nPoints Spent: %d AA\n\n%s',
+            itm.name, itm.rank, itm.maxRank, itm.cost, itm.pointsSpent or 0, wrappedDesc)
+    else
+        tip = string.format('%s\nCurrent Rank: %d / %d\nNext Rank Cost: %d AA\nPoints Spent: %d AA',
+            itm.name, itm.rank, itm.maxRank, itm.cost, itm.pointsSpent or 0)
+    end
+    ImGui.SetTooltip('%s', tip)
+end
+
 -- UI: Auto AA / Point Spender & AA Progression Tab
 function UI.drawAutoAATab()
     if not ImGui.BeginTabItem('Auto AA') then return end
@@ -7164,16 +7281,23 @@ function UI.drawAutoAATab()
     ImGui.SameLine()
     local aaSpendAvail = runtime.aaSpendLoaded and runtime.aaSpendLoaded()
     if aaSpendAvail then
-        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], '● MQ2AAspend')
+        local delVal = ImGui.Checkbox('MQ2AAspend##aaDelegateMaster', ctrl.auto_aa_delegate_aaspend ~= false)
+        if delVal ~= (ctrl.auto_aa_delegate_aaspend ~= false) then
+            ctrl.auto_aa_delegate_aaspend = delVal
+            if delVal and runtime.syncAAsToMQ2AASpendIni then
+                runtime.syncAAsToMQ2AASpendIni(true)
+            end
+            runtime.saveLoadout(true)
+        end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('%s', 'MQ2AAspend is active and ready.\nPrioritized AAs auto-sync to Server_Character.ini [MQ2AASpend_AAList].')
+            ImGui.SetTooltip('%s', 'Delegate AA purchasing to MQ2AAspend plugin.\n• Checked: MQ2AAspend attempts purchases first; Triune automatically falls back to native window training if MQ2AAspend fails.\n• Unchecked: Triune trains all prioritized AAs directly via native window training.')
         end
     else
         if ImGui.SmallButton('Load MQ2AAspend##btnLoadAASpend') then
             mq.cmd('/plugin mq2aaspend load')
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('%s', 'MQ2AAspend is not yet loaded. Click to execute /plugin mq2aaspend load.')
+            ImGui.SetTooltip('%s', 'MQ2AAspend is not loaded. Click to execute /plugin mq2aaspend load.\n(Triune trains AAs natively using its built-in window trainer when MQ2AAspend is not loaded).')
         end
     end
 
@@ -7360,8 +7484,7 @@ function UI.drawAutoAATab()
                     ImGui.Text(itm.name)
                 end
                 if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('%s', string.format('%s\nCurrent Rank: %d / %d\nNext Rank Cost: %d AA\nPoints Spent: %d AA',
-                        itm.name, itm.rank, itm.maxRank, itm.cost, itm.pointsSpent or 0))
+                    runtime.showAATooltip(itm)
                 end
 
                 -- Col 3: Rank
@@ -7372,6 +7495,9 @@ function UI.drawAutoAATab()
                     ImGui.Text(string.format('%d/%d', itm.rank, itm.maxRank))
                 else
                     ImGui.Text(string.format('%d/?', itm.rank))
+                end
+                if ImGui.IsItemHovered() then
+                    runtime.showAATooltip(itm)
                 end
 
                 -- Col 4: Cost
@@ -8907,7 +9033,12 @@ function UI.drawControlTab()
 
         if ctrl.camp_loc then
             ImGui.SetNextItemWidth(180)
-            ctrl.camp_radius = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500)
+            local manualCampR, manualCampRChanged = ImGui.SliderInt('Camp Radius##manualRadius', ctrl.camp_radius or 100, 10, 500)
+            if manualCampRChanged then
+                ctrl.camp_radius = manualCampR
+                runtime.saveLoadout(true)
+                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
+            end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Maximum distance in units from camp center to engage enemies.')
             end
@@ -9030,7 +9161,12 @@ function UI.drawControlTab()
         if ctrl.submode == 'Hunt' then
             accent(ARC, 'Puller (Hunt)')
             ImGui.SetNextItemWidth(180)
-            ctrl.hunter_radius = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000)
+            local huntR, huntRChanged = ImGui.SliderInt('Search Radius', ctrl.hunter_radius or 1500, 50, 2000)
+            if huntRChanged then
+                ctrl.hunter_radius = huntR
+                runtime.saveLoadout(true)
+                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
+            end
             ImGui.SetNextItemWidth(180)
             ctrl.hunter_z_plane = ImGui.SliderInt('Floor Height (Z Plane)', ctrl.hunter_z_plane or 15, 5, 50)
             if ImGui.IsItemHovered() then
@@ -9102,6 +9238,7 @@ function UI.drawControlTab()
             if changed then
                 ctrl.hunter_combat_radius = newRadius
                 if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
+                runtime.saveLoadout(true)
             end
         elseif ctrl.submode == 'Camp' then
             accent(GOLD, 'Puller Camp Location')
@@ -9128,7 +9265,12 @@ function UI.drawControlTab()
             end
 
             ImGui.SetNextItemWidth(180)
-            ctrl.camp_radius = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500)
+            local pullRad, pullRadChanged = ImGui.SliderInt('Pull Radius', ctrl.camp_radius or 100, 10, 500)
+            if pullRadChanged then
+                ctrl.camp_radius = pullRad
+                runtime.saveLoadout(true)
+                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
+            end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Maximum horizontal distance in units from camp to search for pullable NPCs.')
             end
@@ -10657,6 +10799,16 @@ function UI.drawSettingsTab()
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip('Avoidance radius around learned stuck hotspots.')
+        end
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        local newDecayMin = ImGui.SliderInt('Forget Time##navHazardForget', ctrl.nav_hazard_decay_minutes or 10, 1, 60, '%d min')
+        if newDecayMin and newDecayMin ~= ctrl.nav_hazard_decay_minutes then
+            ctrl.nav_hazard_decay_minutes = newDecayMin
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Every N minutes without a fresh stuck event, a hotspot loses one hit and eventually deactivates below the active threshold.')
         end
 
         local curZs = runtime.getCurrentZoneShortName and runtime.getCurrentZoneShortName() or 'unknown'
@@ -12936,6 +13088,7 @@ end
 -- Returns true if an action (spell, AA, disc, skill, clickie) is a healing action.
 function runtime.isHealAction(name, targetToken, entry)
     if not name or name == '' then return false end
+    if runtime.isDetrimentalAction(name, targetToken, entry) then return false end
     if entry and entry.kind == 'heal' then return true end
     local k = entry and entry.kind
     if k and (k == 'dd' or k == 'dot' or k == 'debuff' or k == 'nuke' or k == 'buff' or k == 'pet' or k == 'util') then
@@ -13852,7 +14005,7 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
     if when == 'my Mana <=' then return (mq.TLO.Me.PctMana() or 100) <= pct end
     if when == 'my HP <=' then
         local myMet = pctHP(mq.TLO.Me.ID()) <= pct
-        if token and baseTok(token) ~= 'Myself' and targetId and targetId > 0 and targetId ~= mq.TLO.Me.ID() then
+        if not runtime.isDetrimentalAction(spellName, token, extra) and token and baseTok(token) ~= 'Myself' and targetId and targetId > 0 and targetId ~= mq.TLO.Me.ID() and not isHostileTarget(targetId) then
             return myMet or (pctHP(targetId) <= pct)
         end
         return myMet
@@ -14311,19 +14464,19 @@ end
 
 
 function runtime.findChildRecursive(parent, targetName)
-    if not parent or not parent() or not targetName or targetName == '' then return nil end
+    if not parent or not targetName or targetName == '' then return nil end
     local tLower = targetName:lower()
 
     -- Try direct Child lookup first
     local direct = nil
     pcall(function() direct = parent.Child(targetName) end)
-    if direct and direct() then return direct end
+    if direct then return direct end
 
     -- Check immediate children by iterating FirstChild -> Next
     local curr = nil
     pcall(function() curr = parent.FirstChild end)
     local safety = 0
-    while curr and curr() and safety < 120 do
+    while curr and safety < 120 do
         safety = safety + 1
         local match = false
         pcall(function()
@@ -14337,10 +14490,19 @@ function runtime.findChildRecursive(parent, targetName)
 
         -- Recurse into child if it has children
         local hasChildren = false
-        pcall(function() hasChildren = curr.Children and (curr.Children() == true) end)
+        pcall(function()
+            if curr.FirstChild then
+                hasChildren = true
+            elseif curr.Children then
+                local c = curr.Children()
+                if c == true or c == 'TRUE' or tostring(c):lower() == 'true' then
+                    hasChildren = true
+                end
+            end
+        end)
         if hasChildren then
             local found = runtime.findChildRecursive(curr, targetName)
-            if found and found() then return found end
+            if found then return found end
         end
 
         local nextSibling = nil
@@ -14348,6 +14510,102 @@ function runtime.findChildRecursive(parent, targetName)
         curr = nextSibling
     end
     return nil
+end
+
+function runtime.getAAWindow()
+    local win = nil
+    pcall(function()
+        local w = mq.TLO.Window('AAWindow')
+        if w and w.Name and w.Name() then win = w return end
+        w = mq.TLO.Window('AAWnd')
+        if w and w.Name and w.Name() then win = w return end
+    end)
+    return win
+end
+
+function runtime.getAAWindowName()
+    local name = 'AAWindow'
+    pcall(function()
+        local w = mq.TLO.Window('AAWindow')
+        if w and w.Name and w.Name() then name = w.Name() return end
+        w = mq.TLO.Window('AAWnd')
+        if w and w.Name and w.Name() then name = w.Name() return end
+    end)
+    return name
+end
+
+function runtime.isAAWindowOpen()
+    local isOpen = false
+    pcall(function()
+        local w = mq.TLO.Window('AAWindow')
+        if w and w.Open and w.Open() then isOpen = true return end
+        w = mq.TLO.Window('AAWnd')
+        if w and w.Open and w.Open() then isOpen = true return end
+        local win = runtime.getAAWindow()
+        if win and win.Open and win.Open() then isOpen = true return end
+    end)
+    return isOpen
+end
+
+function runtime.openAAWindow(attempt)
+    if runtime.isAAWindowOpen() then return true end
+    attempt = attempt or 1
+    local win = runtime.getAAWindow()
+    local winName = runtime.getAAWindowName()
+
+    if attempt == 1 then
+        pcall(function()
+            if win and win.DoOpen then win.DoOpen() end
+        end)
+        mq.cmdf('/windowstate %s open', winName)
+        if winName ~= 'AAWindow' then
+            mq.cmd('/windowstate AAWindow open')
+        end
+        mq.cmd('/windowstate AAWnd open')
+    elseif attempt == 2 then
+        mq.cmd('/nomodkey /keypress TOGGLE_ALTADVWIN')
+    elseif attempt == 3 then
+        mq.cmd('/nomodkey /keypress v alt')
+    elseif attempt == 4 then
+        mq.cmd('/nomodkey /keypress a alt')
+    else
+        local invWin = nil
+        local invOpen = false
+        pcall(function()
+            invWin = mq.TLO.Window('InventoryWindow')
+            if invWin and invWin() and invWin.Open and invWin.Open() then
+                invOpen = true
+            else
+                invWin = mq.TLO.Window('InventoryWnd')
+                if invWin and invWin() and invWin.Open and invWin.Open() then
+                    invOpen = true
+                end
+            end
+        end)
+        if invOpen and invWin then
+            local invName = 'InventoryWindow'
+            pcall(function() if invWin.Name then invName = invWin.Name() end end)
+            mq.cmdf('/nomodkey /notify %s IW_AltAdvBtn leftmouseup', invName)
+        end
+    end
+    return runtime.isAAWindowOpen()
+end
+
+function runtime.closeAAWindow()
+    if not runtime.isAAWindowOpen() then return true end
+    local win = runtime.getAAWindow()
+    local winName = runtime.getAAWindowName()
+    pcall(function()
+        if win and win.DoClose then win.DoClose() end
+    end)
+    mq.cmdf('/nomodkey /notify %s AAW_DoneButton leftmouseup', winName)
+    mq.cmdf('/nomodkey /notify %s DoneButton leftmouseup', winName)
+    mq.cmdf('/windowstate %s close', winName)
+    if winName ~= 'AAWindow' then
+        mq.cmd('/windowstate AAWindow close')
+    end
+    mq.cmd('/windowstate AAWnd close')
+    return not runtime.isAAWindowOpen()
 end
 
 function runtime.isSpecialTabAA(name)
@@ -14371,28 +14629,35 @@ function runtime.isSpecialTabAA(name)
 end
 
 function runtime.findAAInWindowLists(targetName)
-    local win = nil
-    pcall(function()
-        local w = mq.TLO.Window('AAWindow')
-        if w and w() then win = w end
-    end)
+    local win = runtime.getAAWindow()
     if not win then return nil, nil, nil, nil end
 
     local listCandidates = {
         { name = 'AAW_SpecialList', tab = 4 },
-        { name = 'AAW_ClassList', tab = 3 },
-        { name = 'AAW_ArchList', tab = 2 },
-        { name = 'AAW_GeneralList', tab = 1 },
+        { name = 'AAW_Special_List', tab = 4 },
+        { name = 'AAW_SpecList', tab = 4 },
         { name = 'AA_SpecialList', tab = 4 },
-        { name = 'AA_ClassList', tab = 3 },
-        { name = 'AA_ArchetypeList', tab = 2 },
-        { name = 'AA_GeneralList', tab = 1 },
+        { name = 'AA_SpecList', tab = 4 },
         { name = 'SpecialList', tab = 4 },
+        { name = 'Special_List', tab = 4 },
+        { name = 'List4', tab = 4 },
+        { name = 'AAW_ClassList', tab = 3 },
+        { name = 'AA_ClassList', tab = 3 },
         { name = 'ClassList', tab = 3 },
+        { name = 'List3', tab = 3 },
+        { name = 'AAW_ArchList', tab = 2 },
+        { name = 'AA_ArchList', tab = 2 },
+        { name = 'AA_ArchetypeList', tab = 2 },
         { name = 'ArchList', tab = 2 },
+        { name = 'List2', tab = 2 },
+        { name = 'AAW_GeneralList', tab = 1 },
+        { name = 'AA_GeneralList', tab = 1 },
         { name = 'GeneralList', tab = 1 },
+        { name = 'List1', tab = 1 },
         { name = 'AAW_List', tab = 1 },
-        { name = 'AA_List', tab = 1 }
+        { name = 'AA_List', tab = 1 },
+        { name = 'AAW_SearchResultList', tab = 1 },
+        { name = 'AA_SearchResultList', tab = 1 }
     }
 
     local cleanTarget = tostring(targetName or ''):lower():gsub('[^%a%d]', '')
@@ -14407,15 +14672,72 @@ function runtime.findAAInWindowLists(targetName)
         end)
     end
 
+    local tabParents = { 'AAW_Subwindows', 'Subwindows', 'AA_Subwindows', 'AA_SubWnd', 'AAW_SpecialTabPage', 'AA_SpecialTabPage' }
+
     for _, cand in ipairs(listCandidates) do
-        local child = runtime.findChildRecursive(win, cand.name)
-        if child and child() and child.Items then
+        local child = nil
+        pcall(function() child = win.Child(cand.name) end)
+        if not child then
+            for _, tp in ipairs(tabParents) do
+                pcall(function()
+                    local p = win.Child(tp)
+                    if p then
+                        local sc = p.Child(cand.name)
+                        if sc then child = sc end
+                    end
+                end)
+                if child then break end
+            end
+        end
+        if not child then
+            child = runtime.findChildRecursive(win, cand.name)
+        end
+        if child and child.Items then
+            -- 1. Try native MacroQuest List text lookup first
+            pcall(function()
+                if targetName and targetName ~= '' and child.List then
+                    local dIdx = tonumber(child.List('=' .. targetName) or 0) or 0
+                    if dIdx <= 0 then dIdx = tonumber(child.List(targetName) or 0) or 0 end
+                    if dIdx > 0 then
+                        child = child -- retain
+                        cand.directIdx = dIdx
+                    end
+                end
+            end)
+            if cand.directIdx and cand.directIdx > 0 then
+                return cand.name, cand.directIdx, cand.tab, child
+            end
+
+            -- 2. Fallback to iterating rows
             local count = 0
             pcall(function() count = tonumber(child.Items() or 0) or 0 end)
             if count > 0 and count <= 500 then
                 for row = 1, count do
                     local rowText = nil
-                    pcall(function() rowText = child.List(row, 1)() or child.List(row)() end)
+                    pcall(function()
+                        local v = child.List(row, 1)
+                        if type(v) == 'string' then
+                            rowText = v
+                        elseif type(v) == 'userdata' or type(v) == 'table' then
+                            local ok, r = pcall(function() return v() end)
+                            if ok and r ~= nil then rowText = tostring(r) else rowText = tostring(v) end
+                        elseif type(v) == 'function' then
+                            rowText = tostring(v())
+                        end
+                    end)
+                    if not rowText or rowText == '' then
+                        pcall(function()
+                            local v = child.List(row)
+                            if type(v) == 'string' then
+                                rowText = v
+                            elseif type(v) == 'userdata' or type(v) == 'table' then
+                                local ok, r = pcall(function() return v() end)
+                                if ok and r ~= nil then rowText = tostring(r) else rowText = tostring(v) end
+                            elseif type(v) == 'function' then
+                                rowText = tostring(v())
+                            end
+                        end)
+                    end
                     if rowText and type(rowText) == 'string' and rowText ~= '' then
                         local cleanRow = rowText:lower():gsub('[^%a%d]', '')
                         local matched = false
@@ -14437,6 +14759,258 @@ function runtime.findAAInWindowLists(targetName)
     return nil, nil, nil, nil
 end
 
+runtime.CLASS_ARCHETYPES = {
+    War = { Melee = true, Tank = true, DualWield = true },
+    Pal = { Melee = true, Tank = true, Hybrid = true, Priest = true },
+    SK  = { Melee = true, Tank = true, Hybrid = true, Caster = true, Pet = true },
+    Rng = { Melee = true, Hybrid = true, DualWield = true },
+    Mnk = { Melee = true, PureMelee = true, DualWield = true },
+    Rog = { Melee = true, PureMelee = true, DualWield = true },
+    Brd = { Melee = true, Hybrid = true, DualWield = true },
+    Bst = { Melee = true, Hybrid = true, DualWield = true, Pet = true },
+    Ber = { Melee = true, PureMelee = true },
+    Clr = { Priest = true, Caster = true },
+    Dru = { Priest = true, Caster = true },
+    Shm = { Priest = true, Caster = true, Pet = true },
+    Nec = { Caster = true, Pet = true },
+    Wiz = { Caster = true },
+    Mag = { Caster = true, Pet = true },
+    Enc = { Caster = true, Pet = true },
+}
+
+runtime.ARCHETYPE_CLASSES = {
+    Caster = { Wiz = true, Mag = true, Nec = true, Enc = true },
+    Priest = { Clr = true, Dru = true, Shm = true, Pal = true },
+    CasterPriest = { Wiz = true, Mag = true, Nec = true, Enc = true, Clr = true, Dru = true, Shm = true, Pal = true, Rng = true, SK = true, Brd = true, Bst = true },
+    PriestCaster = { Wiz = true, Mag = true, Nec = true, Enc = true, Clr = true, Dru = true, Shm = true, Pal = true, Rng = true, Bst = true },
+    Melee = { War = true, Pal = true, SK = true, Rng = true, Mnk = true, Rog = true, Brd = true, Bst = true, Ber = true },
+    DualWield = { War = true, Rng = true, Mnk = true, Rog = true, Brd = true, Bst = true },
+    Hybrid = { Pal = true, SK = true, Rng = true, Brd = true, Bst = true },
+    Pet = { Mag = true, Nec = true, Bst = true, Shm = true, Enc = true, SK = true },
+}
+
+runtime.ARCHETYPE_RESTRICTIONS = {
+    ['Fury of Magic'] = 'Caster',
+    ['Fury of Magic Mastery'] = 'Caster',
+    ['Destructive Fury'] = 'Caster',
+    ['Critical Affliction'] = 'Caster',
+    ['Spell Casting Mastery'] = 'CasterPriest',
+    ['Spell Casting Reinforcement'] = 'CasterPriest',
+    ['Spell Casting Reinforcement Mastery'] = 'CasterPriest',
+    ['Spell Casting Subtlety'] = 'CasterPriest',
+    ['Spell Casting Fury'] = 'CasterPriest',
+    ['Spell Casting Fury Mastery'] = 'CasterPriest',
+    ['Mental Clarity'] = 'CasterPriest',
+    ['Expanded Mental Clarity'] = 'CasterPriest',
+    ['Body and Mind'] = 'CasterPriest',
+    ['Advanced Spell Casting Mastery'] = 'Caster',
+    ['Arcane Tongues'] = 'Caster',
+    ['Mastery of the Past'] = 'Caster',
+    ['Quick Damage'] = 'Caster',
+    ['Quick Evacuation'] = 'Caster',
+    ['Secondary Recall'] = 'Caster',
+    ['Focus of Arcanum'] = 'CasterPriest',
+
+    ['Healing Adept'] = 'Priest',
+    ['Healing Gift'] = 'Priest',
+    ['Radiant Cure'] = 'Priest',
+    ['Purification'] = 'Priest',
+    ['Hastened Purification'] = 'Priest',
+    ['Hastened Curing'] = 'Priest',
+    ['Quick Buff'] = 'Priest',
+    ['Mass Group Buff'] = 'PriestCaster',
+
+    ['Combat Fury'] = 'Melee',
+    ['Veterancy'] = 'Melee',
+    ['Weapon Affinity'] = 'Melee',
+    ['Ferocity'] = 'Melee',
+    ['Punishing Blow'] = 'Melee',
+    ['Stun Resistance'] = 'Melee',
+    ['Tactics'] = 'Melee',
+    ['Ambidexterity'] = 'DualWield',
+    ['Twinproc'] = 'DualWield',
+    ['Sinister Strikes'] = 'DualWield',
+    ['Chaotic Stab'] = 'DualWield',
+    ['Extended Ingenuity'] = 'Hybrid',
+    ['Fearless'] = 'Melee',
+
+    ['Pet Affinity'] = 'Pet',
+    ['Companion\'s Fury'] = 'Pet',
+    ['Companion\'s Strength'] = 'Pet',
+    ['Companion\'s Durability'] = 'Pet',
+    ['Companion\'s Agility'] = 'Pet',
+    ['Companion\'s Alacrity'] = 'Pet',
+    ['Suspended Minion'] = 'Pet',
+    ['Mend Companion'] = 'Pet',
+    ['Summon Companion'] = 'Pet',
+}
+
+runtime.CLASS_SPECIFIC_ABILITIES = {
+    War = {
+        'Area Taunt', 'Rampage', 'War Cry', 'Blade Guardian', 'Warlord\'s Tenacity',
+        'Warlord\'s Resurgence', 'Hold the Line', 'Vehement Rage', 'Mark of the Mage Hunter',
+        'Call of Challenge', 'Infused by Rage', 'Grappling Strike', 'Gut Punch',
+        'Press the Attack', 'Battle Leap', 'Rage of Rallos Zek', 'Warlord\'s Fury',
+        'Blast of Anger', 'Imperator\'s Command'
+    },
+    Clr = {
+        'Divine Arbitration', 'Divine Resurrection', 'Celestial Regeneration', 'Turn Undead',
+        'Bestow Divine Aura', 'Purify Soul', 'Sanctuary', 'Exquisite Benediction',
+        'Celestial Hammer', 'Divine Retribution', 'Silent Casting', 'Ward of Purity',
+        'Battle Frenzy', 'Divine Avatar', 'Improved Twincast', 'Innate Invis to Undead'
+    },
+    Pal = {
+        'Lay on Hands', 'Hand of Piety', 'Divine Stun', 'Holy Steed', 'Valiant Steed',
+        'Cloak of Light', 'Hand of Disruption', 'Beacon of the Righteous', 'Armor of the Inquisitor',
+        'Act of Valor'
+    },
+    Rng = {
+        'Headshot', 'Endless Quiver', 'Archery Mastery', 'Flaming Arrows', 'Frost Arrows',
+        'Guardian of the Forest', 'Auspice of the Hunter', 'Entrap', 'Innate Camouflage',
+        'Shared Camouflage', 'Protection of the Spirit Wolf'
+    },
+    SK = {
+        'Harm Touch', 'Leech Touch', 'Death Peace', 'Touch of the Cursed', 'Soul Abrasion',
+        'Explosion of Spite', 'Vicious Bite of Chaos', 'Abyssal Steed', 'Unholy Steed',
+        'Cloak of Shadows'
+    },
+    Dru = {
+        'Spirit of the Wood', 'Wrath of the Wild', 'Nature\'s Boon', 'Nature\'s Guardian',
+        'Exodus', 'Convergence of Spirits', 'Paralytic Spores', 'Spirit of the Bear',
+        'Teleport Bind', 'Call of the Wild', 'Nature\'s Blessing', 'Spirit of the Black Wolf',
+        'Spirit of the White Wolf', 'Dire Charm (Animal)'
+    },
+    Mnk = {
+        'Purify Body', 'Destructive Force', 'Imitate Death', 'Stunning Kick', 'Eye Gouge',
+        'Crippling Strike', 'Distant Strike'
+    },
+    Rog = {
+        'Escape', 'Purge Poison', 'Dirty Fighting', 'Twisted Shank', 'Ligament Slice',
+        'Envenomed Blades', 'Appraisal', 'Tumble', 'Stealthy Getaway'
+    },
+    Shm = {
+        'Cannibalization', 'Rabid Bear', 'Call of the Ancients', 'Ancestral Aid',
+        'Spiritual Channeling', 'Union of Spirits', 'Turgur\'s Swarm', 'Malosinete',
+        'Virulent Paralysis', 'Pact of the Wolf', 'Group Shrink', 'Languid Bite',
+        'Spirit Guardian', 'Spiritual Blessing', 'Spirit Call', 'Ancestral Guard'
+    },
+    Nec = {
+        'Life Burn', 'Dead Mesmerization', 'Death Bloom', 'Swarm of Decay', 'Wake the Dead',
+        'Army of the Dead', 'Scent of Terris', 'Flesh to Bone', 'Blood Magic',
+        'Pestilent Paralysis', 'Convergence', 'Hand of Death', 'Funeral Pyre',
+        'Call to Corpse', 'Fear Storm', 'Dire Charm', 'Second Wind Ward', 'Replenish Companion'
+    },
+    Wiz = {
+        'Mana Burn', 'Mana Blast', 'Mana Blaze', 'Frenzied Devastation', 'Call of Xuzl',
+        'Harvest of Druzzil', 'Gelid Rending', 'Ro\'s Flaming Familiar', 'E\'ci\'s Icy Familiar',
+        'Druzzil\'s Mystical Familiar', 'Improved Familiar', 'Strong Root', 'Nexus Gate',
+        'Cryomancy', 'Pyromancy', 'Dimensional Shield', 'Translocational Anchor',
+        'Mind Crash', 'Volatile Mana Blaze', 'Ward of Destruction', 'Prolonged Destruction'
+    },
+    Mag = {
+        'Host of the Elements', 'Servant of Ro', 'Frenzied Burnout', 'Turn Summoned',
+        'Heart of Flames', 'Heart of Ice', 'Heart of Stone', 'Heart of Vapor',
+        'Dimensional Armory', 'Elemental Form: Air', 'Elemental Form: Earth',
+        'Elemental Form: Fire', 'Elemental Form: Water', 'Host in the Shell',
+        'Fire Core', 'Ice Core', 'Stone Core', 'Vapor Core', 'Shared Health'
+    },
+    Enc = {
+        'Gather Mana', 'Color Shock', 'Eldritch Rune', 'Doppelganger', 'Soothing Words',
+        'Bite of Tashani', 'Project Illusion', 'Edict of Command', 'Stasis',
+        'Beam of Slumber', 'Azure Mind Crystal', 'Sanguine Mind Crystal',
+        'Illusions of Grandeur', 'Mental Contortion', 'Veil of Mindshadow',
+        'Mind Over Matter', 'Mana Draw', 'Nightmare Stasis'
+    },
+    Bst = {
+        'Feral Swipe', 'Chameleon Strike', 'Bloodlust', 'Bite of the Asp', 'Bestial Alignment',
+        'Frenzy of Spirit', 'Paragon of Spirit', 'Hobble of Spirits', 'Taste of Blood',
+        'Frenzied Swipes', 'Roar of Thunder'
+    },
+    Ber = {
+        'Cry of Battle', 'Desperation', 'Savage Spirit', 'Untamed Rage', 'Blood Pact',
+        'Uncanny Resilience', 'Cascading Rage', 'Blinding Fury', 'Distraction Attack',
+        'Tireless Sprint'
+    },
+    Brd = {
+        'Fading Memories', 'Selo\'s Sonata', 'Boastful Bellow', 'Dance of Blades',
+        'Song of Stone', 'Shield of Notes', 'Cacophony', 'Hymn of the Last Stand',
+        'Bladed Song', 'Funeral Dirge'
+    }
+}
+
+function runtime.buildAAClassRestrictions()
+    local map = {}
+    for cls, aaNames in pairs(runtime.CLASS_SPECIFIC_ABILITIES) do
+        for _, nm in ipairs(aaNames) do
+            if not map[nm] then map[nm] = {} end
+            map[nm][cls] = true
+        end
+    end
+    return map
+end
+runtime.AA_CLASS_RESTRICTIONS = runtime.buildAAClassRestrictions()
+
+function runtime.isAAAllowedForPlayer(name, classes, isFromUI)
+    if not name or name == '' then return false end
+    if isFromUI then return true end
+
+    -- 1. If player explicitly prioritized this ability, always allow it
+    if ctrl.auto_aa_priorities and ctrl.auto_aa_priorities[name] then
+        return true
+    end
+
+    -- 2. If character currently owns ranks in this ability, it belongs to the player
+    local owned = false
+    pcall(function()
+        local ma = mq.TLO.Me.AltAbility(name)
+        if ma and ma() then
+            local r = tonumber(ma.Rank and ma.Rank() or 0) or 0
+            local mid = tonumber(ma.ID and ma.ID() or 0) or 0
+            if r > 0 or mid > 0 then owned = true end
+        end
+    end)
+    if owned then return true end
+
+    -- 3. If present in cached AA data with an ID, it was discovered from the client
+    if runtime.cachedAAData and runtime.cachedAAData[name] then
+        local cd = runtime.cachedAAData[name]
+        if cd.id and cd.id > 0 then return true end
+    end
+
+    classes = classes or myClasses or {}
+
+    -- 2. Class-specific restrictions check: reject if restricted to other classes
+    local restrictedClasses = runtime.AA_CLASS_RESTRICTIONS[name]
+    if restrictedClasses then
+        local match = false
+        for _, cls in ipairs(classes) do
+            if restrictedClasses[cls] then
+                match = true
+                break
+            end
+        end
+        if not match then return false end
+    end
+
+    -- 3. Archetype restrictions check: reject if restricted to other archetypes
+    local archReq = runtime.ARCHETYPE_RESTRICTIONS[name]
+    if archReq then
+        local allowedClasses = runtime.ARCHETYPE_CLASSES[archReq]
+        if allowedClasses then
+            local match = false
+            for _, cls in ipairs(classes) do
+                if allowedClasses[cls] then
+                    match = true
+                    break
+                end
+            end
+            if not match then return false end
+        end
+    end
+
+    return true
+end
+
 function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, knownCost, isKnownCharAA, category, isFromUI)
     if not name or name == '' or tonumber(name) then return end
     name = tostring(name):match('^%s*(.-)%s*$')
@@ -14451,6 +15025,11 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
     end)
     if isSkill then return end
 
+    -- Strictly reject abilities that do not belong to the player's class or archetype
+    if not runtime.isAAAllowedForPlayer(name, nil, isFromUI) then
+        return
+    end
+
     local existing = foundMap[name]
     if existing then
         if knownRank ~= nil and knownRank >= 0 then
@@ -14462,7 +15041,8 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
         if knownCost ~= nil and knownCost > 0 then
             existing.cost = knownCost
         end
-        if existing.maxRank > 0 and existing.rank >= existing.maxRank then
+        local isSpecial = (runtime.isSpecialTabAA and runtime.isSpecialTabAA(name))
+        if not isSpecial and existing.maxRank > 0 and existing.rank >= existing.maxRank then
             existing.fullyTrained = true
             existing.cost = 0
             existing.canTrain = false
@@ -14479,13 +15059,15 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
             maxRank = existing.maxRank,
             cost = existing.cost,
             category = existing.category,
-            id = existing.id
+            id = existing.id,
+            description = existing.description or (runtime.cachedAAData[name] and runtime.cachedAAData[name].description)
         }
         return
     end
 
-    local rank, maxRank, cost, canTrain, pointsSpent, id, passive, aaType = 0, 0, 0, false, 0, 0, false, 0
+    local rank, maxRank, cost, canTrain, pointsSpent, id, passive, aaType, minLevel = 0, 0, 0, false, 0, 0, false, 0, 0
     local isCharacterAA = not not isKnownCharAA
+    local description = ''
 
     if runtime.cachedAAData and runtime.cachedAAData[name] then
         local cd = runtime.cachedAAData[name]
@@ -14494,6 +15076,8 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
         if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
         if cd.category and not category then category = cd.category end
         if cd.id ~= nil and cd.id > 0 then id = cd.id end
+        if cd.minLevel ~= nil and cd.minLevel > 0 then minLevel = cd.minLevel end
+        if cd.description and cd.description ~= '' then description = cd.description end
         isCharacterAA = true
     end
 
@@ -14507,32 +15091,37 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
                 if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
                 if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
                 if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
+                if minLevel == 0 and ma.MinLevel then minLevel = tonumber(ma.MinLevel() or 0) or 0 end
                 canTrain = (ma.CanTrain and ma.CanTrain() == true)
                 pointsSpent = tonumber(ma.PointsSpent and ma.PointsSpent() or 0) or 0
                 passive = (ma.Passive and ma.Passive() == true)
                 aaType = tonumber(ma.Type and ma.Type() or 0) or 0
+                if ma.Description then
+                    local d = ma.Description()
+                    if d and d ~= '' then description = tostring(d) end
+                end
             end
         end
     end)
 
     pcall(function()
-        if maxRank == 0 or cost == 0 or id == 0 or aaType == 0 then
+        if maxRank == 0 or cost == 0 or id == 0 or aaType == 0 or minLevel == 0 or not description or description == '' then
             local ga = mq.TLO.AltAbility(name)
             if ga and ga() then
                 if id == 0 then id = tonumber(ga.ID and ga.ID() or 0) or 0 end
                 if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
                 if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
+                if minLevel == 0 and ga.MinLevel then minLevel = tonumber(ga.MinLevel() or 0) or 0 end
                 if not canTrain and ga.CanTrain then canTrain = (ga.CanTrain() == true) end
                 if aaType == 0 and ga.Type then aaType = tonumber(ga.Type() or 0) or 0 end
                 if not passive and ga.Passive then passive = (ga.Passive() == true) end
+                if (not description or description == '') and ga.Description then
+                    local d = ga.Description()
+                    if d and d ~= '' then description = tostring(d) end
+                end
             end
         end
     end)
-
-    -- If not directly read from live AAWindow UI listbox, it MUST have a valid AltAbility ID (> 0)
-    if not isFromUI and id <= 0 then
-        return
-    end
 
     if knownRank ~= nil then rank = knownRank end
     if knownMaxRank ~= nil and knownMaxRank > 0 then maxRank = knownMaxRank end
@@ -14547,7 +15136,8 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
         isCharacterAA = true
     end
 
-    local fullyTrained = (maxRank > 0 and rank >= maxRank)
+    local isSpecial = (runtime.isSpecialTabAA and runtime.isSpecialTabAA(name))
+    local fullyTrained = not isSpecial and (maxRank > 0 and rank >= maxRank)
     if fullyTrained then
         cost = 0
     elseif cost <= 0 then
@@ -14565,12 +15155,14 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
             maxRank = maxRank,
             cost = cost,
             canTrain = canTrain,
+            minLevel = minLevel,
             pointsSpent = pointsSpent,
             id = id,
             passive = passive,
             type = aaType,
             fullyTrained = fullyTrained,
-            category = category
+            category = category,
+            description = description
         }
         foundMap[name] = entry
         list[#list + 1] = entry
@@ -14581,17 +15173,15 @@ function runtime.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, 
             maxRank = maxRank,
             cost = cost,
             category = category,
-            id = id
+            id = id,
+            minLevel = minLevel,
+            description = description
         }
     end
 end
 
 function runtime.readSpecialTabNamesFromUI()
-    local win = nil
-    pcall(function()
-        local w = mq.TLO.Window('AAWindow')
-        if w and w() then win = w end
-    end)
+    local win = runtime.getAAWindow()
     if not win then return nil end
 
     local specialCandidates = {
@@ -14604,21 +15194,21 @@ function runtime.readSpecialTabNamesFromUI()
         local child = nil
         pcall(function()
             child = win.Child(lName)
-            if not child or not child() then
+            if not child then
                 for _, tp in ipairs(tabParents) do
                     local p = win.Child(tp)
-                    if p and p() then
+                    if p then
                         local sc = p.Child(lName)
-                        if sc and sc() then child = sc; break end
+                        if sc then child = sc; break end
                     end
                 end
             end
-            if not child or not child() then
+            if not child then
                 child = runtime.findChildRecursive(win, lName)
             end
         end)
 
-        if child and child() and child.Items then
+        if child and child.Items then
             local count = 0
             pcall(function() count = tonumber(child.Items() or 0) or 0 end)
             if count > 0 and count <= 1000 then
@@ -14659,18 +15249,16 @@ function runtime.readSpecialTabOnce(force)
     end
 
     -- 2. If AAWindow is already open, try selecting Tab 4 (Special) safely
-    local wasOpen = false
-    pcall(function()
-        local w = mq.TLO.Window('AAWindow')
-        if w and w() and w.Open and w.Open() then wasOpen = true end
-    end)
-
+    local wasOpen = runtime.isAAWindowOpen()
     if wasOpen then
+        local win = runtime.getAAWindow()
+        local winName = runtime.getAAWindowName()
+        mq.cmdf('/nomodkey /notify %s AAW_Subwindows tabselect 4', winName)
+        mq.cmdf('/nomodkey /notify %s Subwindows tabselect 4', winName)
         pcall(function()
-            local win = mq.TLO.Window('AAWindow')
-            if win and win() then
-                local sub = runtime.findChildRecursive(win, 'AAW_Subwindows')
-                if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(4) end
+            if win then
+                local sub = win.Child('AAW_Subwindows') or runtime.findChildRecursive(win, 'AAW_Subwindows')
+                if sub and sub.SetCurrentTab then sub.SetCurrentTab(4) end
             end
         end)
         mq.delay(50)
@@ -14694,10 +15282,10 @@ function runtime.scanPlayerAAs(force)
     local foundMap = {}
     local list = {}
 
-    -- 1. Scan in-game AAWindow lists if AAWindow is open
+    -- 1. Scan in-game AAWindow lists if present in UI memory
     pcall(function()
-        local win = mq.TLO.Window('AAWindow')
-        if win and win() then
+        local win = runtime.getAAWindow()
+        if win then
             local listCandidates = {
                 'AAW_GeneralList', 'AAW_ArchList', 'AAW_ArchetypeList', 'AAW_ClassList', 'AAW_SpecialList',
                 'AA_GeneralList', 'AA_ArchList', 'AA_ArchetypeList', 'AA_ClassList', 'AA_SpecialList',
@@ -14708,15 +15296,14 @@ function runtime.scanPlayerAAs(force)
             local scannedChildren = {}
             for _, lName in ipairs(listCandidates) do
                 local child = nil
-                pcall(function()
-                    child = win.Child(lName)
-                    if not child or not child() then
-                        child = runtime.findChildRecursive(win, lName)
-                    end
-                end)
-                if child and child() and child.Items and not scannedChildren[child] then
+                pcall(function() child = win.Child(lName) end)
+                if not child then
+                    child = runtime.findChildRecursive(win, lName)
+                end
+                if child and child.Items and not scannedChildren[child] then
                     scannedChildren[child] = true
-                    local count = tonumber(child.Items() or 0) or 0
+                    local count = 0
+                    pcall(function() count = tonumber(child.Items() or 0) or 0 end)
                     if count > 0 and count <= 1000 then
                         for row = 1, count do
                             local nameTxt = nil
@@ -14764,25 +15351,52 @@ function runtime.scanPlayerAAs(force)
                     isSkill = true
                 end
             end)
-            if isSkill or ((cd.id or 0) <= 0 and (cd.maxRank or 0) <= 0) then
+            if isSkill or not runtime.isAAAllowedForPlayer(cName, nil, false) then
                 runtime.cachedAAData[cName] = nil
             elseif not foundMap[cName] then
-                runtime.recordScannedAA(list, foundMap, cName, cd.rank, cd.maxRank, cd.cost, true, cd.category, true)
+                runtime.recordScannedAA(list, foundMap, cName, cd.rank, cd.maxRank, cd.cost, true, cd.category, false)
             end
         end
     end
 
-    -- 2. Scan known DATA.aas combat abilities (if present in config)
+    -- 2. Scan known DATA.aas combat abilities for character's classes
     if DATA and DATA.aas then
-        for _, cls in ipairs(myClasses) do
-            for _, aList in pairs(DATA.aas[cls] or {}) do
-                if type(aList) == 'table' then
-                    for _, item in ipairs(aList) do
-                        local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
-                        if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
-                        runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, nil, false)
-                    end
+        for _, cls in ipairs(myClasses or {}) do
+            for _, item in ipairs(DATA.aas[cls] or {}) do
+                local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
+                if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
+                if nm and nm ~= '' and not tonumber(nm) then
+                    runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, cls, false)
                 end
+            end
+        end
+    end
+
+    -- 3. Scan common general AAs (universal to all classes)
+    runtime.GENERAL_AAS = {
+        'Run Speed', 'Innate Run Speed', 'Combat Agility', 'Combat Stability', 'Natural Durability',
+        'Physical Enhancement', 'Planar Power', 'Planar Durability', 'First Aid',
+        'Innate Strength', 'Innate Stamina', 'Innate Agility', 'Innate Dexterity', 'Innate Intelligence',
+        'Innate Wisdom', 'Innate Charisma', 'Delay Death', 'New Tanaan Crafting Mastery', 'Baking Mastery',
+        'Blacksmithing Mastery', 'Brewing Mastery', 'Fletching Mastery', 'Jewelcraft Mastery',
+        'Pottery Mastery', 'Tailoring Mastery', 'Salvage', 'Origin'
+    }
+    for _, nm in ipairs(runtime.GENERAL_AAS) do
+        runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, 'General', false)
+    end
+
+    -- 3.5 Scan archetype and class AAs strictly matching the character's classes
+    for nm in pairs(runtime.ARCHETYPE_RESTRICTIONS) do
+        if runtime.isAAAllowedForPlayer(nm, nil, false) then
+            runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, 'Archetype', false)
+        end
+    end
+
+    for _, cls in ipairs(myClasses or {}) do
+        local classAAList = runtime.CLASS_SPECIFIC_ABILITIES and runtime.CLASS_SPECIFIC_ABILITIES[cls]
+        if classAAList then
+            for _, nm in ipairs(classAAList) do
+                runtime.recordScannedAA(list, foundMap, nm, nil, nil, nil, true, cls, false)
             end
         end
     end
@@ -14904,7 +15518,7 @@ function runtime.getFilteredSortedAAs()
     return result
 end
 
-function runtime.startAATrainWorkflow(targetName)
+function runtime.startAATrainWorkflow(targetName, allowStop)
     if runtime.pendingAATrain then return false end
     targetName = targetName or ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
     if type(targetName) == 'string' then targetName = targetName:match('^%s*(.-)%s*$') end
@@ -14931,7 +15545,25 @@ function runtime.startAATrainWorkflow(targetName)
     end
 
     local prefTab = 1
-    if aaType == 4 or targetName:lower():find('firework') or (runtime.isSpecialTabAA and runtime.isSpecialTabAA(targetName)) then
+    local cat = nil
+    if runtime.cachedAAData and runtime.cachedAAData[targetName] and runtime.cachedAAData[targetName].category then
+        cat = tostring(runtime.cachedAAData[targetName].category):lower()
+    end
+    if not cat and runtime.scannedAAs then
+        for _, itm in ipairs(runtime.scannedAAs) do
+            if itm.name == targetName and itm.category then
+                cat = tostring(itm.category):lower()
+                break
+            end
+        end
+    end
+    if cat then
+        if cat:find('special') then prefTab = 4
+        elseif cat:find('class') then prefTab = 3
+        elseif cat:find('arch') then prefTab = 2
+        elseif cat:find('gen') then prefTab = 1
+        end
+    elseif aaType == 4 or targetName:lower():find('firework') or (runtime.isSpecialTabAA and runtime.isSpecialTabAA(targetName)) then
         prefTab = 4
     elseif aaType == 3 then
         prefTab = 3
@@ -14950,7 +15582,9 @@ function runtime.startAATrainWorkflow(targetName)
         tab = prefTab,
         maxTabs = 4,
         openedByUs = false,
-        nextStepAt = os.clock(),
+        allowStop = allowStop or false,
+        startedAt = os.clock(),
+        nextStepAt = os.clock() + 0.5,
         retries = 0
     }
     print(string.format('\ag[Triune]\ax Initiating AA Window train sequence for "%s" (ID: %d, Tab: %d)...', targetName, aaId, prefTab))
@@ -14960,85 +15594,135 @@ end
 function runtime.processAATrainWorkflow()
     local task = runtime.pendingAATrain
     if not task then return end
+
     local now = os.clock()
+
+    -- Strict anti-pause check: abort immediately if player is moving, navigating, or casting
+    local moving = false
+    pcall(function()
+        if mq.TLO.Me.Moving and mq.TLO.Me.Moving() then moving = true end
+        if runtime.isMoveActive and runtime.isMoveActive() then moving = true end
+        if mq.TLO.Navigation and mq.TLO.Navigation.Active and mq.TLO.Navigation.Active() then moving = true end
+    end)
+    if moving then
+        if task.allowStop and (now - (task.startedAt or now)) < 0.35 then
+            if stopMoving then stopMoving() elseif runtime.stopMoving then runtime.stopMoving() end
+            task.nextStepAt = now + 0.1
+            return
+        end
+        if task.openedByUs then runtime.closeAAWindow() end
+        runtime.pendingAATrain = nil
+        return
+    end
+    if isCasting() then
+        if task.openedByUs then runtime.closeAAWindow() end
+        runtime.pendingAATrain = nil
+        return
+    end
+
+    -- Strict out-of-combat enforcement: if combat engages mid-train, close window immediately and abort
+    local inCombat = false
+    pcall(function()
+        if mq.TLO.Me.Combat and mq.TLO.Me.Combat() then inCombat = true return end
+        if mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT' then inCombat = true return end
+        if mq.TLO.Me.AutoFire and mq.TLO.Me.AutoFire() then inCombat = true return end
+        if runtime.isCombat and runtime.isCombat() then inCombat = true return end
+        if runtime.anyXtarAlive and runtime.anyXtarAlive(true) then inCombat = true return end
+    end)
+    if inCombat then
+        if task.openedByUs then runtime.closeAAWindow() end
+        runtime.pendingAATrain = nil
+        return
+    end
+
     if now < (task.nextStepAt or 0) then return end
 
     if task.step == 'open' then
-        local isOpen = false
-        pcall(function()
-            local w = mq.TLO.Window('AAWindow')
-            if w and w() and w.Open and w.Open() then isOpen = true end
-        end)
-        if not isOpen then
-            task.openedByUs = true
-            pcall(function()
-                local w = mq.TLO.Window('AAWindow')
-                if w and w() and w.DoOpen then w.DoOpen() end
-            end)
-            mq.cmd('/windowstate AAWindow open')
-            mq.cmd('/nomodkey /keypress V')
-            task.nextStepAt = now + 0.35
-            task.step = 'wait_open'
-            return
-        else
+        if runtime.isAAWindowOpen() then
+            task.openedByUs = false
             task.step = 'prepare_tab'
             task.nextStepAt = now + 0.05
+            return
+        else
+            task.openedByUs = true
+            task.retries = 0
+            runtime.openAAWindow(1)
+            task.nextStepAt = now + 0.35
+            task.step = 'wait_open'
             return
         end
 
     elseif task.step == 'wait_open' then
-        local isOpen = false
-        pcall(function()
-            local w = mq.TLO.Window('AAWindow')
-            if w and w() and w.Open and w.Open() then isOpen = true end
-        end)
-        if isOpen or (task.retries and task.retries > 3) then
+        local isOpen = runtime.isAAWindowOpen()
+        if isOpen or (task.retries and task.retries >= 3) then
             task.step = 'prepare_tab'
             task.nextStepAt = now + 0.1
-        else
-            task.retries = (task.retries or 0) + 1
-            pcall(function()
-                local w = mq.TLO.Window('AAWindow')
-                if w and w() and w.DoOpen then w.DoOpen() end
-            end)
-            mq.cmd('/windowstate AAWindow open')
-            mq.cmd('/nomodkey /keypress V')
-            task.nextStepAt = now + 0.35
+            return
         end
-        return
+
+        task.retries = (task.retries or 0) + 1
+        if task.retries <= 4 then
+            runtime.openAAWindow(task.retries + 1)
+            task.nextStepAt = now + 0.35
+            return
+        else
+            print(string.format('\ar[Triune]\ax Failed to open AA Window after %d attempts. Aborting AA train sequence for "%s".', task.retries, task.name))
+            task.step = 'finish'
+            task.nextStepAt = now + 0.05
+            return
+        end
 
     elseif task.step == 'prepare_tab' then
-        local win = nil
-        pcall(function() win = mq.TLO.Window('AAWindow') end)
+        local win = runtime.getAAWindow()
+        local winName = runtime.getAAWindowName()
         local targetTab = task.targetTab or task.tab or 1
 
         -- Select the target tab page first so its listbox is active
-        mq.cmdf('/nomodkey /notify AAWindow AAW_Subwindows tabselect %d', targetTab)
-        mq.cmdf('/nomodkey /notify AAWindow Subwindows tabselect %d', targetTab)
+        mq.cmdf('/nomodkey /notify %s AAW_Subwindows tabselect %d', winName, targetTab)
+        mq.cmdf('/nomodkey /notify %s Subwindows tabselect %d', winName, targetTab)
         pcall(function()
-            if win and win() then
-                local sub = runtime.findChildRecursive(win, 'AAW_Subwindows') or runtime.findChildRecursive(win, 'Subwindows')
-                if sub and sub() and sub.SetCurrentTab then sub.SetCurrentTab(targetTab) end
+            if win then
+                local sub = win.Child('AAW_Subwindows') or win.Child('Subwindows')
+                if not sub then sub = runtime.findChildRecursive(win, 'AAW_Subwindows') or runtime.findChildRecursive(win, 'Subwindows') end
+                if sub and sub.SetCurrentTab then sub.SetCurrentTab(targetTab) end
             end
         end)
 
         task.step = 'select_item'
-        task.nextStepAt = now + 0.3
+        task.nextStepAt = now + 0.25
         return
 
     elseif task.step == 'select_item' then
-        local listName, listIdx, _, listObj = runtime.findAAInWindowLists(task.name)
+        local winName = runtime.getAAWindowName()
+        local listName, listIdx, foundTab, listObj = runtime.findAAInWindowLists(task.name)
 
         if listName and listIdx and listIdx > 0 then
-            -- Found the ability row! Select it
+            -- Found the ability row! If found on a different tab, switch to that tab first
+            if foundTab and foundTab ~= task.targetTab then
+                mq.cmdf('/nomodkey /notify %s AAW_Subwindows tabselect %d', winName, foundTab)
+                mq.cmdf('/nomodkey /notify %s Subwindows tabselect %d', winName, foundTab)
+                pcall(function()
+                    local win = runtime.getAAWindow()
+                    if win then
+                        local sub = win.Child('AAW_Subwindows') or win.Child('Subwindows')
+                        if not sub then sub = runtime.findChildRecursive(win, 'AAW_Subwindows') or runtime.findChildRecursive(win, 'Subwindows') end
+                        if sub and sub.SetCurrentTab then sub.SetCurrentTab(foundTab) end
+                    end
+                end)
+                task.targetTab = foundTab
+                task.nextStepAt = now + 0.15
+                return
+            end
             pcall(function()
-                if listObj and listObj() then
-                    if listObj.Select then listObj.Select(listIdx) end
-                    if listObj.LeftMouseUp then listObj.LeftMouseUp() end
+                if listObj and listObj.Select then
+                    listObj.Select(listIdx)
+                end
+                if listObj and listObj.LeftMouseUp then
+                    listObj.LeftMouseUp()
                 end
             end)
-            mq.cmdf('/nomodkey /notify AAWindow %s listselect %d', listName, listIdx)
-            mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', listName)
+            mq.cmdf('/nomodkey /notify %s %s listselect %d', winName, listName, listIdx)
+            mq.cmdf('/nomodkey /notify %s %s leftmouseup', winName, listName)
             task.step = 'click_train'
             task.nextStepAt = now + 0.25
             return
@@ -15048,13 +15732,22 @@ function runtime.processAATrainWorkflow()
             if task.tab <= (task.maxTabs or 4) then
                 task.targetTab = task.tab
                 task.step = 'prepare_tab'
-                task.nextStepAt = now + 0.1
+                task.nextStepAt = now + 0.15
+                return
+            elseif not task.triedResetFilter then
+                -- Try resetting window filters in case a filter hid the ability
+                task.triedResetFilter = true
+                mq.cmdf('/nomodkey /notify %s AAW_ResetFilter leftmouseup', winName)
+                mq.cmdf('/nomodkey /notify %s ResetFilter leftmouseup', winName)
+                task.tab = 1
+                task.targetTab = 1
+                task.step = 'prepare_tab'
+                task.nextStepAt = now + 0.15
                 return
             else
-                -- Fallback directly to /alt buy if ID is known
+                -- AA not found in any window list; record attempt and close
                 if task.aaId and task.aaId > 0 then
-                    mq.cmdf('/alt buy %d', task.aaId)
-                    print(string.format('\ag[Triune]\ax Issued fallback /alt buy %d for "%s"...', task.aaId, task.name))
+                    print(string.format('\ay[Triune]\ax Could not locate "%s" in AA Window lists (ID: %d). Recording attempt.', task.name, task.aaId))
                 end
                 task.step = 'finish'
                 task.nextStepAt = now + 0.4
@@ -15063,29 +15756,34 @@ function runtime.processAATrainWorkflow()
         end
 
     elseif task.step == 'click_train' then
-        local win = nil
-        pcall(function() win = mq.TLO.Window('AAWindow') end)
+        local win = runtime.getAAWindow()
+        local winName = runtime.getAAWindowName()
         local trainButtons = { 'AAW_TrainButton', 'TrainButton', 'AA_TrainButton' }
         local clicked = false
-        if win and win() then
+        if win then
             for _, btnName in ipairs(trainButtons) do
-                local btn = runtime.findChildRecursive(win, btnName)
-                if btn and btn() then
-                    pcall(function() if btn.LeftMouseUp then btn.LeftMouseUp() end end)
-                    mq.cmdf('/nomodkey /notify AAWindow %s leftmouseup', btnName)
+                local btn = nil
+                pcall(function() btn = win.Child(btnName) end)
+                if not btn then
+                    btn = runtime.findChildRecursive(win, btnName)
+                end
+                if btn then
+                    pcall(function()
+                        if btn.LeftMouseDown then btn.LeftMouseDown() end
+                        if btn.LeftMouseUp then btn.LeftMouseUp() end
+                    end)
+                    mq.cmdf('/nomodkey /notify %s %s leftmousedown', winName, btnName)
+                    mq.cmdf('/nomodkey /notify %s %s leftmouseup', winName, btnName)
                     clicked = true
                     break
                 end
             end
         end
         if not clicked then
-            mq.cmd('/nomodkey /notify AAWindow AAW_TrainButton leftmouseup')
-            mq.cmd('/nomodkey /notify AAWindow TrainButton leftmouseup')
-        end
-
-        -- Also issue /alt buy <id> as a secondary fallback to guarantee purchase
-        if task.aaId and task.aaId > 0 then
-            mq.cmdf('/alt buy %d', task.aaId)
+            mq.cmdf('/nomodkey /notify %s AAW_TrainButton leftmousedown', winName)
+            mq.cmdf('/nomodkey /notify %s AAW_TrainButton leftmouseup', winName)
+            mq.cmdf('/nomodkey /notify %s TrainButton leftmousedown', winName)
+            mq.cmdf('/nomodkey /notify %s TrainButton leftmouseup', winName)
         end
 
         print(string.format('\ag[Triune]\ax Clicked Train Button in AA Window for "%s".', task.name))
@@ -15095,13 +15793,15 @@ function runtime.processAATrainWorkflow()
 
     elseif task.step == 'finish' then
         if task.openedByUs then
-            pcall(function()
-                local w = mq.TLO.Window('AAWindow')
-                if w and w() and w.DoClose then w.DoClose() end
-            end)
-            mq.cmd('/windowstate AAWindow close')
+            runtime.closeAAWindow()
         end
+        runtime.lastAATrainAttempt = runtime.lastAATrainAttempt or {}
+        runtime.lastAATrainAttempt[task.name] = now
         runtime.pendingAATrain = nil
+        runtime.lastAASpendDelegatedTarget = nil
+        runtime.lastAASpendDelegatedAt = nil
+        runtime.lastAACapDelegatedAt = nil
+        runtime.lastAACapDelegatedTarget = nil
         runtime.lastAAScanAt = 0
         runtime.aaFilterDirty = true
         if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
@@ -15204,11 +15904,44 @@ function runtime.syncAAsToMQ2AASpendIni(silent)
     return false
 end
 
-function runtime.checkAutoSpendAA()
+function runtime.checkAutoSpendAA(allowStop)
     if not ctrl.auto_spend_aa then return false end
     if runtime.pendingAATrain then return false end
+
+    -- Strict anti-pause check: never spend AAs while casting or moving
+    if isCasting() then return false end
+    if not allowStop then
+        local moving = false
+        pcall(function()
+            if mq.TLO.Me.Moving and mq.TLO.Me.Moving() then moving = true return end
+            if runtime.isMoveActive and runtime.isMoveActive() then moving = true return end
+            if mq.TLO.Navigation and mq.TLO.Navigation.Active and mq.TLO.Navigation.Active() then moving = true return end
+        end)
+        if moving then return false end
+    end
+
+    -- Strict out-of-combat enforcement: never spend AAs while engaged in combat to avoid pauses
+    local inCombat = false
+    pcall(function()
+        if mq.TLO.Me.Combat and mq.TLO.Me.Combat() then inCombat = true return end
+        if mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT' then inCombat = true return end
+        if mq.TLO.Me.AutoFire and mq.TLO.Me.AutoFire() then inCombat = true return end
+        if runtime.isCombat and runtime.isCombat() then inCombat = true return end
+        if runtime.anyXtarAlive and runtime.anyXtarAlive(true) then inCombat = true return end
+        if mq.TLO.Me.XTHaterCount and (mq.TLO.Me.XTHaterCount() or 0) > 0 then inCombat = true return end
+    end)
+    if inCombat then return false end
+
     local now = os.clock()
     if (now - (runtime.lastAutoSpendAAAt or 0)) < 2.0 then return false end
+
+    -- Reset unpurchasable skips if character level changed
+    local myLevel = 0
+    pcall(function() myLevel = tonumber(mq.TLO.Me.Level() or 0) or 0 end)
+    if runtime.lastCharLevel and myLevel > 0 and myLevel ~= runtime.lastCharLevel then
+        runtime.lastAATrainAttempt = {}
+    end
+    if myLevel > 0 then runtime.lastCharLevel = myLevel end
 
     local unspent = 0
     pcall(function()
@@ -15216,6 +15949,12 @@ function runtime.checkAutoSpendAA()
         unspent = tonumber(raw or 0) or 0
     end)
     if unspent <= 0 then return false end
+
+    -- Clear train attempt cooldowns if unspent points changed (e.g. gained points or purchased)
+    if runtime.lastObservedAutoSpendPts and unspent ~= runtime.lastObservedAutoSpendPts then
+        runtime.lastAATrainAttempt = {}
+    end
+    runtime.lastObservedAutoSpendPts = unspent
 
     -- Autoload MQ2AAspend plugin if missing and auto_spend is active
     if runtime.aaSpendLoaded and not runtime.aaSpendLoaded() then
@@ -15226,6 +15965,206 @@ function runtime.checkAutoSpendAA()
     end
 
     -- 1. Check prioritized AAs
+    if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
+        local candidates = {}
+        for nm, enabled in pairs(ctrl.auto_aa_priorities) do
+            if enabled then
+                local lastAttempt = (runtime.lastAATrainAttempt and runtime.lastAATrainAttempt[nm]) or 0
+                if (now - lastAttempt) >= 30.0 then
+                    local rank, maxRank, cost = 0, 0, 0
+                    if runtime.cachedAAData and runtime.cachedAAData[nm] then
+                        local cd = runtime.cachedAAData[nm]
+                        if cd.rank ~= nil then rank = cd.rank end
+                        if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
+                        if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
+                    end
+                    if (rank == 0 or maxRank == 0 or cost == 0) and runtime.scannedAAs then
+                        for _, itm in ipairs(runtime.scannedAAs) do
+                            if itm.name == nm then
+                                if rank == 0 and itm.rank then rank = itm.rank end
+                                if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
+                                if cost == 0 and itm.cost then cost = itm.cost end
+                                break
+                            end
+                        end
+                    end
+                    pcall(function()
+                        local ma = mq.TLO.Me.AltAbility(nm)
+                        if ma and ma() then
+                            if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
+                            if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
+                            if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
+                        end
+                    end)
+                    pcall(function()
+                        if maxRank == 0 or cost == 0 then
+                            local ga = mq.TLO.AltAbility(nm)
+                            if ga and ga() then
+                                if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
+                                if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
+                            end
+                        end
+                    end)
+                    local isSpecial = (runtime.isSpecialTabAA and runtime.isSpecialTabAA(nm))
+                    local fullyTrained = not isSpecial and (maxRank > 0 and rank >= maxRank)
+                    if not fullyTrained then
+                        if cost <= 0 then cost = (rank > 0) and (rank + 1) or 1 end
+                        if unspent >= cost then
+                            candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
+                        end
+                    end
+                end
+            end
+        end
+
+        if #candidates > 0 then
+            -- Movement check: if moving and allowStop is true, cleanly stop movement before purchasing
+            local moving = false
+            pcall(function()
+                if mq.TLO.Me.Moving and mq.TLO.Me.Moving() then moving = true return end
+                if runtime.isMoveActive and runtime.isMoveActive() then moving = true return end
+                if mq.TLO.Navigation and mq.TLO.Navigation.Active and mq.TLO.Navigation.Active() then moving = true return end
+            end)
+            if moving then
+                if not allowStop then return false end
+                if stopMoving then stopMoving() elseif runtime.stopMoving then runtime.stopMoving() end
+            end
+
+            if ctrl.auto_aa_buy_order == 'list' then
+                table.sort(candidates, function(a, b) return a.name:lower() < b.name:lower() end)
+            else
+                table.sort(candidates, function(a, b)
+                    if a.cost ~= b.cost then return a.cost < b.cost end
+                    return a.name:lower() < b.name:lower()
+                end)
+            end
+            local target = candidates[1]
+
+            -- If candidate is a Special tab ability (such as Fireworks), MQ2AAspend cannot purchase it.
+            -- Train it directly via Triune's native window workflow!
+            if runtime.isSpecialTabAA and runtime.isSpecialTabAA(target.name) then
+                runtime.lastAutoSpendAAAt = now
+                print(string.format('\ag[Triune]\ax Auto-spending AA on Special tab ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
+                    target.name, target.rank, target.maxRank, target.cost, unspent))
+                return runtime.startAATrainWorkflow(target.name, allowStop)
+            end
+
+            -- For regular general/class abilities, if MQ2AAspend is active, delegate with native fallback:
+            if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+                local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+                if unspent >= threshold then
+                    local delegTarget = runtime.lastAASpendDelegatedTarget
+                    local delegAt = runtime.lastAASpendDelegatedAt or 0
+                    local delegPts = runtime.lastAASpendDelegatedPoints or 0
+                    if delegTarget == target.name and (now - delegAt) >= 2.5 and unspent >= delegPts then
+                        runtime.lastAutoSpendAAAt = now
+                        runtime.lastAASpendDelegatedTarget = nil
+                        print(string.format('\ay[Triune]\ax MQ2AAspend did not purchase prioritized ability "%s" (unspent: %d AA); falling back to Triune native window trainer...',
+                            target.name, unspent))
+                        return runtime.startAATrainWorkflow(target.name, allowStop)
+                    end
+
+                    runtime.lastAutoSpendAAAt = now
+                    runtime.lastAASpendDelegatedAt = now
+                    runtime.lastAASpendDelegatedTarget = target.name
+                    runtime.lastAASpendDelegatedPoints = unspent
+                    local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+                    mq.cmdf('/aaspend bank %d', threshold)
+                    mq.cmd('/aaspend ' .. mode)
+                    print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
+                        mode, unspent, threshold))
+                    return true
+                end
+                return false
+            end
+
+            -- Otherwise, train via Triune's native workflow
+            runtime.lastAutoSpendAAAt = now
+            print(string.format('\ag[Triune]\ax Auto-spending AA on prioritized ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
+                target.name, target.rank, target.maxRank, target.cost, unspent))
+            return runtime.startAATrainWorkflow(target.name, allowStop)
+        end
+    end
+
+    -- 2. Fallback: Cap threshold spender (Fireworks or general delegation)
+    local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 100
+    local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
+    local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
+
+    local lastCapAttempt = (runtime.lastAATrainAttempt and runtime.lastAATrainAttempt[effectiveName]) or 0
+    if unspent >= threshold and (now - lastCapAttempt) >= 30.0 then
+        -- Movement check: if moving and allowStop is true, cleanly stop movement before purchasing
+        local moving = false
+        pcall(function()
+            if mq.TLO.Me.Moving and mq.TLO.Me.Moving() then moving = true return end
+            if runtime.isMoveActive and runtime.isMoveActive() then moving = true return end
+            if mq.TLO.Navigation and mq.TLO.Navigation.Active and mq.TLO.Navigation.Active() then moving = true return end
+        end)
+        if moving then
+            if not allowStop then return false end
+            if stopMoving then stopMoving() elseif runtime.stopMoving then runtime.stopMoving() end
+        end
+
+        -- If user has Fireworks / Special tab ability configured as cap spender, buy it natively:
+        if (runtime.isSpecialTabAA and runtime.isSpecialTabAA(effectiveName)) and unspent >= cost then
+            runtime.lastAutoSpendAAAt = now
+            print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on Special tab "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
+                effectiveName, threshold, cost, unspent))
+            return runtime.startAATrainWorkflow(effectiveName, allowStop)
+        end
+
+        -- Delegation to MQ2AAspend plugin for cap dumping if loaded
+        if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
+            local delegCapAt = runtime.lastAACapDelegatedAt or 0
+            local delegCapPts = runtime.lastAACapDelegatedPoints or 0
+            local delegCapTarget = runtime.lastAACapDelegatedTarget
+            if delegCapTarget == effectiveName and (now - delegCapAt) >= 3.0 and unspent >= delegCapPts and cost > 0 and unspent >= cost then
+                runtime.lastAutoSpendAAAt = now
+                runtime.lastAACapDelegatedTarget = nil
+                print(string.format('\ay[Triune]\ax MQ2AAspend did not spend cap protection points; falling back to Triune native trainer on "%s"...',
+                    effectiveName))
+                return runtime.startAATrainWorkflow(effectiveName, allowStop)
+            end
+
+            runtime.lastAutoSpendAAAt = now
+            runtime.lastAACapDelegatedAt = now
+            runtime.lastAACapDelegatedTarget = effectiveName
+            runtime.lastAACapDelegatedPoints = unspent
+            local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+            mq.cmdf('/aaspend bank %d', threshold)
+            mq.cmd('/aaspend ' .. mode)
+            print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
+                mode, unspent, threshold))
+            return true
+        end
+
+        if cost > 0 and unspent >= cost then
+            runtime.lastAutoSpendAAAt = now
+            print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
+                effectiveName, threshold, cost, unspent))
+            return runtime.startAATrainWorkflow(effectiveName, allowStop)
+        end
+    end
+    return false
+end
+
+function runtime.manualSpendAA(targetName)
+    -- If a specific ability is being trained, always train that specific ability natively!
+    if targetName and targetName ~= '' then
+        if runtime.lastAATrainAttempt then runtime.lastAATrainAttempt[targetName] = nil end
+        return runtime.startAATrainWorkflow(targetName)
+    end
+
+    -- Generic spend clicked (e.g. from Spend Now button)
+    runtime.lastAATrainAttempt = {}
+    local unspent = 0
+    pcall(function()
+        local raw = mq.TLO.Me.AAPoints()
+        unspent = tonumber(raw or 0) or 0
+    end)
+
+    -- Check prioritized abilities
+    local topPrioritized = nil
     if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
         local candidates = {}
         for nm, enabled in pairs(ctrl.auto_aa_priorities) do
@@ -15264,7 +16203,8 @@ function runtime.checkAutoSpendAA()
                         end
                     end
                 end)
-                local fullyTrained = (maxRank > 0 and rank >= maxRank)
+                local isSpecial = (runtime.isSpecialTabAA and runtime.isSpecialTabAA(nm))
+                local fullyTrained = not isSpecial and (maxRank > 0 and rank >= maxRank)
                 if not fullyTrained then
                     if cost <= 0 then cost = (rank > 0) and (rank + 1) or 1 end
                     if unspent >= cost then
@@ -15283,89 +16223,43 @@ function runtime.checkAutoSpendAA()
                     return a.name:lower() < b.name:lower()
                 end)
             end
-            local target = candidates[1]
-
-            -- If candidate is a Special tab ability (such as Fireworks), MQ2AAspend cannot purchase it.
-            -- Train it directly via Triune's native window workflow!
-            if runtime.isSpecialTabAA and runtime.isSpecialTabAA(target.name) then
-                runtime.lastAutoSpendAAAt = now
-                print(string.format('\ag[Triune]\ax Auto-spending AA on Special tab ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
-                    target.name, target.rank, target.maxRank, target.cost, unspent))
-                return runtime.startAATrainWorkflow(target.name)
-            end
-
-            -- For regular general/class abilities, if MQ2AAspend is active, delegate:
-            if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
-                local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
-                if unspent >= threshold then
-                    runtime.lastAutoSpendAAAt = now
-                    local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-                    mq.cmdf('/aaspend bank %d', threshold)
-                    mq.cmd('/aaspend ' .. mode)
-                    print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
-                        mode, unspent, threshold))
-                    return true
-                end
-                return false
-            end
-
-            -- Otherwise, train via Triune's native workflow
-            runtime.lastAutoSpendAAAt = now
-            print(string.format('\ag[Triune]\ax Auto-spending AA on prioritized ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
-                target.name, target.rank, target.maxRank, target.cost, unspent))
-            return runtime.startAATrainWorkflow(target.name)
+            topPrioritized = candidates[1]
         end
     end
 
-    -- 2. Fallback: Cap threshold spender (Fireworks or general delegation)
-    local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 100
-    local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
-    local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
-
-    if unspent >= threshold then
-        -- If user has Fireworks / Special tab ability configured as cap spender, buy it natively:
-        if (runtime.isSpecialTabAA and runtime.isSpecialTabAA(effectiveName)) and unspent >= cost then
-            runtime.lastAutoSpendAAAt = now
-            print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on Special tab "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
-                effectiveName, threshold, cost, unspent))
-            return runtime.startAATrainWorkflow(effectiveName)
+    if topPrioritized then
+        -- Special tab abilities always train natively
+        if runtime.isSpecialTabAA and runtime.isSpecialTabAA(topPrioritized.name) then
+            return runtime.startAATrainWorkflow(topPrioritized.name)
         end
 
-        -- Delegation to MQ2AAspend plugin for cap dumping if loaded
+        -- If MQ2AAspend is active, try delegation first unless already delegated or disabled
         if ctrl.auto_aa_delegate_aaspend and runtime.aaSpendLoaded and runtime.aaSpendLoaded() then
-            runtime.lastAutoSpendAAAt = now
+            local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+            local now = os.clock()
+            local delegTarget = runtime.lastAASpendDelegatedTarget
+            local delegAt = runtime.lastAASpendDelegatedAt or 0
+            local delegPts = runtime.lastAASpendDelegatedPoints or 0
+            -- If previously delegated for this target and didn't purchase after >= 2.5s, fall back immediately to native!
+            if delegTarget == topPrioritized.name and (now - delegAt) >= 2.5 and unspent >= delegPts then
+                runtime.lastAASpendDelegatedTarget = nil
+                print(string.format('\ay[Triune]\ax MQ2AAspend did not purchase prioritized ability "%s"; falling back to Triune native window trainer...',
+                    topPrioritized.name))
+                return runtime.startAATrainWorkflow(topPrioritized.name)
+            end
+
             local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
+            runtime.lastAASpendDelegatedAt = now
+            runtime.lastAASpendDelegatedTarget = topPrioritized.name
+            runtime.lastAASpendDelegatedPoints = unspent
             mq.cmdf('/aaspend bank %d', threshold)
             mq.cmd('/aaspend ' .. mode)
-            print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
-                mode, unspent, threshold))
+            print(string.format('\ag[Triune]\ax Issued MQ2AAspend manual command (/aaspend %s).', mode))
             return true
         end
 
-        if cost > 0 and unspent >= cost then
-            runtime.lastAutoSpendAAAt = now
-            print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
-                effectiveName, threshold, cost, unspent))
-            return runtime.startAATrainWorkflow(effectiveName)
-        end
-    end
-    return false
-end
-
-function runtime.manualSpendAA(targetName)
-    -- If a specific ability is being trained, always train that specific ability natively!
-    if targetName and targetName ~= '' then
-        return runtime.startAATrainWorkflow(targetName)
-    end
-
-    -- Generic spend clicked (e.g. from Spend Now button)
-    -- If top prioritized ability is Special tab, train it natively:
-    if ctrl.auto_aa_priorities then
-        for nm, enabled in pairs(ctrl.auto_aa_priorities) do
-            if enabled and runtime.isSpecialTabAA and runtime.isSpecialTabAA(nm) then
-                return runtime.startAATrainWorkflow(nm)
-            end
-        end
+        -- Native workflow
+        return runtime.startAATrainWorkflow(topPrioritized.name)
     end
 
     -- If Fireworks is configured cap spender and no other prios:
@@ -15383,11 +16277,6 @@ function runtime.manualSpendAA(targetName)
         return true
     end
 
-    local unspent = 0
-    pcall(function()
-        local raw = mq.TLO.Me.AAPoints()
-        unspent = tonumber(raw or 0) or 0
-    end)
     local cost = 0
     if runtime.cachedAAData and runtime.cachedAAData[fallbackName] and runtime.cachedAAData[fallbackName].cost then
         cost = tonumber(runtime.cachedAAData[fallbackName].cost) or 0
@@ -16223,7 +17112,8 @@ function runtime.recordStuckHazard(x, y, z, zs)
         end
     end
     if found then
-        local newHits = (found.hits or 1) + 1
+        local maxHits = ctrl.nav_hazard_max_hits or 6
+        local newHits = math.min((found.hits or 1) + 1, maxHits)
         found.x = ((found.x * (newHits - 1)) + x) / newHits
         found.y = ((found.y * (newHits - 1)) + y) / newHits
         found.z = ((found.z * (newHits - 1)) + z) / newHits
@@ -16254,6 +17144,43 @@ function runtime.clearZoneHazards(zs)
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Cleared all navigation hazard hotspots for zone: %s', zs))
     end
+end
+
+function runtime.decayZoneHazards(zs)
+    if not ctrl or not ctrl.nav_hazard_avoidance then return 0 end
+    zs = zs or runtime.getCurrentZoneShortName()
+    local zoneHazards = ctrl.zone_hazards or {}
+    local hazards = zoneHazards[zs]
+    if not hazards or #hazards == 0 then return 0 end
+    local decaySeconds = (ctrl.nav_hazard_decay_minutes or 10) * 60
+    local minHits = ctrl.nav_hazard_min_hits or 2
+    local now = os.time()
+    local changed = 0
+    local removeList = {}
+    for i, h in ipairs(hazards) do
+        local lastHit = h.lastHitAt or h.addedAt or 0
+        if (now - lastHit) >= decaySeconds then
+            local newHits = (h.hits or 1) - 1
+            if newHits >= 1 then
+                h.hits = newHits
+                h.lastHitAt = now
+                if newHits < minHits then
+                    print(string.format('\ay[Triune]\ax Navigation hazard hotspot in %s dampened below active threshold (Y:%.1f, X:%.1f).',
+                        zs, h.y, h.x))
+                end
+            else
+                table.insert(removeList, i)
+                print(string.format('\ay[Triune]\ax Navigation hazard hotspot in %s forgotten (Y:%.1f, X:%.1f).',
+                    zs, h.y, h.x))
+            end
+            changed = changed + 1
+        end
+    end
+    for k = #removeList, 1, -1 do
+        table.remove(hazards, removeList[k])
+    end
+    if changed > 0 then runtime.saveLoadout(true) end
+    return changed
 end
 
 function runtime.isCoordInActiveHazard(x, y, z, zs)
@@ -16365,6 +17292,10 @@ function runtime.calculateDetourWaypoint(x1, y1, hx, hy, hz, r, destX, destY, de
                 local cost2 = len2 + d2ToDest
                 if c1InHazard then cost1 = cost1 + 1000 end
                 if c2InHazard then cost2 = cost2 + 1000 end
+                -- Heavily penalize candidates whose onward route immediately crosses a
+                -- known hazard again (near-side detour points cause re-route oscillation).
+                if runtime.findPathHazardIntersection(cand1.x, cand1.y, destX, destY, cand1.z, zs) then cost1 = cost1 + 1500 end
+                if runtime.findPathHazardIntersection(cand2.x, cand2.y, destX, destY, cand2.z, zs) then cost2 = cost2 + 1500 end
                 return (cost1 <= cost2) and cand1 or cand2
             else
                 if c1InHazard and not c2InHazard then return cand2 end
@@ -16604,15 +17535,23 @@ function runtime.moveToward(id, dist, followOnly)
 
         -- 1. Check in-flight active detour
         if pursuit.detourActive then
-            if now > (pursuit.detourExpiresAt or 0) or pursuit.detourTargetId ~= id then
+            if pursuit.detourTargetId ~= id then
                 runtime.clearDetour()
             else
                 local dDetour = math.sqrt((mx - pursuit.detourX) ^ 2 + (my - pursuit.detourY) ^ 2)
                 if dDetour <= 8 then
                     runtime.clearDetour()
                 else
-                    runtime.moveTowardLoc(pursuit.detourX, pursuit.detourY, pursuit.detourZ, 6)
-                    return false
+                    -- Keep the detour alive while navigation to the waypoint is still
+                    -- in flight; only abandon it once navigation concluded without arrival.
+                    local navActiveToWaypoint = false
+                    pcall(function() navActiveToWaypoint = mq.TLO.Navigation.Active() or false end)
+                    if string.find(tostring(pursuit.lastNavLoc or ''), '^detour_') ~= nil and not navActiveToWaypoint then
+                        runtime.clearDetour()
+                    else
+                        runtime.moveTowardLoc(pursuit.detourX, pursuit.detourY, pursuit.detourZ, 6)
+                        return false
+                    end
                 end
             end
         end
@@ -16633,9 +17572,9 @@ function runtime.moveToward(id, dist, followOnly)
                             pursuit.detourY = detour.y
                             pursuit.detourZ = detour.z
                             pursuit.detourTargetId = id
-                            pursuit.detourTargetKey = nil
+                            pursuit.detourTargetKey = string.format('%.1f_%.1f_%.1f', detour.y, detour.x, detour.z)
                             pursuit.detourStartedAt = now
-                            pursuit.detourExpiresAt = now + 6.0
+                            pursuit.detourExpiresAt = now + 15.0
                             runtime.moveTowardLoc(detour.x, detour.y, detour.z, 6)
                             return false
                         end
@@ -17001,15 +17940,17 @@ function runtime.moveTowardLoc(x, y, z, dist)
     local locKey = string.format('%.1f_%.1f_%.1f', y, x, z)
 
     -- Detour State Machine for Loc navigation (e.g. camp return, waypoints)
-    -- Do not trigger a new detour if we are currently moving toward a detour waypoint itself!
+    -- In-flight detours stay active while navigation toward the waypoint makes
+    -- progress; a new detour is only created when not already headed to one.
     local me = mq.TLO.Me
-    if me() and ctrl.nav_hazard_avoidance and not string.find(tostring(pursuit.lastNavLoc or ''), '^detour_') then
+    if me() and ctrl.nav_hazard_avoidance then
         local mx, my, mz = me.X() or 0, me.Y() or 0, me.Z() or 0
         local now = os.clock()
+        local headingToWaypoint = string.find(tostring(pursuit.lastNavLoc or ''), '^detour_') ~= nil
 
         -- 1. Check in-flight active detour for this loc target
         if pursuit.detourActive then
-            if now > (pursuit.detourExpiresAt or 0) or pursuit.detourTargetKey ~= locKey then
+            if pursuit.detourTargetKey ~= locKey then
                 runtime.clearDetour()
             else
                 local dDetour = math.sqrt((mx - pursuit.detourX) ^ 2 + (my - pursuit.detourY) ^ 2)
@@ -17020,7 +17961,14 @@ function runtime.moveTowardLoc(x, y, z, dist)
                     if navLoaded() then
                         local navActive = false
                         pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
-                        if pursuit.lastNavLoc ~= detourKey or not navActive then
+                        if headingToWaypoint and navActive then
+                            -- still en route to the waypoint: keep following, no hard expiry
+                            return false
+                        elseif now > (pursuit.detourExpiresAt or 0) then
+                            -- waypoint navigation already ended before arrival and the
+                            -- backstop elapsed: give up this detour and re-evaluate
+                            runtime.clearDetour()
+                        else
                             local locyxStr = string.format('locyx %.2f %.2f', pursuit.detourY, pursuit.detourX)
                             local ok = false
                             pcall(function() ok = mq.TLO.Navigation.PathExists(locyxStr)() end)
@@ -17029,16 +17977,15 @@ function runtime.moveTowardLoc(x, y, z, dist)
                                 pursuit.lastNavLoc = detourKey
                                 return false
                             end
-                        else
-                            return false
                         end
                     end
                 end
             end
         end
 
-        -- 2. If no active detour, check if straight path to destination intersects a known hazard
-        if not pursuit.detourActive then
+        -- 2. If no active detour (and not already heading to a waypoint),
+        --    check if straight path to destination intersects a known hazard
+        if not pursuit.detourActive and not headingToWaypoint then
             local hz = runtime.findPathHazardIntersection(mx, my, x, y, mz)
             if hz then
                 local detour = runtime.calculateDetourWaypoint(mx, my, hz.x, hz.y, hz.z, hz.radius or 15, x, y, z)
@@ -17052,7 +17999,7 @@ function runtime.moveTowardLoc(x, y, z, dist)
                         pursuit.detourTargetId = 0
                         pursuit.detourTargetKey = locKey
                         pursuit.detourStartedAt = now
-                        pursuit.detourExpiresAt = now + 6.0
+                        pursuit.detourExpiresAt = now + 15.0
 
                         local detourKey = string.format('detour_%.1f_%.1f_%.1f', detour.y, detour.x, detour.z)
                         if navLoaded() then
@@ -17067,6 +18014,9 @@ function runtime.moveTowardLoc(x, y, z, dist)
                                     pursuit.lastNavLoc = detourKey
                                     return false
                                 end
+                                -- No mesh path around the hazard: abandon the detour and
+                                -- let the normal route below aim straight at the destination.
+                                runtime.clearDetour()
                             else
                                 return false
                             end
@@ -17383,27 +18333,23 @@ end
 function runtime.checkCombatStall()
     if (ctrl.mode == 'Assist' and ctrl.submode == 'Backline')
         or (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState ~= 'FIGHTING') then
-        stuckState.combatStallSince = nil
         return
     end
 
     -- Must be actively in combat, or have hostile enemies on XTarget, or already attacking
     local inCombat = mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT') or runtime.anyXtarAlive(true)
     if not inCombat then
-        stuckState.combatStallSince = nil
         return
     end
 
     local t = mq.TLO.Target
     local haveLiveNPC = t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse'
     if not haveLiveNPC or not isHostileTarget(t.ID()) then
-        stuckState.combatStallSince = nil
         return
     end
 
     -- In Manual mode, only watchdog auto-attack if the target is an active hostile XTarget or actively fighting us
     if ctrl.mode == 'Manual' and not (isXTargetId(t.ID()) or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')) then
-        stuckState.combatStallSince = nil
         return
     end
 
@@ -17416,7 +18362,6 @@ function runtime.checkCombatStall()
         end
         local expectedId = maId or defId
         if not expectedId or expectedId ~= t.ID() then
-            stuckState.combatStallSince = nil
             return
         end
     end
@@ -17435,7 +18380,6 @@ function runtime.checkCombatStall()
             end
         end
     end
-    stuckState.combatStallSince = nil
 end
 
 -- When EQ chat reports "You cannot see your target." during combat, this active
@@ -17635,15 +18579,9 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                 if runtime.verifyTargetCon(sid) then
                                     local sz = s.Z() or 0
                                     local inHaz = runtime.isCoordInActiveHazard(sx, sy, sz)
-                                    if not inHaz or (ctrl and ctrl.combat_style ~= 'Melee') then
-                                        local pathOk = true
-                                        if inHaz then
-                                            local isMelee = (ctrl and (ctrl.combat_style or 'Melee') == 'Melee')
-                                            if isMelee then
-                                                pathOk = false
-                                            end
-                                        end
-                                        if pathOk and navLoaded() then
+                                    local isMeleeStyle = (ctrl and ctrl.combat_style or 'Melee') == 'Melee'
+                                    local pathOk = not (inHaz and isMeleeStyle)
+                                    if pathOk and navLoaded() then
                                             local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
                                             if meshOk and meshLoaded then
                                                 local dist = s.Distance3D() or 999
@@ -17665,8 +18603,7 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                             end
                                         end
                                         if pathOk then
-                                            return sid
-                                        end
+                                        return sid
                                     end
                                 end
                             end
@@ -17834,6 +18771,11 @@ end
 -- Puller: IDLE (find a mob) -> TO_MOB (close in, tag it) -> TO_CAMP (drag it home)
 -- -> FIGHTING (normal combat loop takes over via the target already being set).
 function runtime.pullerTick()
+    if runtime.pendingAATrain then
+        stopMoving()
+        return
+    end
+
     local hasWps = (ctrl.waypoints and #ctrl.waypoints > 0)
 
     if not ctrl.camp_loc then
@@ -17856,6 +18798,11 @@ function runtime.pullerTick()
     end
 
     if runtime.pullState == 'IDLE' then
+        if runtime.pendingAATrain then
+            stopMoving()
+            return
+        end
+
         local maxCampZ = ctrl.camp_z or 75
         local addId = firstNPCXtarget(false, maxCampZ)
         if addId and runtime.setTarget(addId) then
@@ -17876,6 +18823,14 @@ function runtime.pullerTick()
         end
 
         if runtime.checkPullHpRest() then return end
+
+        -- Check to see if an AA can be purchased between pulling before finding next target
+        if ctrl.auto_spend_aa and runtime.checkAutoSpendAA and not mq.TLO.Me.Combat() and not (runtime.anyXtarAlive and runtime.anyXtarAlive(true)) and not isCasting() then
+            if runtime.checkAutoSpendAA(true) then
+                stopMoving()
+                return
+            end
+        end
 
         local scanRadius = hasWps and (ctrl.use_waypoints ~= false) and (ctrl.waypoint_scan_radius or 100) or
         (ctrl.camp_radius or 100)
@@ -18690,9 +19645,6 @@ local function combatTick()
             end
         end
     end
-    if ctrl.auto_spend_aa and runtime.checkAutoSpendAA then
-        runtime.checkAutoSpendAA()
-    end
 
     if not ctrl.medbreak_enabled then
         if runtime.medBreakActive then
@@ -18844,6 +19796,10 @@ local function combatTick()
 
     checkStuck()
     checkCombatStall()
+    if os.time() >= (runtime.nextHazardDecayAt or 0) then
+        runtime.decayZoneHazards()
+        runtime.nextHazardDecayAt = os.time() + 60
+    end
     checkGemMemSync()
     if (ctrl.mode == 'Manual' and ctrl.manual_auto_xtarget ~= false) or ctrl.mode == 'Puller' then
         checkAggroSwitch()
@@ -18936,6 +19892,10 @@ local function combatTick()
         end
     elseif ctrl.mode == 'Puller' then
         if ctrl.submode == 'Camp' then
+            if runtime.pendingAATrain then
+                stopMoving()
+                return
+            end
             pullerTick()
             local pt = mq.TLO.Target
             haveNPC = pt() and pt.Type() == 'NPC' and not pt.Dead() and pt.Type() ~= 'Corpse'
@@ -19060,7 +20020,20 @@ local function combatTick()
             end
 
             if not haveNPC then
+                if runtime.pendingAATrain then
+                    stopMoving()
+                    return
+                end
                 if checkPullHpRest() then return end
+
+                -- Check to see if an AA can be purchased between pulling before finding next target
+                if ctrl.auto_spend_aa and runtime.checkAutoSpendAA and not mq.TLO.Me.Combat() and not anyXtarAlive(true) and not isCasting() then
+                    if runtime.checkAutoSpendAA(true) then
+                        stopMoving()
+                        return
+                    end
+                end
+
                 local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
                 local id = firstNPCXtarget(false, maxHuntXtarZ, maxHuntXtarDist)
                 if not id then
@@ -19343,6 +20316,10 @@ local function combatTick()
                 haveNPC = false
             end
             if not closingOnMob then
+                if runtime.pendingAATrain then
+                    stopMoving()
+                    return
+                end
                 if ctrl.submode == 'Camp' then idleReturn() else chaseMA() end
             end
         end
@@ -21244,6 +22221,7 @@ local function runMainLoop()
         local nm = mq.TLO.Me.CleanName()
         if nm and nm ~= '' and nm ~= myName then
             myName = nm
+            runtime.loadAll()
             runtime.onCharacterChanged()
             UI.resetTracker()
             -- camp restored from a save; no map circle is drawn
@@ -21312,7 +22290,7 @@ local function runMainLoop()
             runtime.aaFilterDirty = true
             if runtime.scanPlayerAAs then runtime.scanPlayerAAs(true) end
         end
-        if ctrl.auto_spend_aa and runtime.checkAutoSpendAA then
+        if ctrl.auto_spend_aa and runtime.checkAutoSpendAA and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
             runtime.checkAutoSpendAA()
         end
         if ctrl.auto_summon_fireworks and runtime.checkAutoSummonFireworks and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
