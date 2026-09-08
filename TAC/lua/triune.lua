@@ -16739,10 +16739,8 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct, extra)
     return id
 end
 
-mq.event('TriuneZone', 'You have entered #*#', function()
-    runtime.sungBuffs = {}; runtime.npcCastCounts = {}; runtime.npcSpellApplied = {}; runtime.npcSpellLastCast = {}; if runtime.onZoned then runtime.onZoned() end
-end)
-
+-- Zone changes are detected using mq.TLO.Zone.ShortName() in the main loop.
+-- The old broad "You have entered #*#" event caused false zone triggers.
 local function reconcileSungBuffs()
     local found = 0
     local function scanGemTable(gemsTable)
