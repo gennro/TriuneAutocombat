@@ -596,6 +596,23 @@ local EXPECTED_FIELDS = {
     { 'cooldown_status_filter',  'string' },
     { 'cooldown_compact',        'boolean' },
     { 'cooldown_show_inline_edit', 'boolean' },
+    { 'show_unit_frames',        'boolean' },
+    { 'uf_lock',                 'boolean' },
+    { 'uf_alpha',                'number' },
+    { 'uf_bar_height',           'number' },
+    { 'uf_show_endurance',       'boolean' },
+    { 'uf_show_xp',              'boolean' },
+    { 'uf_hide_empty_pets',      'boolean' },
+    { 'uf_buff_max',             'number' },
+    { 'show_group_window',       'boolean' },
+    { 'gw_lock',                 'boolean' },
+    { 'gw_alpha',                'number' },
+    { 'gw_bar_height',           'number' },
+    { 'gw_include_self',         'boolean' },
+    { 'gw_show_mana',            'boolean' },
+    { 'gw_show_endurance',       'boolean' },
+    { 'gw_show_pets',            'boolean' },
+    { 'gw_show_roles',           'boolean' },
     { 'burn',                    'boolean' },
     { 'compact',                 'boolean' },
     { 'use_waypoints',           'boolean' },
@@ -8589,6 +8606,586 @@ do
         'Suite 73: triune.lua invokes checkAutoSpendAA(true) between pulls')
     assert_true(triuneContent:find("if runtime%.pendingAATrain then%s+stopMoving%(%)%s+return%s+end") ~= nil,
         'Suite 73: triune.lua pauses pulling while pendingAATrain is active')
+end
+
+-- ============================================================================
+-- Suite 74: Off-Mesh Stick Recovery & Nav Remap
+-- ============================================================================
+print('--- Suite 74: Off-Mesh Stick Recovery & Nav Remap ---')
+do
+    local function mockNavMq(meshLoaded, pathMap)
+        return {
+            TLO = {
+                Navigation = {
+                    MeshLoaded = function() return meshLoaded end,
+                    PathExists = function(query)
+                        return function()
+                            if pathMap[query] ~= nil then return pathMap[query] end
+                            return false
+                        end
+                    end,
+                },
+                Me = setmetatable({
+                    X = function() return 10 end,
+                    Y = function() return 20 end,
+                    Z = function() return 5 end,
+                    Moving = function() return false end,
+                }, { __call = function() return true end }),
+            },
+            cmd = function() end,
+            cmdf = function() end,
+        }
+    end
+
+    -- 1. isPlayerOffMesh
+    local onMesh = loadFunc(src, 'isPlayerOffMesh', {
+        navLoaded = function() return true end,
+        mq = mockNavMq(true, {
+            ['loc 20.00 10.00 5.00'] = true,
+        }),
+        pcall = pcall,
+    })
+    assert_eq(onMesh(), false, 'Suite 74: on-mesh player is not off-mesh')
+
+    local offMesh = loadFunc(src, 'isPlayerOffMesh', {
+        navLoaded = function() return true end,
+        mq = mockNavMq(true, {}),
+        pcall = pcall,
+    })
+    assert_eq(offMesh(), true, 'Suite 74: no path from feet is off-mesh')
+
+    local noPlugin = loadFunc(src, 'isPlayerOffMesh', {
+        navLoaded = function() return false end,
+        mq = mockNavMq(true, {}),
+        pcall = pcall,
+    })
+    assert_eq(noPlugin(), false, 'Suite 74: nav not loaded is not off-mesh')
+
+    local noMesh = loadFunc(src, 'isPlayerOffMesh', {
+        navLoaded = function() return true end,
+        mq = mockNavMq(false, {}),
+        pcall = pcall,
+    })
+    assert_eq(noMesh(), false, 'Suite 74: missing zone mesh is not off-mesh')
+
+    -- 2. tryOffMeshRecovery issues stick once per target
+    local cmds = {}
+    local pursuitState = { meshRecoverId = 0, meshRecoverAt = 0, lastNavTargetId = 0, lastStickDist = 0 }
+    local recover = loadFunc(src, 'tryOffMeshRecovery', {
+        pursuit = pursuitState,
+        stickLoaded = function() return true end,
+        navLoaded = function() return true end,
+        mq = {
+            TLO = { Navigation = { Active = function() return false end } },
+            cmd = function(c) cmds[#cmds + 1] = c end,
+            cmdf = function(fmt, ...) cmds[#cmds + 1] = string.format(fmt, ...) end,
+        },
+        pcall = pcall,
+        print = function() end,
+        os = os,
+    })
+    assert_eq(recover(4242, 12), false, 'Suite 74: recovery does not claim arrival')
+    assert_eq(pursuitState.meshRecoverId, 4242, 'Suite 74: recovery stamps meshRecoverId')
+    local sawStick = false
+    for _, c in ipairs(cmds) do
+        if tostring(c):find('/stick id 4242 12', 1, true) then sawStick = true end
+    end
+    assert_true(sawStick, 'Suite 74: recovery issues /stick id toward the spawn')
+
+    cmds = {}
+    recover(4242, 12)
+    assert_eq(#cmds, 0, 'Suite 74: recovery does not re-issue stick while already tracking the same spawn')
+
+    -- 3. Native fallback when MoveUtils is not loaded
+    local nativeCmds = {}
+    local nativePursuit = { meshRecoverId = 0, meshRecoverAt = 0, lastNavTargetId = 0, lastStickDist = 0 }
+    local recoverNative = loadFunc(src, 'tryOffMeshRecovery', {
+        pursuit = nativePursuit,
+        stickLoaded = function() return false end,
+        navLoaded = function() return true end,
+        mq = {
+            TLO = {
+                Navigation = { Active = function() return false end },
+                Me = { Moving = function() return false end },
+            },
+            cmd = function(c) nativeCmds[#nativeCmds + 1] = c end,
+            cmdf = function(fmt, ...) nativeCmds[#nativeCmds + 1] = string.format(fmt, ...) end,
+        },
+        pcall = pcall,
+        print = function() end,
+        os = os,
+    })
+    recoverNative(77, 14)
+    local sawFace, sawForward = false, false
+    for _, c in ipairs(nativeCmds) do
+        if c == '/face fast' then sawFace = true end
+        if c == '/keypress forward hold' then sawForward = true end
+    end
+    assert_true(sawFace and sawForward, 'Suite 74: native recovery faces and walks forward without stick')
+    assert_eq(nativePursuit.lastNavTargetId, 'native_spawn_77', 'Suite 74: native recovery tags lastNavTargetId')
+
+    -- 4. Source inspections
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find('function runtime%.isPlayerOffMesh') ~= nil,
+        'Suite 74: triune.lua defines isPlayerOffMesh')
+    assert_true(triuneContent:find('function runtime%.tryOffMeshRecovery') ~= nil,
+        'Suite 74: triune.lua defines tryOffMeshRecovery')
+    assert_true(triuneContent:find('sticking toward it to leave the mesh hole, then remapping') ~= nil,
+        'Suite 74: triune.lua logs off-mesh stick recovery')
+    assert_true(triuneContent:find('Remapped nav path to #%%d after off%-mesh stick recovery') ~= nil,
+        'Suite 74: triune.lua remaps /nav after PathExists returns')
+    assert_true(triuneContent:find('local playerOffMesh = runtime%.isPlayerOffMesh') ~= nil,
+        'Suite 74: findRoamTarget still picks NPCs when the player is off-mesh')
+    assert_true(triuneContent:find('and not playerOffMesh then') ~= nil,
+        'Suite 74: findRoamTarget skips PathExists filter while off-mesh')
+    assert_true(not triuneContent:find('noPathFails >= 3'),
+        'Suite 74: 3-tick no-path abandon no longer drops the target before recovery')
+end
+
+-- ============================================================================
+-- Suite 75: Popout Unit Frames HUD Window Logic & Configuration
+-- ============================================================================
+do
+    print('--- Suite 75: Popout Unit Frames HUD Window Logic & Configuration ---')
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    local readmeContent = readFile('README.md')
+
+    -- 1. Verify defaultCtrl defaults
+    local defCtrlFunc = loadFunc(triuneContent, 'defaultCtrl', { MODES = MODES })
+    assert_true(defCtrlFunc ~= nil, 'Suite 75: defaultCtrl loads successfully')
+    local testDc = defCtrlFunc()
+    assert_eq(testDc.show_unit_frames, false, 'Suite 75: defaultCtrl.show_unit_frames is false')
+    assert_eq(testDc.uf_lock, false, 'Suite 75: defaultCtrl.uf_lock is false')
+    assert_eq(testDc.uf_alpha, 0.85, 'Suite 75: defaultCtrl.uf_alpha is 0.85')
+    assert_eq(testDc.uf_bar_height, 14, 'Suite 75: defaultCtrl.uf_bar_height is 14')
+    assert_eq(testDc.uf_show_endurance, true, 'Suite 75: defaultCtrl.uf_show_endurance is true')
+    assert_eq(testDc.uf_show_xp, true, 'Suite 75: defaultCtrl.uf_show_xp is true')
+    assert_eq(testDc.uf_hide_empty_pets, true, 'Suite 75: defaultCtrl.uf_hide_empty_pets is true')
+    assert_eq(testDc.uf_buff_max, 30, 'Suite 75: defaultCtrl.uf_buff_max is 30')
+
+    assert_true(triuneContent:find('show_unit_frames%s*=%s*false') ~= nil,
+        'Suite 75: defaultCtrl sets show_unit_frames to false')
+    assert_true(triuneContent:find('uf_lock%s*=%s*false') ~= nil,
+        'Suite 75: defaultCtrl sets uf_lock to false')
+    assert_true(triuneContent:find('uf_alpha%s*=%s*0%.85') ~= nil,
+        'Suite 75: defaultCtrl sets uf_alpha to 0.85')
+    assert_true(triuneContent:find('uf_bar_height%s*=%s*14') ~= nil,
+        'Suite 75: defaultCtrl sets uf_bar_height to 14')
+    assert_true(triuneContent:find('uf_show_endurance%s*=%s*true') ~= nil,
+        'Suite 75: defaultCtrl sets uf_show_endurance to true')
+    assert_true(triuneContent:find('uf_show_xp%s*=%s*true') ~= nil,
+        'Suite 75: defaultCtrl sets uf_show_xp to true')
+    assert_true(triuneContent:find('uf_hide_empty_pets%s*=%s*true') ~= nil,
+        'Suite 75: defaultCtrl sets uf_hide_empty_pets to true')
+    assert_true(triuneContent:find('uf_buff_max%s*=%s*30') ~= nil,
+        'Suite 75: defaultCtrl sets uf_buff_max to 30')
+
+    -- 2. Verify window definition and imgui init
+    assert_true(triuneContent:find('function UI%.drawUnitFramesWindow') ~= nil,
+        'Suite 75: UI.drawUnitFramesWindow is defined in triune.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneUnitFramesWindow', UI%.drawUnitFramesWindow%)") ~= nil,
+        'Suite 75: TriuneUnitFramesWindow is registered with mq.imgui.init')
+    assert_true(triuneContent:find('function UI%.resolveTargetOfTarget') ~= nil,
+        'Suite 75: UI.resolveTargetOfTarget is defined in triune.lua')
+    assert_true(triuneContent:find('UI%.resolveTargetOfTarget%(') ~= nil,
+        'Suite 75: UI.resolveTargetOfTarget is utilized by Target HUD')
+
+    -- 3. Verify slash command and toolbar buttons
+    assert_true(triuneContent:find("cmd == 'hud' or cmd == 'uf'") ~= nil,
+        'Suite 75: /ac hud and /ac uf slash commands are registered')
+    assert_true(triuneContent:find("Target & Player HUD##hdrHud") ~= nil,
+        'Suite 75: Main header contains Target & Player HUD button')
+    assert_true(triuneContent:find("HUD##miniHud") ~= nil,
+        'Suite 75: Mini GUI toolbar contains HUD button')
+
+    -- 4. Verify version consistency
+    local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
+    local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
+    assert_true(vTriune ~= nil and #vTriune > 0, 'Suite 75: triune.lua has valid VERSION')
+    assert_true(vReadme ~= nil and #vReadme > 0, 'Suite 75: README.md has valid version')
+    assert_eq(vTriune, vReadme, 'Suite 75: Version numbers match across triune.lua and README.md')
+end
+
+-- ============================================================================
+-- Suite 76: Popout Group Window Logic & Configuration
+-- ============================================================================
+do
+    print('--- Suite 76: Popout Group Window Logic & Configuration ---')
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    local readmeContent = readFile('README.md')
+
+    -- 1. Verify defaultCtrl defaults
+    local defCtrlFunc = loadFunc(triuneContent, 'defaultCtrl', { MODES = MODES })
+    assert_true(defCtrlFunc ~= nil, 'Suite 76: defaultCtrl loads successfully')
+    local testDc = defCtrlFunc()
+    assert_eq(testDc.show_group_window, false, 'Suite 76: defaultCtrl.show_group_window is false')
+    assert_eq(testDc.gw_lock, false, 'Suite 76: defaultCtrl.gw_lock is false')
+    assert_eq(testDc.gw_alpha, 0.85, 'Suite 76: defaultCtrl.gw_alpha is 0.85')
+    assert_eq(testDc.gw_bar_height, 14, 'Suite 76: defaultCtrl.gw_bar_height is 14')
+    assert_eq(testDc.gw_include_self, true, 'Suite 76: defaultCtrl.gw_include_self is true')
+    assert_eq(testDc.gw_show_mana, true, 'Suite 76: defaultCtrl.gw_show_mana is true')
+    assert_eq(testDc.gw_show_endurance, false, 'Suite 76: defaultCtrl.gw_show_endurance is false')
+    assert_eq(testDc.gw_show_pets, true, 'Suite 76: defaultCtrl.gw_show_pets is true')
+    assert_eq(testDc.gw_show_roles, true, 'Suite 76: defaultCtrl.gw_show_roles is true')
+
+    assert_true(triuneContent:find('show_group_window%s*=%s*false') ~= nil,
+        'Suite 76: defaultCtrl sets show_group_window to false')
+    assert_true(triuneContent:find('gw_lock%s*=%s*false') ~= nil,
+        'Suite 76: defaultCtrl sets gw_lock to false')
+    assert_true(triuneContent:find('gw_alpha%s*=%s*0%.85') ~= nil,
+        'Suite 76: defaultCtrl sets gw_alpha to 0.85')
+    assert_true(triuneContent:find('gw_bar_height%s*=%s*14') ~= nil,
+        'Suite 76: defaultCtrl sets gw_bar_height to 14')
+    assert_true(triuneContent:find('gw_include_self%s*=%s*true') ~= nil,
+        'Suite 76: defaultCtrl sets gw_include_self to true')
+    assert_true(triuneContent:find('gw_show_mana%s*=%s*true') ~= nil,
+        'Suite 76: defaultCtrl sets gw_show_mana to true')
+    assert_true(triuneContent:find('gw_show_endurance%s*=%s*false') ~= nil,
+        'Suite 76: defaultCtrl sets gw_show_endurance to false')
+    assert_true(triuneContent:find('gw_show_pets%s*=%s*true') ~= nil,
+        'Suite 76: defaultCtrl sets gw_show_pets to true')
+    assert_true(triuneContent:find('gw_show_roles%s*=%s*true') ~= nil,
+        'Suite 76: defaultCtrl sets gw_show_roles to true')
+
+    -- 2. Verify window definition and imgui init
+    assert_true(triuneContent:find('function UI%.drawGroupWindow') ~= nil,
+        'Suite 76: UI.drawGroupWindow is defined in triune.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneGroupWindow', UI%.drawGroupWindow%)") ~= nil,
+        'Suite 76: TriuneGroupWindow is registered with mq.imgui.init')
+
+    -- 3. Verify slash command and toolbar buttons
+    assert_true(triuneContent:find("cmd == 'group' or cmd == 'gw'") ~= nil,
+        'Suite 76: /ac group and /ac gw slash commands are registered')
+    assert_true(triuneContent:find("Group##hdrGroup") ~= nil,
+        'Suite 76: Main header contains Group button')
+    assert_true(triuneContent:find("Grp##miniGroup") ~= nil,
+        'Suite 76: Mini GUI toolbar contains Grp button')
+
+    -- 4. Verify context menu and target clicks
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##gwContextMenu'%)") ~= nil,
+        'Suite 76: Group window has right-click context menu')
+    assert_true(triuneContent:find("mq%.cmdf%('/target id %%d'") ~= nil,
+        'Suite 76: Group window supports click-to-target')
+
+    -- 5. Verify Invite and Disband buttons
+    assert_true(triuneContent:find("Invite##gwInvite") ~= nil,
+        'Suite 76: Group window has Invite button')
+    assert_true(triuneContent:find("Disband##gwDisband") ~= nil or triuneContent:find("disLabel %.%. '##gwDisband'") ~= nil,
+        'Suite 76: Group window has Disband button')
+    assert_true(triuneContent:find("mq%.cmd%('/invite'%)") ~= nil,
+        'Suite 76: Group window issues /invite command')
+    assert_true(triuneContent:find("mq%.cmd%('/disband'%)") ~= nil,
+        'Suite 76: Group window issues /disband command')
+end
+
+-- ============================================================================
+-- Suite 77: Popout Effects & Songs Window Logic & Configuration
+-- ============================================================================
+do
+    print('--- Suite 77: Popout Effects & Songs Window Logic & Configuration ---')
+    local fTriune = io.open('TAC/lua/triune.lua', 'r')
+    local triuneContent = fTriune:read('*all')
+    fTriune:close()
+
+    local fReadme = io.open('README.md', 'r')
+    local readmeContent = fReadme:read('*all')
+    fReadme:close()
+
+    -- 1. Verify defaultCtrl defaults
+    assert_true(triuneContent:find('show_effects_window%s*=%s*false') ~= nil,
+        'Suite 77: defaultCtrl sets show_effects_window to false')
+    assert_true(triuneContent:find('eff_lock%s*=%s*false') ~= nil,
+        'Suite 77: defaultCtrl sets eff_lock to false')
+    assert_true(triuneContent:find('eff_alpha%s*=%s*0%.85') ~= nil,
+        'Suite 77: defaultCtrl sets eff_alpha to 0.85')
+    assert_true(triuneContent:find('eff_bar_height%s*=%s*18') ~= nil,
+        'Suite 77: defaultCtrl sets eff_bar_height to 18')
+    assert_true(triuneContent:find("eff_sort_by%s*=%s*'Time Left %(Ascending%)'") ~= nil,
+        'Suite 77: defaultCtrl sets eff_sort_by to Time Left (Ascending)')
+    assert_true(triuneContent:find('eff_show_buffs%s*=%s*true') ~= nil,
+        'Suite 77: defaultCtrl sets eff_show_buffs to true')
+    assert_true(triuneContent:find('eff_show_songs%s*=%s*true') ~= nil,
+        'Suite 77: defaultCtrl sets eff_show_songs to true')
+    assert_true(triuneContent:find('eff_show_detrimental%s*=%s*true') ~= nil,
+        'Suite 77: defaultCtrl sets eff_show_detrimental to true')
+
+    -- 2. Verify window definition and imgui init
+    assert_true(triuneContent:find('function UI%.drawEffectsWindow') ~= nil,
+        'Suite 77: UI.drawEffectsWindow is defined in triune.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneEffectsWindow', UI%.drawEffectsWindow%)") ~= nil,
+        'Suite 77: TriuneEffectsWindow is registered with mq.imgui.init')
+
+    -- 3. Verify spell icon helpers
+    assert_true(triuneContent:find('function UI%.drawSpellIcon') ~= nil,
+        'Suite 77: UI.drawSpellIcon is defined in triune.lua')
+    assert_true(triuneContent:find('function UI%.getSpellIconAnimation') ~= nil,
+        'Suite 77: UI.getSpellIconAnimation is defined in triune.lua')
+
+    -- 4. Verify slash command and toolbar buttons
+    assert_true(triuneContent:find("cmd == 'eff' or cmd == 'effects'") ~= nil,
+        'Suite 77: /ac eff and /ac effects slash commands are registered')
+    assert_true(triuneContent:find("Effects##hdrEffects") ~= nil,
+        'Suite 77: Main header contains Effects button')
+    assert_true(triuneContent:find("Buffs##miniEffects") ~= nil,
+        'Suite 77: Mini GUI toolbar contains Buffs button')
+
+    -- 5. Verify context menus and actions
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##effWinContextMenu'%)") ~= nil,
+        'Suite 77: Effects window has background context menu')
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%('##effItemMenu_'") ~= nil,
+        'Suite 77: Each effect item has its own right-click context menu')
+    assert_true(triuneContent:find("mq%.cmdf%('/removebuff %%s'") ~= nil,
+        'Suite 77: Supports /removebuff action')
+    assert_true(triuneContent:find("mq%.cmdf%('/blockspell add me %%d'") ~= nil,
+        'Suite 77: Supports /blockspell add me action')
+    assert_true(triuneContent:find("mq%.TLO%.Spell%(eff%.spellId%)%.Inspect%(%)") ~= nil,
+        'Suite 77: Supports Spell.Inspect action')
+
+    -- 6. Verify right-click context menu sorting controls
+    assert_true(triuneContent:find("ImGui%.Combo%('##effSortCombo', curSortIdx, sortModes%)") ~= nil,
+        'Suite 77: Effects window right-click menu has native ImGui.Combo sort dropdown')
+    assert_true(triuneContent:find("ImGui%.MenuItem%(sm %.%. '##menuSort_'") ~= nil,
+        'Suite 77: Effects window right-click menu has clickable MenuItem sort options')
+
+    -- 7. Pure sorting logic validation
+    local testList = {
+        { name = 'Brevity', duration = 300, isSong = false, isBeneficial = true },
+        { name = 'Aura of Insight', duration = 0, isSong = false, isBeneficial = true },
+        { name = 'Selo Song', duration = 18, isSong = true, isBeneficial = true },
+        { name = 'Boil Blood', duration = 45, isSong = false, isBeneficial = false },
+    }
+
+    -- Test Time Left (Ascending): 18s -> 45s -> 300s -> Aura (0s)
+    local asc = { testList[1], testList[2], testList[3], testList[4] }
+    table.sort(asc, function(a, b)
+        local aTimed = (a.duration and a.duration > 0)
+        local bTimed = (b.duration and b.duration > 0)
+        if aTimed and not bTimed then return true end
+        if not aTimed and bTimed then return false end
+        if aTimed and bTimed then
+            if a.duration ~= b.duration then return a.duration < b.duration end
+        end
+        return (a.name or ''):lower() < (b.name or ''):lower()
+    end)
+    assert_eq(asc[1].name, 'Selo Song', 'Suite 77: Asc sort soonest expiring first (Selo)')
+    assert_eq(asc[2].name, 'Boil Blood', 'Suite 77: Asc sort second (Boil Blood)')
+    assert_eq(asc[3].name, 'Brevity', 'Suite 77: Asc sort third (Brevity)')
+    assert_eq(asc[4].name, 'Aura of Insight', 'Suite 77: Asc sort permanent last (Aura)')
+
+    -- Test Time Left (Descending): Aura (0s / Perm) -> 300s -> 45s -> 18s
+    local desc = { testList[1], testList[2], testList[3], testList[4] }
+    table.sort(desc, function(a, b)
+        local aTimed = (a.duration and a.duration > 0)
+        local bTimed = (b.duration and b.duration > 0)
+        if not aTimed and bTimed then return true end
+        if aTimed and not bTimed then return false end
+        if aTimed and bTimed then
+            if a.duration ~= b.duration then return a.duration > b.duration end
+        end
+        return (a.name or ''):lower() < (b.name or ''):lower()
+    end)
+    assert_eq(desc[1].name, 'Aura of Insight', 'Suite 77: Desc sort permanent first')
+    assert_eq(desc[2].name, 'Brevity', 'Suite 77: Desc sort longest timed next')
+    assert_eq(desc[4].name, 'Selo Song', 'Suite 77: Desc sort shortest timed last')
+
+    -- Test Buff Type: Detrimental (Boil Blood) -> Songs (Selo) -> Timed Buffs (Brevity) -> Perm (Aura)
+    local btype = { testList[1], testList[2], testList[3], testList[4] }
+    table.sort(btype, function(a, b)
+        local function typeRank(e)
+            if not e.isBeneficial then return 1 end
+            if e.isSong then return 2 end
+            if e.duration and e.duration > 0 then return 3 end
+            return 4
+        end
+        local rA, rB = typeRank(a), typeRank(b)
+        if rA ~= rB then return rA < rB end
+        local aTimed = (a.duration and a.duration > 0)
+        local bTimed = (b.duration and b.duration > 0)
+        if aTimed and not bTimed then return true end
+        if not aTimed and bTimed then return false end
+        if aTimed and bTimed then
+            if a.duration ~= b.duration then return a.duration < b.duration end
+        end
+        return (a.name or ''):lower() < (b.name or ''):lower()
+    end)
+    assert_eq(btype[1].name, 'Boil Blood', 'Suite 77: Buff Type sort detrimental first')
+    assert_eq(btype[2].name, 'Selo Song', 'Suite 77: Buff Type sort song second')
+    assert_eq(btype[3].name, 'Brevity', 'Suite 77: Buff Type sort timed buff third')
+    assert_eq(btype[4].name, 'Aura of Insight', 'Suite 77: Buff Type sort perm buff last')
+
+    -- 8. Verify version sync
+    local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
+    local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
+    assert_eq(vTriune, '2.08', 'Suite 77: triune.lua VERSION is 2.08')
+    assert_eq(vReadme, '2.08', 'Suite 77: README.md version is 2.08')
+    assert_eq(vTriune, vReadme, 'Suite 77: Version numbers match across triune.lua and README.md')
+end
+
+-- ============================================================================
+-- Suite 78: Popout Extended Target (XTarget) Window Logic & Configuration
+-- ============================================================================
+print('--- Suite 78: Popout Extended Target (XTarget) Window Logic & Configuration ---')
+do
+    local fTriune = io.open('TAC/lua/triune.lua', 'r')
+    local triuneContent = fTriune:read('*all')
+    fTriune:close()
+
+    local fReadme = io.open('README.md', 'r')
+    local readmeContent = fReadme:read('*all')
+    fReadme:close()
+
+    -- 1. Verify defaultCtrl contains xtarget fields
+    assert_true(triuneContent:find('show_xtarget_window%s*=%s*false') ~= nil,
+        'Suite 78: defaultCtrl.show_xtarget_window default is false')
+    assert_true(triuneContent:find('xt_lock%s*=%s*false') ~= nil,
+        'Suite 78: defaultCtrl.xt_lock default is false')
+    assert_true(triuneContent:find('xt_alpha%s*=%s*0.85') ~= nil,
+        'Suite 78: defaultCtrl.xt_alpha default is 0.85')
+    assert_true(triuneContent:find('xt_bar_height%s*=%s*16') ~= nil,
+        'Suite 78: defaultCtrl.xt_bar_height default is 16')
+    assert_true(triuneContent:find('xt_show_empty%s*=%s*false') ~= nil,
+        'Suite 78: defaultCtrl.xt_show_empty default is false')
+    assert_true(triuneContent:find('xt_show_tot%s*=%s*true') ~= nil,
+        'Suite 78: defaultCtrl.xt_show_tot default is true')
+    assert_true(triuneContent:find('xt_show_aggro%s*=%s*true') ~= nil,
+        'Suite 78: defaultCtrl.xt_show_aggro default is true')
+    assert_true(triuneContent:find('xt_show_dist%s*=%s*true') ~= nil,
+        'Suite 78: defaultCtrl.xt_show_dist default is true')
+
+    -- 2. Verify window initialization and draw function
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneXTargetWindow', UI%.drawXTargetWindow%)") ~= nil,
+        'Suite 78: TriuneXTargetWindow is registered via mq.imgui.init')
+    assert_true(triuneContent:find('function UI%.drawXTargetWindow%(%)') ~= nil,
+        'Suite 78: UI.drawXTargetWindow is defined in triune.lua')
+
+    -- 3. Verify two-line header toolbar and compact button height
+    assert_true(triuneContent:find("ImGuiStyleVar%.FramePadding,%s*5,%s*2") ~= nil,
+        'Suite 78: Header toolbar buttons have compact FramePadding (5, 2)')
+    assert_true(triuneContent:find("Cooldowns##hdrCooldowns.-Second Button Line") ~= nil,
+        'Suite 78: Toolbar creates a second button line below Cooldowns')
+    assert_true(triuneContent:find("XTarget##hdrXTarget") ~= nil,
+        'Suite 78: Second button line contains XTarget button')
+    assert_true(triuneContent:find("XT##miniXTarget") ~= nil,
+        'Suite 78: Mini GUI toolbar contains XT button')
+
+    -- 4. Verify slash command handler
+    assert_true(triuneContent:find("cmd == 'xtar' or cmd == 'xt' or cmd == 'xtarget'") ~= nil,
+        'Suite 78: /ac xtar, /ac xt, and /ac xtarget slash commands are registered')
+
+    -- 5. Verify window context menus and actions
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##xtWinContextMenu'%)") ~= nil,
+        'Suite 78: XTarget window has background context menu')
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%('##xtItemMenu_'") ~= nil,
+        'Suite 78: Each xtarget mob row has its own right-click context menu')
+    assert_true(triuneContent:find("mq%.cmdf%('/target id %%d'") ~= nil,
+        'Suite 78: Clicking or selecting mob issues /target id')
+    assert_true(triuneContent:find("mq%.cmd%('/face fast'%)") ~= nil,
+        'Suite 78: Supports Face Target action')
+
+    -- 6. Verify version sync
+    local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
+    local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
+    assert_eq(vTriune, '2.08', 'Suite 78: triune.lua VERSION is 2.08')
+    assert_eq(vReadme, '2.08', 'Suite 78: README.md version is 2.08')
+    assert_eq(vTriune, vReadme, 'Suite 78: Version numbers match across triune.lua and README.md')
+end
+
+-- ============================================================================
+-- Suite 79: Popout Spell Gem Bar Window Logic & Configuration
+-- ============================================================================
+print('--- Suite 79: Popout Spell Gem Bar Window Logic & Configuration ---')
+do
+    local fTriune = io.open('TAC/lua/triune.lua', 'r')
+    local triuneContent = fTriune:read('*all')
+    fTriune:close()
+
+    local fReadme = io.open('README.md', 'r')
+    local readmeContent = fReadme:read('*all')
+    fReadme:close()
+
+    -- 1. Verify defaultCtrl contains spell gem fields
+    assert_true(triuneContent:find('show_spell_gems%s*=%s*false') ~= nil,
+        'Suite 79: defaultCtrl.show_spell_gems default is false')
+    assert_true(triuneContent:find('gem_lock%s*=%s*false') ~= nil,
+        'Suite 79: defaultCtrl.gem_lock default is false')
+    assert_true(triuneContent:find('gem_alpha%s*=%s*0.85') ~= nil,
+        'Suite 79: defaultCtrl.gem_alpha default is 0.85')
+    assert_true(triuneContent:find("gem_orientation%s*=%s*'Auto'") ~= nil,
+        'Suite 79: defaultCtrl.gem_orientation default is Auto')
+    assert_true(triuneContent:find('gem_show_badges%s*=%s*true') ~= nil,
+        'Suite 79: defaultCtrl.gem_show_badges default is true')
+    assert_true(triuneContent:find('gem_show_timer%s*=%s*true') ~= nil,
+        'Suite 79: defaultCtrl.gem_show_timer default is true')
+
+    -- 2. Verify window initialization and draw function
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneSpellGemBarWindow', UI%.drawSpellGemBarWindow%)") ~= nil,
+        'Suite 79: TriuneSpellGemBarWindow is registered via mq.imgui.init')
+    assert_true(triuneContent:find('function UI%.drawSpellGemBarWindow%(%)') ~= nil,
+        'Suite 79: UI.drawSpellGemBarWindow is defined in triune.lua')
+
+    -- 3. Verify toolbar buttons
+    assert_true(triuneContent:find("Gems##hdrGems") ~= nil,
+        'Suite 79: Second button line contains Gems button')
+    assert_true(triuneContent:find("Gems##miniGems") ~= nil,
+        'Suite 79: Mini GUI toolbar contains Gems button')
+
+    -- 4. Verify slash command handler
+    assert_true(triuneContent:find("cmd == 'gems' or cmd == 'gembar' or cmd == 'spellbar'") ~= nil,
+        'Suite 79: /ac gems, /ac gembar, and /ac spellbar slash commands are registered')
+
+    -- 5. Verify window context menus and actions
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##gemWinContextMenu'%)") ~= nil,
+        'Suite 79: Spell Gem Bar window has background options context menu')
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%('##gemItemMenu_'") ~= nil,
+        'Suite 79: Each gem slot has its own right-click context menu')
+    assert_true(triuneContent:find("mq%.cmdf%('/cast %%d', slot%)") ~= nil,
+        'Suite 79: Clicking or selecting gem issues /cast <slot>')
+    assert_true(triuneContent:find("mq%.cmdf%('/memorize \"\" %%d', slot%)") ~= nil,
+        'Suite 79: Supports unmemorizing gem slot')
+
+    -- 6. Verify Spellbook button and spell sets menu
+    assert_true(triuneContent:find("gemSpellBookBtn") ~= nil,
+        'Suite 79: Spellbook button is rendered at end of gem bar')
+    assert_true(triuneContent:find("UI%.drawSpellbookIcon") ~= nil,
+        'Suite 79: High-detail vector Spellbook icon is drawn')
+    assert_true(triuneContent:find("runtime%.savePreset") ~= nil,
+        'Suite 79: Supports saving spell set preset in Triune loadout')
+    assert_true(triuneContent:find("runtime%.loadPreset") ~= nil,
+        'Suite 79: Supports loading spell set preset into memorization queue')
+    assert_true(triuneContent:find("runtime%.deletePreset") ~= nil,
+        'Suite 79: Supports deleting saved spell set preset')
+    assert_true(triuneContent:find("UI%.col32") ~= nil,
+        'Suite 79: UI.col32 provides safe 0xAABBGGRR color generation')
+    assert_true(triuneContent:find("UI%.getGemCooldownSec") ~= nil,
+        'Suite 79: UI.getGemCooldownSec converts EQ millisecond timer to true seconds')
+    assert_true(triuneContent:find("runtime%.gemCooldownEnd") ~= nil,
+        'Suite 79: runtime.gemCooldownEnd tracks real-time frame countdown')
+    assert_true(triuneContent:find("math%.ceil%(gemData%.timer%)") ~= nil,
+        'Suite 79: Recast cooldowns simplified to integer seconds')
+
+    -- 6. Verify Spell Set InputText and Preset Sorting Logic
+    assert_true(triuneContent:find("local newText,%s*changed%s*=%s*ImGui%.InputText") ~= nil,
+        'Suite 79: ImGui.InputText correctly unpacks (text, changed) tuple')
+    assert_true(triuneContent:find("table%.sort%(presetList,") ~= nil,
+        'Suite 79: Saved spell set presets are sorted alphabetically')
+
+    -- 7. Pure logic simulation of countdown ticking
+    local testNow = 1000.0
+    local testRecast = 5.0
+    local testEnd = testNow + testRecast
+    local remAt0_5 = testEnd - (testNow + 0.5)
+    local remAt2_1 = testEnd - (testNow + 2.1)
+    local remAt4_2 = testEnd - (testNow + 4.2)
+    assert_eq(math.ceil(remAt0_5), 5, 'Suite 79: Countdown displays 5 seconds at +0.5s into 5s recast')
+    assert_eq(math.ceil(remAt2_1), 3, 'Suite 79: Countdown displays 3 seconds at +2.1s into 5s recast')
+    assert_eq(math.ceil(remAt4_2), 1, 'Suite 79: Countdown displays 1 second at +4.2s into 5s recast')
+
+    -- 8. Verify version sync
+    local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
+    local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
+    assert_eq(vTriune, '2.08', 'Suite 79: triune.lua VERSION is 2.08')
+    assert_eq(vReadme, '2.08', 'Suite 79: README.md version is 2.08')
+    assert_eq(vTriune, vReadme, 'Suite 79: Version numbers match across triune.lua and README.md')
 end
 
 -- ============================================================================

@@ -32,7 +32,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '2.03'
+local VERSION           = '2.08'
 local open              = true
 local cfg               = mq.configDir
 
@@ -380,6 +380,45 @@ local function defaultCtrl()
         cooldown_status_filter   = 'All',
         cooldown_compact         = false,
         cooldown_show_inline_edit = false,
+        show_unit_frames         = false,
+        uf_lock                  = false,
+        uf_alpha                 = 0.85,
+        uf_bar_height            = 14,
+        uf_show_endurance        = true,
+        uf_show_xp               = true,
+        uf_hide_empty_pets       = true,
+        uf_buff_max              = 30,
+        show_group_window        = false,
+        gw_lock                  = false,
+        gw_alpha                 = 0.85,
+        gw_bar_height            = 14,
+        gw_include_self          = true,
+        gw_show_mana             = true,
+        gw_show_endurance        = false,
+        gw_show_pets             = true,
+        gw_show_roles            = true,
+        show_effects_window      = false,
+        eff_lock                 = false,
+        eff_alpha                = 0.85,
+        eff_bar_height           = 18,
+        eff_sort_by              = 'Time Left (Ascending)',
+        eff_show_buffs           = true,
+        eff_show_songs           = true,
+        eff_show_detrimental     = true,
+        show_xtarget_window      = false,
+        xt_lock                  = false,
+        xt_alpha                 = 0.85,
+        xt_bar_height            = 16,
+        xt_show_empty            = false,
+        xt_show_tot              = true,
+        xt_show_aggro            = true,
+        xt_show_dist             = true,
+        show_spell_gems          = false,
+        gem_lock                 = false,
+        gem_alpha                = 0.85,
+        gem_orientation          = 'Auto',
+        gem_show_badges          = true,
+        gem_show_timer           = true,
         burn                     = false,
         compact                  = false,
         use_waypoints            = false,
@@ -567,6 +606,8 @@ local pursuit = {
     lastStickDist = 0,
     lastBehindStickDist = 0,
     lastFrontStickDist = 0,
+    meshRecoverId = 0,
+    meshRecoverAt = 0,
     -- Detour state machine fields
     detourActive = false,
     detourX = 0,
@@ -1821,6 +1862,8 @@ local function stopMoving()
     pursuit.lastStickDist = 0
     pursuit.lastBehindStickDist = 0
     pursuit.lastFrontStickDist = 0
+    pursuit.meshRecoverId = 0
+    pursuit.meshRecoverAt = 0
     pursuit.detourActive = false
     pursuit.detourX = 0
     pursuit.detourY = 0
@@ -4274,8 +4317,11 @@ end
 
 
 function runtime.savePreset(name)
-    if not name or name == '' then return end
+    if type(name) ~= 'string' or name == '' then return end
     loadout.presets = loadout.presets or {}
+    for k, _ in pairs(loadout.presets) do
+        if type(k) ~= 'string' then loadout.presets[k] = nil end
+    end
     loadout.presets[name] = {
         name = name,
         gems = runtime.deepCopyTable(loadout.gems),
@@ -5866,7 +5912,9 @@ end
 function UI.drawHeaderBar()
     UI.updateTracker()
 
-    -- Toolbar buttons
+    -- Toolbar buttons (with compact vertical padding)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 5, 2)
+
     if ImGui.Button('Open Spellbook##hdrBook') then
         UI.toggleTool('triune_spellbook')
     end
@@ -5917,6 +5965,82 @@ function UI.drawHeaderBar()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Toggles the standalone popout Cooldown & Ability Monitor window.')
     end
+
+    -- Second Button Line: Popout HUD & Window Replacements (below Cooldowns)
+    local ufActive = ctrl.show_unit_frames
+    local ufPop = 0
+    if ufActive then
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then ufPop = ufPop + 1 end
+    end
+    if ImGui.Button('Target & Player HUD##hdrHud') then
+        ctrl.show_unit_frames = not ctrl.show_unit_frames
+        runtime.saveLoadout(true)
+    end
+    if ufPop > 0 then pcall(ImGui.PopStyleColor, ufPop) end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Toggles the popout Target & Player HUD Unit Frames window.')
+    end
+    ImGui.SameLine()
+    local gwActive = ctrl.show_group_window
+    local gwPop = 0
+    if gwActive then
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then gwPop = gwPop + 1 end
+    end
+    if ImGui.Button('Group##hdrGroup') then
+        ctrl.show_group_window = not ctrl.show_group_window
+        runtime.saveLoadout(true)
+    end
+    if gwPop > 0 then pcall(ImGui.PopStyleColor, gwPop) end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Toggles the popout Group Window.')
+    end
+    ImGui.SameLine()
+    local effActive = ctrl.show_effects_window
+    local effPop = 0
+    if effActive then
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then effPop = effPop + 1 end
+    end
+    if ImGui.Button('Effects##hdrEffects') then
+        ctrl.show_effects_window = not ctrl.show_effects_window
+        runtime.saveLoadout(true)
+    end
+    if effPop > 0 then pcall(ImGui.PopStyleColor, effPop) end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Toggles the popout Effects & Songs window.')
+    end
+    ImGui.SameLine()
+    local xtActive = ctrl.show_xtarget_window
+    local xtPop = 0
+    if xtActive then
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then xtPop = xtPop + 1 end
+    end
+    if ImGui.Button('XTarget##hdrXTarget') then
+        ctrl.show_xtarget_window = not ctrl.show_xtarget_window
+        runtime.saveLoadout(true)
+    end
+    if xtPop > 0 then pcall(ImGui.PopStyleColor, xtPop) end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Toggles the popout Extended Target (XTarget) window.')
+    end
+    ImGui.SameLine()
+    local gemActive = ctrl.show_spell_gems
+    local gemPop = 0
+    if gemActive then
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then gemPop = gemPop + 1 end
+    end
+    if ImGui.Button('Gems##hdrGems') then
+        ctrl.show_spell_gems = not ctrl.show_spell_gems
+        runtime.saveLoadout(true)
+    end
+    if gemPop > 0 then pcall(ImGui.PopStyleColor, gemPop) end
+    if ImGui.IsItemHovered() then
+        ImGui.SetTooltip('Toggles the popout Spell Gem Bar window.')
+    end
     ImGui.SameLine()
     if ImGui.Button('Inv Manager##hdrInv') then
         mq.cmd('/lua run triune_inv')
@@ -5924,6 +6048,8 @@ function UI.drawHeaderBar()
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('Launches the standalone Triune Inventory & Bank Manager.')
     end
+
+    ImGui.PopStyleVar()
 
     if not DATA_OK then
         accent(WARN,
@@ -6018,7 +6144,9 @@ function UI.drawHelpTab()
                 { cmd = '/ac memall',                         desc = 'Queue all missing or mismatched priority spells to memorization bar' },
                 { cmd = '/ac importbar / /ac import',         desc = 'Auto-populate spell lines from currently memorized spell gems' },
                 { cmd = '/ac status',                         desc = 'Print current running state and combat mode to chat' },
-                { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window HUD mode' },
+                { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window mode' },
+                { cmd = '/ac hud / /ac uf',                   desc = 'Toggle popout Target & Player HUD unit frames window' },
+                { cmd = '/ac cd / /ac cooldowns',             desc = 'Toggle popout Cooldown & Ability Monitor window' },
                 { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
                 { cmd = '/ac spellbook',                      desc = 'Toggle the standalone spellbook & auto-memorization queue window' },
                 { cmd = '/ac cursorui',                       desc = 'Toggle the standalone cursor item manager window' },
@@ -7941,6 +8069,134 @@ function UI.drawCollapsingStatusHeader(key, label, id)
     return isOpen
 end
 
+-- ============================================================================
+-- Multi-tier Target of Target (ToT) / Aggro Holder resolution helper.
+-- MacroQuest exposes multiple complementary paths depending on group leadership AA,
+-- whether the target is an NPC, PC, or Pet, and whether combat aggro is active.
+-- ============================================================================
+function UI.resolveTargetOfTarget(targetId)
+    local totId = 0
+    local totName = nil
+    local totHpPct = nil
+    local myPctAggro = 0
+    local isAggroHolder = false
+
+    if not targetId or targetId <= 0 then
+        return totName, totId, totHpPct, myPctAggro, isAggroHolder
+    end
+
+    pcall(function()
+        myPctAggro = mq.TLO.Target.PctAggro() or 0
+    end)
+
+    -- 1. Check Target.TargetOfTarget (active when Group or Raid Leadership ToT is available)
+    pcall(function()
+        local tot = mq.TLO.Target.TargetOfTarget
+        if tot and tot() and (tot.ID() or 0) > 0 then
+            totId = tot.ID() or 0
+            totName = tot.CleanName() or ''
+            totHpPct = tot.PctHPs() or 0
+        end
+    end)
+
+    -- 2. Check Target.AggroHolder (returns the mob's actual combat target without needing leadership AA)
+    if not totName or totName == '' or totId <= 0 then
+        pcall(function()
+            local ah = mq.TLO.Target.AggroHolder
+            if ah and ah() and (ah.ID() or 0) > 0 then
+                totId = ah.ID() or 0
+                totName = ah.CleanName() or ''
+                totHpPct = ah.PctHPs() or 0
+                isAggroHolder = true
+            end
+        end)
+    end
+
+    -- 3. Check Me.TargetOfTarget (Character TLO)
+    if not totName or totName == '' or totId <= 0 then
+        pcall(function()
+            local mtot = mq.TLO.Me.TargetOfTarget
+            if mtot and mtot() and (mtot.ID() or 0) > 0 then
+                totId = mtot.ID() or 0
+                totName = mtot.CleanName() or ''
+                totHpPct = mtot.PctHPs() or 0
+            end
+        end)
+    end
+
+    -- 4. Check Spawn(targetId).TargetOfTarget and Spawn(targetId).AggroHolder
+    if not totName or totName == '' or totId <= 0 then
+        pcall(function()
+            local sp = mq.TLO.Spawn(targetId)
+            if sp and sp() then
+                local stot = sp.TargetOfTarget
+                if stot and stot() and (stot.ID() or 0) > 0 then
+                    totId = stot.ID() or 0
+                    totName = stot.CleanName() or ''
+                    totHpPct = stot.PctHPs() or 0
+                else
+                    local sah = sp.AggroHolder
+                    if sah and sah() and (sah.ID() or 0) > 0 then
+                        totId = sah.ID() or 0
+                        totName = sah.CleanName() or ''
+                        totHpPct = sah.PctHPs() or 0
+                        isAggroHolder = true
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 5. If target is player's own pet, check Me.Pet.Target or Me.Pet.Following
+    if not totName or totName == '' or totId <= 0 then
+        pcall(function()
+            local myPetId = mq.TLO.Me.Pet.ID() or 0
+            if myPetId > 0 and targetId == myPetId then
+                local pt = mq.TLO.Me.Pet.Target
+                if pt and pt() and (pt.ID() or 0) > 0 then
+                    totId = pt.ID() or 0
+                    totName = pt.CleanName() or ''
+                    totHpPct = pt.PctHPs() or 0
+                else
+                    local pf = mq.TLO.Me.Pet.Following
+                    if pf and pf() and (pf.ID() or 0) > 0 and pf.Type() == 'NPC' then
+                        totId = pf.ID() or 0
+                        totName = pf.CleanName() or ''
+                        totHpPct = pf.PctHPs() or 0
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 6. Fallback: If target is an NPC in combat with player and player has 100% aggro
+    if (not totName or totName == '' or totId <= 0) and myPctAggro >= 100 then
+        pcall(function()
+            if mq.TLO.Target.Type() == 'NPC' then
+                totId = mq.TLO.Me.ID() or 0
+                totName = mq.TLO.Me.CleanName() or 'Myself'
+                totHpPct = mq.TLO.Me.PctHPs() or 100
+                isAggroHolder = true
+            end
+        end)
+    end
+
+    -- 7. If totId is valid but totHpPct is missing or nil, query spawn directly
+    if totId > 0 and (not totHpPct or totHpPct == 0) then
+        pcall(function()
+            local s = mq.TLO.Spawn(totId)
+            if s and s() then
+                totHpPct = s.PctHPs() or 0
+                if not totName or totName == '' then
+                    totName = s.CleanName() or ''
+                end
+            end
+        end)
+    end
+
+    return totName, totId, totHpPct, myPctAggro, isAggroHolder
+end
+
 -- UI: status tab
 function UI.drawStatusTab()
     if not ImGui.BeginTabItem('Status') then return end
@@ -8097,12 +8353,13 @@ function UI.drawStatusTab()
                 tDist = mq.TLO.Target.Distance() or 0
                 tLoS = mq.TLO.Target.LineOfSight() or false
                 pcall(function() tHeading = mq.TLO.Target.Heading.Degrees() or 0 end)
-                tTotName = mq.TLO.Target.TargetOfTarget.CleanName() or 'None'
-                tTotPct = mq.TLO.Target.PctAggro() or 0
                 tMyAggro = mq.TLO.Target.SecondaryPctAggro() or 0
                 tMySecAggro = mq.TLO.Me.SecondaryPctAggro() or 0
             end
         end)
+
+        local tTotName, tTotId, tTotHpPct, myPctAggro = UI.resolveTargetOfTarget(tId)
+        tTotPct = myPctAggro
 
         if tId and tId > 0 and tName then
             local conCol = UI.getConColorRgb(tCon)
@@ -8448,7 +8705,9 @@ function UI.drawStatusTab()
             local isMoving = false
             pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
 
-            if navActive then
+            if pursuit.meshRecoverId and pursuit.meshRecoverId ~= 0 then
+                accent(WARN, '• Nav Status: OFF-MESH RECOVERY (Stick→Remap)')
+            elseif navActive then
                 accent(GOOD, '• Nav Status: NAVIGATING')
             elseif isMoving then
                 accent(ARC, '• Nav Status: MOVING (Manual/Stick)')
@@ -10781,9 +11040,10 @@ function UI.drawSettingsTab()
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'If MQ2Nav reports no path to a target, /stick will still\n'
-                .. 'try to close on it in a straight line -- which walks\n'
-                .. 'straight at whatever wall is blocking the path.\n'
+                'Off-mesh holes already stick toward the target and remap\n'
+                .. 'nav once a path exists. This checkbox keeps /stick going\n'
+                .. 'even after that recovery gives up -- which walks straight\n'
+                .. 'at whatever wall is blocking the path.\n'
                 .. 'Off by default: unreachable targets are dropped instead.')
         end
 
@@ -11211,6 +11471,81 @@ function UI.drawMiniGui()
         end
         if ImGui.IsItemHovered() then
             UI.setTooltip('Toggle popout Cooldown & Ability Monitor window')
+        end
+        ImGui.SameLine()
+        local miniUfActive = ctrl.show_unit_frames
+        local miniUfPop = 0
+        if miniUfActive then
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then miniUfPop = miniUfPop + 1 end
+        end
+        if ImGui.Button('HUD##miniHud', 45, 22) then
+            ctrl.show_unit_frames = not ctrl.show_unit_frames
+            runtime.saveLoadout(true)
+        end
+        if miniUfPop > 0 then pcall(ImGui.PopStyleColor, miniUfPop) end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Toggle popout Target & Player HUD window')
+        end
+        ImGui.SameLine()
+        local miniGwActive = ctrl.show_group_window
+        local miniGwPop = 0
+        if miniGwActive then
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then miniGwPop = miniGwPop + 1 end
+        end
+        if ImGui.Button('Grp##miniGroup', 45, 22) then
+            ctrl.show_group_window = not ctrl.show_group_window
+            runtime.saveLoadout(true)
+        end
+        if miniGwPop > 0 then pcall(ImGui.PopStyleColor, miniGwPop) end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Toggle popout Group Window')
+        end
+        ImGui.SameLine()
+        local miniEffActive = ctrl.show_effects_window
+        local miniEffPop = 0
+        if miniEffActive then
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then miniEffPop = miniEffPop + 1 end
+        end
+        if ImGui.Button('Buffs##miniEffects', 45, 22) then
+            ctrl.show_effects_window = not ctrl.show_effects_window
+            runtime.saveLoadout(true)
+        end
+        if miniEffPop > 0 then pcall(ImGui.PopStyleColor, miniEffPop) end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Toggle popout Effects & Songs window')
+        end
+        ImGui.SameLine()
+        local miniXtActive = ctrl.show_xtarget_window
+        local miniXtPop = 0
+        if miniXtActive then
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then miniXtPop = miniXtPop + 1 end
+        end
+        if ImGui.Button('XT##miniXTarget', 45, 22) then
+            ctrl.show_xtarget_window = not ctrl.show_xtarget_window
+            runtime.saveLoadout(true)
+        end
+        if miniXtPop > 0 then pcall(ImGui.PopStyleColor, miniXtPop) end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Toggle popout Extended Target (XTarget) window')
+        end
+        ImGui.SameLine()
+        local miniGemActive = ctrl.show_spell_gems
+        local miniGemPop = 0
+        if miniGemActive then
+            local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+            if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then miniGemPop = miniGemPop + 1 end
+        end
+        if ImGui.Button('Gems##miniGems', 45, 22) then
+            ctrl.show_spell_gems = not ctrl.show_spell_gems
+            runtime.saveLoadout(true)
+        end
+        if miniGemPop > 0 then pcall(ImGui.PopStyleColor, miniGemPop) end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Toggle popout Spell Gem Bar window')
         end
 
         ImGui.Separator()
@@ -12491,6 +12826,2447 @@ function UI.drawCooldownWindow()
 
     if show then
         UI.renderCooldownContent('_win', true)
+    end
+
+    ImGui.End()
+    ImGui.PopStyleVar(3)
+    UI.popTheme()
+end
+
+-- ============================================================================
+-- Unit Frames HUD Window (Popout Target, Player & Pet Dashboard)
+-- ============================================================================
+-- An ultra-compact, fully responsive popout window that replaces default EQ
+-- target, player, and pet windows. Features real-time Target + ToT with aggro
+-- warnings, target buffs/debuffs with timers, player vitals (HP, Mana, End,
+-- XP, AAXP), and multi-pet HP bars for the Gestalt Trio.
+-- All widgets stretch and scale dynamically with window resizing.
+-- ============================================================================
+function UI.drawUnitFramesWindow()
+    if not ctrl.show_unit_frames then return end
+    UI.pushTheme()
+
+    if ctrl.uf_alpha then
+        ImGui.SetNextWindowBgAlpha(ctrl.uf_alpha)
+    end
+    ImGui.SetNextWindowSize(320, 360, ImGuiCond.FirstUseEver)
+
+    local winFlags = 0
+    if ctrl.uf_lock then
+        winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
+    end
+
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
+
+    local show
+    ctrl.show_unit_frames, show = ImGui.Begin('Triune Target & Player v' .. VERSION .. '###triuneUnitFrames', ctrl.show_unit_frames, winFlags)
+    if not ctrl.show_unit_frames then
+        ImGui.End()
+        ImGui.PopStyleVar(3)
+        UI.popTheme()
+        return
+    end
+
+    if show then
+        local availW = ImGui.GetContentRegionAvail()
+        local barH = ctrl.uf_bar_height or 14
+
+        -- Settings popup renderer (right-click anywhere in window)
+        local function renderUfSettingsContent()
+            accent(GOLD, 'Target & Player HUD Settings')
+            ImGui.Separator()
+            local lockVal = ImGui.Checkbox('Lock Window Position & Size##ufLock', ctrl.uf_lock or false)
+            if lockVal ~= (ctrl.uf_lock or false) then
+                ctrl.uf_lock = lockVal
+                runtime.saveLoadout(true)
+            end
+            local hidePetVal = ImGui.Checkbox('Auto-Hide Pet Section When No Pets##ufHidePet', ctrl.uf_hide_empty_pets ~= false)
+            if hidePetVal ~= (ctrl.uf_hide_empty_pets ~= false) then
+                ctrl.uf_hide_empty_pets = hidePetVal
+                runtime.saveLoadout(true)
+            end
+            local showEndVal = ImGui.Checkbox('Show Endurance Bar##ufEnd', ctrl.uf_show_endurance ~= false)
+            if showEndVal ~= (ctrl.uf_show_endurance ~= false) then
+                ctrl.uf_show_endurance = showEndVal
+                runtime.saveLoadout(true)
+            end
+            local showXpVal = ImGui.Checkbox('Show XP & AAXP Bars##ufXp', ctrl.uf_show_xp ~= false)
+            if showXpVal ~= (ctrl.uf_show_xp ~= false) then
+                ctrl.uf_show_xp = showXpVal
+                runtime.saveLoadout(true)
+            end
+            ImGui.SetNextItemWidth(120)
+            local newAlpha = ImGui.SliderFloat('Opacity##ufAlpha', ctrl.uf_alpha or 0.85, 0.20, 1.0, '%.2f')
+            if newAlpha ~= (ctrl.uf_alpha or 0.85) then
+                ctrl.uf_alpha = newAlpha
+                runtime.saveLoadout(true)
+            end
+            ImGui.SetNextItemWidth(120)
+            local newH = ImGui.SliderInt('Bar Height##ufHeight', ctrl.uf_bar_height or 14, 10, 24)
+            if newH ~= (ctrl.uf_bar_height or 14) then
+                ctrl.uf_bar_height = newH
+                runtime.saveLoadout(true)
+            end
+            ImGui.SetNextItemWidth(120)
+            local newMaxB = ImGui.SliderInt('Max Buffs##ufMaxB', ctrl.uf_buff_max or 30, 5, 50)
+            if newMaxB ~= (ctrl.uf_buff_max or 30) then
+                ctrl.uf_buff_max = newMaxB
+                runtime.saveLoadout(true)
+            end
+        end
+
+        -- Right-click anywhere in window for options
+        if ImGui.BeginPopupContextWindow('##ufContextMenu') then
+            renderUfSettingsContent()
+            ImGui.EndPopup()
+        end
+
+        local isAtk = false
+        pcall(function() isAtk = mq.TLO.Me.Combat() or false end)
+
+        -- 1. Target & Target's Target (ToT)
+        local tId, tName, tLvl, tClass, tRace, tType, tCon, tHpPct, tCurHp, tMaxHp, tDist, tLoS
+        local tTotName, tTotPct, tTotId, tTotHpPct
+        pcall(function()
+            tId = mq.TLO.Target.ID()
+            if tId and tId > 0 then
+                tName = mq.TLO.Target.CleanName() or 'Unknown'
+                tLvl = mq.TLO.Target.Level() or 0
+                tClass = mq.TLO.Target.Class.ShortName() or '?'
+                tRace = mq.TLO.Target.Race.Name() or '?'
+                tType = mq.TLO.Target.Type() or 'NPC'
+                tCon = mq.TLO.Target.ConColor() or 'White'
+                tHpPct = mq.TLO.Target.PctHPs() or 0
+                tCurHp = mq.TLO.Target.CurrentHPs() or 0
+                tMaxHp = mq.TLO.Target.MaxHPs() or 0
+                tDist = mq.TLO.Target.Distance() or 0
+                tLoS = mq.TLO.Target.LineOfSight() or false
+            end
+        end)
+
+        local tTotName, tTotId, tTotHpPct, myPctAggro, isAggroHolder = UI.resolveTargetOfTarget(tId)
+
+        if tId and tId > 0 and tName then
+            local conCol = UI.getConColorRgb(tCon)
+            accent(conCol, string.format('[Lvl %d %s] %s', tLvl or 0, tClass or '?', tName))
+            ImGui.SameLine()
+            accent(ARC, string.format('%.0fft', tDist or 0))
+            ImGui.SameLine()
+            if tLoS then
+                accent(GOOD, 'LoS')
+            else
+                accent(WARN, 'No LoS')
+            end
+
+            -- Target Health Bar
+            local tr, tg, tb = 0.25, 0.80, 0.35
+            if (tHpPct or 0) <= 20 then
+                tr, tg, tb = 0.90, 0.20, 0.20
+            elseif (tHpPct or 0) <= 50 then
+                tr, tg, tb = 0.95, 0.75, 0.20
+            end
+
+            -- Flashing combat alert when auto-attack is active
+            if isAtk then
+                local pulse = 0.5 + 0.5 * math.sin(os.clock() * 10)
+                tr = 0.95 * pulse + tr * (1.0 - pulse)
+                tg = 0.15 * pulse + tg * (1.0 - pulse)
+                tb = 0.15 * pulse + tb * (1.0 - pulse)
+            end
+
+            local hpStr = string.format('Target: %d%% (%s / %s)', tHpPct or 0,
+                (tCurHp and tCurHp > 0) and tostring(tCurHp) or '?',
+                (tMaxHp and tMaxHp > 0) and tostring(tMaxHp) or '?')
+            UI.drawStatusProgressBar((tHpPct or 0) / 100.0, -1, barH, hpStr, tr, tg, tb, 1.0)
+
+            -- Pulsing red border around target bar when auto-attack is active
+            if isAtk then
+                pcall(function()
+                    local mnX, mnY = ImGui.GetItemRectMin()
+                    local mxX, mxY = ImGui.GetItemRectMax()
+                    local dl = ImGui.GetWindowDrawList()
+                    if dl and mnX and mxX then
+                        local ImVec2Type = _G.ImVec2 or ImVec2
+                        local pulseA = 0.45 + 0.55 * math.sin(os.clock() * 10)
+                        local borderCol = ImGui.GetColorU32(1.0, 0.15, 0.15, pulseA)
+                        dl:AddRect(ImVec2Type(mnX - 1, mnY - 1), ImVec2Type(mxX + 1, mxY + 1), borderCol, 3.0, 0, 2.0)
+                    end
+                end)
+            end
+
+            -- Target's Target (ToT)
+            if tTotName and tTotName ~= 'None' and tTotName ~= '' then
+                local isMe = (myName and tTotName == myName) or (mq.TLO.Me.CleanName and tTotName == mq.TLO.Me.CleanName())
+                if isMe then
+                    accent({ 1.0, 0.30, 0.30, 1.0 }, string.format('ToT: >> YOU << (Holding Aggro: %d%%)', myPctAggro or 100))
+                else
+                    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+                    local pCols = 0
+                    if Col then
+                        if pcall(ImGui.PushStyleColor, Col.Button, 0.15, 0.25, 0.18, 0.60) then pCols = pCols + 1 end
+                        if pcall(ImGui.PushStyleColor, Col.Text, 0.35, 0.90, 0.45, 1.0) then pCols = pCols + 1 end
+                    end
+                    if ImGui.SmallButton(string.format('ToT: %s##totBtn', tTotName)) then
+                        if tTotId and tTotId > 0 then
+                            mq.cmdf('/target id %d', tTotId)
+                        elseif tTotName then
+                            mq.cmdf('/target %s', tTotName)
+                        end
+                    end
+                    if pCols > 0 then pcall(ImGui.PopStyleColor, pCols) end
+                    if ImGui.IsItemHovered() then
+                        UI.setTooltip('%s', string.format('Target of Target: %s\nID: %d\nHP: %d%%\nClick to target',
+                            tTotName, tTotId or 0, tTotHpPct or 0))
+                    end
+                    if myPctAggro and myPctAggro > 0 then
+                        ImGui.SameLine()
+                        accent(ARC, string.format('(Your Aggro: %d%%)', myPctAggro))
+                    end
+                end
+                if tTotHpPct and tTotHpPct > 0 then
+                    local totr, totg, totb = 0.25, 0.75, 0.85
+                    if tTotHpPct <= 25 then
+                        totr, totg, totb = 0.90, 0.20, 0.20
+                    elseif tTotHpPct <= 50 then
+                        totr, totg, totb = 0.95, 0.75, 0.20
+                    end
+                    local totBarStr = string.format('%s HP: %d%%', isMe and 'YOU' or tTotName, tTotHpPct)
+                    UI.drawStatusProgressBar(tTotHpPct / 100.0, -1, math.max(10, barH - 3), totBarStr, totr, totg, totb, 1.0)
+                    if ImGui.IsItemClicked() then
+                        if tTotId and tTotId > 0 then
+                            mq.cmdf('/target id %d', tTotId)
+                        elseif tTotName then
+                            mq.cmdf('/target %s', tTotName)
+                        end
+                    end
+                    if ImGui.IsItemHovered() then
+                        UI.setTooltip('%s', string.format('Click bar to target %s\nHP: %d%%', tTotName, tTotHpPct))
+                    end
+                end
+            else
+                accent(MUTED, 'ToT: None')
+            end
+
+            -- 3. Target Buffs & Debuffs
+            local targetBuffs = {}
+            local tbc = 0
+            pcall(function() tbc = mq.TLO.Target.BuffCount() or 0 end)
+            local maxB = math.min(tbc or 0, ctrl.uf_buff_max or 30)
+            for b = 1, maxB do
+                pcall(function()
+                    local tbObj = mq.TLO.Target.Buff(b)
+                    if tbObj and tbObj() then
+                        local bName = (tbObj.Name and tbObj.Name()) or tbObj()
+                        if bName and bName ~= '' and bName ~= 'NONE' then
+                            local durSec = 0
+                            local isBeneficial = false
+                            pcall(function()
+                                if tbObj.Duration and tbObj.Duration.TotalSeconds then
+                                    durSec = tbObj.Duration.TotalSeconds() or 0
+                                end
+                                if tbObj.Spell and tbObj.Spell.Beneficial then
+                                    isBeneficial = tbObj.Spell.Beneficial() or false
+                                end
+                            end)
+                            table.insert(targetBuffs, {
+                                slot = b,
+                                name = bName,
+                                duration = durSec,
+                                beneficial = isBeneficial
+                            })
+                        end
+                    end
+                end)
+            end
+
+            if #targetBuffs > 0 then
+                accent(GOLD, string.format('Target Buffs (%d):', #targetBuffs))
+                local curLineW = 0
+                for _, b in ipairs(targetBuffs) do
+                    local durStr = ''
+                    if b.duration and b.duration > 0 then
+                        if b.duration >= 3600 then
+                            durStr = string.format(' %dh', math.floor(b.duration / 3600))
+                        elseif b.duration >= 60 then
+                            durStr = string.format(' %dm', math.floor(b.duration / 60))
+                        else
+                            durStr = string.format(' %ds', math.floor(b.duration))
+                        end
+                    end
+                    local chipLabel = b.name .. durStr
+                    local itemW = ImGui.CalcTextSize(chipLabel) + 10
+                    if curLineW > 0 and (curLineW + itemW > availW) then
+                        curLineW = 0
+                    elseif curLineW > 0 then
+                        ImGui.SameLine()
+                    end
+
+                    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+                    local pushedCols = 0
+                    if Col then
+                        if b.beneficial then
+                            if pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.35, 0.22, 0.75) then pushedCols = pushedCols + 1 end
+                            if pcall(ImGui.PushStyleColor, Col.Text, 0.65, 0.95, 0.65, 1.0) then pushedCols = pushedCols + 1 end
+                        else
+                            if pcall(ImGui.PushStyleColor, Col.Button, 0.45, 0.15, 0.15, 0.75) then pushedCols = pushedCols + 1 end
+                            if pcall(ImGui.PushStyleColor, Col.Text, 1.0, 0.65, 0.65, 1.0) then pushedCols = pushedCols + 1 end
+                        end
+                    end
+                    ImGui.SmallButton(chipLabel .. '##ufTb' .. b.slot)
+                    if pushedCols > 0 then
+                        pcall(ImGui.PopStyleColor, pushedCols)
+                    end
+                    if ImGui.IsItemHovered() then
+                        UI.setTooltip('%s', string.format('%s\nSlot: %d\nType: %s%s',
+                            b.name, b.slot, b.beneficial and 'Beneficial (Buff)' or 'Detrimental (Debuff/DoT)',
+                            b.duration > 0 and string.format('\nDuration: %d seconds', math.floor(b.duration)) or ''))
+                    end
+                    curLineW = curLineW + itemW + 4
+                end
+            else
+                ImGui.TextDisabled('Target Buffs: None')
+            end
+        else
+            accent(MUTED, 'Target: No Target Selected')
+            UI.drawStatusProgressBar(0, -1, barH, 'No Target', 0.25, 0.25, 0.25, 0.5)
+        end
+
+        -- 4. Player Vitals: HP, Mana, Endurance, XP, AAXP
+        ImGui.Separator()
+        local myHpPct, myCurHp, myMaxHp, myManaPct, myCurMana, myMaxMana, myEndPct, myCurEnd, myMaxEnd
+        local myLvl, myExpPct, myAAExpPct, myBankedAA
+        pcall(function()
+            myHpPct = mq.TLO.Me.PctHPs() or 0
+            myCurHp = mq.TLO.Me.CurrentHPs() or 0
+            myMaxHp = mq.TLO.Me.MaxHPs() or 0
+            myManaPct = mq.TLO.Me.PctMana() or 0
+            myCurMana = mq.TLO.Me.CurrentMana() or 0
+            myMaxMana = mq.TLO.Me.MaxMana() or 0
+            myEndPct = mq.TLO.Me.PctEndurance() or 0
+            myCurEnd = mq.TLO.Me.CurrentEndurance() or 0
+            myMaxEnd = mq.TLO.Me.MaxEndurance() or 0
+            myLvl = mq.TLO.Me.Level() or 1
+            myExpPct = mq.TLO.Me.PctExp() or 0
+            myAAExpPct = mq.TLO.Me.PctAAExp() or 0
+            myBankedAA = mq.TLO.Me.AAPoints() or 0
+        end)
+
+        -- Player HP Bar
+        local pr, pg, pb = 0.25, 0.80, 0.35
+        if (myHpPct or 0) <= 25 then
+            pr, pg, pb = 0.90, 0.20, 0.20
+        elseif (myHpPct or 0) <= 50 then
+            pr, pg, pb = 0.95, 0.75, 0.20
+        end
+        local myHpStr = string.format('Player HP: %d%% (%d / %d)', myHpPct or 0, myCurHp or 0, myMaxHp or 0)
+        UI.drawStatusProgressBar((myHpPct or 0) / 100.0, -1, barH, myHpStr, pr, pg, pb, 1.0)
+
+        -- Player Mana Bar
+        if (myMaxMana or 0) > 0 then
+            local manaStr = string.format('Mana: %d%% (%d / %d)', myManaPct or 0, myCurMana or 0, myMaxMana or 0)
+            UI.drawStatusProgressBar((myManaPct or 0) / 100.0, -1, barH, manaStr, 0.25, 0.60, 0.95, 1.0)
+        end
+
+        -- Player Endurance Bar
+        if ctrl.uf_show_endurance ~= false and (myMaxEnd or 0) > 0 then
+            local endStr = string.format('End: %d%% (%d / %d)', myEndPct or 0, myCurEnd or 0, myMaxEnd or 0)
+            UI.drawStatusProgressBar((myEndPct or 0) / 100.0, -1, barH, endStr, 0.95, 0.60, 0.25, 1.0)
+        end
+
+        -- Player XP Bar
+        if ctrl.uf_show_xp ~= false then
+            local xpStr = string.format('XP (Lvl %d): %.2f%%', myLvl or 1, myExpPct or 0)
+            UI.drawStatusProgressBar((myExpPct or 0) / 100.0, -1, barH, xpStr, 0.85, 0.70, 0.20, 1.0)
+            if ImGui.IsItemHovered() then
+                local rawExp = 0
+                pcall(function() rawExp = mq.TLO.Me.Exp() or 0 end)
+                UI.setTooltip('%s', string.format('Level %d Experience: %.2f%%\nRaw Exp: %s', myLvl or 1, myExpPct or 0, tostring(rawExp)))
+            end
+
+            -- Player AAXP Bar
+            local aaxpStr = string.format('AAXP: %.2f%% (%d Banked)', myAAExpPct or 0, myBankedAA or 0)
+            UI.drawStatusProgressBar((myAAExpPct or 0) / 100.0, -1, barH, aaxpStr, 0.65, 0.35, 0.90, 1.0)
+            if ImGui.IsItemHovered() then
+                local aaSpent, aaTotal = 0, 0
+                pcall(function()
+                    aaSpent = mq.TLO.Me.AAPointsAssigned() or 0
+                    aaTotal = mq.TLO.Me.AAPointsTotal() or 0
+                end)
+                UI.setTooltip('%s', string.format('AA Experience: %.2f%%\nBanked Points: %d\nAssigned Points: %d\nTotal Points: %d',
+                    myAAExpPct or 0, myBankedAA or 0, aaSpent, aaTotal))
+            end
+        end
+
+        -- 5. Multi-Pet Vitals
+        local petSlots, extraPets = getMultiPetList()
+        local activePets = {}
+        local seenPetIds = {}
+        for _, slot in ipairs(petSlots) do
+            if slot.petId and slot.petId > 0 and not seenPetIds[slot.petId] and isSpawnAlive(slot.petId) then
+                seenPetIds[slot.petId] = true
+                local info = getPetSpawnInfo(slot.petId)
+                table.insert(activePets, { id = slot.petId, cls = slot.cls, slotNum = slot.slotNum, info = info })
+            end
+        end
+        for _, extraPid in ipairs(extraPets or {}) do
+            if extraPid and extraPid > 0 and not seenPetIds[extraPid] and isSpawnAlive(extraPid) then
+                seenPetIds[extraPid] = true
+                local info = getPetSpawnInfo(extraPid)
+                table.insert(activePets, { id = extraPid, cls = 'Pet', slotNum = nil, info = info })
+            end
+        end
+        local myPetId = 0
+        pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+        if myPetId > 0 and not seenPetIds[myPetId] and isSpawnAlive(myPetId) then
+            seenPetIds[myPetId] = true
+            local info = getPetSpawnInfo(myPetId)
+            table.insert(activePets, { id = myPetId, cls = 'Pet', slotNum = nil, info = info })
+        end
+
+        if #activePets > 0 then
+            ImGui.Separator()
+            for _, pData in ipairs(activePets) do
+                local pInfo = pData.info
+                local pHp = pInfo.hpPct or 0
+                local petR, petG, petB = 0.25, 0.80, 0.35
+                if pHp <= 25 then
+                    petR, petG, petB = 0.90, 0.20, 0.20
+                elseif pHp <= 50 then
+                    petR, petG, petB = 0.95, 0.75, 0.20
+                end
+                local pClsTag = (pData.cls and pData.cls ~= '' and pData.cls ~= 'Pet') and string.format('[%s] ', pData.cls) or ''
+                local pTargetStr = (pInfo.targetName and pInfo.targetName ~= '' and pInfo.targetName ~= 'None') and (' -> ' .. pInfo.targetName) or ''
+                local pBarStr = string.format('Pet %s%s: %d%%%s', pClsTag, pInfo.cleanName or 'Pet', pHp, pTargetStr)
+                UI.drawStatusProgressBar(pHp / 100.0, -1, barH, pBarStr, petR, petG, petB, 1.0)
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('%s', string.format('Pet: %s\nClass: %s\nLevel: %d\nHP: %d%%\nTarget: %s\nBuff Count: %d',
+                        pInfo.cleanName or 'Pet', pData.cls or 'Pet', pInfo.level or 0, pHp, pInfo.targetName or 'None', #pInfo.buffs))
+                end
+            end
+        elseif ctrl.uf_hide_empty_pets == false then
+            ImGui.Separator()
+            accent(MUTED, 'No active pets')
+        end
+    end
+
+    ImGui.End()
+    ImGui.PopStyleVar(3)
+    UI.popTheme()
+end
+
+-- ============================================================================
+-- Popout Group Window: modern, compact party vitals with auto-scaling bars,
+-- role/leader badges, member pet tracking, and right-click context menu options.
+-- ============================================================================
+function UI.drawGroupWindow()
+    if not ctrl.show_group_window then return end
+    UI.pushTheme()
+
+    if ctrl.gw_alpha then
+        ImGui.SetNextWindowBgAlpha(ctrl.gw_alpha)
+    end
+    ImGui.SetNextWindowSize(280, 320, ImGuiCond.FirstUseEver)
+
+    local winFlags = 0
+    if ctrl.gw_lock then
+        winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
+    end
+
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
+
+    local show
+    ctrl.show_group_window, show = ImGui.Begin('Triune Group v' .. VERSION .. '###triuneGroupWindow', ctrl.show_group_window, winFlags)
+    if not ctrl.show_group_window then
+        ImGui.End()
+        ImGui.PopStyleVar(3)
+        UI.popTheme()
+        return
+    end
+
+    if show then
+        local barH = ctrl.gw_bar_height or 14
+
+        -- Settings popup renderer (right-click anywhere in window)
+        local function renderGwSettingsContent()
+            accent(GOLD, 'Group Window Settings')
+            ImGui.Separator()
+            local lockVal = ImGui.Checkbox('Lock Window Position & Size##gwLock', ctrl.gw_lock or false)
+            if lockVal ~= (ctrl.gw_lock or false) then
+                ctrl.gw_lock = lockVal
+                runtime.saveLoadout(true)
+            end
+            local selfVal = ImGui.Checkbox('Include Self in Group##gwSelf', ctrl.gw_include_self ~= false)
+            if selfVal ~= (ctrl.gw_include_self ~= false) then
+                ctrl.gw_include_self = selfVal
+                runtime.saveLoadout(true)
+            end
+            local manaVal = ImGui.Checkbox('Show Mana Bars##gwMana', ctrl.gw_show_mana ~= false)
+            if manaVal ~= (ctrl.gw_show_mana ~= false) then
+                ctrl.gw_show_mana = manaVal
+                runtime.saveLoadout(true)
+            end
+            local endVal = ImGui.Checkbox('Show Endurance Bars##gwEnd', ctrl.gw_show_endurance or false)
+            if endVal ~= (ctrl.gw_show_endurance or false) then
+                ctrl.gw_show_endurance = endVal
+                runtime.saveLoadout(true)
+            end
+            local petVal = ImGui.Checkbox('Show Pet Bars##gwPets', ctrl.gw_show_pets ~= false)
+            if petVal ~= (ctrl.gw_show_pets ~= false) then
+                ctrl.gw_show_pets = petVal
+                runtime.saveLoadout(true)
+            end
+            local roleVal = ImGui.Checkbox('Show Role Badges##gwRoles', ctrl.gw_show_roles ~= false)
+            if roleVal ~= (ctrl.gw_show_roles ~= false) then
+                ctrl.gw_show_roles = roleVal
+                runtime.saveLoadout(true)
+            end
+            ImGui.SetNextItemWidth(120)
+            local newAlpha = ImGui.SliderFloat('Opacity##gwAlpha', ctrl.gw_alpha or 0.85, 0.20, 1.0, '%.2f')
+            if newAlpha ~= (ctrl.gw_alpha or 0.85) then
+                ctrl.gw_alpha = newAlpha
+                runtime.saveLoadout(true)
+            end
+            ImGui.SetNextItemWidth(120)
+            local newH = ImGui.SliderInt('Bar Height##gwHeight', ctrl.gw_bar_height or 14, 10, 24)
+            if newH ~= (ctrl.gw_bar_height or 14) then
+                ctrl.gw_bar_height = newH
+                runtime.saveLoadout(true)
+            end
+        end
+
+        -- Right-click anywhere in window for options
+        if ImGui.BeginPopupContextWindow('##gwContextMenu') then
+            renderGwSettingsContent()
+            ImGui.EndPopup()
+        end
+
+        -- Retrieve Group Roles and Leadership
+        local grpSize = 0
+        local leaderName, mtName, maName, pullerName = '', '', '', ''
+        pcall(function()
+            grpSize = mq.TLO.Group.GroupSize() or 0
+            if mq.TLO.Group.Leader and mq.TLO.Group.Leader() then
+                leaderName = mq.TLO.Group.Leader.CleanName() or ''
+            end
+            if mq.TLO.Group.MainTank and mq.TLO.Group.MainTank() then
+                mtName = mq.TLO.Group.MainTank.CleanName() or ''
+            end
+            if mq.TLO.Group.MainAssist and mq.TLO.Group.MainAssist() then
+                maName = mq.TLO.Group.MainAssist.CleanName() or ''
+            end
+            if mq.TLO.Group.Puller and mq.TLO.Group.Puller() then
+                pullerName = mq.TLO.Group.Puller.CleanName() or ''
+            end
+        end)
+
+        local isGrouped = (grpSize and grpSize > 0)
+        local members = {}
+
+        -- Include Self (Member 0)
+        if ctrl.gw_include_self ~= false then
+            local myName, myId, myLvl, myCls = 'Myself', 0, 1, '?'
+            local myHpPct, myCurHp, myMaxHp = 100, 0, 0
+            local myManaPct, myCurMana, myMaxMana = 0, 0, 0
+            local myEndPct, myCurEnd, myMaxEnd = 0, 0, 0
+            local myPetId, myPetName, myPetHpPct = 0, 'Pet', 0
+            pcall(function()
+                myName = mq.TLO.Me.CleanName() or 'Myself'
+                myId = mq.TLO.Me.ID() or 0
+                myLvl = mq.TLO.Me.Level() or 1
+                myCls = mq.TLO.Me.Class.ShortName() or '?'
+                myHpPct = mq.TLO.Me.PctHPs() or 0
+                myCurHp = mq.TLO.Me.CurrentHPs() or 0
+                myMaxHp = mq.TLO.Me.MaxHPs() or 0
+                myManaPct = mq.TLO.Me.PctMana() or 0
+                myCurMana = mq.TLO.Me.CurrentMana() or 0
+                myMaxMana = mq.TLO.Me.MaxMana() or 0
+                myEndPct = mq.TLO.Me.PctEndurance() or 0
+                myCurEnd = mq.TLO.Me.CurrentEndurance() or 0
+                myMaxEnd = mq.TLO.Me.MaxEndurance() or 0
+                if mq.TLO.Me.Pet and mq.TLO.Me.Pet() and (mq.TLO.Me.Pet.ID() or 0) > 0 then
+                    myPetId = mq.TLO.Me.Pet.ID()
+                    myPetName = mq.TLO.Me.Pet.CleanName() or 'Pet'
+                    myPetHpPct = mq.TLO.Me.Pet.PctHPs() or 0
+                end
+            end)
+
+            table.insert(members, {
+                isSelf = true,
+                index = 0,
+                id = myId,
+                name = myName,
+                level = myLvl,
+                cls = myCls,
+                hpPct = myHpPct,
+                curHp = myCurHp,
+                maxHp = myMaxHp,
+                manaPct = myManaPct,
+                curMana = myCurMana,
+                maxMana = myMaxMana,
+                endPct = myEndPct,
+                curEnd = myCurEnd,
+                maxEnd = myMaxEnd,
+                distance = 0,
+                los = true,
+                isLeader = (leaderName ~= '' and leaderName == myName),
+                isMT = (mtName ~= '' and mtName == myName),
+                isMA = (maName ~= '' and maName == myName),
+                isPuller = (pullerName ~= '' and pullerName == myName),
+                isMerc = false,
+                offline = false,
+                otherZone = false,
+                petId = myPetId,
+                petName = myPetName,
+                petHpPct = myPetHpPct,
+            })
+        end
+
+        -- Query Other Group Members (1 .. Members)
+        local otherCount = 0
+        pcall(function() otherCount = mq.TLO.Group.Members() or 0 end)
+        for i = 1, otherCount do
+            pcall(function()
+                local m = mq.TLO.Group.Member(i)
+                if m and m() then
+                    local mName = m.CleanName() or ('Member ' .. i)
+                    local mId = m.ID() or 0
+                    local mLvl = m.Level() or 0
+                    local mCls = (m.Class and m.Class.ShortName and m.Class.ShortName()) or '?'
+                    local mHpPct = m.PctHPs() or 0
+                    local mCurHp = m.CurrentHPs() or 0
+                    local mMaxHp = m.MaxHPs() or 0
+                    local mManaPct = m.PctMana() or 0
+                    local mCurMana = m.CurrentMana() or 0
+                    local mMaxMana = m.MaxMana() or 0
+                    local mEndPct = m.PctEndurance() or 0
+                    local mCurEnd = m.CurrentEndurance() or 0
+                    local mMaxEnd = m.MaxEndurance() or 0
+                    local mDist = m.Distance() or 0
+                    local mLoS = m.LineOfSight() or false
+                    local mOtherZone = m.OtherZone() or false
+                    local mOffline = m.Offline() or false
+                    local mMerc = m.Mercenary() or false
+                    local mLeader = (leaderName ~= '' and leaderName == mName) or (m.Leader and m.Leader()) or false
+                    local mMT = (mtName ~= '' and mtName == mName)
+                    local mMA = (maName ~= '' and maName == mName)
+                    local mPuller = (pullerName ~= '' and pullerName == mName)
+
+                    local mPetId, mPetName, mPetHpPct = 0, 'Pet', 0
+                    if m.Pet and m.Pet() and (m.Pet.ID() or 0) > 0 then
+                        mPetId = m.Pet.ID()
+                        mPetName = m.Pet.CleanName() or 'Pet'
+                        mPetHpPct = m.Pet.PctHPs() or 0
+                    end
+
+                    table.insert(members, {
+                        isSelf = false,
+                        index = i,
+                        id = mId,
+                        name = mName,
+                        level = mLvl,
+                        cls = mCls,
+                        hpPct = mHpPct,
+                        curHp = mCurHp,
+                        maxHp = mMaxHp,
+                        manaPct = mManaPct,
+                        curMana = mCurMana,
+                        maxMana = mMaxMana,
+                        endPct = mEndPct,
+                        curEnd = mCurEnd,
+                        maxEnd = mMaxEnd,
+                        distance = mDist,
+                        los = mLoS,
+                        isLeader = mLeader,
+                        isMT = mMT,
+                        isMA = mMA,
+                        isPuller = mPuller,
+                        isMerc = mMerc,
+                        offline = mOffline,
+                        otherZone = mOtherZone,
+                        petId = mPetId,
+                        petName = mPetName,
+                        petHpPct = mPetHpPct,
+                    })
+                end
+            end)
+        end
+
+        -- Query current target in EverQuest
+        local curTargId = 0
+        local curTargName = ''
+        local curTargType = ''
+        pcall(function()
+            curTargId = mq.TLO.Target.ID() or 0
+            curTargName = mq.TLO.Target.CleanName() or ''
+            curTargType = mq.TLO.Target.Type() or ''
+        end)
+
+        -- Determine currently selected group member
+        local selectedMember = nil
+        for _, m in ipairs(members) do
+            if curTargId > 0 and m.id == curTargId then
+                selectedMember = m
+                break
+            elseif curTargName ~= '' and m.name == curTargName then
+                selectedMember = m
+                break
+            end
+        end
+        if not selectedMember and ctrl.gw_selected_member_id then
+            for _, m in ipairs(members) do
+                if (m.id and m.id == ctrl.gw_selected_member_id) or (m.name and m.name == ctrl.gw_selected_member_name) then
+                    selectedMember = m
+                    break
+                end
+            end
+        end
+
+        -- Invite & Disband Toolbar
+        local availW = ImGui.GetContentRegionAvail()
+        local halfW = math.max(60, math.floor((availW - 4) / 2))
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+
+        -- 1. Invite Button: invites current target to the group
+        local invPushed = 0
+        if Col then
+            if pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.38, 0.22, 0.85) then invPushed = invPushed + 1 end
+            if pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.18, 0.52, 0.30, 0.95) then invPushed = invPushed + 1 end
+            if pcall(ImGui.PushStyleColor, Col.Text, 0.75, 0.98, 0.75, 1.0) then invPushed = invPushed + 1 end
+        end
+        if ImGui.Button('Invite##gwInvite', halfW, 20) then
+            if curTargId > 0 then
+                mq.cmdf('/target id %d', curTargId)
+            end
+            if curTargName ~= '' and (curTargType == 'PC' or curTargType == 'Mercenary') then
+                mq.cmdf('/invite %s', curTargName)
+            else
+                mq.cmd('/invite')
+            end
+        end
+        if invPushed > 0 then pcall(ImGui.PopStyleColor, invPushed) end
+        if ImGui.IsItemHovered() then
+            if curTargName ~= '' then
+                UI.setTooltip('%s', string.format('Invite current target %s (ID %d) to group (/invite)', curTargName, curTargId))
+            else
+                UI.setTooltip('Invite currently targeted player to group (/invite)')
+            end
+        end
+
+        ImGui.SameLine()
+
+        -- 2. Disband Button: removes selected/targeted group member, or self
+        local disPushed = 0
+        if Col then
+            if pcall(ImGui.PushStyleColor, Col.Button, 0.42, 0.16, 0.16, 0.85) then disPushed = disPushed + 1 end
+            if pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.58, 0.22, 0.22, 0.95) then disPushed = disPushed + 1 end
+            if pcall(ImGui.PushStyleColor, Col.Text, 1.0, 0.75, 0.75, 1.0) then disPushed = disPushed + 1 end
+        end
+        local disLabel = selectedMember and (selectedMember.isSelf and 'Disband (Self)' or string.format('Disband: %s', selectedMember.name)) or 'Disband'
+        if ImGui.Button(disLabel .. '##gwDisband', halfW, 20) then
+            if selectedMember then
+                if selectedMember.isSelf then
+                    mq.cmd('/disband')
+                else
+                    if selectedMember.id and selectedMember.id > 0 then
+                        mq.cmdf('/target id %d', selectedMember.id)
+                    elseif selectedMember.name then
+                        mq.cmdf('/target %s', selectedMember.name)
+                    end
+                    mq.cmd('/disband')
+                    if selectedMember.name and selectedMember.name ~= '' then
+                        mq.cmdf('/kickgroup %s', selectedMember.name)
+                    end
+                end
+            else
+                mq.cmd('/disband')
+            end
+        end
+        if disPushed > 0 then pcall(ImGui.PopStyleColor, disPushed) end
+        if ImGui.IsItemHovered() then
+            if selectedMember then
+                if selectedMember.isSelf then
+                    UI.setTooltip('Leave group (/disband)')
+                else
+                    UI.setTooltip('%s', string.format('Disband / remove %s from group (/disband, /kickgroup)', selectedMember.name))
+                end
+            else
+                UI.setTooltip('Disband selected / targeted group member (/disband)')
+            end
+        end
+
+        ImGui.Separator()
+
+        if #members == 0 then
+            accent(MUTED, 'Not currently in a group.')
+        else
+            for idx, mem in ipairs(members) do
+                if idx > 1 then
+                    ImGui.Separator()
+                end
+
+                -- Con Color calculation
+                local conR, conG, conB = 1.0, 1.0, 1.0
+                if mem.offline then
+                    conR, conG, conB = 0.5, 0.5, 0.5
+                elseif mem.otherZone then
+                    conR, conG, conB = 0.85, 0.65, 0.25
+                else
+                    local myLevel = 1
+                    pcall(function() myLevel = mq.TLO.Me.Level() or 1 end)
+                    local delta = (mem.level or 1) - myLevel
+                    if delta >= 3 then
+                        conR, conG, conB = 1.0, 0.25, 0.25
+                    elseif delta >= 1 then
+                        conR, conG, conB = 1.0, 0.85, 0.25
+                    elseif delta >= -3 then
+                        conR, conG, conB = 1.0, 1.0, 1.0
+                    elseif delta >= -8 then
+                        conR, conG, conB = 0.25, 0.60, 1.0
+                    else
+                        conR, conG, conB = 0.35, 0.85, 0.35
+                    end
+                end
+
+                -- Member header button: click targets and selects member
+                local isSelected = (selectedMember and selectedMember.name == mem.name)
+                local tag = string.format('[Lvl %d %s] %s', mem.level or 0, mem.cls or '?', mem.name)
+                local pushedCols = 0
+                if Col then
+                    if isSelected then
+                        if pcall(ImGui.PushStyleColor, Col.Button, 0.18, 0.35, 0.52, 0.90) then pushedCols = pushedCols + 1 end
+                    else
+                        if pcall(ImGui.PushStyleColor, Col.Button, 0.15, 0.15, 0.18, 0.50) then pushedCols = pushedCols + 1 end
+                    end
+                    if pcall(ImGui.PushStyleColor, Col.Text, conR, conG, conB, 1.0) then pushedCols = pushedCols + 1 end
+                end
+                if ImGui.SmallButton(tag .. '##gwTgt' .. idx) then
+                    ctrl.gw_selected_member_id = mem.id
+                    ctrl.gw_selected_member_name = mem.name
+                    if mem.id and mem.id > 0 then
+                        mq.cmdf('/target id %d', mem.id)
+                    elseif mem.name then
+                        mq.cmdf('/target %s', mem.name)
+                    end
+                end
+                if pushedCols > 0 then pcall(ImGui.PopStyleColor, pushedCols) end
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('%s', string.format('Click to target %s\nLevel: %d\nClass: %s\nID: %d%s%s',
+                        mem.name, mem.level or 0, mem.cls or '?', mem.id or 0,
+                        mem.offline and '\nStatus: OFFLINE' or '',
+                        mem.otherZone and '\nStatus: OTHER ZONE' or ''))
+                end
+
+                if isSelected then
+                    ImGui.SameLine()
+                    accent(ARC, '[SEL]')
+                    if ImGui.IsItemHovered() then UI.setTooltip('Selected member') end
+                end
+
+                -- Badges (Leader, Roles, Merc)
+                if ctrl.gw_show_roles ~= false then
+                    if mem.isLeader then
+                        ImGui.SameLine()
+                        accent(GOLD, '[L]')
+                        if ImGui.IsItemHovered() then UI.setTooltip('Group Leader') end
+                    end
+                    if mem.isMT then
+                        ImGui.SameLine()
+                        accent(ARC, '[MT]')
+                        if ImGui.IsItemHovered() then UI.setTooltip('Main Tank') end
+                    end
+                    if mem.isMA then
+                        ImGui.SameLine()
+                        accent(ARC, '[MA]')
+                        if ImGui.IsItemHovered() then UI.setTooltip('Main Assist') end
+                    end
+                    if mem.isPuller then
+                        ImGui.SameLine()
+                        accent(ARC, '[Puller]')
+                        if ImGui.IsItemHovered() then UI.setTooltip('Group Puller') end
+                    end
+                    if mem.isMerc then
+                        ImGui.SameLine()
+                        accent(MUTED, '[Merc]')
+                        if ImGui.IsItemHovered() then UI.setTooltip('Mercenary') end
+                    end
+                end
+
+                -- Distance & LoS (if not self and in zone)
+                if not mem.isSelf and not mem.offline and not mem.otherZone then
+                    ImGui.SameLine()
+                    accent(ARC, string.format('%.0fft', mem.distance or 0))
+                    ImGui.SameLine()
+                    if mem.los then
+                        accent(GOOD, 'LoS')
+                    else
+                        accent(WARN, 'No LoS')
+                    end
+                elseif mem.offline then
+                    ImGui.SameLine()
+                    accent(ERR, '[OFFLINE]')
+                elseif mem.otherZone then
+                    ImGui.SameLine()
+                    accent(WARN, '[ZONE]')
+                end
+
+                -- Member Health Bar
+                local hr, hg, hb = 0.25, 0.80, 0.35
+                if mem.offline then
+                    hr, hg, hb = 0.40, 0.40, 0.40
+                elseif mem.otherZone then
+                    hr, hg, hb = 0.70, 0.55, 0.25
+                elseif (mem.hpPct or 0) <= 25 then
+                    hr, hg, hb = 0.90, 0.20, 0.20
+                elseif (mem.hpPct or 0) <= 50 then
+                    hr, hg, hb = 0.95, 0.75, 0.20
+                end
+
+                local hpText
+                if mem.offline then
+                    hpText = string.format('%s: OFFLINE', mem.name)
+                elseif mem.otherZone then
+                    hpText = string.format('%s: OTHER ZONE', mem.name)
+                else
+                    hpText = string.format('HP: %d%% (%s / %s)', mem.hpPct or 0,
+                        (mem.curHp and mem.curHp > 0) and tostring(mem.curHp) or '?',
+                        (mem.maxHp and mem.maxHp > 0) and tostring(mem.maxHp) or '?')
+                end
+                local hpFrac = (mem.offline or mem.otherZone) and 0.0 or ((mem.hpPct or 0) / 100.0)
+                UI.drawStatusProgressBar(hpFrac, -1, barH, hpText, hr, hg, hb, 1.0)
+                if ImGui.IsItemClicked() then
+                    ctrl.gw_selected_member_id = mem.id
+                    ctrl.gw_selected_member_name = mem.name
+                    if mem.id and mem.id > 0 then
+                        mq.cmdf('/target id %d', mem.id)
+                    elseif mem.name then
+                        mq.cmdf('/target %s', mem.name)
+                    end
+                end
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip('%s', string.format('%s\nHealth: %d%%\nCurrent: %s / Max: %s\nClick bar to target',
+                        mem.name, mem.hpPct or 0,
+                        (mem.curHp and mem.curHp > 0) and tostring(mem.curHp) or '?',
+                        (mem.maxHp and mem.maxHp > 0) and tostring(mem.maxHp) or '?'))
+                end
+
+                -- Mana Bar (if enabled & caster/hybrid)
+                local isCaster = (mem.maxMana and mem.maxMana > 0) or (mem.manaPct and mem.manaPct > 0)
+                if ctrl.gw_show_mana ~= false and isCaster and not mem.offline and not mem.otherZone then
+                    local manaText = string.format('Mana: %d%% (%s / %s)', mem.manaPct or 0,
+                        (mem.curMana and mem.curMana > 0) and tostring(mem.curMana) or '?',
+                        (mem.maxMana and mem.maxMana > 0) and tostring(mem.maxMana) or '?')
+                    UI.drawStatusProgressBar((mem.manaPct or 0) / 100.0, -1, math.max(8, barH - 3), manaText, 0.25, 0.60, 0.95, 1.0)
+                    if ImGui.IsItemClicked() then
+                        if mem.id and mem.id > 0 then mq.cmdf('/target id %d', mem.id) end
+                    end
+                end
+
+                -- Endurance Bar (if enabled)
+                if ctrl.gw_show_endurance == true and (mem.maxEnd or 0) > 0 and not mem.offline and not mem.otherZone then
+                    local endText = string.format('End: %d%% (%s / %s)', mem.endPct or 0,
+                        (mem.curEnd and mem.curEnd > 0) and tostring(mem.curEnd) or '?',
+                        (mem.maxEnd and mem.maxEnd > 0) and tostring(mem.maxEnd) or '?')
+                    UI.drawStatusProgressBar((mem.endPct or 0) / 100.0, -1, math.max(8, barH - 3), endText, 0.95, 0.60, 0.25, 1.0)
+                    if ImGui.IsItemClicked() then
+                        if mem.id and mem.id > 0 then mq.cmdf('/target id %d', mem.id) end
+                    end
+                end
+
+                -- Pet Bar (if enabled & has pet)
+                if ctrl.gw_show_pets ~= false and mem.petId and mem.petId > 0 and not mem.offline and not mem.otherZone then
+                    local petR, petG, petB = 0.25, 0.80, 0.35
+                    local pHp = mem.petHpPct or 0
+                    if pHp <= 25 then
+                        petR, petG, petB = 0.90, 0.20, 0.20
+                    elseif pHp <= 50 then
+                        petR, petG, petB = 0.95, 0.75, 0.20
+                    end
+                    local petText = string.format('Pet (%s): %d%%', mem.petName or 'Pet', pHp)
+                    UI.drawStatusProgressBar(pHp / 100.0, -1, math.max(8, barH - 3), petText, petR, petG, petB, 1.0)
+                    if ImGui.IsItemClicked() then
+                        mq.cmdf('/target id %d', mem.petId)
+                    end
+                    if ImGui.IsItemHovered() then
+                        UI.setTooltip('%s', string.format('Pet: %s\nOwner: %s\nHP: %d%%\nClick to target pet',
+                            mem.petName or 'Pet', mem.name, pHp))
+                    end
+                end
+            end
+        end
+    end
+
+    ImGui.End()
+    ImGui.PopStyleVar(3)
+    UI.popTheme()
+end
+
+-- ============================================================================
+-- Spell Icon Texture Animation & Caching Helpers
+-- ============================================================================
+UI.spellIconCache = UI.spellIconCache or {}
+UI.spellIconMode = UI.spellIconMode or 'probe'
+UI.spellSharedTex = UI.spellSharedTex or nil
+UI.spellLastCell = UI.spellLastCell or nil
+
+function UI.probeSpellIconMode()
+    if UI.spellIconMode ~= 'probe' then return end
+    if mq.TextureAnimation then
+        local ok, res = pcall(mq.TextureAnimation, 'triunebuff_probe')
+        if ok and res then
+            UI.spellIconMode = 'dedicated'
+            return
+        end
+    end
+    local ok1, res1 = pcall(mq.FindTextureAnimation, 'A_SpellIcons')
+    if ok1 and res1 then
+        UI.spellIconMode = 'shared'
+        UI.spellSharedTex = res1
+        return
+    end
+    local ok2, res2 = pcall(mq.FindTextureAnimation, 'eq')
+    if ok2 and res2 then
+        UI.spellIconMode = 'shared'
+        UI.spellSharedTex = res2
+        return
+    end
+    UI.spellIconMode = 'none'
+end
+
+function UI.getSpellIconAnimation(iconId)
+    local id = tonumber(iconId)
+    if not id or id <= 0 then return nil end
+    UI.probeSpellIconMode()
+
+    if UI.spellIconMode == 'dedicated' then
+        local key = tostring(id)
+        local ta = UI.spellIconCache[key]
+        if not ta then
+            local ok, res = pcall(mq.TextureAnimation, 'triunebuff_' .. key)
+            if ok and res then
+                pcall(function() res:SetTextureCell(id) end)
+                UI.spellIconCache[key] = res
+                ta = res
+            end
+        end
+        return ta
+    elseif UI.spellIconMode == 'shared' and UI.spellSharedTex then
+        if UI.spellLastCell ~= id then
+            if not pcall(function() UI.spellSharedTex:SetTextureCell(id) end) then
+                return nil
+            end
+            UI.spellLastCell = id
+        end
+        return UI.spellSharedTex
+    end
+    return nil
+end
+
+function UI.drawSpellIcon(iconId, size)
+    local anim = UI.getSpellIconAnimation(iconId)
+    if not anim then return false end
+    size = size or 18
+
+    if ImGui.DrawTextureAnimation then
+        local ok = pcall(function() ImGui.DrawTextureAnimation(anim, size, size) end)
+        if ok then return true end
+    end
+
+    local dl = ImGui.GetWindowDrawList()
+    if dl and dl.AddTextureAnimation then
+        local pX, pY = ImGui.GetCursorScreenPos()
+        local ok = pcall(function()
+            local ImVec2Type = _G.ImVec2 or ImVec2
+            dl:AddTextureAnimation(anim, ImVec2Type(pX, pY), ImVec2Type(size, size))
+        end)
+        if ok then
+            ImGui.Dummy(size + 2, size)
+            return true
+        end
+    end
+    return false
+end
+
+-- ============================================================================
+-- Popout Effects & Songs Window: unified active buffs, songs & disciplines
+-- with full spell names, remaining-time progress bars, native spell icons,
+-- multi-criteria sorting (Name, Time Left, Buff Type), and right-click menus.
+-- ============================================================================
+function UI.drawEffectsWindow()
+    if not ctrl.show_effects_window then return end
+    UI.pushTheme()
+
+    if ctrl.eff_alpha then
+        ImGui.SetNextWindowBgAlpha(ctrl.eff_alpha)
+    end
+    ImGui.SetNextWindowSize(280, 420, ImGuiCond.FirstUseEver)
+
+    local winFlags = 0
+    if ctrl.eff_lock then
+        winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
+    end
+
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
+
+    local show
+    ctrl.show_effects_window, show = ImGui.Begin('Triune Effects & Songs v' .. VERSION .. '###triuneEffectsWindow', ctrl.show_effects_window, winFlags)
+    if not ctrl.show_effects_window then
+        ImGui.End()
+        ImGui.PopStyleVar(3)
+        UI.popTheme()
+        return
+    end
+
+    if show then
+        local barH = ctrl.eff_bar_height or 18
+
+        local sortModes = {
+            'Time Left (Ascending)',
+            'Time Left (Descending)',
+            'Name (A-Z)',
+            'Buff Type',
+            'Slot Order',
+        }
+
+        -- Right-click context popup on window background for general options
+        local function renderEffSettingsContent()
+            accent(GOLD, 'Effects & Songs Options')
+            ImGui.Separator()
+
+            local curSort = ctrl.eff_sort_by or 'Time Left (Ascending)'
+            local curSortIdx = idxOf(sortModes, curSort)
+            if curSortIdx < 1 then curSortIdx = 1 end
+
+            ImGui.Text('Sort Order:')
+            ImGui.SetNextItemWidth(180)
+            local newSortIdx = ImGui.Combo('##effSortCombo', curSortIdx, sortModes)
+            if newSortIdx ~= curSortIdx and sortModes[newSortIdx] then
+                ctrl.eff_sort_by = sortModes[newSortIdx]
+                runtime.saveLoadout(true)
+            end
+
+            for idx, sm in ipairs(sortModes) do
+                local isSel = (curSort == sm)
+                if ImGui.MenuItem(sm .. '##menuSort_' .. idx, nil, isSel) then
+                    ctrl.eff_sort_by = sm
+                    runtime.saveLoadout(true)
+                end
+            end
+
+            ImGui.Separator()
+            local lockVal = ImGui.Checkbox('Lock Window Position & Size##effLock', ctrl.eff_lock or false)
+            if lockVal ~= (ctrl.eff_lock or false) then
+                ctrl.eff_lock = lockVal
+                runtime.saveLoadout(true)
+            end
+
+            local bVal = ImGui.Checkbox('Show Long Buffs##effBuffs', ctrl.eff_show_buffs ~= false)
+            if bVal ~= (ctrl.eff_show_buffs ~= false) then
+                ctrl.eff_show_buffs = bVal
+                runtime.saveLoadout(true)
+            end
+
+            local sVal = ImGui.Checkbox('Show Songs & Disciplines##effSongs', ctrl.eff_show_songs ~= false)
+            if sVal ~= (ctrl.eff_show_songs ~= false) then
+                ctrl.eff_show_songs = sVal
+                runtime.saveLoadout(true)
+            end
+
+            local dVal = ImGui.Checkbox('Show Detrimental (Debuffs)##effDet', ctrl.eff_show_detrimental ~= false)
+            if dVal ~= (ctrl.eff_show_detrimental ~= false) then
+                ctrl.eff_show_detrimental = dVal
+                runtime.saveLoadout(true)
+            end
+
+            ImGui.SetNextItemWidth(120)
+            local newAlpha = ImGui.SliderFloat('Opacity##effAlpha', ctrl.eff_alpha or 0.85, 0.20, 1.0, '%.2f')
+            if newAlpha ~= (ctrl.eff_alpha or 0.85) then
+                ctrl.eff_alpha = newAlpha
+                runtime.saveLoadout(true)
+            end
+
+            ImGui.SetNextItemWidth(120)
+            local newH = ImGui.SliderInt('Bar Height##effHeight', ctrl.eff_bar_height or 18, 12, 28)
+            if newH ~= (ctrl.eff_bar_height or 18) then
+                ctrl.eff_bar_height = newH
+                runtime.saveLoadout(true)
+            end
+        end
+
+        if ImGui.BeginPopupContextWindow('##effWinContextMenu') then
+            renderEffSettingsContent()
+            ImGui.EndPopup()
+        end
+
+        -- Collect Active Buffs and Songs
+        local effectsList = {}
+        local maxBuffs = 42
+        pcall(function() maxBuffs = mq.TLO.Me.MaxBuffSlots() or 42 end)
+
+        -- 1. Long Buffs
+        if ctrl.eff_show_buffs ~= false then
+            for i = 1, maxBuffs do
+                pcall(function()
+                    local b = mq.TLO.Me.Buff(i)
+                    if b and b() then
+                        local bName = b.Name() or b()
+                        if bName and bName ~= '' then
+                            local bId = 0
+                            local iconId = 0
+                            local dur = 0
+                            local maxDur = 0
+                            local isBen = true
+                            local caster = 'Unknown'
+                            local lvl = 0
+                            local desc = ''
+                            local counters = 0
+
+                            pcall(function() bId = b.Spell.ID() or b.ID() or 0 end)
+                            pcall(function() iconId = b.Spell.SpellIcon() or b.SpellIcon() or 0 end)
+                            pcall(function() dur = parseDurationSec(b.Duration) end)
+                            if dur <= 0 then
+                                pcall(function()
+                                    if b.DurationTicks then dur = (tonumber(b.DurationTicks()) or 0) * 6 end
+                                end)
+                            end
+                            pcall(function()
+                                if b.Spell and b.Spell.Duration then
+                                    maxDur = parseDurationSec(b.Spell.Duration)
+                                end
+                                if maxDur <= 0 and b.Spell and b.Spell.MyDuration then
+                                    maxDur = parseDurationSec(b.Spell.MyDuration)
+                                end
+                            end)
+                            pcall(function() isBen = b.Beneficial() ~= false end)
+                            pcall(function() caster = b.Caster() or 'Unknown' end)
+                            pcall(function() lvl = (b.Spell and b.Spell.Level and b.Spell.Level()) or 0 end)
+                            pcall(function() desc = (b.Spell and b.Spell.Description and b.Spell.Description()) or '' end)
+                            pcall(function() counters = b.TotalCounters() or 0 end)
+
+                            if (bId == 0 or iconId == 0 or maxDur == 0) and bName ~= '' then
+                                pcall(function()
+                                    local sp = mq.TLO.Spell(bName)
+                                    if sp and sp() then
+                                        if bId == 0 then bId = sp.ID() or 0 end
+                                        if iconId == 0 then iconId = sp.SpellIcon() or 0 end
+                                        if maxDur == 0 then maxDur = parseDurationSec(sp.Duration) end
+                                        if maxDur == 0 then maxDur = parseDurationSec(sp.MyDuration) end
+                                        if lvl == 0 then lvl = sp.Level() or 0 end
+                                        if desc == '' and sp.Description then desc = sp.Description() or '' end
+                                        if isBen then isBen = sp.Beneficial() ~= false end
+                                    end
+                                end)
+                            end
+                            if maxDur < dur then maxDur = dur end
+
+                            if ctrl.eff_show_detrimental ~= false or isBen then
+                                table.insert(effectsList, {
+                                    slot = i,
+                                    name = bName,
+                                    spellId = bId,
+                                    iconId = iconId,
+                                    duration = dur,
+                                    maxDuration = maxDur,
+                                    isSong = false,
+                                    isBeneficial = isBen,
+                                    caster = caster,
+                                    level = lvl,
+                                    description = desc,
+                                    counters = counters,
+                                })
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+
+        -- 2. Short Buffs / Songs & Disciplines
+        if ctrl.eff_show_songs ~= false then
+            local maxSongs = 30
+            pcall(function() maxSongs = mq.TLO.Me.CountSongs() or 30 end)
+            for i = 1, maxSongs do
+                pcall(function()
+                    local s = mq.TLO.Me.Song(i)
+                    if s and s() then
+                        local sName = s.Name() or s()
+                        if sName and sName ~= '' then
+                            local sId = 0
+                            local iconId = 0
+                            local dur = 0
+                            local maxDur = 0
+                            local isBen = true
+                            local caster = 'Unknown'
+                            local lvl = 0
+                            local desc = ''
+                            local counters = 0
+
+                            pcall(function() sId = s.Spell.ID() or s.ID() or 0 end)
+                            pcall(function() iconId = s.Spell.SpellIcon() or s.SpellIcon() or 0 end)
+                            pcall(function() dur = parseDurationSec(s.Duration) end)
+                            if dur <= 0 then
+                                pcall(function()
+                                    if s.DurationTicks then dur = (tonumber(s.DurationTicks()) or 0) * 6 end
+                                end)
+                            end
+                            pcall(function()
+                                if s.Spell and s.Spell.Duration then
+                                    maxDur = parseDurationSec(s.Spell.Duration)
+                                end
+                                if maxDur <= 0 and s.Spell and s.Spell.MyDuration then
+                                    maxDur = parseDurationSec(s.Spell.MyDuration)
+                                end
+                            end)
+                            pcall(function() isBen = s.Beneficial() ~= false end)
+                            pcall(function() caster = s.Caster() or 'Unknown' end)
+                            pcall(function() lvl = (s.Spell and s.Spell.Level and s.Spell.Level()) or 0 end)
+                            pcall(function() desc = (s.Spell and s.Spell.Description and s.Spell.Description()) or '' end)
+                            pcall(function() counters = s.TotalCounters() or 0 end)
+
+                            if (sId == 0 or iconId == 0 or maxDur == 0) and sName ~= '' then
+                                pcall(function()
+                                    local sp = mq.TLO.Spell(sName)
+                                    if sp and sp() then
+                                        if sId == 0 then sId = sp.ID() or 0 end
+                                        if iconId == 0 then iconId = sp.SpellIcon() or 0 end
+                                        if maxDur == 0 then maxDur = parseDurationSec(sp.Duration) end
+                                        if maxDur == 0 then maxDur = parseDurationSec(sp.MyDuration) end
+                                        if lvl == 0 then lvl = sp.Level() or 0 end
+                                        if desc == '' and sp.Description then desc = sp.Description() or '' end
+                                        if isBen then isBen = sp.Beneficial() ~= false end
+                                    end
+                                end)
+                            end
+                            if maxDur < dur then maxDur = dur end
+
+                            if ctrl.eff_show_detrimental ~= false or isBen then
+                                table.insert(effectsList, {
+                                    slot = i,
+                                    name = sName,
+                                    spellId = sId,
+                                    iconId = iconId,
+                                    duration = dur,
+                                    maxDuration = maxDur,
+                                    isSong = true,
+                                    isBeneficial = isBen,
+                                    caster = caster,
+                                    level = lvl,
+                                    description = desc,
+                                    counters = counters,
+                                })
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+
+        -- Sort Effects List
+        local sortMode = ctrl.eff_sort_by or 'Time Left (Ascending)'
+        if sortMode == 'Name (A-Z)' then
+            table.sort(effectsList, function(a, b)
+                return (a.name or ''):lower() < (b.name or ''):lower()
+            end)
+        elseif sortMode == 'Time Left (Ascending)' then
+            table.sort(effectsList, function(a, b)
+                local aTimed = (a.duration and a.duration > 0)
+                local bTimed = (b.duration and b.duration > 0)
+                -- Timed buffs come first (expiring soonest first), permanent buffs at bottom
+                if aTimed and not bTimed then return true end
+                if not aTimed and bTimed then return false end
+                if aTimed and bTimed then
+                    if a.duration ~= b.duration then return a.duration < b.duration end
+                end
+                return (a.name or ''):lower() < (b.name or ''):lower()
+            end)
+        elseif sortMode == 'Time Left (Descending)' then
+            table.sort(effectsList, function(a, b)
+                local aTimed = (a.duration and a.duration > 0)
+                local bTimed = (b.duration and b.duration > 0)
+                -- Permanent buffs have most time (at top), then longest duration
+                if not aTimed and bTimed then return true end
+                if aTimed and not bTimed then return false end
+                if aTimed and bTimed then
+                    if a.duration ~= b.duration then return a.duration > b.duration end
+                end
+                return (a.name or ''):lower() < (b.name or ''):lower()
+            end)
+        elseif sortMode == 'Buff Type' then
+            table.sort(effectsList, function(a, b)
+                -- 1 = Detrimental, 2 = Songs/Discs, 3 = Timed Buffs, 4 = Permanent Buffs
+                local function typeRank(e)
+                    if not e.isBeneficial then return 1 end
+                    if e.isSong then return 2 end
+                    if e.duration and e.duration > 0 then return 3 end
+                    return 4
+                end
+                local rA, rB = typeRank(a), typeRank(b)
+                if rA ~= rB then return rA < rB end
+                local aTimed = (a.duration and a.duration > 0)
+                local bTimed = (b.duration and b.duration > 0)
+                if aTimed and not bTimed then return true end
+                if not aTimed and bTimed then return false end
+                if aTimed and bTimed then
+                    if a.duration ~= b.duration then return a.duration < b.duration end
+                end
+                return (a.name or ''):lower() < (b.name or ''):lower()
+            end)
+        elseif sortMode == 'Slot Order' then
+            table.sort(effectsList, function(a, b)
+                if a.isSong ~= b.isSong then
+                    return not a.isSong
+                end
+                return (a.slot or 0) < (b.slot or 0)
+            end)
+        end
+
+        -- Render Effects List
+        if #effectsList == 0 then
+            accent(MUTED, 'No active spells or effects.')
+        else
+            for idx, eff in ipairs(effectsList) do
+                local rowKey = (eff.isSong and 's_' or 'b_') .. tostring(eff.slot) .. '_' .. tostring(eff.spellId)
+                local barFrac = 1.0
+                if eff.maxDuration > 0 and eff.duration > 0 then
+                    barFrac = math.min(1.0, math.max(0.0, eff.duration / eff.maxDuration))
+                end
+
+                -- Dynamic Color Palette
+                local br, bg, bb = 0.22, 0.55, 0.85
+                if not eff.isBeneficial then
+                    br, bg, bb = 0.88, 0.20, 0.20
+                elseif eff.isSong then
+                    br, bg, bb = 0.85, 0.60, 0.20
+                end
+
+                -- Time Left Text
+                local timeStr = 'Perm'
+                if eff.duration > 0 then
+                    timeStr = fmtSec(eff.duration)
+                end
+
+                -- Draw Spell Icon if available
+                local iconDrawn = false
+                if eff.iconId and eff.iconId > 0 then
+                    iconDrawn = UI.drawSpellIcon(eff.iconId, barH)
+                    if iconDrawn then
+                        ImGui.SameLine()
+                    end
+                end
+
+                -- Progress bar with full spell name and remaining time
+                local fullLabel = string.format('%s  [%s]', eff.name, timeStr)
+                UI.drawStatusProgressBar(barFrac, -1, barH, fullLabel, br, bg, bb, 0.85)
+
+                -- Right-click context menu on the buff row (Remove, Block, Spell Info)
+                if ImGui.BeginPopupContextItem('##effItemMenu_' .. rowKey) then
+                    accent(GOLD, eff.name)
+                    if eff.caster and eff.caster ~= '' and eff.caster ~= 'Unknown' then
+                        ImGui.TextDisabled('Caster: ' .. eff.caster)
+                    end
+                    ImGui.Separator()
+                    if ImGui.MenuItem('Remove Buff##rm_' .. rowKey) then
+                        mq.cmdf('/removebuff %s', eff.name)
+                    end
+                    if eff.spellId and eff.spellId > 0 then
+                        if ImGui.MenuItem('Add to Block Buff List##blk_' .. rowKey) then
+                            mq.cmdf('/blockspell add me %d', eff.spellId)
+                            print(string.format('\ag[Triune]\ax Added %s (ID %d) to blocked buffs.', eff.name, eff.spellId))
+                        end
+                        if ImGui.MenuItem('Display Spell Info##insp_' .. rowKey) then
+                            pcall(function() mq.TLO.Spell(eff.spellId).Inspect() end)
+                        end
+                    end
+                    ImGui.EndPopup()
+                end
+
+                -- Hover Tooltip
+                if ImGui.IsItemHovered() then
+                    local lines = {
+                        string.format('%s (%s)', eff.name, eff.isSong and 'Song / Disc' or 'Buff'),
+                        string.format('Slot: %d  |  ID: %d', eff.slot, eff.spellId),
+                        eff.duration > 0 and string.format('Time Left: %s (Total: %s)', fmtSec(eff.duration), fmtSec(eff.maxDuration)) or 'Duration: Permanent / Aura',
+                    }
+                    if eff.caster and eff.caster ~= '' and eff.caster ~= 'Unknown' then
+                        table.insert(lines, 'Caster: ' .. eff.caster)
+                    end
+                    if eff.level and eff.level > 0 then
+                        table.insert(lines, string.format('Spell Level: %d', eff.level))
+                    end
+                    if eff.counters and eff.counters > 0 then
+                        table.insert(lines, string.format('Counters: %d', eff.counters))
+                    end
+                    if eff.description and eff.description ~= '' then
+                        table.insert(lines, '---')
+                        table.insert(lines, eff.description)
+                    end
+                    table.insert(lines, 'Right-click for options (Remove, Block, Info)')
+                    UI.setTooltip('%s', table.concat(lines, '\n'))
+                end
+            end
+        end
+    end
+
+    ImGui.End()
+    ImGui.PopStyleVar(3)
+    UI.popTheme()
+end
+
+-- ============================================================================
+-- Popout Extended Target (XTarget) Window: modern, compact, auto-scaling replacement
+-- for EverQuest's default Extended Target window.
+-- ============================================================================
+function UI.drawXTargetWindow()
+    if not ctrl.show_xtarget_window then return end
+    UI.pushTheme()
+
+    if ctrl.xt_alpha then
+        ImGui.SetNextWindowBgAlpha(ctrl.xt_alpha)
+    end
+    ImGui.SetNextWindowSize(260, 320, ImGuiCond.FirstUseEver)
+
+    local winFlags = 0
+    if ctrl.xt_lock then
+        winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
+    end
+
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
+
+    local show
+    ctrl.show_xtarget_window, show = ImGui.Begin('Triune Extended Target v' .. VERSION .. '###triuneXTargetWindow', ctrl.show_xtarget_window, winFlags)
+    if not ctrl.show_xtarget_window then
+        ImGui.End()
+        ImGui.PopStyleVar(3)
+        UI.popTheme()
+        return
+    end
+
+    if show then
+        local barH = ctrl.xt_bar_height or 16
+
+        -- Right-click on window background for general options
+        local function renderXtSettingsContent()
+            accent(GOLD, 'Extended Target Options')
+            ImGui.Separator()
+
+            local lockVal = ImGui.Checkbox('Lock Window Position & Size##xtLock', ctrl.xt_lock or false)
+            if lockVal ~= (ctrl.xt_lock or false) then
+                ctrl.xt_lock = lockVal
+                runtime.saveLoadout(true)
+            end
+
+            local empVal = ImGui.Checkbox('Show Empty Slots##xtEmpty', ctrl.xt_show_empty or false)
+            if empVal ~= (ctrl.xt_show_empty or false) then
+                ctrl.xt_show_empty = empVal
+                runtime.saveLoadout(true)
+            end
+
+            local totVal = ImGui.Checkbox('Show Target of Target##xtTot', ctrl.xt_show_tot ~= false)
+            if totVal ~= (ctrl.xt_show_tot ~= false) then
+                ctrl.xt_show_tot = totVal
+                runtime.saveLoadout(true)
+            end
+
+            local aggVal = ImGui.Checkbox('Show Aggro %##xtAggro', ctrl.xt_show_aggro ~= false)
+            if aggVal ~= (ctrl.xt_show_aggro ~= false) then
+                ctrl.xt_show_aggro = aggVal
+                runtime.saveLoadout(true)
+            end
+
+            local dstVal = ImGui.Checkbox('Show Distance & LoS##xtDist', ctrl.xt_show_dist ~= false)
+            if dstVal ~= (ctrl.xt_show_dist ~= false) then
+                ctrl.xt_show_dist = dstVal
+                runtime.saveLoadout(true)
+            end
+
+            ImGui.SetNextItemWidth(120)
+            local newAlpha = ImGui.SliderFloat('Opacity##xtAlpha', ctrl.xt_alpha or 0.85, 0.20, 1.0, '%.2f')
+            if newAlpha ~= (ctrl.xt_alpha or 0.85) then
+                ctrl.xt_alpha = newAlpha
+                runtime.saveLoadout(true)
+            end
+
+            ImGui.SetNextItemWidth(120)
+            local newH = ImGui.SliderInt('Bar Height##xtHeight', ctrl.xt_bar_height or 16, 10, 24)
+            if newH ~= (ctrl.xt_bar_height or 16) then
+                ctrl.xt_bar_height = newH
+                runtime.saveLoadout(true)
+            end
+        end
+
+        if ImGui.BeginPopupContextWindow('##xtWinContextMenu') then
+            renderXtSettingsContent()
+            ImGui.EndPopup()
+        end
+
+        -- Query XTarget Slots
+        local xtarSlots = 13
+        pcall(function() xtarSlots = mq.TLO.Me.XTargetSlots() or 13 end)
+
+        local currentTargetId = 0
+        pcall(function() currentTargetId = mq.TLO.Target.ID() or 0 end)
+
+        local activeCount = 0
+
+        for slot = 1, xtarSlots do
+            local xtData = nil
+            pcall(function()
+                local xt = mq.TLO.Me.XTarget(slot)
+                if xt and xt() and (xt.ID() or 0) > 0 then
+                    local xtId = xt.ID()
+                    local xtName = xt.CleanName() or 'Unknown'
+                    local xtLvl = xt.Level() or 0
+                    local xtCls = (xt.Class and xt.Class.ShortName and xt.Class.ShortName()) or '?'
+                    local xtDist = math.floor(xt.Distance() or 0)
+                    local xtHp = xt.PctHPs() or 0
+                    local xtCon = xt.ConColor() or 'White'
+                    local xtAggro = 0
+                    pcall(function() xtAggro = xt.PctAggro() or 0 end)
+                    local xtLoS = true
+                    pcall(function() xtLoS = xt.LineOfSight() ~= false end)
+                    local xtTotName = nil
+                    pcall(function()
+                        local tot = xt.TargetOfTarget
+                        if tot and tot() and (tot.ID() or 0) > 0 then
+                            xtTotName = tot.CleanName() or ''
+                        end
+                    end)
+                    local ttype = ''
+                    pcall(function() ttype = xt.TargetType() or '' end)
+
+                    xtData = {
+                        slot = slot,
+                        id = xtId,
+                        name = xtName,
+                        level = xtLvl,
+                        class = xtCls,
+                        dist = xtDist,
+                        hpPct = xtHp,
+                        con = xtCon,
+                        aggroPct = xtAggro,
+                        los = xtLoS,
+                        tot = xtTotName,
+                        targetType = ttype,
+                    }
+                end
+            end)
+
+            if xtData then
+                activeCount = activeCount + 1
+                local rowKey = 'xt_' .. tostring(slot) .. '_' .. tostring(xtData.id)
+                local isCurrentTarget = (currentTargetId > 0 and currentTargetId == xtData.id)
+
+                -- Visual highlight if current target
+                local stylePushed = 0
+                if isCurrentTarget then
+                    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+                    if Col and Col.Border then
+                        ImGui.PushStyleColor(Col.Border, 0.20, 0.85, 1.0, 1.0)
+                        stylePushed = stylePushed + 1
+                    end
+                end
+
+                -- Badges row
+                local slotCol = isCurrentTarget and GOLD or MUTED
+                accent(slotCol, string.format('#%d', slot))
+                if ImGui.IsItemClicked() then
+                    mq.cmdf('/target id %d', xtData.id)
+                end
+
+                ImGui.SameLine()
+                local conRgb = UI.getConColorRgb(xtData.con)
+                accent(conRgb, xtData.name)
+                if ImGui.IsItemClicked() then
+                    mq.cmdf('/target id %d', xtData.id)
+                end
+
+                ImGui.SameLine()
+                ImGui.TextDisabled(string.format('%d %s', xtData.level, xtData.class))
+
+                if isCurrentTarget then
+                    ImGui.SameLine()
+                    accent(GOOD, '[TARGET]')
+                end
+
+                if ctrl.xt_show_dist ~= false then
+                    ImGui.SameLine()
+                    ImGui.TextDisabled(string.format("%d'", xtData.dist))
+                    ImGui.SameLine()
+                    if xtData.los then
+                        accent(GOOD, 'LoS')
+                    else
+                        accent(WARN, 'No LoS')
+                    end
+                end
+
+                if ctrl.xt_show_aggro ~= false and xtData.aggroPct > 0 then
+                    ImGui.SameLine()
+                    local aggCol = xtData.aggroPct >= 100 and ERR or WARN
+                    accent(aggCol, string.format('%d%% Aggro', xtData.aggroPct))
+                end
+
+                if ctrl.xt_show_tot ~= false and xtData.tot and xtData.tot ~= '' then
+                    ImGui.SameLine()
+                    ImGui.TextDisabled('->')
+                    ImGui.SameLine()
+                    accent(GOLD, xtData.tot)
+                    if ImGui.IsItemClicked() then
+                        mq.cmdf('/target %s', xtData.tot)
+                    end
+                end
+
+                -- Health progress bar
+                local hp = xtData.hpPct or 0
+                local hr, hg, hb = 0.25, 0.75, 0.35
+                if hp <= 25 then
+                    hr, hg, hb = 0.90, 0.20, 0.20
+                elseif hp <= 50 then
+                    hr, hg, hb = 0.95, 0.75, 0.20
+                end
+                local hpLabel = string.format('%d%%', hp)
+                UI.drawStatusProgressBar(hp / 100.0, -1, barH, hpLabel, hr, hg, hb, 1.0)
+                if ImGui.IsItemClicked() then
+                    mq.cmdf('/target id %d', xtData.id)
+                end
+
+                -- Right-click menu on target item
+                if ImGui.BeginPopupContextItem('##xtItemMenu_' .. rowKey) then
+                    accent(conRgb, xtData.name)
+                    ImGui.TextDisabled(string.format('Level %d %s | Slot #%d', xtData.level, xtData.class, slot))
+                    ImGui.Separator()
+                    if ImGui.MenuItem('Target##tgt_' .. rowKey) then
+                        mq.cmdf('/target id %d', xtData.id)
+                    end
+                    if ImGui.MenuItem('Face Target##face_' .. rowKey) then
+                        mq.cmdf('/target id %d', xtData.id)
+                        mq.cmd('/face fast')
+                    end
+                    if ImGui.MenuItem('Add to Ignore List##ign_' .. rowKey) then
+                        if runtime.addIgnore then
+                            runtime.addIgnore(xtData.name)
+                        end
+                        print(string.format('\ag[Triune]\ax Added %s to ignore list.', xtData.name))
+                    end
+                    ImGui.EndPopup()
+                end
+
+                -- Hover tooltip
+                if ImGui.IsItemHovered() then
+                    local lines = {
+                        string.format('Slot #%d: %s', slot, xtData.name),
+                        string.format('Level: %d  |  Class: %s  |  Con: %s', xtData.level, xtData.class, xtData.con),
+                        string.format("HP: %d%%  |  Distance: %d'  |  LoS: %s", hp, xtData.dist, xtData.los and 'Yes' or 'No'),
+                    }
+                    if xtData.aggroPct > 0 then
+                        table.insert(lines, string.format('Aggro Threat: %d%%', xtData.aggroPct))
+                    end
+                    if xtData.tot and xtData.tot ~= '' then
+                        table.insert(lines, string.format('Targeting: %s', xtData.tot))
+                    end
+                    if xtData.targetType and xtData.targetType ~= '' then
+                        table.insert(lines, string.format('Slot Role: %s', xtData.targetType))
+                    end
+                    table.insert(lines, 'Click to target | Right-click for options')
+                    UI.setTooltip('%s', table.concat(lines, '\n'))
+                end
+
+                if stylePushed > 0 then
+                    ImGui.PopStyleColor(stylePushed)
+                end
+            elseif ctrl.xt_show_empty then
+                accent(MUTED, string.format('#%d [Empty Slot]', slot))
+            end
+        end
+
+        if activeCount == 0 and not ctrl.xt_show_empty then
+            accent(MUTED, 'No active extended targets in combat.')
+        end
+    end
+
+    ImGui.End()
+    ImGui.PopStyleVar(3)
+    UI.popTheme()
+end
+
+function UI.col32(r, g, b, a)
+    local R = math.min(255, math.max(0, math.floor((r or 0) * 255 + 0.5)))
+    local G = math.min(255, math.max(0, math.floor((g or 0) * 255 + 0.5)))
+    local B = math.min(255, math.max(0, math.floor((b or 0) * 255 + 0.5)))
+    local A = math.min(255, math.max(0, math.floor((a or 1) * 255 + 0.5)))
+    return (A * 16777216) + (B * 65536) + (G * 256) + R
+end
+
+function UI.toVec(x, y)
+    local fn = _G.ImVec2 or (ImGui and ImGui.ImVec2) or ImVec2
+    if fn then
+        local ok, v = pcall(fn, tonumber(x) or 0, tonumber(y) or 0)
+        if ok and v then return v end
+    end
+    return nil
+end
+
+-- ============================================================================
+-- Vector Spellbook Icon Renderer
+-- ============================================================================
+function UI.drawSpellbookIcon(dl, mnX, mnY, btnW, btnH)
+    if not dl then return end
+
+    local mX = mnX
+    local mY = mnY
+    if type(mX) == 'userdata' or (type(mX) == 'table' and mX.x) then
+        mY = mX.y
+        mX = mX.x
+    end
+    mX = tonumber(mX) or 0
+    mY = tonumber(mY) or 0
+    btnW = tonumber(btnW) or 24
+    btnH = tonumber(btnH) or 24
+
+    local toV = UI.toVec
+
+    local ok = pcall(function()
+        local bH = math.max(12, math.floor(btnH * 0.72))
+        local bW = math.max(10, math.floor(btnW * 0.70))
+        local bX = mX + math.floor((btnW - bW) / 2)
+        local bY = mY + math.floor((btnH - bH) / 2)
+
+        local spineW = math.max(3, math.floor(bW * 0.25))
+        local coverX = bX + spineW
+        local coverW = bW - spineW
+
+        local p1, p2
+
+        -- 1. Dark leather spine with rounded edge
+        p1, p2 = toV(bX, bY), toV(bX + spineW, bY + bH)
+        if p1 and p2 and dl.AddRectFilled then
+            dl:AddRectFilled(p1, p2, UI.col32(0.12, 0.08, 0.22, 1.0), 2)
+        end
+
+        -- 2. Spine gold ribs
+        local colRib = UI.col32(0.95, 0.82, 0.25, 0.95)
+        if dl.AddLine then
+            p1, p2 = toV(bX + 1, bY + math.floor(bH * 0.25)), toV(bX + spineW - 1, bY + math.floor(bH * 0.25))
+            if p1 and p2 then dl:AddLine(p1, p2, colRib, 1.2) end
+            p1, p2 = toV(bX + 1, bY + math.floor(bH * 0.50)), toV(bX + spineW - 1, bY + math.floor(bH * 0.50))
+            if p1 and p2 then dl:AddLine(p1, p2, colRib, 1.2) end
+            p1, p2 = toV(bX + 1, bY + math.floor(bH * 0.75)), toV(bX + spineW - 1, bY + math.floor(bH * 0.75))
+            if p1 and p2 then dl:AddLine(p1, p2, colRib, 1.2) end
+        end
+
+        -- 3. Parchment page edges (right & bottom)
+        local colPages = UI.col32(0.96, 0.94, 0.82, 1.0)
+        if dl.AddRectFilled then
+            p1, p2 = toV(bX + bW - 3, bY + 2), toV(bX + bW, bY + bH - 1)
+            if p1 and p2 then dl:AddRectFilled(p1, p2, colPages) end
+            p1, p2 = toV(coverX + 1, bY + bH - 3), toV(bX + bW, bY + bH)
+            if p1 and p2 then dl:AddRectFilled(p1, p2, colPages) end
+        end
+
+        -- 4. Deep royal purple arcane leather front cover
+        local colCover = UI.col32(0.20, 0.12, 0.36, 1.0)
+        p1, p2 = toV(coverX, bY), toV(bX + bW - 2, bY + bH - 2)
+        if p1 and p2 and dl.AddRectFilled then
+            dl:AddRectFilled(p1, p2, colCover, 1)
+        end
+
+        -- 5. Gold embossed border on front cover
+        if coverW >= 6 and bH >= 8 then
+            local colGold = UI.col32(0.95, 0.82, 0.25, 0.90)
+            p1, p2 = toV(coverX + 2, bY + 2), toV(bX + bW - 4, bY + bH - 4)
+            if p1 and p2 and dl.AddRect then
+                dl:AddRect(p1, p2, colGold, 1)
+            end
+
+            -- 6. Arcane star / diamond rune in center of cover
+            local cX = coverX + math.floor((coverW - 2) / 2)
+            local cY = bY + math.floor(bH / 2)
+            local r = math.max(2, math.floor(bH * 0.18))
+            if dl.AddQuadFilled then
+                local q1, q2, q3, q4 = toV(cX, cY - r), toV(cX + r, cY), toV(cX, cY + r), toV(cX - r, cY)
+                if q1 and q2 and q3 and q4 then
+                    dl:AddQuadFilled(q1, q2, q3, q4, colGold)
+                end
+            elseif dl.AddRectFilled then
+                p1, p2 = toV(cX - r, cY - r), toV(cX + r, cY + r)
+                if p1 and p2 then dl:AddRectFilled(p1, p2, colGold) end
+            end
+            local centerP = toV(cX, cY)
+            if centerP and dl.AddCircleFilled then
+                dl:AddCircleFilled(centerP, math.max(1.0, r * 0.45), UI.col32(0.25, 0.95, 1.0, 1.0))
+            end
+
+            -- 7. Crimson bookmark ribbon hanging out bottom
+            local colRibbon = UI.col32(0.90, 0.20, 0.20, 1.0)
+            p1, p2 = toV(cX, bY + bH - 3), toV(cX - 1, bY + bH + 3)
+            if p1 and p2 and dl.AddLine then
+                dl:AddLine(p1, p2, colRibbon, 1.8)
+            end
+        end
+    end)
+    if not ok and dl and dl.AddText then
+        pcall(function()
+            local pos = toV(mX + math.max(2, (btnW - 14) / 2), mY + math.max(2, (btnH / 2) - 6))
+            if pos then dl:AddText(pos, UI.col32(0.4, 0.85, 1.0, 1.0), 'BOOK') end
+        end)
+    end
+end
+
+-- ============================================================================
+-- Spell Gem Cooldown Tracker (converts EQ milliseconds to true seconds)
+-- ============================================================================
+function UI.getGemCooldownSec(slot, spellName, spellRecast)
+    local sec = 0
+    pcall(function()
+        local gt = nil
+        if slot and slot > 0 then
+            gt = mq.TLO.Me.GemTimer(slot)
+        end
+        if (not gt or not gt()) and spellName and spellName ~= '' then
+            gt = mq.TLO.Me.GemTimer(spellName)
+        end
+        if gt and gt() then
+            -- 1. Try MQ ticks TotalSeconds property
+            local ts = nil
+            pcall(function()
+                if type(gt.TotalSeconds) == 'function' then
+                    ts = tonumber(gt.TotalSeconds() or 0)
+                elseif type(gt.TotalSeconds) == 'number' then
+                    ts = tonumber(gt.TotalSeconds or 0)
+                end
+            end)
+            if ts and ts > 0 then
+                sec = ts
+                return
+            end
+
+            -- 2. Try Raw or direct numeric conversion
+            local val = nil
+            pcall(function()
+                if type(gt.Raw) == 'function' then
+                    val = tonumber(gt.Raw() or 0)
+                end
+            end)
+            if not val or val <= 0 then
+                val = tonumber(gt()) or 0
+            end
+
+            if val > 1000 then
+                sec = val / 1000.0
+            elseif val > 0 then
+                sec = val
+            end
+        end
+    end)
+    return sec
+end
+
+-- ============================================================================
+-- Popout Spell Gem Bar Window: modern, compact, customizable replacement
+-- for EverQuest's default spell gem bar with dual orientations, compact vs full
+-- layouts, live recast timers, active casting overlays, and right-click actions.
+-- ============================================================================
+function UI.drawSpellGemBarWindow()
+    if not ctrl.show_spell_gems then return end
+    UI.pushTheme()
+
+    if ctrl.gem_alpha then
+        ImGui.SetNextWindowBgAlpha(ctrl.gem_alpha)
+    end
+
+    ImGui.SetNextWindowSize(320, 38, ImGuiCond.FirstUseEver)
+
+    local winFlags = 0
+    if ctrl.gem_lock then
+        winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
+    end
+
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 2, 2)
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 2, 2)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 1, 1)
+
+    local show
+    ctrl.show_spell_gems, show = ImGui.Begin('Triune Spell Gems v' .. VERSION .. '###triuneSpellGemsWindow', ctrl.show_spell_gems, winFlags)
+    if not ctrl.show_spell_gems then
+        ImGui.End()
+        ImGui.PopStyleVar(3)
+        UI.popTheme()
+        return
+    end
+
+    if show then
+        -- Right-click on window background for settings
+        local function renderGemSettingsContent()
+            accent(GOLD, 'Spell Gem Bar Options')
+            ImGui.Separator()
+
+            local lockVal = ImGui.Checkbox('Lock Window Position & Size##gemLock', ctrl.gem_lock or false)
+            if lockVal ~= (ctrl.gem_lock or false) then
+                ctrl.gem_lock = lockVal
+                runtime.saveLoadout(true)
+            end
+
+            -- Orientation selection
+            ImGui.Text('Orientation:')
+            ImGui.SameLine()
+            if ImGui.RadioButton('Auto##gemOrientAuto', ctrl.gem_orientation == 'Auto' or not ctrl.gem_orientation) then
+                ctrl.gem_orientation = 'Auto'
+                runtime.saveLoadout(true)
+            end
+            ImGui.SameLine()
+            if ImGui.RadioButton('Horizontal##gemOrientH', ctrl.gem_orientation == 'Horizontal') then
+                ctrl.gem_orientation = 'Horizontal'
+                runtime.saveLoadout(true)
+            end
+            ImGui.SameLine()
+            if ImGui.RadioButton('Vertical##gemOrientV', ctrl.gem_orientation == 'Vertical') then
+                ctrl.gem_orientation = 'Vertical'
+                runtime.saveLoadout(true)
+            end
+
+            local badgeVal = ImGui.Checkbox('Show Gem Numbers (#1..#N)##gemBadges', ctrl.gem_show_badges ~= false)
+            if badgeVal ~= (ctrl.gem_show_badges ~= false) then
+                ctrl.gem_show_badges = badgeVal
+                runtime.saveLoadout(true)
+            end
+
+            local timerVal = ImGui.Checkbox('Show Cooldown Timers##gemTimer', ctrl.gem_show_timer ~= false)
+            if timerVal ~= (ctrl.gem_show_timer ~= false) then
+                ctrl.gem_show_timer = timerVal
+                runtime.saveLoadout(true)
+            end
+
+            ImGui.SetNextItemWidth(120)
+            local newAlpha = ImGui.SliderFloat('Opacity##gemAlpha', ctrl.gem_alpha or 0.85, 0.20, 1.0, '%.2f')
+            if newAlpha ~= (ctrl.gem_alpha or 0.85) then
+                ctrl.gem_alpha = newAlpha
+                runtime.saveLoadout(true)
+            end
+
+            ImGui.Separator()
+            if ImGui.MenuItem('Open Spellbook##gemOpenBook') then
+                UI.toggleTool('triune_spellbook')
+            end
+        end
+
+        if ImGui.BeginPopupContextWindow('##gemWinContextMenu') then
+            renderGemSettingsContent()
+            ImGui.EndPopup()
+        end
+
+        local availW, availH = ImGui.GetContentRegionAvail()
+        availW = math.max(24, availW)
+        availH = math.max(24, availH)
+
+        local maxGems = getNumGems() or 8
+        local totalItems = maxGems + 1
+        local spacing = 2
+        local cols = 1
+
+        -- Dynamic layout: horizontal, vertical, or responsive aspect ratio grid
+        if ctrl.gem_orientation == 'Horizontal' then
+            cols = totalItems
+        elseif ctrl.gem_orientation == 'Vertical' then
+            cols = 1
+        else -- 'Auto' (stretches smoothly either horizontally or vertically)
+            if availW >= availH * 1.25 then
+                cols = totalItems
+            elseif availH >= availW * 1.25 then
+                cols = 1
+            else
+                local bestCols = 1
+                local bestDiff = 999999
+                for c = 1, totalItems do
+                    local r = math.ceil(totalItems / c)
+                    local w = (availW - (spacing * (c - 1))) / c
+                    local h = (availH - (spacing * (r - 1))) / r
+                    local diff = math.abs(w - h)
+                    if diff < bestDiff then
+                        bestDiff = diff
+                        bestCols = c
+                    end
+                end
+                cols = bestCols
+            end
+        end
+
+        local rows = math.max(1, math.ceil(totalItems / cols))
+        local btnW = math.max(18, math.floor((availW - (spacing * (cols - 1))) / cols))
+        local btnH = math.max(18, math.floor((availH - (spacing * (rows - 1))) / rows))
+        local iconSize = math.max(14, math.min(btnW - 4, btnH - 4))
+
+        local myMana = 0
+        pcall(function() myMana = mq.TLO.Me.CurrentMana() or 0 end)
+
+        local activeCastingName = nil
+        local castTimeLeft = 0
+        pcall(function()
+            if mq.TLO.Me.Casting() then
+                activeCastingName = mq.TLO.Me.Casting.Name()
+                castTimeLeft = (mq.TLO.Me.CastTimeLeft() or 0) / 1000.0
+            end
+        end)
+
+        local nowClock = os.clock()
+        runtime.gemCooldownEnd = runtime.gemCooldownEnd or {}
+
+        local toXY = function(x, y)
+            if type(x) == 'userdata' or (type(x) == 'table' and x.x) then
+                return x.x, x.y
+            end
+            return x or 0, y or 0
+        end
+
+        local toV = UI.toVec
+
+        for slot = 1, maxGems do
+            local gemData = nil
+            pcall(function()
+                local g = mq.TLO.Me.Gem(slot)
+                if g and g() and g.Name() and g.Name() ~= '' then
+                    local sName = g.Name()
+                    local sId = g.ID() or 0
+                    local sLvl = g.Level() or 0
+                    local sMana = g.Mana() or 0
+                    local sIcon = g.SpellIcon() or 0
+                    local sRange = g.Range() or 0
+                    local sCastTime = (g.MyCastTime() or g.CastTime() or 0) / 1000.0
+                    local sRecast = (g.RecastTime() or 0) / 1000.0
+                    local querySec = UI.getGemCooldownSec(slot, sName, sRecast)
+
+                    local isReady = false
+                    pcall(function() isReady = (mq.TLO.Me.SpellReady(slot)() == true) end)
+
+                    local timer = 0
+                    if isReady then
+                        runtime.gemCooldownEnd[slot] = nil
+                        timer = 0
+                    else
+                        local isOtherCasting = (activeCastingName and activeCastingName ~= sName)
+                        local endAt = runtime.gemCooldownEnd[slot]
+
+                        if querySec > 0 then
+                            if not endAt or math.abs((nowClock + querySec) - endAt) > 1.2 then
+                                endAt = nowClock + querySec
+                                runtime.gemCooldownEnd[slot] = endAt
+                            end
+                            timer = math.max(0.1, endAt - nowClock)
+                        elseif endAt then
+                            local rem = endAt - nowClock
+                            if rem > 0 then
+                                timer = rem
+                            else
+                                timer = 0.5
+                            end
+                        elseif not isOtherCasting then
+                            local baseRecast = math.max(2.25, sRecast or 0)
+                            endAt = nowClock + baseRecast
+                            runtime.gemCooldownEnd[slot] = endAt
+                            timer = baseRecast
+                        end
+                    end
+                    local ready = isReady or (timer <= 0.05 and not activeCastingName)
+
+                    gemData = {
+                        slot = slot,
+                        name = sName,
+                        id = sId,
+                        level = sLvl,
+                        mana = sMana,
+                        icon = sIcon,
+                        range = sRange,
+                        castTime = sCastTime,
+                        recast = sRecast,
+                        timer = timer,
+                        ready = ready,
+                    }
+                end
+            end)
+
+            if (slot - 1) % cols ~= 0 then
+                ImGui.SameLine(0, spacing)
+            end
+
+            local btnKey = 'gemBtn_' .. tostring(slot)
+
+            if gemData then
+                local isCastingThis = (activeCastingName and activeCastingName == gemData.name)
+                local hasMana = (gemData.mana == 0 or myMana >= gemData.mana)
+
+                -- Visual button frame styling based on state
+                local stylePushed = 0
+                local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+                if isCastingThis then
+                    if Col and Col.Border then
+                        ImGui.PushStyleColor(Col.Border, 0.20, 0.85, 1.0, 1.0)
+                        stylePushed = stylePushed + 1
+                    end
+                elseif not gemData.ready then
+                    if Col and Col.Button then
+                        ImGui.PushStyleColor(Col.Button, 0.12, 0.12, 0.14, 0.70)
+                        stylePushed = stylePushed + 1
+                    end
+                elseif not hasMana then
+                    if Col and Col.Button then
+                        ImGui.PushStyleColor(Col.Button, 0.35, 0.12, 0.12, 0.65)
+                        stylePushed = stylePushed + 1
+                    end
+                end
+
+                local clicked = ImGui.Button('##' .. btnKey, btnW, btnH)
+                if clicked then
+                    mq.cmdf('/cast %d', slot)
+                    local estRecast = math.max(2.25, gemData.recast or 0)
+                    runtime.gemCooldownEnd[slot] = nowClock + (gemData.castTime or 0) + estRecast
+                end
+
+                if stylePushed > 0 then
+                    ImGui.PopStyleColor(stylePushed)
+                end
+
+                local mnX, mnY = ImGui.GetItemRectMin()
+                local mxX, mxY = ImGui.GetItemRectMax()
+                local mX, mY = toXY(mnX, mnY)
+                local maxX, maxY = toXY(mxX, mxY)
+                local dl = ImGui.GetWindowDrawList()
+
+                -- Draw authentic spell icon centered in button
+                if dl and dl.AddTextureAnimation then
+                    local tex = UI.getSpellIconAnimation(gemData.icon)
+                    if tex then
+                        local iconX = mX + math.floor((btnW - iconSize) / 2)
+                        local iconY = mY + math.floor((btnH - iconSize) / 2)
+                        local pPos = toV(iconX, iconY)
+                        local pSz = toV(iconSize, iconSize)
+                        if pPos and pSz then
+                            dl:AddTextureAnimation(tex, pPos, pSz)
+                        end
+                    end
+                end
+
+                -- Gem slot # badge
+                if ctrl.gem_show_badges ~= false and dl and dl.AddText then
+                    local bCol = isCastingThis and UI.col32(0.2, 0.85, 1.0, 1.0) or UI.col32(1.0, 0.85, 0.25, 0.95)
+                    local p1 = toV(mX + 1, mY + 2)
+                    local p2 = toV(mX + 2, mY + 1)
+                    if p1 then dl:AddText(p1, UI.col32(0, 0, 0, 0.85), string.format('%d', slot)) end
+                    if p2 then dl:AddText(p2, bCol, string.format('%d', slot)) end
+                end
+
+                -- Low mana overlay
+                if not hasMana and dl and dl.AddRectFilled then
+                    local p1 = toV(mX + 1, mY + 1)
+                    local p2 = toV(maxX - 1, maxY - 1)
+                    if p1 and p2 then
+                        dl:AddRectFilled(p1, p2, UI.col32(0.65, 0.12, 0.12, 0.45), 3)
+                    end
+                end
+
+                -- Recast cooldown overlay (seconds countdown)
+                if not isCastingThis and not gemData.ready and gemData.timer > 0.05 and dl then
+                    if dl.AddRectFilled then
+                        local p1 = toV(mX + 1, mY + 1)
+                        local p2 = toV(maxX - 1, maxY - 1)
+                        if p1 and p2 then
+                            dl:AddRectFilled(p1, p2, UI.col32(0, 0, 0, 0.65), 3)
+                        end
+                    end
+                    if ctrl.gem_show_timer ~= false and dl.AddText then
+                        local cdSec = math.ceil(gemData.timer)
+                        local cdStr = cdSec >= 60 and string.format('%dm', math.ceil(cdSec / 60)) or tostring(cdSec)
+                        local tW = #cdStr * 7
+                        local tX = mX + math.max(2, math.floor((btnW - tW) / 2))
+                        local tY = mY + math.max(2, math.floor((btnH / 2) - 6))
+                        local pShadow = toV(tX + 1, tY + 1)
+                        local pText = toV(tX, tY)
+                        if pShadow then dl:AddText(pShadow, UI.col32(0, 0, 0, 0.95), cdStr) end
+                        if pText then dl:AddText(pText, UI.col32(1.0, 0.85, 0.2, 1.0), cdStr) end
+                    end
+                end
+
+                -- Active casting overlay (seconds only)
+                if isCastingThis and dl then
+                    if dl.AddRect then
+                        local pulse = 0.5 + 0.5 * math.sin(os.clock() * 8.0)
+                        local p1 = toV(mX, mY)
+                        local p2 = toV(maxX, maxY)
+                        if p1 and p2 then
+                            dl:AddRect(p1, p2, UI.col32(0.2, 0.85, 1.0, 0.75 + 0.25 * pulse), 3, 0, 2.0)
+                        end
+                    end
+                    if dl.AddText and castTimeLeft > 0 then
+                        local cSec = math.ceil(castTimeLeft)
+                        local cStr = tostring(cSec)
+                        local tW = #cStr * 7
+                        local tX = mX + math.max(2, math.floor((btnW - tW) / 2))
+                        local tY = mY + math.max(2, math.floor((btnH / 2) - 6))
+                        local pShadow = toV(tX + 1, tY + 1)
+                        local pText = toV(tX, tY)
+                        if pShadow then dl:AddText(pShadow, UI.col32(0, 0, 0, 0.95), cStr) end
+                        if pText then dl:AddText(pText, UI.col32(0.2, 1.0, 0.4, 1.0), cStr) end
+                    end
+                end
+
+                -- Right-click popup menu on gem
+                if ImGui.BeginPopupContextItem('##gemItemMenu_' .. slot) then
+                    accent(GOLD, string.format('Gem #%d: %s', slot, gemData.name))
+                    ImGui.TextDisabled(string.format('Level %d | Mana: %d | Cast: %.1fs | Recast: %.1fs', gemData.level, gemData.mana, gemData.castTime, gemData.recast))
+                    ImGui.Separator()
+                    if ImGui.MenuItem('Cast Spell##cast_' .. slot) then
+                        mq.cmdf('/cast %d', slot)
+                    end
+                    if ImGui.MenuItem('Inspect Spell Info##info_' .. slot) then
+                        pcall(function() mq.TLO.Spell(gemData.id).Inspect() end)
+                    end
+                    if ImGui.MenuItem('Unmemorize Gem##unmem_' .. slot) then
+                        mq.cmdf('/memorize "" %d', slot)
+                    end
+                    if ImGui.MenuItem('Open Spellbook##book_' .. slot) then
+                        UI.toggleTool('triune_spellbook')
+                    end
+                    ImGui.EndPopup()
+                end
+
+                -- Hover tooltip
+                if ImGui.IsItemHovered() then
+                    local lines = {
+                        string.format('Gem #%d: %s', slot, gemData.name),
+                        string.format('Level: %d  |  Mana: %d  |  Range: %d', gemData.level, gemData.mana, gemData.range),
+                        string.format('Cast Time: %.1fs  |  Recast: %.1fs', gemData.castTime, gemData.recast),
+                    }
+                    if not gemData.ready and gemData.timer > 0 then
+                        table.insert(lines, string.format('Recast Cooldown: %d seconds remaining', math.ceil(gemData.timer)))
+                    elseif isCastingThis then
+                        table.insert(lines, string.format('Currently Casting: %d seconds left', math.ceil(castTimeLeft)))
+                    elseif not hasMana then
+                        table.insert(lines, string.format('INSUFFICIENT MANA: Need %d (Have %d)', gemData.mana, myMana))
+                    else
+                        table.insert(lines, 'STATUS: Ready to Cast')
+                    end
+                    table.insert(lines, 'Left-click to Cast | Right-click for options')
+                    UI.setTooltip('%s', table.concat(lines, '\n'))
+                end
+            else
+                -- Empty gem slot button
+                if ImGui.Button(string.format('#%d##empty_%d', slot, slot), btnW, btnH) then
+                    UI.toggleTool('triune_spellbook')
+                end
+                if ImGui.IsItemHovered() then
+                    UI.setTooltip(string.format('Gem Slot #%d (Empty)\nClick to open Spellbook and memorize a spell.', slot))
+                end
+            end
+        end
+
+        -- Spellbook & Spell Sets button at the end
+        if (totalItems - 1) % cols ~= 0 then
+            ImGui.SameLine(0, spacing)
+        end
+
+        local sbClicked = ImGui.Button('##gemSpellBookBtn', btnW, btnH)
+        if sbClicked then
+            UI.toggleTool('triune_spellbook')
+        end
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Spellbook & Spell Sets\nLeft-click: Open Spellbook Browser\nRight-click: Load / Save / Delete Spell Sets')
+        end
+
+        local sbMnX, sbMnY = ImGui.GetItemRectMin()
+        local sbDl = ImGui.GetWindowDrawList()
+
+        -- Render high-detail vector Spellbook icon
+        UI.drawSpellbookIcon(sbDl, sbMnX, sbMnY, btnW, btnH)
+
+        -- Right-click on Spellbook button: Load / Save / Delete spell sets
+        if ImGui.BeginPopupContextItem('##spellbookSetMenu') then
+            accent(GOLD, 'Spell Sets & Spellbook')
+            ImGui.Separator()
+
+            if ImGui.MenuItem('Open Spellbook Browser') then
+                UI.toggleTool('triune_spellbook')
+            end
+            ImGui.Separator()
+
+            -- Save current spell set
+            if ImGui.BeginMenu('Save Current Spell Set...##saveSetMenu') then
+                ImGui.Text('Enter set name:')
+                ImGui.SetNextItemWidth(140)
+                UI.newSpellSetName = (type(UI.newSpellSetName) == 'string') and UI.newSpellSetName or ''
+                local itFlags = (ImGuiInputTextFlags and ImGuiInputTextFlags.EnterReturnsTrue) or 0
+                local newText, changed = ImGui.InputText('##setNameInput', UI.newSpellSetName, itFlags)
+                if type(newText) == 'string' then
+                    UI.newSpellSetName = newText
+                end
+                local cleanName = UI.newSpellSetName:match('^%s*(.-)%s*$') or ''
+                local enterHit = changed and (ImGui.IsKeyPressed and ImGui.IsKeyPressed(ImGuiKey and ImGuiKey.Enter or 13))
+                local saveClicked = ImGui.Button('Save Set##doSaveSet')
+                if (saveClicked or enterHit) and cleanName ~= '' then
+                    runtime.importCurrentGems()
+                    runtime.savePreset(cleanName)
+                    UI.newSpellSetName = ''
+                    ImGui.CloseCurrentPopup()
+                end
+                ImGui.EndMenu()
+            end
+
+            -- Load saved spell set
+            if ImGui.BeginMenu('Load Spell Set##loadSetMenu') then
+                local presetList = {}
+                if loadout.presets and type(loadout.presets) == 'table' then
+                    for pName, pData in pairs(loadout.presets) do
+                        if type(pName) == 'string' and pName ~= '' and type(pData) == 'table' then
+                            table.insert(presetList, pName)
+                        end
+                    end
+                    table.sort(presetList, function(a, b) return a:lower() < b:lower() end)
+                end
+                if #presetList > 0 then
+                    for _, name in ipairs(presetList) do
+                        if ImGui.MenuItem(name .. '##load_' .. name) then
+                            runtime.loadPreset(name, true)
+                        end
+                    end
+                else
+                    ImGui.TextDisabled('No saved sets found.')
+                end
+                ImGui.EndMenu()
+            end
+
+            -- Delete saved spell set
+            if ImGui.BeginMenu('Delete Spell Set##deleteSetMenu') then
+                local presetList = {}
+                if loadout.presets and type(loadout.presets) == 'table' then
+                    for pName, pData in pairs(loadout.presets) do
+                        if type(pName) == 'string' and pName ~= '' and type(pData) == 'table' then
+                            table.insert(presetList, pName)
+                        end
+                    end
+                    table.sort(presetList, function(a, b) return a:lower() < b:lower() end)
+                end
+                if #presetList > 0 then
+                    for _, name in ipairs(presetList) do
+                        if ImGui.MenuItem('Delete: ' .. name .. '##del_' .. name) then
+                            runtime.deletePreset(name)
+                        end
+                    end
+                else
+                    ImGui.TextDisabled('No saved sets to delete.')
+                end
+                ImGui.EndMenu()
+            end
+
+            ImGui.EndPopup()
+        end
+
+        -- Hover tooltip
+        if ImGui.IsItemHovered() then
+            UI.setTooltip('Spellbook & Spell Sets\nLeft-click: Open Spellbook\nRight-click: Load, Save, or Delete Spell Sets')
+        end
     end
 
     ImGui.End()
@@ -17522,6 +20298,66 @@ end
 -- above tried to melee/shoot through the wall. Fails open (true) if the LoS TLO
 -- itself errors, so a broken check can't wedge movement forever.
 
+-- True when the zone mesh is loaded but MQ2Nav cannot path from our current
+-- feet -- typical mesh hole / off-mesh landing. Used so hunter/puller still
+-- pick a nearby NPC instead of standing still forever with "no path" to anyone.
+function runtime.isPlayerOffMesh()
+    if not navLoaded() then return false end
+    local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
+    if not meshOk or not meshLoaded then return false end
+    local me = mq.TLO.Me
+    if not me() then return false end
+    local x, y, z = me.X() or 0, me.Y() or 0, me.Z() or 0
+    local ok = false
+    pcall(function()
+        ok = mq.TLO.Navigation.PathExists(string.format('loc %.2f %.2f %.2f', y, x, z))() or false
+    end)
+    if ok then return false end
+    pcall(function()
+        ok = mq.TLO.Navigation.PathExists(string.format('locyx %.2f %.2f', y, x))() or false
+    end)
+    return not ok
+end
+
+-- When PathExists is false, walk toward the spawn with /stick (or native keys)
+-- so we can step off the hole. moveToward remaps /nav as soon as a path exists
+-- again. Existing PURSUIT_STALL_TIMEOUT still abandons if we never get closer.
+function runtime.tryOffMeshRecovery(id, targetDist)
+    if not id or id <= 0 then return false end
+    if pursuit.meshRecoverId ~= id then
+        pursuit.meshRecoverId = id
+        pursuit.meshRecoverAt = os.clock()
+        print(string.format(
+            '\ay[Triune]\ax No navigation path to target #%d -- sticking toward it to leave the mesh hole, then remapping.',
+            id))
+        if navLoaded() then
+            local navActive = false
+            pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+            if navActive then pcall(function() mq.cmd('/nav stop') end) end
+        end
+    end
+
+    local dist = math.max(4, math.floor(targetDist or 14))
+    if stickLoaded() then
+        if pursuit.lastNavTargetId ~= id or pursuit.lastStickDist ~= dist then
+            mq.cmdf('/stick id %d %d', id, dist)
+            pursuit.lastNavTargetId = id
+            pursuit.lastStickDist = dist
+        end
+        return false
+    end
+
+    local nativeKey = string.format('native_spawn_%d', id)
+    mq.cmd('/face fast')
+    local isMoving = false
+    pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+    if not isMoving then
+        mq.cmd('/keypress forward hold')
+    end
+    pursuit.lastNavTargetId = nativeKey
+    return false
+end
+
 function runtime.moveToward(id, dist, followOnly)
     local NAV_CONST = pursuit.NAV_CONST
     if not id or id <= 0 then return false end
@@ -17665,6 +20501,21 @@ function runtime.moveToward(id, dist, followOnly)
         local ok = false
         pcall(function() ok = mq.TLO.Navigation.PathExists('id ' .. id)() end)
         if ok then
+            if pursuit.meshRecoverId == id then
+                print(string.format(
+                    '\ag[Triune]\ax Remapped nav path to #%d after off-mesh stick recovery.', id))
+                if stickLoaded() then
+                    local stickActive = false
+                    pcall(function() stickActive = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+                    if stickActive then pcall(function() mq.cmd('/stick off') end) end
+                end
+                if pursuit.lastNavTargetId and string.find(tostring(pursuit.lastNavTargetId), '^native_') then
+                    pcall(function() mq.cmd('/keypress forward') end)
+                end
+                pursuit.meshRecoverId = 0
+                pursuit.meshRecoverAt = 0
+                pursuit.lastNavTargetId = 0
+            end
             pursuit.noPathFails = 0
             local navActiveNow = mq.TLO.Navigation.Active()
             if pursuit.wasNavActive and not navActiveNow then
@@ -17676,24 +20527,12 @@ function runtime.moveToward(id, dist, followOnly)
                 pursuit.lastNavTargetId = id
             end
             return false
-        elseif meshOk and meshLoaded and not followOnly and (d > effectiveArrivalDist or not losOk) then
-            -- Zone navmesh is confirmed loaded, but MQ2Nav reports no valid path to target
+        elseif meshOk and meshLoaded and (d > effectiveArrivalDist or not losOk) then
+            -- Zone mesh is loaded but there is no path from here -- typically we
+            -- landed in a hole. Stick toward the spawn so we can step back onto
+            -- the mesh; the `if ok` branch remaps /nav as soon as PathExists.
             pursuit.noPathFails = (pursuit.noPathFails or 0) + 1
-            if pursuit.noPathFails >= 3 then
-                print(string.format(
-                    '\ay[Triune]\ax No navigation path to target #%d -- marking unreachable & finding new target.',
-                    id))
-                runtime.markUnreachable(id)
-                stopMoving()
-                clearTarget()
-                pursuit.id = 0
-                pursuit.lastNavTargetId = 0
-                pursuit.noPathFails = 0
-                runtime.pullTargetId = 0
-                runtime.pullState = 'IDLE'
-                return false
-            end
-            return false
+            return runtime.tryOffMeshRecovery(id, targetDist)
         end
     end
 
@@ -18555,6 +21394,8 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
     end
 
+    local playerOffMesh = runtime.isPlayerOffMesh()
+
     local function scanSpawns(maxZ)
         local radius = searchRadius or 100
         local p = string.format('npc radius %d zradius %d targetable', radius, maxZ)
@@ -18588,7 +21429,7 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                     local inHaz = runtime.isCoordInActiveHazard(sx, sy, sz)
                                     local isMeleeStyle = (ctrl and ctrl.combat_style or 'Melee') == 'Melee'
                                     local pathOk = not (inHaz and isMeleeStyle)
-                                    if pathOk and navLoaded() then
+                                    if pathOk and navLoaded() and not playerOffMesh then
                                             local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
                                             if meshOk and meshLoaded then
                                                 local dist = s.Distance3D() or 999
@@ -21101,7 +23942,8 @@ local function triuneCommand(...)
         print('  \ag/ac importbar | import\ax - Auto-populate spell lines from current spell gems')
         print('  \ag/ac debug\ax - Toggle live combat debug telemetry in chat')
         print('  \ag/ac status\ax - Print running state and mode')
-        print('  \ag/ac compact | mini | hud\ax - Toggle compact HUD mode')
+        print('  \ag/ac compact | mini\ax - Toggle compact mini-window mode')
+        print('  \ag/ac hud | uf | targetwin\ax - Toggle popout Target & Player HUD window')
         print('  \ag/ac help | h | ?\ax - Print slash command summary')
         print('  \ag/ac spellbook | book\ax - Toggle spellbook browser')
         print('  \ag/ac cursorui | cursormgr\ax - Toggle cursor item manager')
@@ -21217,6 +24059,26 @@ local function triuneCommand(...)
         ctrl.show_cooldowns = not ctrl.show_cooldowns
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Popout Cooldown Monitor window %s.', ctrl.show_cooldowns and 'OPENED' or 'CLOSED'))
+    elseif cmd == 'hud' or cmd == 'uf' or cmd == 'unitframes' or cmd == 'targetwin' or cmd == 'playerwin' then
+        ctrl.show_unit_frames = not ctrl.show_unit_frames
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Popout Target & Player HUD window %s.', ctrl.show_unit_frames and 'OPENED' or 'CLOSED'))
+    elseif cmd == 'group' or cmd == 'gw' or cmd == 'groupwin' or cmd == 'groupwindow' then
+        ctrl.show_group_window = not ctrl.show_group_window
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Popout Group Window %s.', ctrl.show_group_window and 'OPENED' or 'CLOSED'))
+    elseif cmd == 'eff' or cmd == 'effects' or cmd == 'buffs' or cmd == 'buffwin' or cmd == 'songwin' or cmd == 'songs' then
+        ctrl.show_effects_window = not ctrl.show_effects_window
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Popout Effects & Songs Window %s.', ctrl.show_effects_window and 'OPENED' or 'CLOSED'))
+    elseif cmd == 'xtar' or cmd == 'xt' or cmd == 'xtarget' or cmd == 'xtargetwin' or cmd == 'xtwin' then
+        ctrl.show_xtarget_window = not ctrl.show_xtarget_window
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Popout Extended Target Window %s.', ctrl.show_xtarget_window and 'OPENED' or 'CLOSED'))
+    elseif cmd == 'gems' or cmd == 'gembar' or cmd == 'spellbar' or cmd == 'castbar' or cmd == 'spellgems' then
+        ctrl.show_spell_gems = not ctrl.show_spell_gems
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Popout Spell Gem Bar Window %s.', ctrl.show_spell_gems and 'OPENED' or 'CLOSED'))
     elseif cmd == 'spellbook' or cmd == 'book' then
         if UI.toggleTool('triune_spellbook') == 'started' then
             print('\ag[Triune]\ax launching spellbook engine...')
@@ -21510,10 +24372,10 @@ local function triuneCommand(...)
         else
             print('\ag[Triune]\ax stopping map & tracker window...')
         end
-    elseif cmd == 'compact' or cmd == 'mini' or cmd == 'hud' then
+    elseif cmd == 'compact' or cmd == 'mini' then
         ctrl.compact = not ctrl.compact
         runtime.saveLoadout(true)
-        print(string.format('\ag[Triune]\ax Compact HUD mode %s.', ctrl.compact and 'ENABLED' or 'DISABLED'))
+        print(string.format('\ag[Triune]\ax Compact Mini mode %s.', ctrl.compact and 'ENABLED' or 'DISABLED'))
     elseif cmd == 'pullcon' or cmd == 'con' or cmd == 'confilter' then
         ctrl.pull_con_filter = ctrl.pull_con_filter or {}
         local arg2 = args[2] and string.lower(args[2]) or ''
@@ -22053,6 +24915,11 @@ end)
 
 mq.imgui.init('TriuneCritOverlay', UI.drawCritOverlay)
 mq.imgui.init('TriuneCooldownWindow', UI.drawCooldownWindow)
+mq.imgui.init('TriuneUnitFramesWindow', UI.drawUnitFramesWindow)
+mq.imgui.init('TriuneGroupWindow', UI.drawGroupWindow)
+mq.imgui.init('TriuneEffectsWindow', UI.drawEffectsWindow)
+mq.imgui.init('TriuneXTargetWindow', UI.drawXTargetWindow)
+mq.imgui.init('TriuneSpellGemBarWindow', UI.drawSpellGemBarWindow)
 mq.imgui.init('TriuneAutoCombat', UI.draw)
 print('\ag[Triune]\ax loaded v' ..
     VERSION ..

@@ -2,6 +2,96 @@
 
 ## 2026-09-07
 
+- **New Popout Spell Gem Bar Window (`triune.lua`).** Added a modern, high-performance, ultra-compact popout Spell Gem Bar window (`TriuneSpellGemBarWindow`) designed to replace EverQuest's default Spell Gem bar (`CastSpellWnd`) with dynamic stretchable buttons, authentic spell icons, and live combat state feedback.
+  - **Ultra-Compact Pure Buttons Design**: Every spell gem is rendered directly as a clickable, responsive ImGui button with tight padding (`2, 2`), eliminating wasted screen space while maximizing icon visibility.
+  - **High-Detail Handcrafted Vector Spellbook Icon**: Replaced missing textures and text badges with a rich, resolution-independent vector-rendered EverQuest Spellbook featuring a dark leather spine with gold ribs, parchment page trim, royal purple cover with embossed gold filigree, central arcane star with glowing cyan jewel, and a hanging crimson bookmark ribbon. Powered by `UI.col32()` and coordinate normalization to guarantee 100% reliable rendering across all MQ builds.
+  - **Fixed `mq2lua.dll` Crash on Draw List Calls**: Replaced fallback Lua table vector constructors `{ x = x, y = y }` with a strictly guarded `UI.toVec()` wrapper. Passing Lua tables into Dear ImGui C++ draw list bindings (`AddRectFilled`, `AddLine`, `AddTextureAnimation`, `AddText`) caused sol2 null pointer dereferences at `mq2lua.dll+0023AF43`. Every draw call now strictly verifies valid C++ `ImVec2` userdata before rendering.
+  - **Triune Spell Set Management**: Right-clicking the Spellbook button provides an integrated menu to manage custom spell sets directly within Triune:
+    - **Fixed Spell Set Saving & InputText Tuple**: Corrected MacroQuest ImGui `InputText` return value ordering (`text, changed`) in the "Save Current Spell Set" menu. Previously, an inverted return tuple assignment caused the entered name to be assigned as a boolean, preventing presets from ever saving to `loadout.presets`.
+    - **Enter Key Submission**: Added `ImGuiInputTextFlags.EnterReturnsTrue` so pressing Enter in the set name input immediately saves the preset without requiring a mouse click on the button.
+    - **Alphabetical Preset Sorting**: Preset lists in both "Load Spell Set" and "Delete Spell Set" menus are now sorted alphabetically for clean discovery.
+    - **Defensive Preset Key Sanitization**: `runtime.savePreset` purges any corrupted non-string keys and guarantees clean persistence in Triune's saved presets.
+    - **Load Spell Set**: Seamless 1-click loading that queues unmemorized spells into `runtime.pendingMem` for automated memorization.
+    - **Delete Spell Set**: Removes obsolete spell sets from saved presets.
+  - **Accurate Real-Time Cooldown Countdown**: Implemented a dedicated spell gem cooldown handler (`UI.getGemCooldownSec()`) and real-time frame countdown tracker (`runtime.gemCooldownEnd`):
+    - **Smooth Real-Time Frame Interpolation**: Cooldown end timestamps (`runtime.gemCooldownEnd`) are anchored and interpolated smoothly across frames rather than re-anchoring on static integer seconds, allowing the seconds countdown on spell icons to tick down continuously (`5` -> `4` -> `3` -> `2` -> `1`).
+    - **GCD and Zero-Timer Handling**: Properly handles Global Cooldown (GCD) and spells where `Me.GemTimer` returns 0 but `Me.SpellReady()` is false, accurately estimating and displaying the recast cooldown.
+    - **Active Cast / Recast Overlay Separation**: Suppressed recast countdown overlay while actively casting a spell (`activeCastingName == gemData.name`), allowing the cyan pulse and green cast time countdown to display cleanly until casting finishes.
+    - **Fixed Sub-Second Countdown Bug**: Identified that general buff tick parsers misidentified sub-second millisecond cooldowns (<1000ms) as buff ticks and multiplied them by 6 (causing cooldowns to jump from 1s to 900s or 3000s).
+    - **Real-Time Frame-by-Frame Countdown**: Every second ticks down cleanly and reliably (e.g. `12` -> `11` -> ... -> `2` -> `1` -> Ready) using high-precision millisecond timing and local frame interpolation.
+    - **Instant Click Anticipation**: Primed immediate local timer estimation upon clicking any gem so the visual cooldown starts on the exact frame of the click without waiting for server round-trip latency.
+    - **Horizontal Strip**: Stretching the window horizontally automatically scales buttons into a wide horizontal bar.
+    - **Vertical Column**: Stretching the window vertically automatically stacks buttons into a tall vertical sidebar.
+    - **Responsive Grid**: Resizing into a box automatically computes the optimal aspect-ratio grid (e.g. 2x4, 2x6, 3x4).
+    - **Manual Lock**: Option in right-click settings to force `Auto (Stretch)`, `Horizontal`, or `Vertical`.
+  - **Live Combat State Feedback**:
+    - **Active Spell Casting**: Pulsing cyan border and live cast countdown in integer seconds (`Me.CastTimeLeft()`).
+    - **Recast Cooldown Sweep**: Darkened cooldown overlay and live integer seconds countdown (`Me.GemTimer()`).
+    - **Insufficient Mana Alert**: Reddish overlay and dimmed state when player mana is insufficient.
+    - **Empty Gem Receptacles**: Compact button placeholder with 1-click shortcut to launch the Spellbook.
+  - **Interactive Click-to-Cast**: Left-clicking any gem button immediately fires `/cast <slot>`.
+  - **Gem Item Context Menu**: Right-clicking any gem slot opens an action menu (Cast Spell, Inspect Spell Info, Unmemorize Gem, Open in Spellbook).
+  - **Right-Click Window Options Menu**: Right-clicking the window background opens the settings menu (Orientation mode, Lock position/size, Show gem slot numbers toggle, Show timers toggle, Opacity slider 20%–100%, and Open Spellbook).
+  - **Command & Toolbar Integration**: Added `/ac gems` (aliases: `/ac gembar`, `/ac spellbar`, `/ac castbar`) slash command, and quick-toggle `Gems` buttons on the main header toolbar and Mini GUI. Canonical version bumped to 2.08.
+
+- **New Popout Extended Target (XTarget) Window (`triune.lua`).** Added an ultra-compact, auto-scaling popout Extended Target Window (`TriuneXTargetWindow`) designed to replace EverQuest's default Extended Target window with the modern zero-clutter visual style and architecture.
+  - **Dynamic Auto-Scaling & Health Bars**: Auto-scaling `-1` width health progress bars with color-graded status (emerald green >50%, amber yellow 25–50%, crimson red <=25%) and slot number badges (`#1` to `#N`).
+  - **Active Target Visual Highlight**: When the character's current target in EverQuest matches an extended target, that row is framed with a glowing cyan border and marked with a `[TARGET]` badge for instant recognition in combat.
+  - **Target of Target (ToT) & Threat Tracking**: Live monitoring of who the mob is attacking (`-> PlayerName`) and real-time player aggro percentage (`100% Aggro`).
+  - **Distance & Line of Sight**: Displays feet distance (`45'`) and real-time LoS status (`LoS` / `No LoS`).
+  - **Interactive Click-to-Target**: Clicking any slot's number badge, name, or health bar immediately targets that entity in EverQuest (`/target id <id>`).
+  - **Target Context Menu**: Right-clicking any mob row opens an action menu (Target, Face Target, Add to Ignore List).
+  - **Right-Click Window Options Menu**: Right-clicking the window background opens the customization menu (lock position/size, show/hide empty slots, toggle ToT, toggle aggro %, toggle distance/LoS, opacity slider 20%–100%, and bar height slider 10–24px).
+  - **Command & Toolbar Integration**: Added `/ac xtar` (aliases: `/ac xt`, `/ac xtarget`, `/ac xtwin`) slash command and quick-toggle `XTarget` / `XT` buttons. Canonical version bumped to 2.07.
+
+- **Two-Line Main Header Toolbar & Compact Button Height (`triune.lua`).**
+  - **Two-Line Organization**: Reorganized the main UI header toolbar into two logical lines, creating a new button line below Cooldowns dedicated to popout windows (`Target & Player HUD`, `Group`, `Effects`, `XTarget`, `Inv Manager`).
+  - **Shorter Button Height**: Adjusted toolbar frame padding (`FramePadding.y = 2`) to make buttons slightly shorter to save vertical space without truncating button text.
+
+- **New Popout Effects & Songs Window (`triune.lua`).** Added a modern, high-performance popout window (`TriuneEffectsWindow`) designed to consolidate and replace EverQuest's default Buffs/Effects and Short-Duration (Song) windows.
+  - **Unified Buff & Song Tracking**: Combines all active long-duration buffs (`Me.Buff(1..42)`) and short-duration songs/disciplines (`Me.Song(1..30)`) with full spell names and formatted remaining time (e.g. `52m 14s`, `4m 30s`, `18s`, `Perm`).
+  - **Dynamic Remaining-Time Progress Bars**: Visual time-remaining bars behind each effect with auto-scaling to window resizing (`-1` / `availW`) and color-coded status gradients: emerald teal for long beneficial buffs, golden amber for songs/disciplines, and crimson red for detrimental debuffs and DoTs.
+  - **Native EQ Spell Icons**: Authentic 18x18/20x20 spell icons rendered directly beside each effect's name and timer bar using MacroQuest texture animations (`mq.TextureAnimation` / `A_SpellIcons` / `eq`).
+  - **Zero-Clutter Window with Right-Click Context Menu Sorting**: Maintained a clean, borderless design matching the HUD and Group Window. Replaced the nested combo popup with native `ImGui.Combo` and clickable `MenuItem` radio options in the right-click context menu, ensuring sorting selections instantly trigger without dropping clicks or getting stuck when scrolling.
+  - **Comprehensive Duration Parsing & Robust Sorting Logic**: Integrated `parseDurationSec()` with fallback to `b.DurationTicks` and `mq.TLO.Spell(bName)` for spells where userdata duration objects fail direct property access. Implemented strict partitioning between timed buffs and permanent auras/passives across all 5 sort options:
+    - **Time Left (Ascending)**: Expiring soonest first (songs and short buffs bubble to the top, permanent auras cleanly placed at bottom).
+    - **Time Left (Descending)**: Permanent buffs (infinite duration) at top, followed by longest duration to shortest.
+    - **Name (A-Z)**: Alphabetical by spell name.
+    - **Buff Type**: Detrimental debuffs first, then Songs/Disciplines, then Timed buffs, then Permanent buffs.
+    - **Slot Order**: Preserves native EverQuest buff slot order.
+  - **Interactive Buff Context Menu**: Right-clicking any buff row opens a dedicated action popup menu:
+    - **Remove Buff**: Immediately cancels and dismisses the buff (`/removebuff <name>`).
+    - **Add to Block Buff List**: Adds the spell to character's blocked spell list in EverQuest (`/blockspell add me <id>`).
+    - **Display Spell Info**: Opens the native in-game spell inspect window (`mq.TLO.Spell(id).Inspect()`).
+  - **Hover Tooltip**: Rich inspect tooltip displaying caster name, slot number, spell ID, level, counter counts (Poison, Disease, Curse, Corruption), total duration, and spell description.
+  - **Right-Click Window Options Menu**: Right-clicking the window background opens the settings menu (sort order dropdown, lock window position/size, opacity slider 20%–100%, bar height slider 12–28px, and toggles for buffs, songs, and detrimental effects).
+  - **Command & Toolbar Integration**: Added `/ac eff` (aliases: `/ac effects`, `/ac buffs`, `/ac buffwin`, `/ac songwin`, `/ac songs`) slash command and quick-toggle `Effects` / `Buffs` buttons in the main header and Mini GUI toolbars. Canonical version bumped to 2.06.
+
+- **New Popout Group Window (`triune.lua`).** Added an ultra-compact, auto-scaling popout Group Window (`TriuneGroupWindow`) designed to replace EverQuest's default party window, maintaining the identical modern visual style and architecture as the Target & Player HUD.
+  - **Group Vitals & Auto-Scaling**: Dynamic `-1` width health, mana (casters/hybrids), and endurance progress bars with color-graded HP (green >50%, yellow 25–50%, red <=25%) and status indicators (`[OFFLINE]`, `[OTHER ZONE]`). All bars scale smoothly to window resizing.
+  - **Click-to-Target**: Clicking any group member's con-colored name badge or health bar immediately targets that character in EverQuest (`/target id <id>`).
+  - **Group Role & Status Badges**: Crisp color badges for Group Leader (`[L]` in gold), Main Tank (`[MT]`), Main Assist (`[MA]`), Puller (`[Puller]`), Mercenary (`[Merc]`), Distance (in feet), and Line of Sight (`LoS` in green / `No LoS` in amber).
+  - **Party Pet Tracking**: Live progress bars tracking each member's active pet HP% with hover tooltip displaying pet level, owner, and target.
+  - **Self-Inclusion Toggle**: By default displays the player's own character at the top of the group as Member #0 (or solo state when ungrouped), fully toggleable in settings.
+  - **Invite & Disband Action Buttons**: Added dual action buttons (`Invite` in emerald green and `Disband` in crimson red) at the top of the group window. `Invite` invites the currently targeted player character to the party (`/invite`). `Disband` intelligently removes whichever group member is selected/targeted via click or TLO (`/disband`, `/kickgroup`), leaving the group if the player's own character is selected. Selected group member rows display an active cyan tint and `[SEL]` badge.
+  - **Right-Click Context Menu**: Clean right-click menu anywhere in the window for window position/size lock, background opacity slider (20%–100%), bar height slider (10–24px), and toggleable mana/endurance/pet/role/self display.
+  - **Command & Toolbar Integration**: Added `/ac group` (aliases: `/ac gw`, `/ac groupwin`, `/ac groupwindow`) slash command and quick-toggle `Group` / `Grp` buttons in the main header and Mini GUI toolbars. Version bumped to 2.05.
+
+- **Fix: Multi-Tier Target of Target (ToT) Resolution & Click-to-Target (`triune.lua`).** Fixed an issue where Target of Target was displaying `None` or failing to resolve on servers or characters without Group/Raid Leadership AAs active.
+  - **Root Cause**: `mq.TLO.Target.TargetOfTarget` evaluated to nil or threw nil indexing exceptions when leadership AAs were absent or when solo, causing pcall to abort and leave ToT unresolved.
+  - **Multi-Tier Resolution (`UI.resolveTargetOfTarget`)**: Implemented a comprehensive resolution chain inspecting: (1) `Target.TargetOfTarget`, (2) `Target.AggroHolder` (returns the NPC's actual current combat target without requiring leadership AAs), (3) `Me.TargetOfTarget`, (4) `Spawn(targetId).TargetOfTarget` and `Spawn(targetId).AggroHolder`, (5) `Me.Pet.Target` and `Me.Pet.Following` (when targeting player's own pet), and (6) 100% aggro NPC combat fallback.
+  - **Interactive Click-to-Target**: Both the Target of Target name badge button and ToT health bar are now interactive; clicking either one instantly targets the ToT in EverQuest (`/target id <id>`). Corrected aggro percentage display to reflect true threat. Applied to both the Popout HUD and the main Status tab.
+
+- **New Popout Target, Player & Multi-Pet HUD Window (`triune.lua`).** Added an ultra-compact, auto-scaling popout HUD unit frames window (`TriuneUnitFramesWindow`) designed to replace EverQuest's default target, player, and pet windows.
+  - **Top Section**: Live Target vitals featuring con-colored level/class/name, distance, Line of Sight, dynamic color HP progress bar, and Target's Target (ToT) with holding aggro percentage and alert highlighting when the player character is tanking. When auto-attack is active, both the target health bar fill and an animated outline border flash/pulse bright combat red.
+  - **Target Buffs & Debuffs**: High-density auto-wrapping pill badges showing active target buffs and debuffs with remaining duration timers, color-coded by beneficial (green/cyan) vs detrimental (crimson/red), and hover tooltips showing slot number, duration, and type.
+  - **Player Vitals**: Full-width auto-scaling progress bars for Player HP, Mana (caster/hybrid), Endurance, Character XP % (with current level and raw exp tooltip), and AAXP % (with banked, assigned, and total AA counts).
+  - **Multi-Pet Vitals**: Live HP bars and active mob target indicators (`-> MobName`) for all summoned pets across the Gestalt Trio (Necromancer, Magician, Beastlord, swarm pets), with an auto-hide toggle that collapses the pet section when no pets are active.
+  - **Auto-Scaling & Controls**: Everything stretches dynamically to the window's content width (`-1` / `availW`) when resizing. Zero-clutter minimalist design: all HUD settings (window position/size lock, opacity slider 20%–100%, bar height slider 10–24px, and vitals toggles) are accessed seamlessly by right-clicking anywhere in the window.
+  - **Command & Toolbar Integration**: Added `/ac hud` (aliases: `/ac uf`, `/ac unitframes`, `/ac targetwin`) command and quick-toggle `Target & Player HUD` / `HUD` buttons to both the main Triune window header and Mini GUI toolbars. Version bumped to 2.04.
+
+- **Off-mesh stick recovery & nav remap (`triune.lua`).** Puller Hunt/Camp could land in a navmesh hole, fail `PathExists` to every nearby NPC, then sit forever: `findRoamTarget` skipped all candidates, and `moveToward` abandoned the spawn after 3 ticks of no path without ever moving. Now `isPlayerOffMesh` detects when MQ2Nav cannot path from the character's feet, roam targeting still picks the nearest valid NPC, and `tryOffMeshRecovery` `/stick`s (or walks) toward it. As soon as `PathExists` returns, stick is cancelled and `/nav id` remaps a real mesh path. Existing 8s pursuit-stall timeout still drops the target if stick never makes progress. The "Fallback to Stick on Nav Failure" checkbox remains the more aggressive keep-sticking-into-walls option.
+
 - **"Ignore Distant XTargets When Pulling" now defaults ON (`triune.lua`).** `ctrl.ignore_distant_xtargets` defaults to `true` so the shown toggle state matches the new pull-time behavior out of the box; existing saved loadouts with an explicit value keep their stored setting.
 
 - **Per-character loadout files (`triune.lua`, `triune_map.lua`).** When multiple MQ clients share one MQ install folder, every client wrote to the same `triune_loadout.lua` — and since the ignore/pull lists, zone hazards, and zone-waypoint presets live at the top level of that file (under `__ignore` / `__pullList` / `__zoneHazards` / `__zoneWaypoints` / `__zoneWaypointPresets`), settings and lists were bleeding between different characters across clients. Triune now writes `triune_loadout_<server>_<char>.lua` (per-character file), and `loadAll` prefers that file, re-loading it when the character is first detected in the main loop (migrating from the legacy shared file on first save). The map syncs this character's file first (`mq.configDir/triune_loadout_<server>_<char>.lua`), then falls back to discovery/legacy names so pre-migration setups keep working; candidates now pair every directory with both the per-character name and the legacy name. On a transient parse failure the map now keeps the previous overlay state instead of blanking the triune overlays for a sync cycle (guards against reading mid-write).

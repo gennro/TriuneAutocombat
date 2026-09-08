@@ -204,6 +204,10 @@ Triune comes packed with handy standalone tools you can open right from the main
 | Tool | Chat Command | What It Does |
 |---|---|---|
 | ⏱️ **Cooldown Monitor** | `/ac cd` | Standalone popout live ability, AA, and discipline cooldown monitor with active buff duration countdowns, smart diagnostics, timer groups, next-up forecast, and 1-click execution. |
+| 🎯 **Target & Player HUD** | `/ac hud` | Standalone popout compact unit frames window with pulsing auto-attack aggro outline, target buffs, ToT, player vitals, multi-pet status, and right-click settings. |
+| 👥 **Popout Group Window** | `/ac group` | Standalone popout group window replacing EQ's default group window with auto-scaling vitals, role & leader badges, pet tracking, offline/other-zone states, and right-click settings. |
+| ⚔️ **Popout XTarget Window** | `/ac xtar` | Standalone popout extended target window replacing EQ's default with auto-scaling health bars, current target highlight, ToT, aggro %, distance, LoS, and right-click settings. |
+| 🔮 **Popout Spell Gem Bar** | `/ac gems` | Standalone popout spell gem bar window replacing EQ's default with dual orientations (Vertical/Horizontal), Compact vs Full layouts, live recast overlays, casting progress, and right-click spell inspection. |
 | 🎛️ **Hot Buttons Toolbar** | `/lua run triune_buttons` | Standalone ImGui tabbed hot button toolbar (ButtonMaster-style) replacing EQ's default hotbars with tabs, icon animations, live cooldown overlays, 1-click button creation from cursor, and multi-line macro execution. |
 | 🗺️ **2D Map & Norrath Atlas** | `/ac map` | Interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, and Point of Interest locator. |
 | 🧙 **Spellbook Browser** | `/ac spellbook` | Browse and search all spells across all 3 of your character's classes, filter by level or type, and assign them to your loadout with one click. |
@@ -232,7 +236,12 @@ You can control almost everything using simple in-game chat commands:
 | `/ac memall` | `/ac mem`, `/ac remem` | Queue all missing or mismatched priority spells to memorization bar |
 | `/ac importbar` | `/ac import`, `/ac importgems` | Auto-populate spell lines from currently memorized spell gems |
 | `/ac debug` | `/ac diag`, `/ac debugmode` | Toggle live combat debug telemetry in chat |
-| `/ac compact` | `/ac mini`, `/ac hud` | Toggle the compact Mini HUD |
+| `/ac compact` | `/ac mini` | Toggle the compact Mini HUD |
+| `/ac hud` | `/ac uf`, `/ac unitframes`, `/ac targetwin` | Toggle the popout Target & Player HUD unit frames window |
+| `/ac group` | `/ac gw`, `/ac groupwin` | Toggle the popout Group Window |
+| `/ac eff` | `/ac effects`, `/ac buffs`, `/ac songs` | Toggle the popout Effects & Songs Window (unified buffs, songs, timers, and icons) |
+| `/ac xtar` | `/ac xt`, `/ac xtarget`, `/ac xtwin` | Toggle the popout Extended Target (XTarget) window |
+| `/ac gems` | `/ac gembar`, `/ac spellbar`, `/ac castbar` | Toggle the popout Spell Gem Bar window |
 | `/ac cd` | `/ac cooldowns`, `/ac cds` | Toggle the popout Cooldown & Ability Monitor window |
 | `/ac status` | | Print current status and mode to chat |
 | `/ac help` | `/ac ?` | Show command help in chat |
@@ -333,6 +342,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **2.03**
+Current version: **2.08**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.
