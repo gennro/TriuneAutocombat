@@ -783,6 +783,82 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
             augTypeVal = tonumber(itemObj.AugType()) or 0
         end)
 
+        -- Collect extended stats in a second pcall to avoid aborting on missing members
+        local ext = {}
+        pcall(function()
+            ext.endurance = tonumber(itemObj.Endurance()) or 0
+            ext.norent = itemObj.NoRent() or false
+            ext.magic = itemObj.Magic() or false
+            ext.attunable = itemObj.Attunable() or false
+            ext.range = tonumber(itemObj.Range()) or 0
+            ext.str = tonumber(itemObj.STR()) or 0
+            ext.sta = tonumber(itemObj.STA()) or 0
+            ext.agi = tonumber(itemObj.AGI()) or 0
+            ext.dex = tonumber(itemObj.DEX()) or 0
+            ext.wis = tonumber(itemObj.WIS()) or 0
+            ext.int = tonumber(itemObj.INT()) or 0
+            ext.cha = tonumber(itemObj.CHA()) or 0
+            ext.heroicStr = tonumber(itemObj.HeroicSTR()) or 0
+            ext.heroicSta = tonumber(itemObj.HeroicSTA()) or 0
+            ext.heroicAgi = tonumber(itemObj.HeroicAGI()) or 0
+            ext.heroicDex = tonumber(itemObj.HeroicDEX()) or 0
+            ext.heroicWis = tonumber(itemObj.HeroicWIS()) or 0
+            ext.heroicInt = tonumber(itemObj.HeroicINT()) or 0
+            ext.heroicCha = tonumber(itemObj.HeroicCHA()) or 0
+            ext.svMagic = tonumber(itemObj.svMagic()) or 0
+            ext.svFire = tonumber(itemObj.svFire()) or 0
+            ext.svCold = tonumber(itemObj.svCold()) or 0
+            ext.svDisease = tonumber(itemObj.svDisease()) or 0
+            ext.svPoison = tonumber(itemObj.svPoison()) or 0
+            ext.svCorruption = tonumber(itemObj.svCorruption()) or 0
+            ext.hpRegen = tonumber(itemObj.HPRegen()) or 0
+            ext.manaRegen = tonumber(itemObj.ManaRegen()) or 0
+            ext.endRegen = tonumber(itemObj.EnduranceRegen()) or 0
+            ext.attack = tonumber(itemObj.Attack()) or 0
+            ext.haste = tonumber(itemObj.Haste()) or 0
+            ext.accuracy = tonumber(itemObj.Accuracy()) or 0
+            ext.avoidance = tonumber(itemObj.Avoidance()) or 0
+            ext.combatEffects = tonumber(itemObj.CombatEffects()) or 0
+            ext.shielding = tonumber(itemObj.Shielding()) or 0
+            ext.spellShield = tonumber(itemObj.SpellShield()) or 0
+            ext.strikeThrough = tonumber(itemObj.StrikeThrough()) or 0
+            ext.stunResist = tonumber(itemObj.StunResist()) or 0
+            ext.damShield = tonumber(itemObj.DamShield()) or 0
+            ext.dotShielding = tonumber(itemObj.DoTShielding()) or 0
+            ext.dsm = tonumber(itemObj.DamageShieldMitigation()) or 0
+            ext.healAmount = tonumber(itemObj.HealAmount()) or 0
+            ext.spellDamage = tonumber(itemObj.SpellDamage()) or 0
+            ext.clairvoyance = tonumber(itemObj.Clairvoyance()) or 0
+            ext.purity = tonumber(itemObj.Purity()) or 0
+            ext.requiredLevel = tonumber(itemObj.RequiredLevel()) or 0
+            ext.instrumentMod = tonumber(itemObj.InstrumentMod()) or 0
+            ext.tribute = tonumber(itemObj.Tribute()) or 0
+            local dbt = itemObj.DMGBonusType()
+            if dbt and dbt ~= '' and dbt ~= 'None' then ext.dmgBonusType = tostring(dbt) end
+            local onWorn = itemObj.Worn
+            if onWorn and type(onWorn) == 'function' then onWorn = onWorn() end
+            if onWorn then
+                pcall(function()
+                    local sp = onWorn.Spell
+                    if sp and sp() then
+                        local sn = sp.Name()
+                        if sn and sn ~= '' then ext.wornEffect = tostring(sn) end
+                    end
+                end)
+            end
+            local onFocus = itemObj.Focus
+            if onFocus and type(onFocus) == 'function' then onFocus = onFocus() end
+            if onFocus then
+                pcall(function()
+                    local sp = onFocus.Spell
+                    if sp and sp() then
+                        local sn = sp.Name()
+                        if sn and sn ~= '' then ext.focusEffect = tostring(sn) end
+                    end
+                end)
+            end
+        end)
+
         def = {
             id = itemId,
             icon = iconId,
@@ -803,6 +879,33 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
             damage = dmgVal,
             delay = dlyVal,
             augType = augTypeVal,
+            -- Extended stats from second pcall
+            endurance = ext.endurance or 0,
+            norent = ext.norent or false,
+            magic = ext.magic or false,
+            attunable = ext.attunable or false,
+            range = ext.range or 0,
+            str = ext.str or 0, sta = ext.sta or 0, agi = ext.agi or 0, dex = ext.dex or 0,
+            wis = ext.wis or 0, int = ext.int or 0, cha = ext.cha or 0,
+            heroicStr = ext.heroicStr or 0, heroicSta = ext.heroicSta or 0,
+            heroicAgi = ext.heroicAgi or 0, heroicDex = ext.heroicDex or 0,
+            heroicWis = ext.heroicWis or 0, heroicInt = ext.heroicInt or 0, heroicCha = ext.heroicCha or 0,
+            svMagic = ext.svMagic or 0, svFire = ext.svFire or 0, svCold = ext.svCold or 0,
+            svDisease = ext.svDisease or 0, svPoison = ext.svPoison or 0, svCorruption = ext.svCorruption or 0,
+            hpRegen = ext.hpRegen or 0, manaRegen = ext.manaRegen or 0, endRegen = ext.endRegen or 0,
+            attack = ext.attack or 0, haste = ext.haste or 0,
+            accuracy = ext.accuracy or 0, avoidance = ext.avoidance or 0,
+            combatEffects = ext.combatEffects or 0, shielding = ext.shielding or 0,
+            spellShield = ext.spellShield or 0, strikeThrough = ext.strikeThrough or 0,
+            stunResist = ext.stunResist or 0, damShield = ext.damShield or 0,
+            dotShielding = ext.dotShielding or 0, dsm = ext.dsm or 0,
+            healAmount = ext.healAmount or 0, spellDamage = ext.spellDamage or 0,
+            clairvoyance = ext.clairvoyance or 0, purity = ext.purity or 0,
+            requiredLevel = ext.requiredLevel or 0,
+            instrumentMod = ext.instrumentMod or 0, tribute = ext.tribute or 0,
+            dmgBonusType = ext.dmgBonusType,
+            wornEffect = ext.wornEffect,
+            focusEffect = ext.focusEffect,
         }
         def.category = invLogic.classifyItem(def)
         state.itemDefs[itemId] = def
@@ -904,6 +1007,33 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         delay = def.delay,
         augType = def.augType,
         augs = augs,
+        -- Extended stats
+        endurance = def.endurance,
+        norent = def.norent,
+        magic = def.magic,
+        attunable = def.attunable,
+        range = def.range,
+        str = def.str, sta = def.sta, agi = def.agi, dex = def.dex,
+        wis = def.wis, int = def.int, cha = def.cha,
+        heroicStr = def.heroicStr, heroicSta = def.heroicSta,
+        heroicAgi = def.heroicAgi, heroicDex = def.heroicDex,
+        heroicWis = def.heroicWis, heroicInt = def.heroicInt, heroicCha = def.heroicCha,
+        svMagic = def.svMagic, svFire = def.svFire, svCold = def.svCold,
+        svDisease = def.svDisease, svPoison = def.svPoison, svCorruption = def.svCorruption,
+        hpRegen = def.hpRegen, manaRegen = def.manaRegen, endRegen = def.endRegen,
+        attack = def.attack, haste = def.haste,
+        accuracy = def.accuracy, avoidance = def.avoidance,
+        combatEffects = def.combatEffects, shielding = def.shielding,
+        spellShield = def.spellShield, strikeThrough = def.strikeThrough,
+        stunResist = def.stunResist, damShield = def.damShield,
+        dotShielding = def.dotShielding, dsm = def.dsm,
+        healAmount = def.healAmount, spellDamage = def.spellDamage,
+        clairvoyance = def.clairvoyance, purity = def.purity,
+        requiredLevel = def.requiredLevel,
+        instrumentMod = def.instrumentMod, tribute = def.tribute,
+        dmgBonusType = def.dmgBonusType,
+        wornEffect = def.wornEffect,
+        focusEffect = def.focusEffect,
     }
 end
 
@@ -1318,41 +1448,168 @@ end
 
 function UI.drawTooltip(it)
     ImGui.BeginTooltip()
+
+    -- Item name in gold
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], it.name or 'Item')
     ImGui.TextDisabled(string.format("ID: %d | Type: %s | Location: %s", it.id or 0, it.type or 'Misc', it.displayLocation or ''))
+
+    -- Tags line
+    local tags = {}
+    if it.magic then table.insert(tags, 'MAGIC ITEM') end
+    if it.lore then table.insert(tags, 'LORE ITEM') end
+    if it.nodrop then table.insert(tags, 'NO TRADE') end
+    if it.norent then table.insert(tags, 'NO RENT') end
+    if it.attunable then table.insert(tags, 'ATTUNEABLE') end
+    if it.tradeskill then table.insert(tags, 'TRADESKILL') end
+    if it.stackable then table.insert(tags, string.format('STACKABLE (%d/%d)', it.count or 1, it.stackSize or 1)) end
+    if #tags > 0 then
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], table.concat(tags, '  '))
+    end
+
+    -- Required level
+    if (it.requiredLevel or 0) > 0 then
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format('Required Level: %d', it.requiredLevel))
+    end
+
     ImGui.Separator()
 
-    if it.damage and it.damage > 0 then
-        ImGui.Text(string.format("Damage: %d   Delay: %d", it.damage, it.delay or 0))
-    end
-    if it.ac and it.ac > 0 then
-        ImGui.Text(string.format("AC: %d", it.ac))
-    end
-    if (it.hp and it.hp > 0) or (it.mana and it.mana > 0) then
-        ImGui.Text(string.format("HP: +%d   Mana: +%d", it.hp or 0, it.mana or 0))
-    end
-
-    if it.clicky and it.clicky ~= '' then
-        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Effect: " .. it.clicky)
+    -- Weapon stats
+    if (it.damage or 0) > 0 then
+        local dmgLine = string.format('Damage: %d    Delay: %d', it.damage, it.delay or 0)
+        if (it.range or 0) > 0 then dmgLine = dmgLine .. string.format('    Range: %d', it.range) end
+        ImGui.Text(dmgLine)
+        if it.dmgBonusType then
+            ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'DMG Type: ' .. it.dmgBonusType)
+        end
     end
 
+    -- AC
+    if (it.ac or 0) > 0 then
+        ImGui.Text(string.format('AC: %d', it.ac))
+    end
+
+    -- HP / Mana / End
+    local hasPool = ((it.hp or 0) ~= 0) or ((it.mana or 0) ~= 0) or ((it.endurance or 0) ~= 0)
+    if hasPool then
+        local poolParts = {}
+        if (it.hp or 0) ~= 0 then table.insert(poolParts, string.format('HP: %+d', it.hp)) end
+        if (it.mana or 0) ~= 0 then table.insert(poolParts, string.format('Mana: %+d', it.mana)) end
+        if (it.endurance or 0) ~= 0 then table.insert(poolParts, string.format('End: %+d', it.endurance)) end
+        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], table.concat(poolParts, '   '))
+    end
+
+    -- Base stats
+    local statNames = { 'STR', 'STA', 'AGI', 'DEX', 'WIS', 'INT', 'CHA' }
+    local statKeys = { 'str', 'sta', 'agi', 'dex', 'wis', 'int', 'cha' }
+    local heroicKeys = { 'heroicStr', 'heroicSta', 'heroicAgi', 'heroicDex', 'heroicWis', 'heroicInt', 'heroicCha' }
+    local hasAnyStat = false
+    for i = 1, #statKeys do
+        if (it[statKeys[i]] or 0) ~= 0 or (it[heroicKeys[i]] or 0) ~= 0 then hasAnyStat = true break end
+    end
+    if hasAnyStat then
+        local statParts = {}
+        for i = 1, #statKeys do
+            local base = it[statKeys[i]] or 0
+            local hero = it[heroicKeys[i]] or 0
+            if base ~= 0 or hero ~= 0 then
+                local s = string.format('%s: %+d', statNames[i], base)
+                if hero ~= 0 then s = s .. string.format(' (+%d)', hero) end
+                table.insert(statParts, s)
+            end
+        end
+        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], table.concat(statParts, '   '))
+    end
+
+    -- Resists
+    local resNames = { 'Magic', 'Fire', 'Cold', 'Disease', 'Poison', 'Corrupt' }
+    local resKeys = { 'svMagic', 'svFire', 'svCold', 'svDisease', 'svPoison', 'svCorruption' }
+    local hasAnyRes = false
+    for i = 1, #resKeys do
+        if (it[resKeys[i]] or 0) ~= 0 then hasAnyRes = true break end
+    end
+    if hasAnyRes then
+        local resParts = {}
+        for i = 1, #resKeys do
+            local v = it[resKeys[i]] or 0
+            if v ~= 0 then table.insert(resParts, string.format('SV %s: %+d', resNames[i], v)) end
+        end
+        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], table.concat(resParts, '   '))
+    end
+
+    -- Regen
+    local hasRegen = ((it.hpRegen or 0) ~= 0) or ((it.manaRegen or 0) ~= 0) or ((it.endRegen or 0) ~= 0)
+    if hasRegen then
+        local regenParts = {}
+        if (it.hpRegen or 0) ~= 0 then table.insert(regenParts, string.format('HP Regen: %+d', it.hpRegen)) end
+        if (it.manaRegen or 0) ~= 0 then table.insert(regenParts, string.format('Mana Regen: %+d', it.manaRegen)) end
+        if (it.endRegen or 0) ~= 0 then table.insert(regenParts, string.format('End Regen: %+d', it.endRegen)) end
+        ImGui.Text(table.concat(regenParts, '   '))
+    end
+
+    -- Combat modifiers
+    local combatMods = {}
+    if (it.attack or 0) ~= 0 then table.insert(combatMods, string.format('Attack: %+d', it.attack)) end
+    if (it.haste or 0) ~= 0 then table.insert(combatMods, string.format('Haste: %+d%%', it.haste)) end
+    if (it.accuracy or 0) ~= 0 then table.insert(combatMods, string.format('Accuracy: %+d', it.accuracy)) end
+    if (it.avoidance or 0) ~= 0 then table.insert(combatMods, string.format('Avoidance: %+d', it.avoidance)) end
+    if (it.combatEffects or 0) ~= 0 then table.insert(combatMods, string.format('Combat Effects: %+d', it.combatEffects)) end
+    if (it.strikeThrough or 0) ~= 0 then table.insert(combatMods, string.format('Strikethrough: %+d', it.strikeThrough)) end
+    if (it.stunResist or 0) ~= 0 then table.insert(combatMods, string.format('Stun Resist: %+d', it.stunResist)) end
+    if #combatMods > 0 then
+        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], table.concat(combatMods, '   '))
+    end
+
+    -- Defensive modifiers
+    local defMods = {}
+    if (it.shielding or 0) ~= 0 then table.insert(defMods, string.format('Shielding: %+d', it.shielding)) end
+    if (it.spellShield or 0) ~= 0 then table.insert(defMods, string.format('Spell Shield: %+d', it.spellShield)) end
+    if (it.dotShielding or 0) ~= 0 then table.insert(defMods, string.format('DoT Shield: %+d', it.dotShielding)) end
+    if (it.damShield or 0) ~= 0 then table.insert(defMods, string.format('Dam Shield: %+d', it.damShield)) end
+    if (it.dsm or 0) ~= 0 then table.insert(defMods, string.format('DS Mit: %+d', it.dsm)) end
+    if #defMods > 0 then
+        ImGui.Text(table.concat(defMods, '   '))
+    end
+
+    -- Caster modifiers
+    local castMods = {}
+    if (it.healAmount or 0) ~= 0 then table.insert(castMods, string.format('Heal Amt: %+d', it.healAmount)) end
+    if (it.spellDamage or 0) ~= 0 then table.insert(castMods, string.format('Spell Dmg: %+d', it.spellDamage)) end
+    if (it.clairvoyance or 0) ~= 0 then table.insert(castMods, string.format('Clairvoyance: %+d', it.clairvoyance)) end
+    if #castMods > 0 then
+        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], table.concat(castMods, '   '))
+    end
+
+    -- Purity / Instrument
+    local miscMods = {}
+    if (it.purity or 0) > 0 then table.insert(miscMods, string.format('Purity: %d', it.purity)) end
+    if (it.instrumentMod or 0) > 0 then table.insert(miscMods, string.format('Instrument: %d', it.instrumentMod)) end
+    if #miscMods > 0 then
+        ImGui.Text(table.concat(miscMods, '   '))
+    end
+
+    -- Spell Effects
+    if it.clicky or it.wornEffect or it.focusEffect then
+        ImGui.Separator()
+        if it.clicky then ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Click: ' .. it.clicky) end
+        if it.wornEffect then ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Worn: ' .. it.wornEffect) end
+        if it.focusEffect then ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Focus: ' .. it.focusEffect) end
+    end
+
+    -- Augments
     local augText = invLogic.formatAugs(it)
     if augText ~= '' then
-        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Augs: " .. augText)
+        ImGui.Separator()
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Augs: ' .. augText)
     end
 
-    local tags = {}
-    if it.lore then table.insert(tags, "LORE") end
-    if it.nodrop then table.insert(tags, "NO TRADE") end
-    if it.tradeskill then table.insert(tags, "TRADESKILL") end
-    if it.stackable then table.insert(tags, string.format("STACKABLE (%d/%d)", it.count or 1, it.stackSize or 1)) end
-    if #tags > 0 then
-        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], table.concat(tags, " | "))
-    end
-
-    ImGui.TextDisabled(string.format("Weight: %.1f | Value: %s", it.weight or 0, invLogic.formatMoney(it.value or 0)))
+    -- Weight / Value / Tribute
     ImGui.Separator()
-    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Left-Click: Pick up / Place | Right-Click: Inspect | Drag: Move")
+    local footer = string.format('Weight: %.1f | Value: %s', it.weight or 0, invLogic.formatMoney(it.value or 0))
+    if (it.tribute or 0) > 0 then footer = footer .. string.format(' | Tribute: %d', it.tribute) end
+    ImGui.TextDisabled(footer)
+
+    -- Interaction hint
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Left-Click: Pick up / Place | Right-Click: Inspect | Drag: Move')
     ImGui.EndTooltip()
 end
 

@@ -208,6 +208,7 @@ Triune comes packed with handy standalone tools you can open right from the main
 | 👥 **Popout Group Window** | `/ac group` | Standalone popout group window replacing EQ's default group window with auto-scaling vitals, role & leader badges, pet tracking, offline/other-zone states, and right-click settings. |
 | ⚔️ **Popout XTarget Window** | `/ac xtar` | Standalone popout extended target window replacing EQ's default with auto-scaling health bars, current target highlight, ToT, aggro %, distance, LoS, and right-click settings. |
 | 🔮 **Popout Spell Gem Bar** | `/ac gems` | Standalone popout spell gem bar window replacing EQ's default with dual orientations (Vertical/Horizontal), Compact vs Full layouts, live recast overlays, casting progress, and right-click spell inspection. |
+| 🪪 **Popout Character Window** | `/ac char` | Standalone popout Character Stats + Inventory + Alternate Currency window replacing EQ's default player/stats/inventory: authentic in-game inventory stat page replication (Current Status, Basic Stats, Spell Resists, Advanced Item Stats, Advanced Character Stats), worn equipment, all bag grids, full item management (pickup/place/swap, drag-drop, inspect, auto-inventory), and currency list. |
 | 🎛️ **Hot Buttons Toolbar** | `/lua run triune_buttons` | Standalone ImGui tabbed hot button toolbar (ButtonMaster-style) replacing EQ's default hotbars with tabs, icon animations, live cooldown overlays, 1-click button creation from cursor, and multi-line macro execution. |
 | 🗺️ **2D Map & Norrath Atlas** | `/ac map` | Interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, and Point of Interest locator. |
 | 🧙 **Spellbook Browser** | `/ac spellbook` | Browse and search all spells across all 3 of your character's classes, filter by level or type, and assign them to your loadout with one click. |
@@ -242,7 +243,9 @@ You can control almost everything using simple in-game chat commands:
 | `/ac eff` | `/ac effects`, `/ac buffs`, `/ac songs` | Toggle the popout Effects & Songs Window (unified buffs, songs, timers, and icons) |
 | `/ac xtar` | `/ac xt`, `/ac xtarget`, `/ac xtwin` | Toggle the popout Extended Target (XTarget) window |
 | `/ac gems` | `/ac gembar`, `/ac spellbar`, `/ac castbar` | Toggle the popout Spell Gem Bar window |
+| `/ac char [sync|skills]` | `/ac charwin`, `/ac character`, `/ac inventory`, `/ac stats`, `/ac gear`, `/ac currency` | Toggle the popout Character Stats, Inventory & Currency window (or sync stats / toggle skills window) |
 | `/ac cd` | `/ac cooldowns`, `/ac cds` | Toggle the popout Cooldown & Ability Monitor window |
+| `/ac winpos [save\|restore\|reset]` | `/ac savewindows`, `/ac restorewindows` | Save or restore popout window screen coordinates and dimensions |
 | `/ac status` | | Print current status and mode to chat |
 | `/ac help` | `/ac ?` | Show command help in chat |
 | `/ac <mode> [submode]` | | Switch mode (e.g. `/ac manual`, `/ac puller camp`, `/ac assist chase`, `/ac backline`) |
@@ -342,6 +345,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **2.08**
+Current version: **2.11**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

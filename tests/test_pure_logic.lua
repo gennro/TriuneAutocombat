@@ -2116,7 +2116,7 @@ local decayZones = loadFunc(src, 'decayZoneHazards', {
 -- hazard timestamps align with the fake clock.
 local realOsTime = os.time
 local fakeClock = 100000
-os.time = function() return fakeClock end
+rawset(os, 'time', function() return fakeClock end)
 
 -- Cap: repeated stuck events cannot push hits past nav_hazard_max_hits
 decayRecord(100, 200, 10, 'poknowledge')
@@ -2149,7 +2149,7 @@ local faded2 = decayZones('poknowledge')
 assert_eq(faded2, 1, 'decay: final decay removed hazard')
 assert_eq(#decayGetZoneHazards('poknowledge'), 0, 'decay: hazard forgotten at 0 hits')
 
-os.time = realOsTime
+rawset(os, 'time', realOsTime)
 end
 
 -- ============================================================================
@@ -7638,34 +7638,31 @@ do
         local dead = false
         local stype = ''
         local state = ''
-        local curHp = nil
         pcall(function()
             dead = s.Dead and s.Dead() or false
             stype = s.Type and s.Type() or ''
             state = s.State and s.State() or ''
-            curHp = s.CurrentHPs and s.CurrentHPs()
         end)
-        return dead or stype == 'Corpse' or state == 'DEAD' or (curHp and curHp <= 0)
+        return dead or stype == 'Corpse' or state == 'DEAD'
     end
 
-    local livingMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 500 end }
-    local dyingZeroHp = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'FEIGN' end, CurrentHPs = function() return 0 end }
-    local dyingNegHp = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return -10 end }
-    local deadStateMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'DEAD' end, CurrentHPs = function() return 100 end }
+    local livingMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 500 end, PctHPs = function() return 50 end }
+    local livingZeroHpMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 0 end, PctHPs = function() return 0 end }
+    local deadStateMob = { Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'DEAD' end, CurrentHPs = function() return 0 end }
     local corpseMob = { Dead = function() return false end, Type = function() return 'Corpse' end, State = function() return 'DEAD' end, CurrentHPs = function() return 0 end }
-    local deadFlagMob = { Dead = function() return true end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 100 end }
+    local deadFlagMob = { Dead = function() return true end, Type = function() return 'NPC' end, State = function() return 'STAND' end, CurrentHPs = function() return 0 end }
 
     assert_true(not isDeadSpawn(livingMob), 'Suite 66: living mob is not dead')
-    assert_true(isDeadSpawn(dyingZeroHp), 'Suite 66: 0 HP mob is recognized as dead')
-    assert_true(isDeadSpawn(dyingNegHp), 'Suite 66: negative HP mob is recognized as dead')
+    assert_true(not isDeadSpawn(livingZeroHpMob), 'Suite 66: 0 HP / 0% health living mob is not dead (0% health does not mean dead)')
     assert_true(isDeadSpawn(deadStateMob), 'Suite 66: DEAD state mob is recognized as dead')
     assert_true(isDeadSpawn(corpseMob), 'Suite 66: Corpse type mob is recognized as dead')
     assert_true(isDeadSpawn(deadFlagMob), 'Suite 66: Dead() == true mob is recognized as dead')
 
-    -- 2. XTarget filtering skips dead / 0 HP mobs
+    -- 2. XTarget retains 0% HP living mobs and filters truly dead mobs
     local mockXtar = {
-        { id = 101, spawn = dyingZeroHp },
-        { id = 102, spawn = livingMob },
+        { id = 101, spawn = corpseMob },
+        { id = 102, spawn = livingZeroHpMob },
+        { id = 103, spawn = livingMob },
     }
     local function findFirstAliveXtar(xtars)
         for _, entry in ipairs(xtars) do
@@ -7675,11 +7672,11 @@ do
         end
         return nil
     end
-    assert_eq(findFirstAliveXtar(mockXtar), 102, 'Suite 66: skips 0 HP mob on XTarget and picks alive mob')
+    assert_eq(findFirstAliveXtar(mockXtar), 102, 'Suite 66: retains 0% HP living mob on XTarget and skips corpse')
 
-    -- 3. countNPCXtarget logic returns 0 when only dead mobs linger
+    -- 3. countNPCXtarget logic returns 0 when only truly dead mobs linger
     local mockDeadOnlyXtar = {
-        { id = 101, spawn = dyingZeroHp },
+        { id = 101, spawn = deadStateMob },
         { id = 103, spawn = corpseMob },
     }
     local function countAliveNPCXtarget(xtars)
@@ -7710,7 +7707,7 @@ do
     local triuneContent = readFile('TAC/lua/triune.lua')
     assert_true(triuneContent:find("TriuneSlain1") ~= nil, 'Suite 66: triune.lua registers TriuneSlain1 event')
     assert_true(triuneContent:find("TriuneSlain2") ~= nil, 'Suite 66: triune.lua registers TriuneSlain2 event')
-    assert_true(triuneContent:find("curHp and curHp <= 0") ~= nil, 'Suite 66: triune.lua checks curHp <= 0')
+    assert_true(triuneContent:find("curHp and curHp <= 0") == nil, 'Suite 66: triune.lua does not falsely treat 0 HP as dead')
     assert_true(triuneContent:find("isDead = matches or t.Dead()") ~= nil, 'Suite 66: triune.lua detects slain mob target')
 end
 
@@ -8876,6 +8873,14 @@ do
         'Suite 76: Group window issues /invite command')
     assert_true(triuneContent:find("mq%.cmd%('/disband'%)") ~= nil,
         'Suite 76: Group window issues /disband command')
+
+    -- 6. Verify streamlined layout (class removed, LoS removed, percentage-only bars)
+    assert_true(triuneContent:find("%[Lvl %%d%] %%s") ~= nil,
+        'Suite 76: Member header tag removes player class')
+    assert_true(triuneContent:find("hpText = string%.format%('HP: %%d%%%%', mem%.hpPct or 0%)") ~= nil,
+        'Suite 76: Health bar displays percentage total only')
+    assert_true(triuneContent:find("manaText = string%.format%('Mana: %%d%%%%', mem%.manaPct or 0%)") ~= nil,
+        'Suite 76: Mana bar displays percentage total only')
 end
 
 -- ============================================================================
@@ -8883,11 +8888,11 @@ end
 -- ============================================================================
 do
     print('--- Suite 77: Popout Effects & Songs Window Logic & Configuration ---')
-    local fTriune = io.open('TAC/lua/triune.lua', 'r')
+    local fTriune = assert(io.open('TAC/lua/triune.lua', 'r'))
     local triuneContent = fTriune:read('*all')
     fTriune:close()
 
-    local fReadme = io.open('README.md', 'r')
+    local fReadme = assert(io.open('README.md', 'r'))
     local readmeContent = fReadme:read('*all')
     fReadme:close()
 
@@ -9016,8 +9021,8 @@ do
     -- 8. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.08', 'Suite 77: triune.lua VERSION is 2.08')
-    assert_eq(vReadme, '2.08', 'Suite 77: README.md version is 2.08')
+    assert_eq(vTriune, '2.11', 'Suite 77: triune.lua VERSION is 2.11')
+    assert_eq(vReadme, '2.11', 'Suite 77: README.md version is 2.11')
     assert_eq(vTriune, vReadme, 'Suite 77: Version numbers match across triune.lua and README.md')
 end
 
@@ -9026,11 +9031,11 @@ end
 -- ============================================================================
 print('--- Suite 78: Popout Extended Target (XTarget) Window Logic & Configuration ---')
 do
-    local fTriune = io.open('TAC/lua/triune.lua', 'r')
+    local fTriune = assert(io.open('TAC/lua/triune.lua', 'r'))
     local triuneContent = fTriune:read('*all')
     fTriune:close()
 
-    local fReadme = io.open('README.md', 'r')
+    local fReadme = assert(io.open('README.md', 'r'))
     local readmeContent = fReadme:read('*all')
     fReadme:close()
 
@@ -9085,8 +9090,8 @@ do
     -- 6. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.08', 'Suite 78: triune.lua VERSION is 2.08')
-    assert_eq(vReadme, '2.08', 'Suite 78: README.md version is 2.08')
+    assert_eq(vTriune, '2.11', 'Suite 78: triune.lua VERSION is 2.11')
+    assert_eq(vReadme, '2.11', 'Suite 78: README.md version is 2.11')
     assert_eq(vTriune, vReadme, 'Suite 78: Version numbers match across triune.lua and README.md')
 end
 
@@ -9095,11 +9100,11 @@ end
 -- ============================================================================
 print('--- Suite 79: Popout Spell Gem Bar Window Logic & Configuration ---')
 do
-    local fTriune = io.open('TAC/lua/triune.lua', 'r')
+    local fTriune = assert(io.open('TAC/lua/triune.lua', 'r'))
     local triuneContent = fTriune:read('*all')
     fTriune:close()
 
-    local fReadme = io.open('README.md', 'r')
+    local fReadme = assert(io.open('README.md', 'r'))
     local readmeContent = fReadme:read('*all')
     fReadme:close()
 
@@ -9183,9 +9188,417 @@ do
     -- 8. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.08', 'Suite 79: triune.lua VERSION is 2.08')
-    assert_eq(vReadme, '2.08', 'Suite 79: README.md version is 2.08')
+    assert_eq(vTriune, '2.11', 'Suite 79: triune.lua VERSION is 2.11')
+    assert_eq(vReadme, '2.11', 'Suite 79: README.md version is 2.11')
     assert_eq(vTriune, vReadme, 'Suite 79: Version numbers match across triune.lua and README.md')
+end
+
+-- ============================================================================
+-- Suite 80: Popout Character Stats, Inventory & Currency Window Logic
+-- ============================================================================
+print('--- Suite 80: Popout Character Stats, Inventory & Currency Window ---')
+do
+    local fTriune = assert(io.open('TAC/lua/triune.lua', 'r'))
+    local triuneContent = fTriune:read('*all')
+    fTriune:close()
+
+    -- 1. Verify defaultCtrl contains character window fields
+    assert_true(triuneContent:find('show_character_window%s*=%s*false') ~= nil,
+        'Suite 80: defaultCtrl.show_character_window default is false')
+    assert_true(triuneContent:find('char_lock%s*=%s*false') ~= nil,
+        'Suite 80: defaultCtrl.char_lock default is false')
+    assert_true(triuneContent:find('char_alpha%s*=%s*0.85') ~= nil,
+        'Suite 80: defaultCtrl.char_alpha default is 0.85')
+    assert_true(triuneContent:find('char_show_zerocur%s*=%s*false') ~= nil,
+        'Suite 80: defaultCtrl.char_show_zerocur default is false')
+    assert_true(triuneContent:find('char_slots_per_row%s*=%s*10') ~= nil,
+        'Suite 80: defaultCtrl.char_slots_per_row default is 10')
+
+    -- 2. Verify window initialization and draw function
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneCharacterWindow', UI%.drawCharacterWindow%)") ~= nil,
+        'Suite 80: TriuneCharacterWindow is registered via mq.imgui.init')
+    assert_true(triuneContent:find('function UI%.drawCharacterWindow%(%)') ~= nil,
+        'Suite 80: UI.drawCharacterWindow is defined in triune.lua')
+
+    -- 3. Verify toolbar buttons
+    assert_true(triuneContent:find("Character##hdrChar") ~= nil,
+        'Suite 80: Main toolbar contains Character toggle button')
+    assert_true(triuneContent:find("Char##miniChar") ~= nil,
+        'Suite 80: Mini GUI toolbar contains Char toggle button')
+
+    -- 4. Verify slash command handler
+    assert_true(triuneContent:find("cmd == 'char' or cmd == 'charwin' or cmd == 'charlua' or cmd == 'character' or cmd == 'inventory' or cmd == 'stats'") ~= nil,
+        'Suite 80: /ac char, /ac character, /ac inventory, and /ac stats slash commands are registered')
+
+    -- 5. Verify window context menu and settings
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##charContextMenu'%)") ~= nil,
+        'Suite 80: Character window has background options context menu')
+    assert_true(triuneContent:find('Lock Window Position & Size##charLock') ~= nil,
+        'Suite 80: Context menu supports locking window position & size')
+    assert_true(triuneContent:find('Show Zero-Count Currencies##charShowZero', 1, true) ~= nil,
+        'Suite 80: Context menu supports showing zero-count currencies')
+    assert_true(triuneContent:find('Bag Columns##charCols') ~= nil,
+        'Suite 80: Context menu supports per-window bag column count')
+    assert_true(triuneContent:find('Opacity##charAlpha') ~= nil,
+        'Suite 80: Context menu supports window opacity')
+
+    -- 6. Verify tabs
+    assert_true(triuneContent:find("BeginTabItem%('Stats##charStatsTab'%)") ~= nil,
+        'Suite 80: Stats tab is rendered')
+    assert_true(triuneContent:find("BeginTabItem%('Inventory##charInvTab'%)") ~= nil,
+        'Suite 80: Inventory tab is rendered')
+    assert_true(triuneContent:find("BeginTabItem%('Alternate Currency##charAltCurrTab'%)") ~= nil,
+        'Suite 80: Alternate Currency tab is rendered')
+
+    -- 7. Verify alt currency data source
+    assert_true(triuneContent:find('UI%.altCurrencyDefs') ~= nil,
+        'Suite 80: Alternate currency definitions are defined')
+    assert_true(triuneContent:find('RadiantCrystals') ~= nil,
+        'Suite 80: Alt currency list includes RadiantCrystals')
+    assert_true(triuneContent:find('UI%.readAltCurrencyAmount') ~= nil,
+        'Suite 80: Alt currency reader tries named members and AltCurrency keys')
+
+    -- 8. Verify item management executor queue (never blocks the draw frame)
+    assert_true(triuneContent:find('char_pendingAction') ~= nil,
+        'Suite 80: Character window queues item actions into char_pendingAction')
+    assert_true(triuneContent:find("/nomodkey /itemnotify") ~= nil,
+        'Suite 80: Item management executes via /nomodkey /itemnotify')
+    assert_true(triuneContent:find("QuantityWnd QTYW_Accept_Button") ~= nil,
+        'Suite 80: Stack split/merge accepts QuantityWnd')
+    assert_true(triuneContent:find("cmd == 'autoinv'") ~= nil,
+        'Suite 80: Auto-inventory cursor-to-bag action is supported')
+
+    -- 9. Verify worn gear grid & drag and drop payload
+    assert_true(triuneContent:find('UI%.wornSlotNames') ~= nil,
+        'Suite 80: Worn equipment slot-name table is defined')
+    assert_true(triuneContent:find("TRIUNE_CHAR_SLOT") ~= nil,
+        'Suite 80: Drag-drop payload type TRIUNE_CHAR_SLOT is used')
+    assert_true(triuneContent:find("for s = 0, 22 do") ~= nil,
+        'Suite 80: Worn gear grid iterates native slots 0..22')
+    assert_true(triuneContent:find("for p = 1, 10 do") ~= nil,
+        'Suite 80: Inventory iterates personal bags 1..10')
+
+    -- 10. Verify authentic EverQuest in-game inventory stat page replication
+    assert_true(triuneContent:find('UI%.C_EQ_HEADER') ~= nil,
+        'Suite 80: EQ stat header palette color is defined')
+    assert_true(triuneContent:find('UI%.readInvChildText') ~= nil,
+        'Suite 80: UI.readInvChildText helper is defined')
+    assert_true(triuneContent:find('UI%.drawEqSectionHeader') ~= nil,
+        'Suite 80: UI.drawEqSectionHeader is defined')
+    assert_true(triuneContent:find('UI%.drawEqSlashRow') ~= nil,
+        'Suite 80: UI.drawEqSlashRow is defined')
+    assert_true(triuneContent:find('UI%.drawEqValRow') ~= nil,
+        'Suite 80: UI.drawEqValRow is defined')
+    assert_true(triuneContent:find('UI%.drawEqStatCapRow') ~= nil,
+        'Suite 80: UI.drawEqStatCapRow is defined')
+    assert_true(triuneContent:find('UI%.drawEqModRow') ~= nil,
+        'Suite 80: UI.drawEqModRow is defined')
+
+    -- Verify all 5 authentic sections exist
+    assert_true(triuneContent:find("Current Status") ~= nil,
+        'Suite 80: Current Status section header rendered')
+    assert_true(triuneContent:find("Basic Stats") ~= nil,
+        'Suite 80: Basic Stats section header rendered')
+    assert_true(triuneContent:find("Spell Resists") ~= nil,
+        'Suite 80: Spell Resists section header rendered')
+    assert_true(triuneContent:find("Advanced Item Stats") ~= nil,
+        'Suite 80: Advanced Item Stats section header rendered')
+    assert_true(triuneContent:find("Advanced Character Stats") ~= nil,
+        'Suite 80: Advanced Character Stats section header rendered')
+
+    -- Verify key EQ child item names are queried
+    assert_true(triuneContent:find("IWS_CurrentArmorClass") ~= nil,
+        'Suite 80: IWS_CurrentArmorClass is queried for Combat Mitigation')
+    assert_true(triuneContent:find("IWS_CurrentAvoidanceClass") ~= nil,
+        'Suite 80: IWS_CurrentAvoidanceClass is queried for Combat Evasion')
+    assert_true(triuneContent:find("IWS_CurrentStrength") ~= nil,
+        'Suite 80: IWS_CurrentStrength is queried for Strength')
+    assert_true(triuneContent:find("IWS_CurrentMagic") ~= nil,
+        'Suite 80: IWS_CurrentMagic is queried for Magic resist')
+    assert_true(triuneContent:find("IWS_CurrentHealAmount") ~= nil,
+        'Suite 80: IWS_CurrentHealAmount is queried for Heal Amount')
+    assert_true(triuneContent:find("IWS_CurrentSpellCritRate") ~= nil,
+        'Suite 80: IWS_CurrentSpellCritRate is queried for Spell Crit Rate')
+    assert_true(triuneContent:find("IWS_CurrentPhysicalCritRatio") ~= nil,
+        'Suite 80: IWS_CurrentPhysicalCritRatio is queried for Physical Crit Modifier')
+
+    -- Verify stats sync and scanner
+    assert_true(triuneContent:find("runtime%.scanStatsFromInventoryWindow") ~= nil,
+        'Suite 80: runtime.scanStatsFromInventoryWindow is implemented')
+    assert_true(triuneContent:find("statSyncRequested") ~= nil,
+        'Suite 80: statSyncRequested asynchronous queue flag is present')
+    assert_true(triuneContent:find("Sync Stats##charSyncStatsBtn") ~= nil,
+        'Suite 80: Sync Stats button is present in Character Stats header')
+    assert_true(triuneContent:find("sub == 'sync' or sub == 'scan' or sub == 'refresh'") ~= nil,
+        'Suite 80: /ac char sync subcommand is supported')
+
+    -- Verify header excludes redundant TLO class and includes distinct XP/AAXP and AA controls
+    assert_true(triuneContent:find("'%s   Lv %d  %s'", 1, true) ~= nil,
+        'Suite 80: Character header omits redundant TLO class')
+    assert_true(triuneContent:find("EXP: %%.2f%%%%") ~= nil,
+        'Suite 80: Dedicated EXP progress bar is rendered')
+    assert_true(triuneContent:find("AA EXP: %%.2f%%%%") ~= nil,
+        'Suite 80: Dedicated AA EXP progress bar is rendered')
+    assert_true(triuneContent:find("AA Window##charOpenAABtn") ~= nil,
+        'Suite 80: AA Window open/toggle button is present near AAXP bar')
+    assert_true(triuneContent:find("Banked: %%d") ~= nil,
+        'Suite 80: Banked unspent AAs counter is displayed')
+    assert_true(triuneContent:find("Spent: %%d") ~= nil,
+        'Suite 80: Spent AAs counter is displayed')
+
+    -- Verify in-game Skills window button and toggler
+    assert_true(triuneContent:find("Skills##charOpenSkillsBtn") ~= nil,
+        'Suite 80: Skills button is present next to Sync Stats button')
+    assert_true(triuneContent:find("runtime%.toggleSkillsWindow") ~= nil,
+        'Suite 80: runtime.toggleSkillsWindow is implemented')
+    assert_true(triuneContent:find("runtime%.isSkillsWindowOpen") ~= nil,
+        'Suite 80: runtime.isSkillsWindowOpen is implemented')
+    assert_true(triuneContent:find("sub == 'skills' or sub == 'skill'") ~= nil,
+        'Suite 80: /ac char skills subcommand is supported')
+
+    -- Verify worn items narrower panel, larger slots (48px), and aligned captions
+    assert_true(triuneContent:find("function UI%.drawCharSlotCell%([^)]*customSize%)") ~= nil,
+        'Suite 80: UI.drawCharSlotCell accepts customSize parameter')
+    assert_true(triuneContent:find("local wornW = 215") ~= nil,
+        'Suite 80: Worn equipment child panel width is narrowed to 215px')
+    assert_true(triuneContent:find("local slotSize = 48") ~= nil,
+        'Suite 80: Worn equipment slot size is enlarged to 48px')
+    assert_true(triuneContent:find("local colStep = slotSize %+ colSpacing") ~= nil,
+        'Suite 80: Worn equipment column step layout is implemented')
+    assert_true(triuneContent:find("textX = posX %+ math%.floor%(%(slotSize %- tw%) / 2%)") ~= nil,
+        'Suite 80: Worn equipment captions are precisely centered below each slot')
+
+    -- Verify personal inventory right-click context menu and destroy confirmation modal
+    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%(string%.format%('##charItemCtx_%%s'") ~= nil,
+        'Suite 80: Right-click context menu is attached to personal bag item slots')
+    assert_true(triuneContent:find("Use / Click##charCtxUse_") ~= nil,
+        'Suite 80: Use / Click menu item is present in context menu')
+    assert_true(triuneContent:find("Inspect##charCtxInspect_") ~= nil,
+        'Suite 80: Inspect menu item is present in context menu')
+    assert_true(triuneContent:find("Destroy%.%.%.##charCtxDestroy_") ~= nil,
+        'Suite 80: Destroy... menu item is present in context menu')
+    assert_true(triuneContent:find("Confirm Destroy Item##charConfirmDestroyModal") ~= nil,
+        'Suite 80: Confirmation modal popup is implemented for item destruction')
+    assert_true(triuneContent:find("CONFIRM DESTROY##charConfirmDestroyBtn") ~= nil,
+        'Suite 80: CONFIRM DESTROY button is present in confirmation modal')
+    assert_true(triuneContent:find("mq%.cmd%('/destroy'%)") ~= nil,
+        'Suite 80: Multi-step destroy execution with cursor verification is wired in main loop')
+
+    -- Verify automatic character stats sync on worn equipment change
+    assert_true(triuneContent:find("function runtime%.checkWornItemsChanged%(") ~= nil,
+        'Suite 80: runtime.checkWornItemsChanged is implemented')
+    assert_true(triuneContent:find("runtime%.checkWornItemsChanged%(%)") ~= nil,
+        'Suite 80: runtime.checkWornItemsChanged is periodically evaluated in main loop')
+    assert_true(triuneContent:find("Worn equipment change detected%. Triggering character stats sync%.%.%.") ~= nil,
+        'Suite 80: Log notification is emitted on worn equipment change')
+
+    -- Pure logic verification of checkWornItemsChanged algorithm
+    local testRuntime = {}
+    testRuntime.checkWornItemsChanged = function(mockSlots)
+        local changed = false
+        local firstRun = (testRuntime.lastWornItemIds == nil)
+        testRuntime.lastWornItemIds = testRuntime.lastWornItemIds or {}
+        for s = 0, 22 do
+            local id = mockSlots[s] or 0
+            if not firstRun and testRuntime.lastWornItemIds[s] ~= nil and testRuntime.lastWornItemIds[s] ~= id then
+                changed = true
+            end
+            testRuntime.lastWornItemIds[s] = id
+        end
+        return changed
+    end
+
+    local initialSlots = {}
+    for s = 0, 22 do initialSlots[s] = 1000 + s end
+    assert_eq(testRuntime.checkWornItemsChanged(initialSlots), false,
+        'Suite 80: First run of checkWornItemsChanged establishes baseline without false trigger')
+    assert_eq(testRuntime.checkWornItemsChanged(initialSlots), false,
+        'Suite 80: Unchanged worn items returns false')
+
+    local swappedSlots = {}
+    for s = 0, 22 do swappedSlots[s] = 1000 + s end
+    swappedSlots[13] = 9999 -- swapped main hand weapon
+    assert_eq(testRuntime.checkWornItemsChanged(swappedSlots), true,
+        'Suite 80: Swapping worn item in slot 13 correctly triggers changed == true')
+    assert_eq(testRuntime.checkWornItemsChanged(swappedSlots), false,
+        'Suite 80: Subsequent check after swap returns false')
+end
+
+-- ============================================================================
+-- Suite 81: Window Settings & Position Save/Restore Logic
+-- ============================================================================
+print('--- Suite 81: Window Settings & Position Save/Restore Logic ---')
+do
+    local fTriune = assert(io.open('TAC/lua/triune.lua', 'r'))
+    local triuneContent = fTriune:read('*all')
+    fTriune:close()
+
+    local fReadme = assert(io.open('README.md', 'r'))
+    local readmeContent = fReadme:read('*all')
+    fReadme:close()
+
+    -- 1. Verify defaultCtrl contains window position fields
+    assert_true(triuneContent:find('saved_window_positions%s*=%s*{}') ~= nil,
+        'Suite 81: defaultCtrl.saved_window_positions default is empty table')
+    assert_true(triuneContent:find('winpos_auto_restore_on_resize%s*=%s*true') ~= nil,
+        'Suite 81: defaultCtrl.winpos_auto_restore_on_resize default is true')
+    assert_true(triuneContent:find('winpos_restore_visibility%s*=%s*false') ~= nil,
+        'Suite 81: defaultCtrl.winpos_restore_visibility default is false')
+
+    -- 2. Verify runtime.MANAGED_WINDOWS registry covers all 9 windows
+    local expectedKeys = { 'main', 'mini', 'unit_frames', 'group', 'effects', 'cooldowns', 'xtarget', 'spell_gems', 'character' }
+    for _, k in ipairs(expectedKeys) do
+        assert_true(triuneContent:find("key%s*=%s*'" .. k .. "'") ~= nil,
+            'Suite 81: runtime.MANAGED_WINDOWS tracks window key ' .. k)
+    end
+
+    -- 3. Verify window position hooks
+    assert_true(triuneContent:find('function UI%.preBeginWindow%(winKey%)') ~= nil,
+        'Suite 81: UI.preBeginWindow is defined')
+    assert_true(triuneContent:find('function UI%.postBeginWindow%(winKey%)') ~= nil,
+        'Suite 81: UI.postBeginWindow is defined')
+    for _, k in ipairs(expectedKeys) do
+        assert_true(triuneContent:find("UI%.preBeginWindow%('" .. k .. "'%)") ~= nil,
+            'Suite 81: UI.preBeginWindow is hooked for ' .. k)
+        assert_true(triuneContent:find("UI%.postBeginWindow%('" .. k .. "'%)") ~= nil,
+            'Suite 81: UI.postBeginWindow is hooked for ' .. k)
+    end
+
+    -- 4. Verify save, restore, center, and reset logic
+    assert_true(triuneContent:find('function runtime%.saveWindowPositions%(') ~= nil,
+        'Suite 81: runtime.saveWindowPositions is defined')
+    assert_true(triuneContent:find('function runtime%.triggerRestoreWindows%(') ~= nil,
+        'Suite 81: runtime.triggerRestoreWindows is defined')
+    assert_true(triuneContent:find('function runtime%.resetWindowPositionsToDefault%(') ~= nil,
+        'Suite 81: runtime.resetWindowPositionsToDefault is defined')
+    assert_true(triuneContent:find('function runtime%.centerWindow%(') ~= nil,
+        'Suite 81: runtime.centerWindow is defined')
+    assert_true(triuneContent:find('function runtime%.checkDisplaySizeChange%(') ~= nil,
+        'Suite 81: runtime.checkDisplaySizeChange handles display resolution/monitor recovery')
+
+    -- 5. Verify Settings subtab and drawWindowSettings
+    assert_true(triuneContent:find("Window Settings##settingsWindows") ~= nil,
+        'Suite 81: Settings tab has Window Settings subtab')
+    assert_true(triuneContent:find('function UI%.drawWindowSettings%(%)') ~= nil,
+        'Suite 81: UI.drawWindowSettings is defined')
+    assert_true(triuneContent:find("ManagedWinTable") ~= nil,
+        'Suite 81: Window Settings tab renders ManagedWinTable')
+
+    -- 6. Verify slash command handler
+    assert_true(triuneContent:find("cmd == 'winpos' or cmd == 'windows' or cmd == 'window'") ~= nil,
+        'Suite 81: /ac winpos slash command is registered')
+
+    -- 7. Verify version sync
+    local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
+    local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
+    assert_eq(vTriune, '2.11', 'Suite 81: triune.lua VERSION is 2.11')
+    assert_eq(vReadme, '2.11', 'Suite 81: README.md version is 2.11')
+    assert_eq(vTriune, vReadme, 'Suite 81: Version numbers match across triune.lua and README.md')
+end
+
+-- ============================================================================
+-- Suite 82: Auto AA Cross-Class Stub Rejection & 1/? Filtering Logic
+-- ============================================================================
+print('--- Suite 82: Auto AA Cross-Class Stub Rejection & 1/? Filtering Logic ---')
+do
+    -- 1. Test isAAAllowedForPlayer foreign stub detection
+    local function simIsAAAllowedForPlayer(name, classes, isFromUI, mockMe, mockCache, classRestrictions)
+        if not name or name == '' then return false end
+        if isFromUI then return true end
+
+        local owned = false
+        local isForeignStub = false
+        local ma = mockMe and mockMe[name]
+        if ma then
+            local r = tonumber(ma.Rank or 0) or 0
+            local mr = tonumber(ma.MaxRank or 0) or 0
+            if r > 0 and mr > 0 then
+                owned = true
+            elseif r > 0 and mr <= 0 then
+                isForeignStub = true
+            end
+        end
+        if isForeignStub then return false end
+        if owned then return true end
+
+        if mockCache and mockCache[name] then
+            local cd = mockCache[name]
+            if cd.id and cd.id > 0 and cd.maxRank and cd.maxRank > 0 then return true end
+        end
+
+        local restricted = classRestrictions and classRestrictions[name]
+        if restricted then
+            local match = false
+            for _, cls in ipairs(classes or {}) do
+                if restricted[cls] then match = true; break end
+            end
+            if not match then return false end
+        end
+        return true
+    end
+
+    local warClasses = { 'War' }
+    local restrictions = {
+        ['Harm Touch'] = { SK = true },
+        ['Cannibalization'] = { Shm = true },
+        ['Combat Agility'] = nil -- universal
+    }
+
+    -- Foreign stub reporting Rank 1 with MaxRank 0 (1/?)
+    local mockMe = {
+        ['Harm Touch'] = { Rank = 1, MaxRank = 0, ID = 45 },
+        ['Combat Agility'] = { Rank = 3, MaxRank = 5, ID = 101 },
+    }
+    assert_eq(simIsAAAllowedForPlayer('Harm Touch', warClasses, false, mockMe, nil, restrictions), false,
+        'Suite 82: isAAAllowedForPlayer rejects Harm Touch foreign stub with Rank 1 and MaxRank 0')
+    assert_true(simIsAAAllowedForPlayer('Combat Agility', warClasses, false, mockMe, nil, restrictions),
+        'Suite 82: isAAAllowedForPlayer allows Combat Agility with valid Rank 3 and MaxRank 5')
+
+    -- 2. Test cache pruning of invalid maxRank <= 0 entries
+    local cache = {
+        ['harmtouch'] = { name = 'Harm Touch', id = 45, maxRank = 0, rank = 1 },
+        ['combatagility'] = { name = 'Combat Agility', id = 101, maxRank = 5, rank = 3 },
+        ['unknownstub'] = { name = 'Unknown Stub', id = 999, rank = 1 } -- missing maxRank
+    }
+    for cName, cd in pairs(cache) do
+        if not cd.maxRank or cd.maxRank <= 0 then
+            cache[cName] = nil
+        end
+    end
+    assert_true(cache['harmtouch'] == nil, 'Suite 82: Cache prunes Harm Touch with maxRank == 0')
+    assert_true(cache['unknownstub'] == nil, 'Suite 82: Cache prunes stub with missing maxRank')
+    assert_true(cache['combatagility'] ~= nil, 'Suite 82: Cache retains Combat Agility with valid maxRank 5')
+
+    -- 3. Test getFilteredSortedAAs filtering of 1/? items
+    local scannedAAs = {
+        { name = 'Harm Touch', rank = 1, maxRank = 0, cost = 2, fullyTrained = false },
+        { name = 'Combat Agility', rank = 3, maxRank = 5, cost = 5, fullyTrained = false },
+        { name = 'Planar Power', rank = 0, maxRank = 5, cost = 3, fullyTrained = false },
+    }
+    local filtered = {}
+    for _, item in ipairs(scannedAAs) do
+        local match = true
+        if not item.maxRank or item.maxRank <= 0 then
+            match = false
+        end
+        if match then filtered[#filtered + 1] = item end
+    end
+    assert_eq(#filtered, 2, 'Suite 82: Filtered out 1/? Harm Touch entry')
+    assert_eq(filtered[1].name, 'Combat Agility', 'Suite 82: First valid item is Combat Agility')
+    assert_eq(filtered[2].name, 'Planar Power', 'Suite 82: Second valid item is Planar Power')
+
+    -- 4. Source code verification of TAC/lua/triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find("if r > 0 and mr <= 0 then%s+isForeignStub = true") ~= nil,
+        'Suite 82: triune.lua detects foreign stubs with r > 0 and mr <= 0')
+    assert_true(triuneContent:find("if not maxRank or maxRank <= 0 then%s+return%s+end") ~= nil,
+        'Suite 82: recordScannedAA rejects abilities with maxRank <= 0')
+    assert_true(triuneContent:find("if not cd%.maxRank or cd%.maxRank <= 0 then%s+runtime%.cachedAAData%[cName%] = nil") ~= nil,
+        'Suite 82: cache pruning purges entries with missing or non-positive maxRank')
+    assert_true(triuneContent:find("if not item%.maxRank or item%.maxRank <= 0 then%s+match = false") ~= nil,
+        'Suite 82: getFilteredSortedAAs filters out 1/? abilities')
+    assert_true(triuneContent:find("if nm and nm ~= '' and mr > 0 then%s+runtime%.recordScannedAA%(list, foundMap, nm, r > 0 and r or nil, mr, nil, true, nil, false%)") ~= nil,
+        'Suite 82: probeRange requires mr > 0 and passes isFromUI = false')
 end
 
 -- ============================================================================
