@@ -5975,20 +5975,19 @@ function UI.pushTheme()
 end
 
 function UI.popTheme()
-    local cCount = 0
-    local vCount = 0
+    local cCnt, vCnt
     if runtime.themeColStack and #runtime.themeColStack > 0 then
-        cCount = table.remove(runtime.themeColStack)
+        cCnt = table.remove(runtime.themeColStack)
     else
-        cCount = runtime.colN or 0
+        cCnt = runtime.colN or 0
     end
     if runtime.themeVarStack and #runtime.themeVarStack > 0 then
-        vCount = table.remove(runtime.themeVarStack)
+        vCnt = table.remove(runtime.themeVarStack)
     else
-        vCount = runtime.varN or 0
+        vCnt = runtime.varN or 0
     end
-    if vCount > 0 then pcall(ImGui.PopStyleVar, vCount) end
-    if cCount > 0 then pcall(ImGui.PopStyleColor, cCount) end
+    if (vCnt or 0) > 0 then pcall(ImGui.PopStyleVar, vCnt) end
+    if (cCnt or 0) > 0 then pcall(ImGui.PopStyleColor, cCnt) end
     runtime.colN = 0
     runtime.varN = 0
 end
@@ -8525,7 +8524,7 @@ function UI.drawStatusTab()
         end
 
         local tId, tName, tLvl, tClass, tRace, tType, tCon, tHpPct, tCurHp, tMaxHp, tDist, tLoS, tHeading
-        local tTotName, tTotPct, tMyAggro, tMySecAggro
+        local tTotPct, tMyAggro, tMySecAggro
         pcall(function()
             tId = mq.TLO.Target.ID()
             if tId and tId > 0 then
@@ -8546,7 +8545,7 @@ function UI.drawStatusTab()
             end
         end)
 
-        local tTotName, tTotId, tTotHpPct, myPctAggro = UI.resolveTargetOfTarget(tId)
+        local tTotName, _, _, myPctAggro = UI.resolveTargetOfTarget(tId)
         tTotPct = myPctAggro
 
         if tId and tId > 0 and tName then
@@ -11464,7 +11463,7 @@ function UI.drawWindowSettings()
     end
     if pushedColors > 0 then
         pcall(ImGui.PopStyleColor, pushedColors)
-        pushedColors = 0
+        pushedColors = 0  -- luacheck: ignore 311
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'Restores all windows to their previously saved screen coordinates and dimensions.')
@@ -13753,16 +13752,13 @@ function UI.drawUnitFramesWindow()
         pcall(function() isAtk = mq.TLO.Me.Combat() or false end)
 
         -- 1. Target & Target's Target (ToT)
-        local tId, tName, tLvl, tClass, tRace, tType, tCon, tHpPct, tCurHp, tMaxHp, tDist, tLoS
-        local tTotName, tTotPct, tTotId, tTotHpPct
+        local tId, tName, tLvl, tClass, tCon, tHpPct, tCurHp, tMaxHp, tDist, tLoS
         pcall(function()
             tId = mq.TLO.Target.ID()
             if tId and tId > 0 then
                 tName = mq.TLO.Target.CleanName() or 'Unknown'
                 tLvl = mq.TLO.Target.Level() or 0
                 tClass = mq.TLO.Target.Class.ShortName() or '?'
-                tRace = mq.TLO.Target.Race.Name() or '?'
-                tType = mq.TLO.Target.Type() or 'NPC'
                 tCon = mq.TLO.Target.ConColor() or 'White'
                 tHpPct = mq.TLO.Target.PctHPs() or 0
                 tCurHp = mq.TLO.Target.CurrentHPs() or 0
@@ -13772,7 +13768,7 @@ function UI.drawUnitFramesWindow()
             end
         end)
 
-        local tTotName, tTotId, tTotHpPct, myPctAggro, isAggroHolder = UI.resolveTargetOfTarget(tId)
+        local tTotName, tTotId, tTotHpPct, myPctAggro = UI.resolveTargetOfTarget(tId)
 
         if tId and tId > 0 and tName then
             local conCol = UI.getConColorRgb(tCon)
@@ -14191,7 +14187,7 @@ function UI.drawGroupWindow()
             end
         end)
 
-        local isGrouped = (grpSize and grpSize > 0)
+        local _ = (grpSize and grpSize > 0) -- isGrouped (reserved for future use)
         local members = {}
 
         -- Include Self (Member 0)
@@ -14437,7 +14433,7 @@ function UI.drawGroupWindow()
                 end
 
                 -- Con Color calculation
-                local conR, conG, conB = 1.0, 1.0, 1.0
+                local conR, conG, conB = 1.0, 1.0, 1.0  -- luacheck: ignore 311
                 if mem.offline then
                     conR, conG, conB = 0.5, 0.5, 0.5
                 elseif mem.otherZone then
@@ -15047,7 +15043,7 @@ function UI.drawEffectsWindow()
         if #effectsList == 0 then
             accent(MUTED, 'No active spells or effects.')
         else
-            for idx, eff in ipairs(effectsList) do
+            for _, eff in ipairs(effectsList) do
                 local rowKey = (eff.isSong and 's_' or 'b_') .. tostring(eff.slot) .. '_' .. tostring(eff.spellId)
                 local barFrac = 1.0
                 if eff.maxDuration > 0 and eff.duration > 0 then
@@ -15069,7 +15065,7 @@ function UI.drawEffectsWindow()
                 end
 
                 -- Draw Spell Icon if available
-                local iconDrawn = false
+                local iconDrawn = false  -- luacheck: ignore 311
                 if eff.iconId and eff.iconId > 0 then
                     iconDrawn = UI.drawSpellIcon(eff.iconId, barH)
                     if iconDrawn then
@@ -16085,7 +16081,7 @@ function UI.drawCharSlotCell(id, slotIdx, subSlot, locType, cursorHasItem, curso
         local mnX, mnY = ImGui.GetItemRectMin()
         local mxX, mxY = ImGui.GetItemRectMax()
         mnX, mnY = UI.charUnpackPos(mnX, mnY)
-        mxX, mxY = UI.charUnpackPos(mxX, mxY)
+        mxX = UI.charUnpackPos(mxX, mxY)
         if mnX and mxX and (mxX - mnX) >= 8 then
             sx, sy = mnX, mnY
             size = math.max(20, math.floor(mxX - mnX + 0.5))
@@ -17304,7 +17300,7 @@ function UI.drawSpellGemBarWindow()
         local maxGems = getNumGems() or 8
         local totalItems = maxGems + 1
         local spacing = 2
-        local cols = 1
+        local cols = 1  -- luacheck: ignore 311
 
         -- Dynamic layout: horizontal, vertical, or responsive aspect ratio grid
         if ctrl.gem_orientation == 'Horizontal' then

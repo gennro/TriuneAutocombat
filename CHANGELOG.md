@@ -1,5 +1,14 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-09
+
+- Fix all 25 luacheck warnings in `triune.lua`: replace unused variables with `_` discards, remove dead initializers, eliminate unused loop variables, and add `-- luacheck: ignore 311` annotations for intentional overwrite patterns (`conR/G/B`, `cols`, `iconDrawn`, `pushedColors`).
+  - Removed unused `tRace`/`tType` TLO fetches from the compact Unit Frame target block (not displayed in that view).
+  - Restructured `UI.popTheme()` to use uninitialized `local cCnt, vCnt` to avoid dead `= 0` assignments.
+  - Fixed a latent global `_` assignment inside a `pcall` closure (`charUnpackPos` mxY discard).
+
+---
+
 ## 2026-09-08
 
 - **Authentic In-Game Inventory Screen Stats Tab Replication (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).** Re-engineered the **Stats** tab in the popout Character Window (`TriuneCharacterWindow`) to replicate the exact look, layout, alignment, and color palette of EverQuest's native in-game inventory screen stat page:
