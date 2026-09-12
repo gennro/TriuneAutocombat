@@ -206,9 +206,11 @@ local function registerActor()
         net.err = 'actors.register failed: ' .. tostring(actorOrErr)
         return false
     end
-    if type(actorOrErr) ~= 'table' then
-        -- MQ returns nil when the mailbox name is already registered in this
-        -- client (e.g. another Triune instance in the same process).
+    -- The dropbox is a sol usertype (userdata) in MQ; tests hand in a table.
+    -- MQ returns nil when the mailbox name is already registered in this
+    -- client (e.g. another Triune instance in the same process).
+    local actorType = type(actorOrErr)
+    if actorType ~= 'userdata' and actorType ~= 'table' then
         net.available = false
         net.err = 'mailbox "' .. MAILBOX .. '" is already registered in this client; retrying'
         return false
@@ -231,9 +233,14 @@ local function statusName(status)
     local actors = net.actorsModule
     local rs = actors and actors.ResponseStatus
     if type(rs) == 'table' then
-        for name, code in pairs(rs) do
-            if code == status then return name end
-        end
+        -- sol enums may be read-only proxies; iterate defensively.
+        local found = nil
+        pcall(function()
+            for name, code in pairs(rs) do
+                if code == status then found = name end
+            end
+        end)
+        if found then return found end
     end
     if status == -1 then return 'ConnectionClosed' end
     if status == -2 then return 'NoConnection' end

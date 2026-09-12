@@ -11912,6 +11912,16 @@ end
     assert_true(tostring(E.inst.net.err):find('already registered', 1, true) ~= nil, 'Suite 95: duplicate mailbox reported')
     E.inst.onDestroy()
     table.remove(boxes)
+    -- In MQ the dropbox is a sol usertype (userdata), not a table: it must be accepted
+    local F = makeBox('Fay')
+    F.inst.actorsModule = { register = function() return io.stdout end, ResponseStatus = {} }
+    F.inst.onInit(F.core)
+    assert_true(F.inst.net.actor ~= nil, 'Suite 95: a userdata dropbox from register is accepted')
+    assert_nil(F.inst.net.err, 'Suite 95: no error recorded for a userdata dropbox')
+    assert_eq(F.inst.net.available, true, 'Suite 95: available with a userdata dropbox')
+    F.inst.net.actor = nil -- io.stdout has no unregister; detach before destroy
+    F.inst.onDestroy()
+    table.remove(boxes)
 
     -- 16. Settings round-trip with clamping
     A.inst.cfg.trust = 'allow'
