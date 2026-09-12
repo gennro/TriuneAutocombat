@@ -1,112 +1,73 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# tests/check_theme_consistency.sh — Verify pushTheme/popTheme duplication
+# tests/check_theme_consistency.sh — Verify there is exactly one theme
 #
-# Extracts the color values and style-var values from each satellite module's
-# pushTheme() function and compares them against the canonical copy in
-# triune_buttons.lua (the smallest/cleanest satellite).  Exits non-zero on
-# drift.
+# Every companion tool used to be a standalone script carrying its own copy
+# of pushTheme()/popTheme(), and this script diffed those copies against a
+# canonical one. All of them are in-process plugins now (TAC/lua/tac/*.lua)
+# and draw through core.pushTheme()/core.popTheme(), so the check is simply:
 #
-# The comparison ignores variable names (pushCol vs UI.pushCol) and only
-# compares the numeric tuples and ImGui enum names, since triune.lua uses a
-# UI.pushCol wrapper while satellites use a standalone pushCol.
+#   1. triune.lua still defines UI.pushTheme / UI.popTheme (the one theme).
+#   2. No plugin defines its own pushTheme/popTheme or pushes the theme
+#      colour tuples itself (drift would be invisible until it looked wrong).
+#   3. Every plugin that opens a (non-overlay) window uses core.pushTheme().
+#
+# Exits non-zero on drift.
 # ==========================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LUA_DIR="$REPO_ROOT/TAC/lua"
-
-# The canonical satellite module (smallest, cleanest pushTheme copy)
-CANONICAL="$LUA_DIR/triune_cursor.lua"
-
-# All satellite modules that should carry identical pushTheme copies
-SATELLITES=(
-    "$LUA_DIR/triune_buffbot.lua"
-    "$LUA_DIR/triune_dps.lua"
-    "$LUA_DIR/triune_inv.lua"
-    "$LUA_DIR/triune_map.lua"
-    "$LUA_DIR/triune_spellbook.lua"
-)
-
-# Extract just the color/var tuples from a pushTheme function body.
-# This normalizes away the variable-name differences (ImGuiCol vs Col, etc.)
-# and produces a stable fingerprint of the actual theme values.
-extract_theme_fingerprint() {
-    local file="$1"
-    # Extract pushTheme body (from 'local function pushTheme' to next 'end' at col 1)
-    sed -n '/^local function pushTheme()/,/^end$/p' "$file" \
-        | grep -oP '\.\w+,\s*[\d.]+,\s*[\d.]+,\s*[\d.]+[^)]*\)' \
-        | sed 's/[[:space:]]//g' \
-        | sort
-}
-
-# Also extract style vars
-extract_stylevar_fingerprint() {
-    local file="$1"
-    sed -n '/^local function pushTheme()/,/^end$/p' "$file" \
-        | grep -iP 'pushVar\(' \
-        | grep -oP '\.\w+,\s*[\d.]+[^)]*\)' \
-        | sed 's/[[:space:]]//g' \
-        | sort
-}
+PLUGIN_DIR="$LUA_DIR/tac"
+CORE="$LUA_DIR/triune.lua"
 
 fail=0
 
-# Get canonical fingerprints
-canonical_colors=$(extract_theme_fingerprint "$CANONICAL")
-canonical_vars=$(extract_stylevar_fingerprint "$CANONICAL")
-
-if [ -z "$canonical_colors" ]; then
-    echo "::error::Could not extract pushTheme colors from canonical file: $(basename "$CANONICAL")"
+if ! grep -q '^function UI.pushTheme()' "$CORE" || ! grep -q '^function UI.popTheme()' "$CORE"; then
+    echo "::error file=$CORE::triune.lua must define UI.pushTheme() and UI.popTheme()"
     exit 1
 fi
+echo "Canonical theme source: $(basename "$CORE") (UI.pushTheme / UI.popTheme)"
 
-echo "Canonical theme source: $(basename "$CANONICAL")"
+# Fingerprint of the canonical colour tuples, used to spot copied theme blocks.
+canonical_colors=$(sed -n '/^function UI.pushTheme()/,/^end$/p' "$CORE" \
+    | grep -oP '\.\w+,\s*[\d.]+,\s*[\d.]+,\s*[\d.]+[^)]*\)' | sed 's/[[:space:]]//g' | sort)
 echo "  Color entries: $(echo "$canonical_colors" | wc -l)"
-echo "  StyleVar entries: $(echo "$canonical_vars" | wc -l)"
 echo ""
 
-for sat in "${SATELLITES[@]}"; do
-    name="$(basename "$sat")"
+shopt -s nullglob
+for plugin in "$PLUGIN_DIR"/*.lua; do
+    name="$(basename "$plugin")"
 
-    sat_colors=$(extract_theme_fingerprint "$sat")
-    sat_vars=$(extract_stylevar_fingerprint "$sat")
-
-    if [ -z "$sat_colors" ]; then
-        echo "::error file=$sat::Could not extract pushTheme from $name"
+    if grep -qE '^\s*local function (pushTheme|popTheme|pushCol|pushVar)\s*\(' "$plugin"; then
+        echo "::error file=$plugin::$name defines its own theme helpers; use core.pushTheme()/core.popTheme()"
         fail=1
         continue
     fi
 
-    # Compare colors
-    color_diff=$(diff <(echo "$canonical_colors") <(echo "$sat_colors") || true)
-    if [ -n "$color_diff" ]; then
-        echo "::error file=$sat::Theme COLOR drift in $name"
-        echo "  Diff vs $(basename "$CANONICAL"):"
-        echo "$color_diff" | head -20
+    copied=$( (grep -oP '\.\w+,\s*[\d.]+,\s*[\d.]+,\s*[\d.]+[^)]*\)' "$plugin" || true) | sed 's/[[:space:]]//g' | sort | comm -12 - <(echo "$canonical_colors") | wc -l)
+    if [ "$copied" -gt 3 ]; then
+        echo "::error file=$plugin::$name re-pushes $copied canonical theme colour tuples (copied theme block)"
         fail=1
-    else
-        echo "OK: $name (colors match)"
+        continue
     fi
 
-    # Compare vars
-    var_diff=$(diff <(echo "$canonical_vars") <(echo "$sat_vars") || true)
-    if [ -n "$var_diff" ]; then
-        echo "::error file=$sat::Theme STYLEVAR drift in $name"
-        echo "  Diff vs $(basename "$CANONICAL"):"
-        echo "$var_diff" | head -20
+    # Transparent overlays (NoBackground, e.g. floating damage text) have no theme to apply.
+    if grep -q 'ImGui.Begin(' "$plugin" && ! grep -q 'core.pushTheme()' "$plugin" && ! grep -q 'ImGuiWindowFlags.NoBackground' "$plugin"; then
+        echo "::error file=$plugin::$name opens a window without core.pushTheme()"
         fail=1
-    else
-        echo "OK: $name (style vars match)"
+        continue
     fi
+
+    echo "OK: $name"
 done
 
 echo ""
 if [ $fail -ne 0 ]; then
-    echo "FAIL: Theme drift detected. Update the drifted module(s) to match $(basename "$CANONICAL")."
+    echo "FAIL: Theme drift detected. Plugins must draw through core.pushTheme()/core.popTheme()."
     exit 1
 else
-    echo "All satellite themes match the canonical copy."
+    echo "All plugins draw through the core theme."
     exit 0
 fi

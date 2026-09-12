@@ -161,6 +161,8 @@ end
 -- ---------------------------------------------------------------------------
 local srcPath = 'TAC/lua/triune.lua'
 local src = readFile(srcPath)
+-- Auto AA engine source (migrated to the auto_aa plugin); global to stay under the 200-local cap
+AA_CONTENT = readFile('TAC/lua/tac/auto_aa.lua')
 
 -- ---------------------------------------------------------------------------
 -- Shared constants (duplicated here to match module-level definitions)
@@ -559,7 +561,6 @@ local EXPECTED_FIELDS = {
     { 'ignore_distant_xtargets', 'boolean' },
     { 'combat_style',            'string' },
     { 'melee_dist',              'number' },
-    { 'ranged_dist',             'number' },
     { 'ma_name',                 'string' },
     { 'assist_at',               'number' },
     { 'chase',                   'boolean' },
@@ -943,20 +944,6 @@ local sungKey = loadFunc(src, 'sungKey', {})
 assert_eq(sungKey('Heal', 123), '123_Heal', 'sungKey: basic')
 assert_eq(sungKey('Buff', 0), '0_Buff', 'sungKey: id 0')
 assert_eq(sungKey('Spell', nil), '0_Spell', 'sungKey: nil id')
-
--- ============================================================================
--- 16. classPlausible(abbr) — checks if a class abbreviation is valid
--- ============================================================================
-print('--- classPlausible ---')
-local classPlausible = loadFunc(src, 'classPlausible',
-    { ALL_ABBR = ALL_ABBR, DATA = { spells = {} } })
-
-assert_true(classPlausible('War'), 'plausible: War')
-assert_true(classPlausible('SK'), 'plausible: SK')
-assert_true(classPlausible('Ber'), 'plausible: Ber')
-assert_eq(classPlausible('Xyz'), false, 'plausible: Xyz invalid')
-assert_eq(classPlausible(nil), false, 'plausible: nil')
-assert_eq(classPlausible(42), false, 'plausible: number')
 
 -- ============================================================================
 -- 17. serialize(o, f, indent) — round-trip persistence
@@ -1382,9 +1369,9 @@ end
 testCastTracker()
 
 -- ============================================================================
--- CROSS-MODULE TESTS: triune_dps.lua
+-- CROSS-MODULE TESTS: tac/dps.lua (DPS parser plugin)
 -- ============================================================================
-local dpsSrc = readFile('TAC/lua/triune_dps.lua')
+local dpsSrc = readFile('TAC/lua/tac/dps.lua')
 
 -- ============================================================================
 -- 20. cleanLine (DPS) — strip MQ color codes
@@ -1552,9 +1539,9 @@ assert_eq(getFightDPS(100, 3), 33, 'dps: 100/3 rounds to 33')
 assert_eq(getFightDPS(200, 3), 67, 'dps: 200/3 rounds to 67')
 
 -- ============================================================================
--- CROSS-MODULE TESTS: triune_buffbot.lua
+-- CROSS-MODULE TESTS: tac/buffbot.lua (buffbot plugin)
 -- ============================================================================
-local bbSrc = readFile('TAC/lua/triune_buffbot.lua')
+local bbSrc = readFile('TAC/lua/tac/buffbot.lua')
 
 -- ============================================================================
 -- 26. parseBuffRequest (buffbot) — tell message parsing
@@ -1645,14 +1632,14 @@ local testCtrl = {
     banMsg = "You are banned from getting buffs."
 }
 local dummySaveCalled = false
-local isPlayerIgnored = loadFunc(bbSrc, 'isPlayerIgnored', { ctrl = testCtrl })
+local isPlayerIgnored = loadFunc(bbSrc, 'isPlayerIgnored', { cfg = testCtrl })
 local addIgnoredPlayer = loadFunc(bbSrc, 'addIgnoredPlayer', {
-    ctrl = testCtrl,
+    cfg = testCtrl,
     isPlayerIgnored = isPlayerIgnored,
     saveConfig = function() dummySaveCalled = true end
 })
 local removeIgnoredPlayer = loadFunc(bbSrc, 'removeIgnoredPlayer', {
-    ctrl = testCtrl,
+    cfg = testCtrl,
     saveConfig = function() dummySaveCalled = true end
 })
 
@@ -1764,19 +1751,19 @@ do
     local gpCtrl = { guildMode = 'Guild Priority' }
 
     local enqueueBuffJob = loadFunc(bbSrc, 'enqueueBuffJob', {
-        ctrl = gpCtrl,
-        runtime = gpRuntime,
+        cfg = gpCtrl,
+        rt = gpRuntime,
         table = table
     })
 
     local requeuePreemptedJob = loadFunc(bbSrc, 'requeuePreemptedJob', {
-        runtime = gpRuntime,
+        rt = gpRuntime,
         table = table
     })
 
     local getQueuePosition = loadFunc(bbSrc, 'getQueuePosition', {
-        ctrl = gpCtrl,
-        runtime = gpRuntime,
+        cfg = gpCtrl,
+        rt = gpRuntime,
         isPlayerSameGuild = isPlayerSameGuild
     })
 
@@ -1826,8 +1813,8 @@ do
     gpCtrl.guildMode = 'Off'
     local fifoRuntime = { activeQueue = {}, currentJob = nil }
     local enqueueFifo = loadFunc(bbSrc, 'enqueueBuffJob', {
-        ctrl = gpCtrl,
-        runtime = fifoRuntime,
+        cfg = gpCtrl,
+        rt = fifoRuntime,
         table = table
     })
     enqueueFifo({ sender = 'User1', isGuild = false })
@@ -2371,13 +2358,25 @@ do
         }
     }
 
+    -- Mirrors the real isHostileTarget() contract against the fixture: the spawn
+    -- exists, is NPC/Pet, and is not dead. The scanners under test lean on this
+    -- one predicate for all friendly / dead / type filtering.
+    local function dummyIsHostile(id)
+        for _, slot in pairs(dummyXtarSlots) do
+            if slot.id == id then
+                return (slot.type == 'NPC' or slot.type == 'Pet') and not slot.dead
+            end
+        end
+        return false
+    end
+
     local findFirstNPCXtarget = loadFunc(src, 'findFirstNPCXtarget', {
         ctrl = { xtar_nav_dist = 150 },
         mq = dummyMqXtar,
         isSpawnAlive = function(id) return id ~= 203 end,
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
-        isHostileTarget = function() return true end,
+        isHostileTarget = dummyIsHostile,
         buffActive = function() return false end
     })
 
@@ -2385,7 +2384,7 @@ do
         mq = dummyMqXtar,
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
-        isHostileTarget = function() return true end,
+        isHostileTarget = dummyIsHostile,
         isIgnored = function() return false end
     })
 
@@ -2411,7 +2410,7 @@ do
         isSpawnAlive = function(id) return id ~= 203 end,
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
-        isHostileTarget = function() return true end,
+        isHostileTarget = dummyIsHostile,
         isIgnored = function() return false end
     })
 
@@ -2425,7 +2424,7 @@ do
         isSpawnAlive = function(id) return false end,
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
-        isHostileTarget = function() return true end,
+        isHostileTarget = dummyIsHostile,
         isIgnored = function() return false end
     })
     assert_eq(hasActualNPCXtargetDead(), false, 'hasActualNPCXtarget: false when all spawns are dead or corpses')
@@ -2449,7 +2448,7 @@ do
         isSpawnAlive = function(id) return true end,
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
-        isHostileTarget = function() return true end,
+        isHostileTarget = dummyIsHostile,
         isIgnored = function() return true end
     })
     assert_eq(hasActualNPCXtargetIgnored(), false, 'hasActualNPCXtarget: false when all spawns are on ignore list')
@@ -2613,13 +2612,13 @@ do
     })
     assert_eq(testStickLoaded3(), false, 'stickLoaded: false when neither Stick TLO nor Plugin is loaded')
 
-    -- 4. Cross-file standalone validation for triune_map
-    local srcMap = readFile('TAC/lua/triune_map.lua')
+    -- 4. Cross-file validation for the map plugin
+    local srcMap = readFile('TAC/lua/tac/map.lua')
     local testMapStick = loadFunc(srcMap, 'stickLoaded', {
         mq = dummyMqMoveUtilsPluginLoaded,
         pcall = pcall,
     })
-    assert_eq(testMapStick(), true, 'triune_map stickLoaded: true when Plugin mq2moveutils is loaded')
+    assert_eq(testMapStick(), true, 'map plugin stickLoaded: true when Plugin mq2moveutils is loaded')
 end
 
 -- ============================================================================
@@ -3000,12 +2999,12 @@ end
 -- ============================================================================
 print('--- triune_map Norrath Zone Atlas & Navigation Logic ---')
 do
-    local mapSrc = readFile('TAC/lua/triune_map.lua')
-    assert_true(mapSrc ~= nil and #mapSrc > 0, 'triune_map.lua read successfully')
+    local mapSrc = readFile('TAC/lua/tac/map.lua')
+    assert_true(mapSrc ~= nil and #mapSrc > 0, 'tac/map.lua read successfully')
 
     -- Verify version is 1.1
     local versionMatch = mapSrc:match("local VERSION%s*=%s*'([^']+)'")
-    assert_eq(versionMatch, '1.1', 'triune_map version is 1.1')
+    assert_eq(versionMatch, '1.1', 'map plugin version is 1.1')
 
     -- Test Atlas History Navigation State Stack
     local history = {}
@@ -3563,11 +3562,15 @@ do
     assert_eq(t1Rem, 45, 'timer group: T1 has 45s left')
     assert_true(not isT2Active, 'timer group: T2 has expired')
 
-    -- E. Cooldowns Tab Ordering & Declaration
+    -- E. Cooldowns is a popout window only (no main-window tab)
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find('function UI.drawCooldownsTab()', 1, true) ~= nil, 'cooldown tab: UI.drawCooldownsTab defined')
-    local tabOrderMatch = triuneContent:find('UI.drawAutoAATab%(%)[%s\r\n]+UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)')
-    assert_true(tabOrderMatch ~= nil, 'cooldown tab: Cooldowns tab positioned after Auto AA and before Settings tab in triuneTabs')
+    local cdContent = readFile('TAC/lua/tac/hud_cooldowns.lua')
+    assert_true(triuneContent:find('function UI.drawCooldownsTab()', 1, true) == nil, 'cooldown window: UI.drawCooldownsTab removed from triune.lua (hud_cooldowns plugin)')
+    assert_true(cdContent:find("ImGui.BeginTabItem('Cooldowns')", 1, true) == nil, 'cooldown window: hud_cooldowns no longer contributes a main-window tab')
+    assert_true(cdContent:find('function plugin.onDrawTab', 1, true) == nil, 'cooldown window: hud_cooldowns defines no onDrawTab')
+    assert_true(cdContent:find("M.renderCooldownContent('_win', true)", 1, true) ~= nil, 'cooldown window: popout renders the shared cooldown content')
+    assert_true(cdContent:find("flag = 'show_cooldowns'", 1, true) ~= nil, 'cooldown window: hud_cooldowns declares its window for the header button')
+    assert_true(triuneContent:find('pm.drawTabs', 1, true) == nil, 'cooldown window: pm.drawTabs removed from the plugin manager')
 
     -- F. parseDurationSec & parseSpellRecastTime Comprehensive Tests
     local function parseDurationSec(durObj)
@@ -3575,9 +3578,16 @@ do
         local sec = 0
         pcall(function()
             if type(durObj) == 'number' then
-                if durObj > 1800 then sec = durObj / 1000.0
-                elseif durObj > 0 and durObj <= 500 then sec = durObj * 6
-                else sec = durObj end
+                if durObj >= 2147483647 or durObj < 0 then
+                    sec = 0
+                elseif durObj > 10000 then
+                    sec = durObj / 1000.0
+                elseif durObj > 0 and durObj <= 500 then
+                    sec = durObj * 6
+                else
+                    sec = durObj
+                end
+                if sec >= 2000000 or sec < 0 then sec = 0 end
                 return
             end
             if type(durObj) == 'table' then
@@ -3587,29 +3597,44 @@ do
                     else
                         sec = tonumber(durObj.TotalSeconds) or 0
                     end
+                    if sec >= 2000000 or sec < 0 then sec = 0 end
                     if sec > 0 then return end
                 end
                 if durObj.Raw then
                     local r = type(durObj.Raw) == 'function' and durObj.Raw() or durObj.Raw
                     local nr = tonumber(r or 0) or 0
-                    if nr > 0 then sec = nr / 1000.0; return end
+                    if nr > 0 and nr < 2147483647 then
+                        sec = nr / 1000.0
+                        if sec > 0 then return end
+                    end
                 end
                 if durObj.Ticks then
                     local t = type(durObj.Ticks) == 'function' and durObj.Ticks() or durObj.Ticks
                     local nt = tonumber(t or 0) or 0
-                    if nt > 0 then sec = nt * 6; return end
+                    if nt > 0 and nt < 350000 then
+                        sec = nt * 6
+                        if sec > 0 then return end
+                    end
                 end
             end
             if type(durObj) == 'function' then
                 local val = durObj()
                 if val ~= nil then
                     local n = tonumber(val) or 0
-                    if n > 1800 then sec = n / 1000.0
-                    elseif n > 0 and n <= 500 then sec = n * 6
-                    else sec = n end
+                    if n >= 2147483647 or n < 0 then
+                        sec = 0
+                    elseif n > 1800 then
+                        sec = n / 1000.0
+                    elseif n > 0 and n <= 500 then
+                        sec = n * 6
+                    else
+                        sec = n
+                    end
+                    if sec >= 2000000 or sec < 0 then sec = 0 end
                 end
             end
         end)
+        if sec >= 2000000 or sec < 0 then sec = 0 end
         return sec
     end
 
@@ -3620,6 +3645,11 @@ do
     assert_eq(parseDurationSec({ Ticks = function() return 10 end }), 60, 'parseDurationSec: Ticks() method (10 ticks = 60s)')
     assert_eq(parseDurationSec(function() return "18000" end), 18, 'parseDurationSec: string ms fallback (18000ms = 18s)')
     assert_eq(parseDurationSec(function() return "5" end), 30, 'parseDurationSec: string ticks fallback (5 ticks = 30s)')
+    -- Sentinel / 0xFFFFFFFF unsigned underflow rejection (prevents 1194h)
+    assert_eq(parseDurationSec({ Raw = function() return 4294967295 end }), 0, 'parseDurationSec: rejects 0xFFFFFFFF Raw ms sentinel')
+    assert_eq(parseDurationSec({ TotalSeconds = function() return 4294967 end }), 0, 'parseDurationSec: rejects 4294967s TotalSeconds sentinel (1194h)')
+    assert_eq(parseDurationSec(4294967295), 0, 'parseDurationSec: rejects 4294967295 numeric ms sentinel')
+    assert_eq(parseDurationSec(-1), 0, 'parseDurationSec: rejects negative duration')
 
     -- G. DISC_BASE_COOLDOWNS and DISC_BASE_DURATIONS Lookups
     local DISC_BASE_COOLDOWNS = {
@@ -3961,23 +3991,23 @@ do
 
     -- K. Verify Auto AA tab & functions in triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("function UI.drawAutoAATab()") ~= nil, 'triune.lua defines UI.drawAutoAATab')
-    assert_true(triuneContent:find("UI.drawAutoAATab()") ~= nil, 'triune.lua invokes UI.drawAutoAATab in tab bar')
-    assert_true(triuneContent:find("runtime.checkAutoSpendAA()") ~= nil, 'triune.lua includes runtime.checkAutoSpendAA check')
-    assert_true(triuneContent:find("runtime.scanPlayerAAs") ~= nil, 'triune.lua defines runtime.scanPlayerAAs')
-    assert_true(triuneContent:find("runtime.getFilteredSortedAAs") ~= nil, 'triune.lua defines runtime.getFilteredSortedAAs')
-    assert_true(triuneContent:find("runtime.findAAInWindowLists") ~= nil, 'triune.lua defines runtime.findAAInWindowLists')
-    assert_true(triuneContent:find("runtime.findChildRecursive") ~= nil, 'triune.lua defines runtime.findChildRecursive')
-    assert_true(triuneContent:find("AAW_SpecialList") ~= nil, 'triune.lua scans AAW_SpecialList')
-    assert_true(triuneContent:find("AAW_TrainButton") ~= nil, 'triune.lua clicks AAW_TrainButton')
-    assert_true(triuneContent:find("AAW_Subwindows") ~= nil, 'triune.lua notifies AAW_Subwindows')
-    assert_true(triuneContent:find("runtime.readSpecialTabOnce") ~= nil, 'triune.lua defines runtime.readSpecialTabOnce')
-    assert_true(triuneContent:find("runtime.readSpecialTabNamesFromUI") ~= nil, 'triune.lua defines runtime.readSpecialTabNamesFromUI')
-    assert_true(triuneContent:find("runtime.specialTabAAs") ~= nil, 'triune.lua tracks runtime.specialTabAAs')
-    assert_true(triuneContent:find("TriuneAAPurchased") ~= nil, 'triune.lua registers TriuneAAPurchased event')
-    assert_true(triuneContent:find("runtime.lastObservedAAPointsSpent") ~= nil, 'triune.lua tracks lastObservedAAPointsSpent')
-    assert_true(triuneContent:find("runtime.pendingPostTrainScanAt") ~= nil, 'triune.lua tracks pendingPostTrainScanAt')
-    assert_true(triuneContent:find("runtime.checkAutoSummonFireworks()") ~= nil, 'triune.lua includes runtime.checkAutoSummonFireworks check')
+    assert_true(AA_CONTENT:find("function AA.drawWindow()") ~= nil, 'auto_aa defines AA.drawWindow (popout Auto AA window)')
+    assert_true(AA_CONTENT:find("AA.drawWindow()") ~= nil, 'auto_aa invokes AA.drawWindow from onDrawUI')
+    assert_true(AA_CONTENT:find("AA.checkAutoSpendAA()") ~= nil, 'triune.lua includes AA.checkAutoSpendAA check')
+    assert_true(AA_CONTENT:find("AA.scanPlayerAAs") ~= nil, 'triune.lua defines AA.scanPlayerAAs')
+    assert_true(AA_CONTENT:find("AA.getFilteredSortedAAs") ~= nil, 'triune.lua defines AA.getFilteredSortedAAs')
+    assert_true(AA_CONTENT:find("AA.findAAInWindowLists") ~= nil, 'triune.lua defines AA.findAAInWindowLists')
+    assert_true(AA_CONTENT:find("AA.findChildRecursive") ~= nil, 'triune.lua defines AA.findChildRecursive')
+    assert_true(AA_CONTENT:find("AAW_SpecialList") ~= nil, 'triune.lua scans AAW_SpecialList')
+    assert_true(AA_CONTENT:find("AAW_TrainButton") ~= nil, 'triune.lua clicks AAW_TrainButton')
+    assert_true(AA_CONTENT:find("AAW_Subwindows") ~= nil, 'triune.lua notifies AAW_Subwindows')
+    assert_true(AA_CONTENT:find("AA.readSpecialTabOnce") ~= nil, 'triune.lua defines AA.readSpecialTabOnce')
+    assert_true(AA_CONTENT:find("AA.readSpecialTabNamesFromUI") ~= nil, 'triune.lua defines AA.readSpecialTabNamesFromUI')
+    assert_true(AA_CONTENT:find("AA.specialTabAAs") ~= nil, 'triune.lua tracks AA.specialTabAAs')
+    assert_true(AA_CONTENT:find("TacAAPurchased") ~= nil, 'triune.lua registers TacAAPurchased event')
+    assert_true(AA_CONTENT:find("AA.lastObservedAAPointsSpent") ~= nil, 'triune.lua tracks lastObservedAAPointsSpent')
+    assert_true(AA_CONTENT:find("AA.pendingPostTrainScanAt") ~= nil, 'triune.lua tracks pendingPostTrainScanAt')
+    assert_true(AA_CONTENT:find("AA.checkAutoSummonFireworks()") ~= nil, 'triune.lua includes AA.checkAutoSummonFireworks check')
 end
 
 -- ============================================================================
@@ -4100,10 +4130,13 @@ do
     assert_true(triuneContent:find("ImGui.BeginTabItem%('Pets'%)") ~= nil, 'triune.lua uses Pets as tab label')
     local tabOrderMatch = triuneContent:find("UI.drawControlTab%(%)[%s\r\n]+UI.drawPetControlTab%(%)[%s\r\n]+UI.drawGemTab%(%)")
     assert_true(tabOrderMatch ~= nil, 'triune.lua places UI.drawPetControlTab right next to Control tab and before Gem tab')
-    local tabOrderMatch2 = triuneContent:find("UI.drawAATab%(%)[%s\r\n]+UI.drawDiscTab%(%)[%s\r\n]+UI.drawClickieTab%(%)[%s\r\n]+UI.drawAutoAATab%(%)")
-    assert_true(tabOrderMatch2 ~= nil, 'triune.lua places Disciplines and Clickies between AAs and Auto AA tabs')
-    local settingsTabMatch = triuneContent:find("UI.drawCooldownsTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)[%s\r\n]+UI.drawHelpTab%(%)")
-    assert_true(settingsTabMatch ~= nil, 'triune.lua places UI.drawSettingsTab between Cooldowns and Help tabs')
+    local tabOrderMatch2 = triuneContent:find("UI.drawAATab%(%)[%s\r\n]+UI.drawDiscTab%(%)[%s\r\n]+UI.drawClickieTab%(%)[%s\r\n]+UI.drawSettingsTab%(%)")
+    assert_true(tabOrderMatch2 ~= nil, 'triune.lua places Disciplines and Clickies between AAs and Settings (no plugin tabs)')
+    assert_true(AA_CONTENT:find("ImGui.BeginTabItem('Auto AA')", 1, true) == nil, 'auto_aa plugin no longer contributes a main-window tab')
+    assert_true(AA_CONTENT:find("###triuneAutoAA'", 1, true) ~= nil, 'auto_aa plugin draws the Auto AA popout window')
+    assert_true(AA_CONTENT:find("flag = 'show_auto_aa'", 1, true) ~= nil, 'auto_aa plugin declares its window for the header button')
+    local settingsTabMatch = triuneContent:find("UI.drawSettingsTab%(%)[%s\r\n]+UI.drawHelpTab%(%)")
+    assert_true(settingsTabMatch ~= nil, 'triune.lua places UI.drawSettingsTab right before the Help tab')
     assert_true(triuneContent:find("PET_CLASSES%s*=%s*{[^}]*Brd%s*=%s*true") ~= nil, 'triune.lua includes Brd in petState.PET_CLASSES')
     assert_true(triuneContent:find("function UI.drawPetControlTab") ~= nil, 'triune.lua includes drawPetControlTab renderer')
     assert_true(triuneContent:find("sendPetCmd%(") ~= nil, 'triune.lua includes sendPetCmd helper')
@@ -5359,15 +5392,14 @@ print('--- Main Chunk Local Variables Limit Verification ---')
 do
     local files = {
         'TAC/lua/triune.lua',
-        'TAC/lua/triune_buttons.lua',
-        'TAC/lua/triune_buffbot.lua',
-        'TAC/lua/triune_cursor.lua',
-        'TAC/lua/triune_dps.lua',
-        'TAC/lua/triune_inv.lua',
-        'TAC/lua/triune_map.lua',
-        'TAC/lua/triune_quest.lua',
-        'TAC/lua/triune_spellbook.lua',
-        'TAC/lua/triune_test.lua',
+        'TAC/lua/tac/spellbook.lua',
+        'TAC/lua/tac/auto_aa.lua',
+        'TAC/lua/tac/hud_cooldowns.lua',
+        'TAC/lua/tac/buffbot.lua',
+        'TAC/lua/tac/cursor.lua',
+        'TAC/lua/tac/dps.lua',
+        'TAC/lua/tac/inventory.lua',
+        'TAC/lua/tac/map.lua',
     }
 
     for _, filePath in ipairs(files) do
@@ -5798,6 +5830,8 @@ end
 do
     print('--- Suite 55: Auto-Accept Logic & Whitelist Authorization ---')
 
+    -- The whitelist + authorization logic lives in the auto_accept plugin now, so
+    -- exercise the real implementation against a mock core / TLO instead of a mirror.
     local testCtrl = {
         auto_group = false,
         auto_trade = false,
@@ -5808,146 +5842,76 @@ do
         auto_accept_names = {},
     }
 
-    local testRuntime = {}
-
-    function testRuntime.getAutoAcceptPlayerInfo(entry)
-        if type(entry) == 'table' then
-            return tostring(entry.name or ''), tonumber(entry.id) or 0
-        else
-            return tostring(entry or ''), 0
-        end
-    end
-
-    function testRuntime.isAutoAcceptListed(nameOrId)
-        if not nameOrId or nameOrId == '' or nameOrId == 0 then return false end
-        if not testCtrl.auto_accept_names or type(testCtrl.auto_accept_names) ~= 'table' then
-            testCtrl.auto_accept_names = {}
-            return false
-        end
-        local targetNum = tonumber(nameOrId)
-        local targetStr = tostring(nameOrId):lower():gsub('^%s+', ''):gsub('%s+$', '')
-        for _, entry in ipairs(testCtrl.auto_accept_names) do
-            local eName, eId = testRuntime.getAutoAcceptPlayerInfo(entry)
-            if targetNum and targetNum > 0 and eId > 0 and eId == targetNum then
-                return true
-            end
-            if targetStr ~= '' and eName ~= '' and eName:lower() == targetStr then
-                return true
-            end
-        end
-        return false
-    end
-
-    function testRuntime.addAutoAcceptName(nameOrId, optionalId)
-        if not nameOrId then return end
-        local s = tostring(nameOrId):gsub('^%s+', ''):gsub('%s+$', '')
-        if s == '' then return end
-
-        local name = s
-        local id = tonumber(optionalId) or 0
-        local num = tonumber(s)
-        if num and num > 0 and id == 0 then
-            id = num
-            name = string.format('Player_%d', id)
-        end
-
-        if not testCtrl.auto_accept_names or type(testCtrl.auto_accept_names) ~= 'table' then
-            testCtrl.auto_accept_names = {}
-        end
-
-        local found = false
-        for _, entry in ipairs(testCtrl.auto_accept_names) do
-            local eName, eId = testRuntime.getAutoAcceptPlayerInfo(entry)
-            if (id > 0 and eId > 0 and eId == id) or (name ~= '' and eName ~= '' and eName:lower() == name:lower()) then
-                if type(entry) == 'table' then
-                    if id > 0 then entry.id = id end
-                    if name ~= '' and (entry.name == '' or entry.name:find('^Player_')) then entry.name = name end
-                end
-                found = true
-                break
-            end
-        end
-
-        if not found then
-            table.insert(testCtrl.auto_accept_names, { name = name, id = id })
-            table.sort(testCtrl.auto_accept_names, function(a, b)
-                local aName = testRuntime.getAutoAcceptPlayerInfo(a)
-                local bName = testRuntime.getAutoAcceptPlayerInfo(b)
-                return aName:lower() < bName:lower()
-            end)
-        end
-    end
-
-    function testRuntime.removeAutoAcceptName(nameOrIdOrEntry)
-        if not nameOrIdOrEntry or not testCtrl.auto_accept_names then return false end
-        local targetNum = nil
-        local targetStr = nil
-        if type(nameOrIdOrEntry) == 'table' then
-            targetNum = tonumber(nameOrIdOrEntry.id)
-            targetStr = nameOrIdOrEntry.name and tostring(nameOrIdOrEntry.name):lower():gsub('^%s+', ''):gsub('%s+$', '')
-        else
-            targetNum = tonumber(nameOrIdOrEntry)
-            targetStr = tostring(nameOrIdOrEntry):lower():gsub('^%s+', ''):gsub('%s+$', '')
-        end
-        for i, entry in ipairs(testCtrl.auto_accept_names) do
-            local eName, eId = testRuntime.getAutoAcceptPlayerInfo(entry)
-            if (targetNum and targetNum > 0 and eId > 0 and eId == targetNum) or
-               (targetStr and targetStr ~= '' and eName ~= '' and eName:lower() == targetStr) then
-                table.remove(testCtrl.auto_accept_names, i)
-                return true
-            end
-        end
-        return false
-    end
-
-    function testRuntime.clearAutoAcceptNames()
-        testCtrl.auto_accept_names = {}
-    end
-
     local mockGroupMembers = { { name = 'TrioHealer', id = 101 }, { name = 'TrioTank', id = 102 } }
     local mockGuild = 'Fires of Heaven'
-    local mockSpawnGuilds = {
-        ['GuildieOne'] = 'Fires of Heaven',
-        ['guildieone'] = 'Fires of Heaven',
-        ['GuildieTwo'] = 'fires of heaven',
-        ['guildietwo'] = 'fires of heaven',
-        ['Outsider'] = 'Some Other Guild',
+    local mockSpawns = {
+        -- name -> { id, guild }
+        GuildieOne = { id = 501, guild = 'Fires of Heaven' },
+        GuildieTwo = { id = 502, guild = 'fires of heaven' },
+        Outsider   = { id = 600, guild = 'Some Other Guild' },
     }
-
-    -- Authorization evaluator mirroring runtime.isAutoAcceptAllowed
-    function testRuntime.isAutoAcceptAllowed(senderName, senderId)
-        if (not senderName or senderName == '') and (not senderId or senderId == 0) then return false end
-        if senderName then senderName = tostring(senderName):gsub('^%s+', ''):gsub('%s+$', '') end
-
-        if testCtrl.auto_accept_anyone then return true end
-
-        if senderId and senderId > 0 and testRuntime.isAutoAcceptListed(senderId) then return true end
-        if senderName and senderName ~= '' and testRuntime.isAutoAcceptListed(senderName) then return true end
-
-        local sLower = senderName and senderName:lower() or ''
-        local sIdNum = tonumber(senderId) or 0
-
-        if testCtrl.auto_accept_group then
-            for i = 1, #mockGroupMembers do
-                local mem = mockGroupMembers[i]
-                if (sIdNum > 0 and mem.id == sIdNum) or (sLower ~= '' and mem.name:lower() == sLower) then
-                    return true
-                end
-            end
+    local function findSpawn(query)
+        local q = tostring(query or '')
+        local idStr = q:match('^id (%d+)$')
+        for name, info in pairs(mockSpawns) do
+            if idStr and tonumber(idStr) == info.id then return name, info end
+            local wanted = q:match('^pc =?(.+)$')
+            if wanted and wanted:lower() == name:lower() then return name, info end
         end
-
-        if testCtrl.auto_accept_guild and senderName and senderName ~= '' then
-            local myG = mockGuild
-            if myG and myG ~= '' then
-                local theirG = mockSpawnGuilds[senderName]
-                if theirG and theirG ~= '' and theirG:lower() == myG:lower() then
-                    return true
-                end
-            end
-        end
-
-        return false
+        return nil, nil
     end
+    local function spawnObj(query)
+        local name, info = findSpawn(query)
+        local o = {}
+        setmetatable(o, { __call = function() return name ~= nil end })
+        o.ID = function() return info and info.id or 0 end
+        o.CleanName = function() return name end
+        o.Type = function() return 'PC' end
+        o.Guild = function() return info and info.guild or '' end
+        return o
+    end
+    local function groupMember(i)
+        local m = mockGroupMembers[i]
+        local o = {}
+        setmetatable(o, { __call = function() return m ~= nil end })
+        o.ID = function() return m and m.id or 0 end
+        o.CleanName = function() return m and m.name or '' end
+        return o
+    end
+    local mockCore = {
+        ctrl = testCtrl,
+        saveLoadout = function() end,
+        mq = {
+            event = function() end,
+            unevent = function() end,
+            cmd = function() end,
+            cmdf = function() end,
+            TLO = {
+                Spawn = spawnObj,
+                Group = {
+                    Members = function() return #mockGroupMembers end,
+                    Member = groupMember,
+                },
+                Me = {
+                    Guild = setmetatable({}, { __call = function() return mockGuild end }),
+                },
+            },
+        },
+    }
+    local aaPlugin = assert(loadfile('TAC/lua/tac/auto_accept.lua'))()
+    local okAAInit, errAAInit = pcall(aaPlugin.onInit, mockCore)
+    assert_true(okAAInit, 'Suite 55: auto_accept.onInit runs against mock core: ' .. tostring(errAAInit))
+    assert_type(aaPlugin.isAutoAcceptAllowed, 'function', 'Suite 55: plugin exposes isAutoAcceptAllowed')
+    assert_type(aaPlugin.isAutoAcceptListed, 'function', 'Suite 55: plugin exposes isAutoAcceptListed')
+    assert_type(aaPlugin.addAutoAcceptName, 'function', 'Suite 55: plugin exposes addAutoAcceptName')
+    assert_type(aaPlugin.removeAutoAcceptName, 'function', 'Suite 55: plugin exposes removeAutoAcceptName')
+    assert_type(aaPlugin.clearAutoAcceptNames, 'function', 'Suite 55: plugin exposes clearAutoAcceptNames')
+    assert_type(aaPlugin.getAutoAcceptPlayerInfo, 'function', 'Suite 55: plugin exposes getAutoAcceptPlayerInfo')
+
+    -- Silence the plugin's chat output during the suite
+    local realPrint = print
+    print = function() end
+    local testRuntime = aaPlugin
 
     -- 1. Whitelist list operations with Names and Player IDs
     assert_eq(#testCtrl.auto_accept_names, 0, 'Auto-accept list starts empty')
@@ -6034,6 +5998,31 @@ do
     assert_true(testRuntime.isAutoAcceptAllowed('guildietwo', 502), 'Allowed: guildietwo matches same guild case-insensitively')
     assert_eq(testRuntime.isAutoAcceptAllowed('Outsider', 600), false, 'Denied: Outsider belongs to a different guild')
     testCtrl.auto_accept_guild = false
+    print = realPrint
+
+    -- 3. The core no longer carries its own copy of the auto-accept engine
+    local triuneSrc = readFile('TAC/lua/triune.lua')
+    assert_true(triuneSrc:find('function runtime%.checkAutoAccept') == nil,
+        'Suite 55: runtime.checkAutoAccept removed from triune.lua (owned by auto_accept plugin)')
+    assert_true(triuneSrc:find('function runtime%.isAutoAcceptAllowed') == nil,
+        'Suite 55: runtime.isAutoAcceptAllowed removed from triune.lua (owned by auto_accept plugin)')
+    assert_true(triuneSrc:find("mq%.event%('TriuneAutoGroupInvite") == nil,
+        'Suite 55: core no longer registers its own group-invite chat events')
+    assert_true(triuneSrc:find("drawPluginSettings%('auto_accept'%)") == nil,
+        'Suite 55: Settings -> Auto-Accept sub-tab removed (Auto-Accept is a popout window)')
+    assert_true(triuneSrc:find("Auto%-Accept##settingsAutoAccept") == nil,
+        'Suite 55: no Auto-Accept tab in the Settings tab bar')
+    local aaSrc = readFile('TAC/lua/tac/auto_accept.lua')
+    assert_true(aaSrc:find("###triuneAutoAccept'", 1, true) ~= nil,
+        'Suite 55: auto_accept draws the Triune Auto-Accept popout window')
+    assert_true(aaSrc:find("flag = 'show_auto_accept'", 1, true) ~= nil,
+        'Suite 55: auto_accept declares its window for the header button / layout manager')
+    assert_true(aaSrc:find("'TacAutoGroupInvite1'") ~= nil and aaSrc:find("'TacAutoDZInvite3'") ~= nil,
+        'Suite 55: auto_accept plugin registers the group/DZ chat events')
+    assert_true(aaSrc:find('HisTradeReady') ~= nil and aaSrc:find('Me%.Invited') ~= nil,
+        'Suite 55: auto_accept plugin polls Me.Invited and TradeWnd ready state')
+    assert_true(aaSrc:find('auto_accept_group') ~= nil,
+        'Suite 55: auto_accept plugin honors the Always accept from Group Members rule')
 end
 
 -- ============================================================================
@@ -6724,7 +6713,7 @@ end
 -- ============================================================================
 print('--- triune_inv.lua pure logic tests ---')
 do
-    local invSrc = readFile('TAC/lua/triune_inv.lua')
+    local invSrc = readFile('TAC/lua/tac/inventory.lua')
     local formatMoney = loadFunc(invSrc, 'formatMoney', {})
     local classifyItem = loadFunc(invSrc, 'classifyItem', {})
     local matchesFilter = loadFunc(invSrc, 'matchesFilter', {})
@@ -7142,13 +7131,13 @@ do
     assert_eq(#res2, 0, 'Suite 62: subsequent call returns cached empty list without retrying UI')
 
     -- 2. Verify scanPlayerAAs never sets pendingReadSpecialTab in triune.lua
-    assert_true(triuneContent:find("if %(not specialList or #specialList == 0%) and not runtime%.specialTabReadDone then") ~= nil,
+    assert_true(AA_CONTENT:find("if %(not specialList or #specialList == 0%) and not AA%.specialTabReadDone then") ~= nil,
         'Suite 62: scanPlayerAAs respects specialTabReadDone')
 
     -- 3. Verify main loop honors paused and auto_spend_aa states
-    assert_true(triuneContent:find("if not ctrl%.paused and ctrl%.auto_spend_aa and not mq%.TLO%.Me%.Combat") ~= nil,
+    assert_true(AA_CONTENT:find("if not ctrl%.paused and ctrl%.auto_spend_aa and not mq%.TLO%.Me%.Combat") ~= nil,
         'Suite 62: main loop only executes pending read when not paused and auto_spend_aa is enabled')
-    assert_true(triuneContent:find("elseif not ctrl%.auto_spend_aa or ctrl%.paused then%s*runtime%.pendingReadSpecialTab = false") ~= nil,
+    assert_true(AA_CONTENT:find("elseif not ctrl%.auto_spend_aa or ctrl%.paused then%s*AA%.pendingReadSpecialTab = false") ~= nil,
         'Suite 62: main loop clears pending read when auto_spend_aa disabled or paused')
 
     -- 4. Verify script startup does NOT unconditionally queue pendingReadSpecialTab
@@ -7304,9 +7293,9 @@ do
 
     -- 6. Verify triune.lua defines enhanced recursive scanning and UI list extraction
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("AAW_ArchList") ~= nil, 'Suite 63: triune.lua searches AAW_ArchList')
-    assert_true(triuneContent:find("curMaxTxt:match") ~= nil, 'Suite 63: triune.lua parses curMaxTxt column')
-    assert_true(triuneContent:find("costTxt:match") ~= nil, 'Suite 63: triune.lua parses costTxt column')
+    assert_true(AA_CONTENT:find("AAW_ArchList") ~= nil, 'Suite 63: triune.lua searches AAW_ArchList')
+    assert_true(AA_CONTENT:find("curMaxTxt:match") ~= nil, 'Suite 63: triune.lua parses curMaxTxt column')
+    assert_true(AA_CONTENT:find("costTxt:match") ~= nil, 'Suite 63: triune.lua parses costTxt column')
     assert_true(triuneContent:find("runtime.cachedAAData") ~= nil, 'Suite 63: triune.lua uses runtime.cachedAAData')
 end
 
@@ -7543,20 +7532,20 @@ do
 
     -- 6. Verify triune.lua source tokens
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("runtime.aaSpendLoaded") ~= nil, 'Suite 64: triune.lua defines runtime.aaSpendLoaded')
+    assert_true(AA_CONTENT:find("AA.aaSpendLoaded") ~= nil, 'Suite 64: triune.lua defines AA.aaSpendLoaded')
     assert_true(triuneContent:find("auto_aa_delegate_aaspend") ~= nil, 'Suite 64: triune.lua configures auto_aa_delegate_aaspend')
     assert_true(triuneContent:find("auto_aa_aaspend_mode") ~= nil, 'Suite 64: triune.lua configures auto_aa_aaspend_mode')
-    assert_true(triuneContent:find("/aaspend") ~= nil, 'Suite 64: triune.lua contains /aaspend commands')
-    assert_true(triuneContent:find("mq.TLO.Skill%(name%)") ~= nil, 'Suite 64: triune.lua validates against mq.TLO.Skill')
+    assert_true(AA_CONTENT:find("/aaspend") ~= nil, 'Suite 64: triune.lua contains /aaspend commands')
+    assert_true(AA_CONTENT:find("mq.TLO.Skill%(name%)") ~= nil, 'Suite 64: triune.lua validates against mq.TLO.Skill')
     assert_true(triuneContent:find("CLASS_AAS") == nil, 'Suite 64: triune.lua purged hardcoded CLASS_AAS')
     assert_true(triuneContent:find("COMMON_AAS") == nil, 'Suite 64: triune.lua purged hardcoded COMMON_AAS')
-    assert_true(triuneContent:find("runtime.syncAAsToMQ2AASpendIni") ~= nil, 'Suite 64: triune.lua defines syncAAsToMQ2AASpendIni')
-    assert_true(triuneContent:find("MQ2AASpend_AAList") ~= nil, 'Suite 64: triune.lua writes MQ2AASpend_AAList section')
-    assert_true(triuneContent:find("Sync to INI") ~= nil, 'Suite 64: triune.lua provides Sync to INI button')
-    assert_true(triuneContent:find("runtime.isSpecialTabAA") ~= nil, 'Suite 64: triune.lua defines isSpecialTabAA')
-    assert_true(triuneContent:find("Special tab ability") ~= nil, 'Suite 64: triune.lua trains Special tab abilities natively')
-    assert_true(triuneContent:find("MQ2AAspend##aaDelegateMaster") ~= nil, 'Suite 64: triune.lua provides MQ2AAspend delegation checkbox')
-    assert_true(triuneContent:find("falling back to Triune native window trainer") ~= nil, 'Suite 64: triune.lua provides native fallback when MQ2AAspend stalls')
+    assert_true(AA_CONTENT:find("AA.syncAAsToMQ2AASpendIni") ~= nil, 'Suite 64: triune.lua defines syncAAsToMQ2AASpendIni')
+    assert_true(AA_CONTENT:find("MQ2AASpend_AAList") ~= nil, 'Suite 64: triune.lua writes MQ2AASpend_AAList section')
+    assert_true(AA_CONTENT:find("Sync to INI") ~= nil, 'Suite 64: triune.lua provides Sync to INI button')
+    assert_true(AA_CONTENT:find("AA.isSpecialTabAA") ~= nil, 'Suite 64: triune.lua defines isSpecialTabAA')
+    assert_true(AA_CONTENT:find("Special tab ability") ~= nil, 'Suite 64: triune.lua trains Special tab abilities natively')
+    assert_true(AA_CONTENT:find("MQ2AAspend##aaDelegateMaster") ~= nil, 'Suite 64: triune.lua provides MQ2AAspend delegation checkbox')
+    assert_true(AA_CONTENT:find("falling back to Triune native window trainer") ~= nil, 'Suite 64: triune.lua provides native fallback when MQ2AAspend stalls')
 end
 
 -- ============================================================================
@@ -7949,15 +7938,15 @@ do
 
     -- 5. Source code validation in TAC/lua/triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("runtime.getAAWindow") ~= nil, 'Suite 67: triune.lua defines runtime.getAAWindow')
-    assert_true(triuneContent:find("runtime.getAAWindowName") ~= nil, 'Suite 67: triune.lua defines runtime.getAAWindowName')
-    assert_true(triuneContent:find("runtime.isAAWindowOpen") ~= nil, 'Suite 67: triune.lua defines runtime.isAAWindowOpen')
-    assert_true(triuneContent:find("runtime.openAAWindow") ~= nil, 'Suite 67: triune.lua defines runtime.openAAWindow')
-    assert_true(triuneContent:find("runtime.closeAAWindow") ~= nil, 'Suite 67: triune.lua defines runtime.closeAAWindow')
-    assert_true(triuneContent:find("TOGGLE_ALTADVWIN") ~= nil, 'Suite 67: triune.lua uses TOGGLE_ALTADVWIN keypress')
-    assert_true(triuneContent:find("IW_AltAdvBtn") ~= nil, 'Suite 67: triune.lua notifies IW_AltAdvBtn')
-    assert_true(triuneContent:find("AAW_ResetFilter") ~= nil, 'Suite 67: triune.lua supports AAW_ResetFilter')
-    assert_true(triuneContent:find("Failed to open AA Window after") ~= nil, 'Suite 67: triune.lua aborts cleanly when window fails to open')
+    assert_true(AA_CONTENT:find("AA.getAAWindow") ~= nil, 'Suite 67: triune.lua defines AA.getAAWindow')
+    assert_true(AA_CONTENT:find("AA.getAAWindowName") ~= nil, 'Suite 67: triune.lua defines AA.getAAWindowName')
+    assert_true(AA_CONTENT:find("AA.isAAWindowOpen") ~= nil, 'Suite 67: triune.lua defines AA.isAAWindowOpen')
+    assert_true(AA_CONTENT:find("AA.openAAWindow") ~= nil, 'Suite 67: triune.lua defines AA.openAAWindow')
+    assert_true(AA_CONTENT:find("AA.closeAAWindow") ~= nil, 'Suite 67: triune.lua defines AA.closeAAWindow')
+    assert_true(AA_CONTENT:find("TOGGLE_ALTADVWIN") ~= nil, 'Suite 67: triune.lua uses TOGGLE_ALTADVWIN keypress')
+    assert_true(AA_CONTENT:find("IW_AltAdvBtn") ~= nil, 'Suite 67: triune.lua notifies IW_AltAdvBtn')
+    assert_true(AA_CONTENT:find("AAW_ResetFilter") ~= nil, 'Suite 67: triune.lua supports AAW_ResetFilter')
+    assert_true(AA_CONTENT:find("Failed to open AA Window after") ~= nil, 'Suite 67: triune.lua aborts cleanly when window fails to open')
 end
 
 
@@ -8046,13 +8035,13 @@ do
 
     -- 3. Source code inspection of TAC/lua/triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("runtime.GENERAL_AAS = {") ~= nil, 'Suite 68: triune.lua defines GENERAL_AAS catalog')
-    assert_true(triuneContent:find("'Physical Enhancement'") ~= nil, 'Suite 68: NORRATH_AAS includes Physical Enhancement')
-    assert_true(triuneContent:find("'Bloodlust'") ~= nil, 'Suite 68: NORRATH_AAS includes Bloodlust')
-    assert_true(triuneContent:find("'Extended Ingenuity'") ~= nil, 'Suite 68: NORRATH_AAS includes Extended Ingenuity')
-    assert_true(triuneContent:find("'Fury of Magic'") ~= nil, 'Suite 68: NORRATH_AAS includes Fury of Magic')
-    assert_true(triuneContent:find("'Twinproc'") ~= nil, 'Suite 68: NORRATH_AAS includes Twinproc')
-    assert_true(triuneContent:find("'Gelid Rending'") ~= nil, 'Suite 68: NORRATH_AAS includes Gelid Rending')
+    assert_true(AA_CONTENT:find("AA.GENERAL_AAS = {") ~= nil, 'Suite 68: triune.lua defines GENERAL_AAS catalog')
+    assert_true(AA_CONTENT:find("'Physical Enhancement'") ~= nil, 'Suite 68: NORRATH_AAS includes Physical Enhancement')
+    assert_true(AA_CONTENT:find("'Bloodlust'") ~= nil, 'Suite 68: NORRATH_AAS includes Bloodlust')
+    assert_true(AA_CONTENT:find("'Extended Ingenuity'") ~= nil, 'Suite 68: NORRATH_AAS includes Extended Ingenuity')
+    assert_true(AA_CONTENT:find("'Fury of Magic'") ~= nil, 'Suite 68: NORRATH_AAS includes Fury of Magic')
+    assert_true(AA_CONTENT:find("'Twinproc'") ~= nil, 'Suite 68: NORRATH_AAS includes Twinproc')
+    assert_true(AA_CONTENT:find("'Gelid Rending'") ~= nil, 'Suite 68: NORRATH_AAS includes Gelid Rending')
 
     -- Ensure listboxes are NOT gated behind isAAWindowOpen()
     assert_true(triuneContent:find("if runtime.isAAWindowOpen%(%) then%s+for _, lName in ipairs%(listNames%) do") == nil,
@@ -8131,9 +8120,9 @@ do
     assert_eq(foundNestedList.Name(), 'AAW_GeneralList', 'Suite 68: found nested control matches AAW_GeneralList')
 
     -- 6. Verify in-combat gate in triune.lua
-    assert_true(triuneContent:find("Strict out%-of%-combat enforcement: never spend AAs while engaged in combat") ~= nil,
+    assert_true(AA_CONTENT:find("Strict out%-of%-combat enforcement: never spend AAs while engaged in combat") ~= nil,
         'Suite 68: triune.lua includes strict out-of-combat gate in checkAutoSpendAA')
-    assert_true(triuneContent:find("Strict out%-of%-combat enforcement: if combat engages mid%-train") ~= nil,
+    assert_true(AA_CONTENT:find("Strict out%-of%-combat enforcement: if combat engages mid%-train") ~= nil,
         'Suite 68: triune.lua includes mid-training combat abort in processAATrainWorkflow')
 end
 
@@ -8236,10 +8225,10 @@ do
 
     -- 6. Verify triune.lua source code definitions
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("task%.step == 'click_train'") ~= nil, 'Suite 69: triune.lua implements click_train step in processAATrainWorkflow')
-    assert_true(triuneContent:find("AAW_TrainButton") ~= nil, 'Suite 69: triune.lua clicks train button in UI')
-    assert_true(triuneContent:find("targetTab = prefTab") ~= nil, 'Suite 69: triune.lua sets target tab based on ability type')
-    assert_true(triuneContent:find("ImGui%.TextColored%(GOOD%[1%], GOOD%[2%], GOOD%[3%], GOOD%[4%], 'Can Train'%)") ~= nil,
+    assert_true(AA_CONTENT:find("task%.step == 'click_train'") ~= nil, 'Suite 69: triune.lua implements click_train step in processAATrainWorkflow')
+    assert_true(AA_CONTENT:find("AAW_TrainButton") ~= nil, 'Suite 69: triune.lua clicks train button in UI')
+    assert_true(AA_CONTENT:find("targetTab = prefTab") ~= nil, 'Suite 69: triune.lua sets target tab based on ability type')
+    assert_true(AA_CONTENT:find("ImGui%.TextColored%(GOOD%[1%], GOOD%[2%], GOOD%[3%], GOOD%[4%], 'Can Train'%)") ~= nil,
         'Suite 69: triune.lua displays Can Train status for affordable abilities in UI')
 end
 
@@ -8368,17 +8357,17 @@ do
 
     -- 3. Source code inspection of TAC/lua/triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("runtime.CLASS_ARCHETYPES = {") ~= nil, 'Suite 70: triune.lua defines CLASS_ARCHETYPES')
-    assert_true(triuneContent:find("runtime.ARCHETYPE_CLASSES = {") ~= nil, 'Suite 70: triune.lua defines ARCHETYPE_CLASSES')
-    assert_true(triuneContent:find("runtime.ARCHETYPE_RESTRICTIONS = {") ~= nil, 'Suite 70: triune.lua defines ARCHETYPE_RESTRICTIONS')
-    assert_true(triuneContent:find("runtime.CLASS_SPECIFIC_ABILITIES = {") ~= nil, 'Suite 70: triune.lua defines CLASS_SPECIFIC_ABILITIES')
-    assert_true(triuneContent:find("runtime.buildAAClassRestrictions") ~= nil, 'Suite 70: triune.lua defines buildAAClassRestrictions')
-    assert_true(triuneContent:find("runtime.isAAAllowedForPlayer") ~= nil, 'Suite 70: triune.lua defines isAAAllowedForPlayer')
-    assert_true(triuneContent:find("if not runtime%.isAAAllowedForPlayer%(name, nil, isFromUI%) then%s+return") ~= nil,
+    assert_true(AA_CONTENT:find("AA.CLASS_ARCHETYPES = {") ~= nil, 'Suite 70: triune.lua defines CLASS_ARCHETYPES')
+    assert_true(AA_CONTENT:find("AA.ARCHETYPE_CLASSES = {") ~= nil, 'Suite 70: triune.lua defines ARCHETYPE_CLASSES')
+    assert_true(AA_CONTENT:find("AA.ARCHETYPE_RESTRICTIONS = {") ~= nil, 'Suite 70: triune.lua defines ARCHETYPE_RESTRICTIONS')
+    assert_true(AA_CONTENT:find("AA.CLASS_SPECIFIC_ABILITIES = {") ~= nil, 'Suite 70: triune.lua defines CLASS_SPECIFIC_ABILITIES')
+    assert_true(AA_CONTENT:find("AA.buildAAClassRestrictions") ~= nil, 'Suite 70: triune.lua defines buildAAClassRestrictions')
+    assert_true(AA_CONTENT:find("AA.isAAAllowedForPlayer") ~= nil, 'Suite 70: triune.lua defines isAAAllowedForPlayer')
+    assert_true(AA_CONTENT:find("if not AA%.isAAAllowedForPlayer%(name, nil, isFromUI%) then%s+return") ~= nil,
         'Suite 70: recordScannedAA filters foreign class abilities')
-    assert_true(triuneContent:find("if isSkill or not runtime%.isAAAllowedForPlayer%(cName, nil, false%) then") ~= nil,
+    assert_true(AA_CONTENT:find("if isSkill or not AA%.isAAAllowedForPlayer%(cName, nil, false%) then") ~= nil,
         'Suite 70: scanPlayerAAs cache pruning removes foreign class abilities')
-    assert_true(triuneContent:find("if ctrl%.auto_aa_priorities and ctrl%.auto_aa_priorities%[name%] then") ~= nil,
+    assert_true(AA_CONTENT:find("if ctrl%.auto_aa_priorities and ctrl%.auto_aa_priorities%[name%] then") ~= nil,
         'Suite 70: isAAAllowedForPlayer permits prioritized abilities unconditionally')
 end
 
@@ -8516,13 +8505,13 @@ do
         'Suite 71: triune.lua defines runtime.showAATabTooltip')
     assert_true(triuneContent:find("runtime.showAATabTooltip%(nm, cls, secNum, tier%)") ~= nil,
         'Suite 71: UI.drawAATab invokes runtime.showAATabTooltip on hover')
-    assert_true(triuneContent:find("description = cd.description") ~= nil,
+    assert_true(AA_CONTENT:find("description = cd.description") ~= nil,
         'Suite 71: recordScannedAA restores description from cache')
     assert_true(triuneContent:find("if ma.Description then%s+local d = ma.Description%(%)") ~= nil,
         'Suite 71: recordScannedAA extracts description from Me.AltAbility')
-    assert_true(triuneContent:find("if %(not description or description == ''%) and ga.Description then%s+local d = ga.Description%(%)") ~= nil,
+    assert_true(AA_CONTENT:find("if %(not description or description == ''%) and ga.Description then%s+local d = ga.Description%(%)") ~= nil,
         'Suite 71: recordScannedAA extracts description from AltAbility')
-    assert_true(triuneContent:find("description = description") ~= nil,
+    assert_true(AA_CONTENT:find("description = description") ~= nil,
         'Suite 71: recordScannedAA populates description in entry and cache')
     assert_true(triuneContent:find("runtime.showAATooltip%(itm%)") ~= nil,
         'Suite 71: UI.drawAutoAATab displays runtime.showAATooltip on hover')
@@ -8591,15 +8580,15 @@ do
 
     -- 6. Source code inspection of TAC/lua/triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("runtime%.pendingAATrain") ~= nil,
-        'Suite 72: triune.lua defines runtime.pendingAATrain')
-    assert_true(triuneContent:find("step = 'open'") ~= nil,
+    assert_true(AA_CONTENT:find("AA%.pendingAATrain") ~= nil,
+        'Suite 72: triune.lua defines AA.pendingAATrain')
+    assert_true(AA_CONTENT:find("step = 'open'") ~= nil,
         'Suite 72: triune.lua initializes step to open')
-    assert_true(triuneContent:find("mq%.cmdf%('/nomodkey /notify %%s %%s leftmouseup', winName, listName%)") ~= nil,
+    assert_true(AA_CONTENT:find("mq%.cmdf%('/nomodkey /notify %%s %%s leftmouseup', winName, listName%)") ~= nil,
         'Suite 72: triune.lua sends leftmouseup to list row to activate Train button')
-    assert_true(triuneContent:find("not isSpecial and %(maxRank > 0 and rank >= maxRank%)") ~= nil,
+    assert_true(AA_CONTENT:find("not isSpecial and %(maxRank > 0 and rank >= maxRank%)") ~= nil,
         'Suite 72: triune.lua prevents marking repeatable Special tab abilities as fully trained')
-    assert_true(triuneContent:find("Strict anti%-pause check: never spend AAs while casting or moving") ~= nil,
+    assert_true(AA_CONTENT:find("Strict anti%-pause check: never spend AAs while casting or moving") ~= nil,
         'Suite 72: triune.lua guards checkAutoSpendAA against casting and movement to eliminate pauses')
 end
 
@@ -8643,16 +8632,20 @@ do
 
     -- 2. Source code inspection of TAC/lua/triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("function runtime%.checkAutoSpendAA%(allowStop%)") ~= nil,
-        'Suite 73: triune.lua defines runtime.checkAutoSpendAA(allowStop)')
-    assert_true(triuneContent:find("function runtime%.startAATrainWorkflow%(targetName, allowStop%)") ~= nil,
-        'Suite 73: triune.lua defines runtime.startAATrainWorkflow(targetName, allowStop)')
-    assert_true(triuneContent:find("Check to see if an AA can be purchased between pulling") ~= nil,
-        'Suite 73: triune.lua checks AA purchasing between pulls')
-    assert_true(triuneContent:find("if runtime%.checkAutoSpendAA%(true%) then") ~= nil,
-        'Suite 73: triune.lua invokes checkAutoSpendAA(true) between pulls')
-    assert_true(triuneContent:find("if runtime%.pendingAATrain then%s+stopMoving%(%)%s+return%s+end") ~= nil,
-        'Suite 73: triune.lua pauses pulling while pendingAATrain is active')
+    assert_true(AA_CONTENT:find("function AA%.checkAutoSpendAA%(allowStop%)") ~= nil,
+        'Suite 73: triune.lua defines AA.checkAutoSpendAA(allowStop)')
+    assert_true(AA_CONTENT:find("function AA%.startAATrainWorkflow%(targetName, allowStop%)") ~= nil,
+        'Suite 73: triune.lua defines AA.startAATrainWorkflow(targetName, allowStop)')
+    assert_true(triuneContent:find("Let plugins %(e%.g%. Auto AA purchases%) use the gap between pulls") ~= nil,
+        'Suite 73: triune.lua offers the gap between pulls to plugins')
+    assert_true(triuneContent:find("if runtime%.pluginManager%.onBetweenPulls%(%) then%s+stopMoving%(%)%s+return") ~= nil,
+        'Suite 73: puller yields when a plugin claims the between-pull gap')
+    assert_true(AA_CONTENT:find("return AA%.checkAutoSpendAA%(true%) == true") ~= nil,
+        'Suite 73: auto_aa.onBetweenPulls invokes checkAutoSpendAA(true)')
+    assert_true(triuneContent:find("if runtime%.combatHold%(%) then%s+stopMoving%(%)%s+return%s+end") ~= nil,
+        'Suite 73: triune.lua pauses pulling while a plugin holds combat')
+    assert_true(AA_CONTENT:find("return AA%.pendingAATrain ~= nil") ~= nil,
+        'Suite 73: auto_aa.wantsCombatHold reports an active purchase workflow')
 end
 
 -- ============================================================================
@@ -8827,21 +8820,31 @@ do
     assert_true(triuneContent:find('uf_buff_max%s*=%s*30') ~= nil,
         'Suite 75: defaultCtrl sets uf_buff_max to 30')
 
-    -- 2. Verify window definition and imgui init
-    assert_true(triuneContent:find('function UI%.drawUnitFramesWindow') ~= nil,
-        'Suite 75: UI.drawUnitFramesWindow is defined in triune.lua')
-    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneUnitFramesWindow', UI%.drawUnitFramesWindow%)") ~= nil,
-        'Suite 75: TriuneUnitFramesWindow is registered with mq.imgui.init')
+    -- 2. Verify window definition and autonomous plugin architecture
+    local fUf = assert(io.open('TAC/lua/tac/hud_unitframes.lua', 'r'))
+    local ufContent = fUf:read('*all')
+    fUf:close()
+
+    assert_true(triuneContent:find("TriunePluginsUI") ~= nil,
+        'Suite 75: TriunePluginsUI is registered with mq.imgui.init')
+    assert_true(triuneContent:find('function UI%.drawPlugins') ~= nil,
+        'Suite 75: UI.drawPlugins is defined in triune.lua')
+    assert_true(ufContent:find("id%s*=%s*'hud_unitframes'") ~= nil,
+        'Suite 75: hud_unitframes plugin has id hud_unitframes')
+    assert_true(ufContent:find('function plugin%.onDrawUI') ~= nil,
+        'Suite 75: hud_unitframes defines onDrawUI render hook')
+    assert_true(ufContent:find('function plugin%.onTick') ~= nil,
+        'Suite 75: hud_unitframes defines onTick fiber hook')
     assert_true(triuneContent:find('function UI%.resolveTargetOfTarget') ~= nil,
         'Suite 75: UI.resolveTargetOfTarget is defined in triune.lua')
-    assert_true(triuneContent:find('UI%.resolveTargetOfTarget%(') ~= nil,
-        'Suite 75: UI.resolveTargetOfTarget is utilized by Target HUD')
+    assert_true(triuneContent:find('resolveTargetOfTarget%s*=') ~= nil,
+        'Suite 75: UI.resolveTargetOfTarget is exported to plugins via pm.getCoreApi()')
 
     -- 3. Verify slash command and toolbar buttons
     assert_true(triuneContent:find("cmd == 'hud' or cmd == 'uf'") ~= nil,
         'Suite 75: /ac hud and /ac uf slash commands are registered')
-    assert_true(triuneContent:find("Target & Player HUD##hdrHud") ~= nil,
-        'Suite 75: Main header contains Target & Player HUD button')
+    assert_true(readFile('TAC/lua/tac/hud_unitframes.lua'):find("label = 'Target & Player HUD'", 1, true) ~= nil,
+        'Suite 75: hud_unitframes declares its header window button (drawn by pm.drawHeaderButtons)')
     assert_true(triuneContent:find("HUD##miniHud") ~= nil,
         'Suite 75: Mini GUI toolbar contains HUD button')
 
@@ -8894,43 +8897,56 @@ do
     assert_true(triuneContent:find('gw_show_roles%s*=%s*true') ~= nil,
         'Suite 76: defaultCtrl sets gw_show_roles to true')
 
-    -- 2. Verify window definition and imgui init
-    assert_true(triuneContent:find('function UI%.drawGroupWindow') ~= nil,
-        'Suite 76: UI.drawGroupWindow is defined in triune.lua')
-    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneGroupWindow', UI%.drawGroupWindow%)") ~= nil,
-        'Suite 76: TriuneGroupWindow is registered with mq.imgui.init')
+    -- 2. Verify the window now lives in the hud_group plugin (render-only, no fiber)
+    local gwContent = readFile('TAC/lua/tac/hud_group.lua')
+    assert_true(triuneContent:find('function UI%.drawGroupWindow') == nil,
+        'Suite 76: UI.drawGroupWindow was removed from triune.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneGroupWindow'") == nil,
+        'Suite 76: TriuneGroupWindow imgui registration was removed from triune.lua')
+    local gwPlugin = assert(loadfile('TAC/lua/tac/hud_group.lua'))()
+    assert_eq(gwPlugin.id, 'hud_group', 'Suite 76: hud_group plugin id')
+    assert_eq(gwPlugin.hasThread, false, 'Suite 76: hud_group is render-only (no fiber)')
+    assert_eq(gwPlugin.runOutOfCombatOnly, false, 'Suite 76: hud_group keeps rendering in combat')
+    assert_type(gwPlugin.onDrawUI, 'function', 'Suite 76: hud_group defines onDrawUI')
+    assert_type(gwPlugin.onDrawSettings, 'function', 'Suite 76: hud_group defines onDrawSettings')
+    assert_true(gwContent:find('ctrl%.show_group_window') ~= nil,
+        'Suite 76: hud_group visibility is driven by ctrl.show_group_window')
 
     -- 3. Verify slash command and toolbar buttons
     assert_true(triuneContent:find("cmd == 'group' or cmd == 'gw'") ~= nil,
         'Suite 76: /ac group and /ac gw slash commands are registered')
-    assert_true(triuneContent:find("Group##hdrGroup") ~= nil,
-        'Suite 76: Main header contains Group button')
+    assert_true(readFile('TAC/lua/tac/hud_group.lua'):find("flag = 'show_group_window'", 1, true) ~= nil,
+        'Suite 76: hud_group declares its header window button (drawn by pm.drawHeaderButtons)')
     assert_true(triuneContent:find("Grp##miniGroup") ~= nil,
         'Suite 76: Mini GUI toolbar contains Grp button')
 
     -- 4. Verify context menu and target clicks
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##gwContextMenu'%)") ~= nil,
+    assert_true(gwContent:find("ImGui%.BeginPopupContextWindow%('##gwContextMenu'%)") ~= nil,
         'Suite 76: Group window has right-click context menu')
-    assert_true(triuneContent:find("mq%.cmdf%('/target id %%d'") ~= nil,
+    assert_true(gwContent:find("mq%.cmdf%('/target id %%d'") ~= nil,
         'Suite 76: Group window supports click-to-target')
 
     -- 5. Verify Invite and Disband buttons
-    assert_true(triuneContent:find("Invite##gwInvite") ~= nil,
+    assert_true(gwContent:find("Invite##gwInvite") ~= nil,
         'Suite 76: Group window has Invite button')
-    assert_true(triuneContent:find("Disband##gwDisband") ~= nil or triuneContent:find("disLabel %.%. '##gwDisband'") ~= nil,
+    assert_true(gwContent:find("Disband##gwDisband") ~= nil or gwContent:find("disLabel %.%. '##gwDisband'") ~= nil,
         'Suite 76: Group window has Disband button')
-    assert_true(triuneContent:find("mq%.cmd%('/invite'%)") ~= nil,
+    assert_true(gwContent:find("mq%.cmd%('/invite'%)") ~= nil,
         'Suite 76: Group window issues /invite command')
-    assert_true(triuneContent:find("mq%.cmd%('/disband'%)") ~= nil,
+    assert_true(gwContent:find("mq%.cmd%('/disband'%)") ~= nil,
         'Suite 76: Group window issues /disband command')
 
     -- 6. Verify streamlined layout (class removed, LoS removed, percentage-only bars)
-    assert_true(triuneContent:find("%[Lvl %%d%] %%s") ~= nil,
+    assert_true(gwContent:find("%[Lvl %%d%] %%s") ~= nil,
         'Suite 76: Member header tag removes player class')
-    assert_true(triuneContent:find("hpText = string%.format%('HP: %%d%%%%', mem%.hpPct or 0%)") ~= nil,
+    assert_true(gwContent:find("hpText = string%.format%('HP: %%d%%%%', mem%.hpPct or 0%)") ~= nil,
         'Suite 76: Health bar displays percentage total only')
-    assert_true(triuneContent:find("manaText = string%.format%('Mana: %%d%%%%', mem%.manaPct or 0%)") ~= nil,
+    assert_true(gwContent:find("manaText = string%.format%('Mana: %%d%%%%', mem%.manaPct or 0%)") ~= nil,
         'Suite 76: Mana bar displays percentage total only')
+
+    -- 7. Plugin only touches the core through the plugin API
+    assert_true(gwContent:find('runtime%.') == nil and gwContent:find('UI%.') == nil,
+        'Suite 76: hud_group does not reach into runtime./UI. directly')
 end
 
 -- ============================================================================
@@ -8964,11 +8980,21 @@ do
     assert_true(triuneContent:find('eff_show_detrimental%s*=%s*true') ~= nil,
         'Suite 77: defaultCtrl sets eff_show_detrimental to true')
 
-    -- 2. Verify window definition and imgui init
-    assert_true(triuneContent:find('function UI%.drawEffectsWindow') ~= nil,
-        'Suite 77: UI.drawEffectsWindow is defined in triune.lua')
-    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneEffectsWindow', UI%.drawEffectsWindow%)") ~= nil,
-        'Suite 77: TriuneEffectsWindow is registered with mq.imgui.init')
+    -- 2. Verify the window now lives in the hud_effects plugin (render-only, no fiber)
+    local effContent = readFile('TAC/lua/tac/hud_effects.lua')
+    assert_true(triuneContent:find('function UI%.drawEffectsWindow') == nil,
+        'Suite 77: UI.drawEffectsWindow was removed from triune.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneEffectsWindow'") == nil,
+        'Suite 77: TriuneEffectsWindow imgui registration was removed from triune.lua')
+    local effPlugin = assert(loadfile('TAC/lua/tac/hud_effects.lua'))()
+    assert_eq(effPlugin.id, 'hud_effects', 'Suite 77: hud_effects plugin id')
+    assert_eq(effPlugin.hasThread, false, 'Suite 77: hud_effects is render-only (no fiber)')
+    assert_type(effPlugin.onDrawUI, 'function', 'Suite 77: hud_effects defines onDrawUI')
+    assert_true(effContent:find('core%.parseDurationSec') ~= nil and effContent:find('core%.drawSpellIcon') ~= nil,
+        'Suite 77: hud_effects uses parseDurationSec/drawSpellIcon through the plugin API')
+    assert_true(triuneContent:find('parseDurationSec%s*=%s*parseDurationSec') ~= nil
+        and triuneContent:find('drawSpellIcon%s*=%s*UI%.drawSpellIcon') ~= nil,
+        'Suite 77: pm.getCoreApi exports parseDurationSec and drawSpellIcon')
 
     -- 3. Verify spell icon helpers
     assert_true(triuneContent:find('function UI%.drawSpellIcon') ~= nil,
@@ -8979,27 +9005,27 @@ do
     -- 4. Verify slash command and toolbar buttons
     assert_true(triuneContent:find("cmd == 'eff' or cmd == 'effects'") ~= nil,
         'Suite 77: /ac eff and /ac effects slash commands are registered')
-    assert_true(triuneContent:find("Effects##hdrEffects") ~= nil,
-        'Suite 77: Main header contains Effects button')
+    assert_true(readFile('TAC/lua/tac/hud_effects.lua'):find("flag = 'show_effects_window'", 1, true) ~= nil,
+        'Suite 77: hud_effects declares its header window button (drawn by pm.drawHeaderButtons)')
     assert_true(triuneContent:find("Buffs##miniEffects") ~= nil,
         'Suite 77: Mini GUI toolbar contains Buffs button')
 
     -- 5. Verify context menus and actions
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##effWinContextMenu'%)") ~= nil,
+    assert_true(effContent:find("ImGui%.BeginPopupContextWindow%('##effWinContextMenu'%)") ~= nil,
         'Suite 77: Effects window has background context menu')
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%('##effItemMenu_'") ~= nil,
+    assert_true(effContent:find("ImGui%.BeginPopupContextItem%('##effItemMenu_'") ~= nil,
         'Suite 77: Each effect item has its own right-click context menu')
-    assert_true(triuneContent:find("mq%.cmdf%('/removebuff %%s'") ~= nil,
+    assert_true(effContent:find("mq%.cmdf%('/removebuff %%s'") ~= nil,
         'Suite 77: Supports /removebuff action')
-    assert_true(triuneContent:find("mq%.cmdf%('/blockspell add me %%d'") ~= nil,
+    assert_true(effContent:find("mq%.cmdf%('/blockspell add me %%d'") ~= nil,
         'Suite 77: Supports /blockspell add me action')
-    assert_true(triuneContent:find("mq%.TLO%.Spell%(eff%.spellId%)%.Inspect%(%)") ~= nil,
+    assert_true(effContent:find("mq%.TLO%.Spell%(eff%.spellId%)%.Inspect%(%)") ~= nil,
         'Suite 77: Supports Spell.Inspect action')
 
     -- 6. Verify right-click context menu sorting controls
-    assert_true(triuneContent:find("ImGui%.Combo%('##effSortCombo', curSortIdx, sortModes%)") ~= nil,
+    assert_true(effContent:find("ImGui%.Combo%('##effSortCombo', curSortIdx, sortModes%)") ~= nil,
         'Suite 77: Effects window right-click menu has native ImGui.Combo sort dropdown')
-    assert_true(triuneContent:find("ImGui%.MenuItem%(sm %.%. '##menuSort_'") ~= nil,
+    assert_true(effContent:find("ImGui%.MenuItem%(sm %.%. '##menuSort_'") ~= nil,
         'Suite 77: Effects window right-click menu has clickable MenuItem sort options')
 
     -- 7. Pure sorting logic validation
@@ -9077,8 +9103,8 @@ do
     -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.14', 'Suite 77: triune.lua VERSION is 2.14')
-    assert_eq(vReadme, '2.14', 'Suite 77: README.md version is 2.14')
+    assert_eq(vTriune, '2.15', 'Suite 77: triune.lua VERSION is 2.15')
+    assert_eq(vReadme, '2.15', 'Suite 77: README.md version is 2.15')
     assert_eq(vTriune, vReadme, 'Suite 77: Version numbers match across triune.lua and README.md')
 end
 
@@ -9113,19 +9139,55 @@ do
     assert_true(triuneContent:find('xt_show_dist%s*=%s*true') ~= nil,
         'Suite 78: defaultCtrl.xt_show_dist default is true')
 
-    -- 2. Verify window initialization and draw function
-    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneXTargetWindow', UI%.drawXTargetWindow%)") ~= nil,
-        'Suite 78: TriuneXTargetWindow is registered via mq.imgui.init')
-    assert_true(triuneContent:find('function UI%.drawXTargetWindow%(%)') ~= nil,
-        'Suite 78: UI.drawXTargetWindow is defined in triune.lua')
+    -- 2. Verify the window now lives in the hud_xtarget plugin (render-only, no fiber)
+    local xtContent = readFile('TAC/lua/tac/hud_xtarget.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneXTargetWindow'") == nil,
+        'Suite 78: TriuneXTargetWindow imgui registration was removed from triune.lua')
+    assert_true(triuneContent:find('function UI%.drawXTargetWindow%(%)') == nil,
+        'Suite 78: UI.drawXTargetWindow was removed from triune.lua')
+    local xtPlugin = assert(loadfile('TAC/lua/tac/hud_xtarget.lua'))()
+    assert_eq(xtPlugin.id, 'hud_xtarget', 'Suite 78: hud_xtarget plugin id')
+    assert_eq(xtPlugin.hasThread, false, 'Suite 78: hud_xtarget is render-only (no fiber)')
+    assert_type(xtPlugin.onDrawUI, 'function', 'Suite 78: hud_xtarget defines onDrawUI')
+    assert_true(xtContent:find('core%.addIgnore') ~= nil and triuneContent:find('addIgnore%s*=%s*runtime%.addIgnore') ~= nil,
+        'Suite 78: hud_xtarget reaches the ignore list through the exported core API')
+
+    -- Pet / friendly-PC slots are hidden by default (they are not hostiles)
+    do
+        local xtCtrl = {}
+        local xtCore = {
+            ctrl = xtCtrl,
+            getMultiPetList = function() return { { petId = 501, cls = 'Nec', slotNum = 2 } }, { 777 } end,
+        }
+        xtPlugin.onInit(xtCore)
+        assert_eq(xtCtrl.xt_show_pets, false, 'Suite 78: xt_show_pets defaults to false')
+        assert_eq(xtCtrl.xt_show_pcs, false, 'Suite 78: xt_show_pcs defaults to false')
+        local hidden = xtPlugin.isHiddenSlot
+        assert_eq(hidden('NPC', 'Auto Hater', 100), false, 'Suite 78: Auto Hater NPC slot is shown')
+        assert_eq(hidden('Pet', 'My Pet', 200), true, 'Suite 78: own pet slot is hidden')
+        assert_eq(hidden('NPC', 'Group Member Pet', 300), true, 'Suite 78: group pet slot is hidden by slot type')
+        assert_eq(hidden('NPC', 'Auto Hater', 501), true, 'Suite 78: Trio pet (multi-pet slot id) is hidden even in a hater slot')
+        assert_eq(hidden('NPC', 'Auto Hater', 777), true, 'Suite 78: extra pet id from getMultiPetList is hidden')
+        assert_eq(hidden('PC', 'Specific PC', 400), true, 'Suite 78: friendly PC slot is hidden')
+        assert_eq(hidden('Mercenary', 'My Mercenary', 410), true, 'Suite 78: mercenary slot is hidden')
+        assert_eq(hidden('PC', 'Group Tank', 420), true, 'Suite 78: Group Tank role slot is hidden')
+        assert_eq(hidden('NPC', 'Group Tank Target', 430), false, 'Suite 78: Group Tank Target (what the tank fights) is shown')
+        assert_eq(hidden('NPC', 'My Pet Target', 440), false, 'Suite 78: My Pet Target (what the pet fights) is shown')
+        xtCtrl.xt_show_pets = true
+        assert_eq(hidden('Pet', 'My Pet', 200), false, 'Suite 78: pets are listed when xt_show_pets is on')
+        xtCtrl.xt_show_pcs = true
+        assert_eq(hidden('PC', 'Specific PC', 400), false, 'Suite 78: PCs are listed when xt_show_pcs is on')
+        assert_true(xtContent:find("Show Pets & Mercenaries##xtPets", 1, true) ~= nil,
+            'Suite 78: context menu exposes the Show Pets toggle')
+    end
 
     -- 3. Verify two-line header toolbar and compact button height
     assert_true(triuneContent:find("ImGuiStyleVar%.FramePadding,%s*5,%s*2") ~= nil,
         'Suite 78: Header toolbar buttons have compact FramePadding (5, 2)')
-    assert_true(triuneContent:find("Cooldowns##hdrCooldowns.-Second Button Line") ~= nil,
-        'Suite 78: Toolbar creates a second button line below Cooldowns')
-    assert_true(triuneContent:find("XTarget##hdrXTarget") ~= nil,
-        'Suite 78: Second button line contains XTarget button')
+    assert_true(triuneContent:find("runtime.pluginManager.drawHeaderButtons()", 1, true) ~= nil,
+        'Suite 78: Toolbar draws plugin window buttons through the plugin manager')
+    assert_true(readFile('TAC/lua/tac/hud_xtarget.lua'):find("flag = 'show_xtarget_window'", 1, true) ~= nil,
+        'Suite 78: hud_xtarget declares its header window button (drawn by pm.drawHeaderButtons)')
     assert_true(triuneContent:find("XT##miniXTarget") ~= nil,
         'Suite 78: Mini GUI toolbar contains XT button')
 
@@ -9134,20 +9196,20 @@ do
         'Suite 78: /ac xtar, /ac xt, and /ac xtarget slash commands are registered')
 
     -- 5. Verify window context menus and actions
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##xtWinContextMenu'%)") ~= nil,
+    assert_true(xtContent:find("ImGui%.BeginPopupContextWindow%('##xtWinContextMenu'%)") ~= nil,
         'Suite 78: XTarget window has background context menu')
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%('##xtItemMenu_'") ~= nil,
+    assert_true(xtContent:find("ImGui%.BeginPopupContextItem%('##xtItemMenu_'") ~= nil,
         'Suite 78: Each xtarget mob row has its own right-click context menu')
-    assert_true(triuneContent:find("mq%.cmdf%('/target id %%d'") ~= nil,
+    assert_true(xtContent:find("mq%.cmdf%('/target id %%d'") ~= nil,
         'Suite 78: Clicking or selecting mob issues /target id')
-    assert_true(triuneContent:find("mq%.cmd%('/face fast'%)") ~= nil,
+    assert_true(xtContent:find("mq%.cmd%('/face fast'%)") ~= nil,
         'Suite 78: Supports Face Target action')
 
     -- 6. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.14', 'Suite 78: triune.lua VERSION is 2.14')
-    assert_eq(vReadme, '2.14', 'Suite 78: README.md version is 2.14')
+    assert_eq(vTriune, '2.15', 'Suite 78: triune.lua VERSION is 2.15')
+    assert_eq(vReadme, '2.15', 'Suite 78: README.md version is 2.15')
     assert_eq(vTriune, vReadme, 'Suite 78: Version numbers match across triune.lua and README.md')
 end
 
@@ -9179,14 +9241,23 @@ do
         'Suite 79: defaultCtrl.gem_show_timer default is true')
 
     -- 2. Verify window initialization and draw function
-    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneSpellGemBarWindow', UI%.drawSpellGemBarWindow%)") ~= nil,
-        'Suite 79: TriuneSpellGemBarWindow is registered via mq.imgui.init')
-    assert_true(triuneContent:find('function UI%.drawSpellGemBarWindow%(%)') ~= nil,
-        'Suite 79: UI.drawSpellGemBarWindow is defined in triune.lua')
+    local sgContent = readFile('TAC/lua/tac/hud_spellgems.lua')
+    assert_true(triuneContent:find("mq%.imgui%.init%('TriuneSpellGemBarWindow'") == nil,
+        'Suite 79: TriuneSpellGemBarWindow imgui registration removed from triune.lua')
+    assert_true(triuneContent:find('function UI%.drawSpellGemBarWindow%(%)') == nil,
+        'Suite 79: UI.drawSpellGemBarWindow removed from triune.lua (hud_spellgems plugin)')
+    local sgPlugin = assert(loadfile('TAC/lua/tac/hud_spellgems.lua'))()
+    assert_eq(sgPlugin.id, 'hud_spellgems', 'Suite 79: hud_spellgems plugin id')
+    assert_eq(sgPlugin.hasThread, false, 'Suite 79: hud_spellgems is render-only')
+    assert_type(sgPlugin.onDrawUI, 'function', 'Suite 79: hud_spellgems defines onDrawUI')
+    assert_true(sgContent:find('function M%.drawSpellGemBarWindow%(%)') ~= nil,
+        'Suite 79: hud_spellgems carries the spell gem bar renderer')
+    assert_true(sgContent:find('core%.getGemCooldownSec') ~= nil and triuneContent:find('getGemCooldownSec%s*=%s*UI%.getGemCooldownSec') ~= nil,
+        'Suite 79: gem cooldown helper is reached through the exported core API')
 
     -- 3. Verify toolbar buttons
-    assert_true(triuneContent:find("Gems##hdrGems") ~= nil,
-        'Suite 79: Second button line contains Gems button')
+    assert_true(readFile('TAC/lua/tac/hud_spellgems.lua'):find("flag = 'show_spell_gems'", 1, true) ~= nil,
+        'Suite 79: hud_spellgems declares its header window button (drawn by pm.drawHeaderButtons)')
     assert_true(triuneContent:find("Gems##miniGems") ~= nil,
         'Suite 79: Mini GUI toolbar contains Gems button')
 
@@ -9195,17 +9266,17 @@ do
         'Suite 79: /ac gems, /ac gembar, and /ac spellbar slash commands are registered')
 
     -- 5. Verify window context menus and actions
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextWindow%('##gemWinContextMenu'%)") ~= nil,
+    assert_true(sgContent:find("ImGui%.BeginPopupContextWindow%('##gemWinContextMenu'%)") ~= nil,
         'Suite 79: Spell Gem Bar window has background options context menu')
-    assert_true(triuneContent:find("ImGui%.BeginPopupContextItem%('##gemItemMenu_'") ~= nil,
+    assert_true(sgContent:find("ImGui%.BeginPopupContextItem%('##gemItemMenu_'") ~= nil,
         'Suite 79: Each gem slot has its own right-click context menu')
-    assert_true(triuneContent:find("mq%.cmdf%('/cast %%d', slot%)") ~= nil,
+    assert_true(sgContent:find("mq%.cmdf%('/cast %%d', slot%)") ~= nil,
         'Suite 79: Clicking or selecting gem issues /cast <slot>')
-    assert_true(triuneContent:find("mq%.cmdf%('/memorize \"\" %%d', slot%)") ~= nil,
+    assert_true(sgContent:find("mq%.cmdf%('/memorize \"\" %%d', slot%)") ~= nil,
         'Suite 79: Supports unmemorizing gem slot')
 
     -- 6. Verify Spellbook button and spell sets menu
-    assert_true(triuneContent:find("gemSpellBookBtn") ~= nil,
+    assert_true(sgContent:find("gemSpellBookBtn") ~= nil,
         'Suite 79: Spellbook button is rendered at end of gem bar')
     assert_true(triuneContent:find("UI%.drawSpellbookIcon") ~= nil,
         'Suite 79: High-detail vector Spellbook icon is drawn')
@@ -9219,19 +9290,19 @@ do
         'Suite 79: UI.col32 provides safe 0xAABBGGRR color generation')
     assert_true(triuneContent:find("UI%.getGemCooldownSec") ~= nil,
         'Suite 79: UI.getGemCooldownSec converts EQ millisecond timer to true seconds')
-    assert_true(triuneContent:find("runtime%.gemCooldownEnd") ~= nil,
-        'Suite 79: runtime.gemCooldownEnd tracks real-time frame countdown')
-    assert_true(triuneContent:find("math%.ceil%(gemData%.timer%)") ~= nil,
+    assert_true(sgContent:find("M%.gemCooldownEnd") ~= nil and triuneContent:find("gemCooldownEnd") == nil,
+        'Suite 79: gemCooldownEnd frame countdown is plugin-local state')
+    assert_true(sgContent:find("math%.ceil%(gemData%.timer%)") ~= nil,
         'Suite 79: Recast cooldowns simplified to integer seconds')
 
     -- 6. Verify Spell Set InputText and Preset Sorting Logic
-    assert_true(triuneContent:find("local newText,%s*changed%s*=%s*ImGui%.InputText") ~= nil,
+    assert_true(sgContent:find("local newText,%s*changed%s*=%s*ImGui%.InputText") ~= nil,
         'Suite 79: ImGui.InputText correctly unpacks (text, changed) tuple')
-    assert_true(triuneContent:find("table%.sort%(presetList,") ~= nil,
+    assert_true(sgContent:find("table%.sort%(presetList,") ~= nil,
         'Suite 79: Saved spell set presets are sorted alphabetically')
 
-    assert_true(triuneContent:find("runtime%.gemCooldownSpell") ~= nil,
-        'Suite 79: runtime.gemCooldownSpell tracks memorized spell changes')
+    assert_true(sgContent:find("M%.gemCooldownSpell") ~= nil and triuneContent:find("gemCooldownSpell") == nil,
+        'Suite 79: gemCooldownSpell memorized-spell tracking is plugin-local state')
 
     -- 7. Pure logic simulation of countdown ticking
     local testNow = 1000.0
@@ -9255,11 +9326,48 @@ do
         assert_eq(math.ceil(rem), 12 - step, string.format('Suite 79: Countdown smoothly ticks to %d without freezing', 12 - step))
     end
 
-    -- 8. Verify version sync
+    -- 8. Sentinel / 0xFFFFFFFF unsigned underflow and 1194h rejection
+    local function simulateGemCooldownSec(rawMs, totalSec, spellRecast)
+        local sec = 0
+        if rawMs and (rawMs >= 2147483647 or rawMs < 0) then
+            return 0
+        end
+        if totalSec and totalSec >= 2000000 then
+            return 0
+        end
+        if totalSec and totalSec > 0 and totalSec < 3600 then
+            sec = totalSec
+        end
+        if sec >= 3600 or sec < 0 then
+            sec = 0
+        end
+        if spellRecast and spellRecast >= 0 then
+            local maxAllowed = math.max(3.0, spellRecast + 3.0)
+            if sec > maxAllowed then sec = 0 end
+        end
+        return sec
+    end
+
+    assert_eq(simulateGemCooldownSec(4294967295, 4294967, 10), 0, 'Suite 79: Rejects 0xFFFFFFFF unsigned underflow sentinel (1194h bug)')
+    assert_eq(simulateGemCooldownSec(nil, 4294967, 10), 0, 'Suite 79: Rejects 4294967s TotalSeconds sentinel')
+    assert_eq(simulateGemCooldownSec(nil, 50, 10), 0, 'Suite 79: Clamps cooldown that exceeds spell recast + buffer')
+    assert_eq(simulateGemCooldownSec(nil, 8, 10), 8, 'Suite 79: Accepts valid cooldown within recast duration')
+
+    -- Overlay timer formatting verification (no 1194h)
+    local function fmtGemTimer(timerSec)
+        local cdSec = math.ceil(timerSec)
+        if cdSec >= 3600 then cdSec = 0 end
+        return cdSec >= 60 and string.format('%dm', math.ceil(cdSec / 60)) or tostring(cdSec)
+    end
+    assert_eq(fmtGemTimer(4294967), '0', 'Suite 79: Corrupted 4294967s never renders 1194h')
+    assert_eq(fmtGemTimer(120), '2m', 'Suite 79: 120s formats as 2m')
+    assert_eq(fmtGemTimer(5), '5', 'Suite 79: 5s formats as 5')
+
+    -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.14', 'Suite 79: triune.lua VERSION is 2.14')
-    assert_eq(vReadme, '2.14', 'Suite 79: README.md version is 2.14')
+    assert_eq(vTriune, '2.15', 'Suite 79: triune.lua VERSION is 2.15')
+    assert_eq(vReadme, '2.15', 'Suite 79: README.md version is 2.15')
     assert_eq(vTriune, vReadme, 'Suite 79: Version numbers match across triune.lua and README.md')
 end
 
@@ -9374,11 +9482,19 @@ do
     assert_true(triuneContent:find('winpos_restore_visibility%s*=%s*false') ~= nil,
         'Suite 81: defaultCtrl.winpos_restore_visibility default is false')
 
-    -- 2. Verify runtime.MANAGED_WINDOWS registry covers all 8 windows
-    local expectedKeys = { 'main', 'mini', 'unit_frames', 'group', 'effects', 'cooldowns', 'xtarget', 'spell_gems' }
-    for _, k in ipairs(expectedKeys) do
+    -- 2. Window registry: core owns main/mini, plugin windows are appended dynamically
+    local expectedKeys = { 'main', 'mini', 'unit_frames', 'group', 'effects', 'cooldowns', 'spellbook', 'xtarget', 'spell_gems' }
+    for _, k in ipairs({ 'main', 'mini' }) do
         assert_true(triuneContent:find("key%s*=%s*'" .. k .. "'") ~= nil,
-            'Suite 81: runtime.MANAGED_WINDOWS tracks window key ' .. k)
+            'Suite 81: runtime.CORE_WINDOWS tracks window key ' .. k)
+    end
+    assert_true(triuneContent:find('function runtime.getManagedWindows()', 1, true) ~= nil,
+        'Suite 81: runtime.getManagedWindows builds the layout registry')
+    assert_true(triuneContent:find('runtime.MANAGED_WINDOWS', 1, true) == nil,
+        'Suite 81: static runtime.MANAGED_WINDOWS list removed (plugin windows are discovered)')
+    for _, k in ipairs({ 'unit_frames', 'group', 'effects', 'cooldowns', 'xtarget', 'spell_gems' }) do
+        assert_true(triuneContent:find("key%s*=%s*'" .. k .. "'") == nil,
+            'Suite 81: core no longer hardcodes the ' .. k .. ' layout entry')
     end
 
     -- 3. Verify window position hooks
@@ -9386,11 +9502,28 @@ do
         'Suite 81: UI.preBeginWindow is defined')
     assert_true(triuneContent:find('function UI%.postBeginWindow%(winKey%)') ~= nil,
         'Suite 81: UI.postBeginWindow is defined')
+    local pluginWindowFiles = {
+        unit_frames = 'TAC/lua/tac/hud_unitframes.lua',
+        group       = 'TAC/lua/tac/hud_group.lua',
+        effects     = 'TAC/lua/tac/hud_effects.lua',
+        xtarget     = 'TAC/lua/tac/hud_xtarget.lua',
+        cooldowns   = 'TAC/lua/tac/hud_cooldowns.lua',
+        spell_gems  = 'TAC/lua/tac/hud_spellgems.lua',
+        spellbook   = 'TAC/lua/tac/spellbook.lua',
+    }
     for _, k in ipairs(expectedKeys) do
-        assert_true(triuneContent:find("UI%.preBeginWindow%('" .. k .. "'%)") ~= nil,
-            'Suite 81: UI.preBeginWindow is hooked for ' .. k)
-        assert_true(triuneContent:find("UI%.postBeginWindow%('" .. k .. "'%)") ~= nil,
-            'Suite 81: UI.postBeginWindow is hooked for ' .. k)
+        if pluginWindowFiles[k] then
+            local plContent = readFile(pluginWindowFiles[k])
+            assert_true(plContent:find("core%.preBeginWindow%('" .. k .. "'%)") ~= nil,
+                'Suite 81: core.preBeginWindow is hooked for ' .. k .. ' in ' .. pluginWindowFiles[k])
+            assert_true(plContent:find("core%.postBeginWindow%('" .. k .. "'%)") ~= nil,
+                'Suite 81: core.postBeginWindow is hooked for ' .. k .. ' in ' .. pluginWindowFiles[k])
+        else
+            assert_true(triuneContent:find("UI%.preBeginWindow%('" .. k .. "'%)") ~= nil,
+                'Suite 81: UI.preBeginWindow is hooked for ' .. k)
+            assert_true(triuneContent:find("UI%.postBeginWindow%('" .. k .. "'%)") ~= nil,
+                'Suite 81: UI.postBeginWindow is hooked for ' .. k)
+        end
     end
 
     -- 4. Verify save, restore, center, and reset logic
@@ -9420,8 +9553,8 @@ do
     -- 7. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.14', 'Suite 81: triune.lua VERSION is 2.14')
-    assert_eq(vReadme, '2.14', 'Suite 81: README.md version is 2.14')
+    assert_eq(vTriune, '2.15', 'Suite 81: triune.lua VERSION is 2.15')
+    assert_eq(vReadme, '2.15', 'Suite 81: README.md version is 2.15')
     assert_eq(vTriune, vReadme, 'Suite 81: Version numbers match across triune.lua and README.md')
 end
 
@@ -9518,15 +9651,15 @@ do
 
     -- 4. Source code verification of TAC/lua/triune.lua
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(triuneContent:find("if r > 0 and mr <= 0 then%s+isForeignStub = true") ~= nil,
+    assert_true(AA_CONTENT:find("if r > 0 and mr <= 0 then%s+isForeignStub = true") ~= nil,
         'Suite 82: triune.lua detects foreign stubs with r > 0 and mr <= 0')
-    assert_true(triuneContent:find("if not maxRank or maxRank <= 0 then%s+return%s+end") ~= nil,
+    assert_true(AA_CONTENT:find("if not maxRank or maxRank <= 0 then%s+return%s+end") ~= nil,
         'Suite 82: recordScannedAA rejects abilities with maxRank <= 0')
-    assert_true(triuneContent:find("if not cd%.maxRank or cd%.maxRank <= 0 then%s+runtime%.cachedAAData%[cName%] = nil") ~= nil,
+    assert_true(AA_CONTENT:find("if not cd%.maxRank or cd%.maxRank <= 0 then%s+rt%.cachedAAData%[cName%] = nil") ~= nil,
         'Suite 82: cache pruning purges entries with missing or non-positive maxRank')
-    assert_true(triuneContent:find("if not item%.maxRank or item%.maxRank <= 0 then%s+match = false") ~= nil,
+    assert_true(AA_CONTENT:find("if not item%.maxRank or item%.maxRank <= 0 then%s+match = false") ~= nil,
         'Suite 82: getFilteredSortedAAs filters out 1/? abilities')
-    assert_true(triuneContent:find("if nm and nm ~= '' and mr > 0 then%s+runtime%.recordScannedAA%(list, foundMap, nm, r > 0 and r or nil, mr, nil, true, nil, false%)") ~= nil,
+    assert_true(AA_CONTENT:find("if nm and nm ~= '' and mr > 0 then%s+AA%.recordScannedAA%(list, foundMap, nm, r > 0 and r or nil, mr, nil, true, nil, false%)") ~= nil,
         'Suite 82: probeRange requires mr > 0 and passes isFromUI = false')
 end
 
@@ -9570,9 +9703,9 @@ do
     local triuneContent = readFile('TAC/lua/triune.lua')
 
     -- 1. Verify bank slider in UI enforces a minimum of 5 AA
-    assert_true(triuneContent:find("SliderInt('##autoAaThresh', curThresh, 5, 100, 'Bank: %d')", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("SliderInt('##autoAaThresh', curThresh, 5, 100, 'Bank: %d')", 1, true) ~= nil,
         'Suite 84: Bank slider enforces 5 minimum AA points in UI')
-    assert_true(triuneContent:find("Reserve/Bank Threshold: %d AA points (min: 5)", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("Reserve/Bank Threshold: %d AA points (min: 5)", 1, true) ~= nil,
         'Suite 84: Bank slider tooltip indicates 5 minimum AA points')
 
     -- 2. Verify sanitizeCtrl clamps auto_spend_aa_threshold to at least 5
@@ -9580,24 +9713,1728 @@ do
         'Suite 84: sanitizeCtrl clamps auto_spend_aa_threshold to minimum of 5')
 
     -- 3. Verify checkAutoSpendAA halts early if unspent < 5 to avoid micro-pauses
-    assert_true(triuneContent:find("if unspent < 5 then return false end", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("if unspent < 5 then return false end", 1, true) ~= nil,
         'Suite 84: checkAutoSpendAA skips evaluation when unspent < 5')
 
     -- 4. Verify findAAInWindowLists prioritizes preferredTab and does not overmatch substrings
-    assert_true(triuneContent:find("function runtime.findAAInWindowLists(targetName, preferredTab)", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("function AA.findAAInWindowLists(targetName, preferredTab)", 1, true) ~= nil,
         'Suite 84: findAAInWindowLists accepts preferredTab parameter')
     assert_true(triuneContent:find("cleanTarget:find(cleanRow, 1, true)", 1, true) == nil,
         'Suite 84: findAAInWindowLists eliminated dangerous substring overmatching')
 
     -- 5. Verify Special tab abilities (like Fireworks) and designated auto_spend_aa_name are whitelisted in isAAAllowedForPlayer
-    assert_true(triuneContent:find("if runtime.isSpecialTabAA and runtime.isSpecialTabAA(name) then", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("if AA.isSpecialTabAA and AA.isSpecialTabAA(name) then", 1, true) ~= nil,
         'Suite 84: isAAAllowedForPlayer whitelists Special tab abilities')
-    assert_true(triuneContent:find("if ctrl.auto_spend_aa_name and name == ctrl.auto_spend_aa_name then", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("if ctrl.auto_spend_aa_name and name == ctrl.auto_spend_aa_name then", 1, true) ~= nil,
         'Suite 84: isAAAllowedForPlayer whitelists auto_spend_aa_name')
 
     -- 6. Verify synthetic maxRank for Special repeatable AAs in recordScannedAA
-    assert_true(triuneContent:find("if isSpecial and (not maxRank or maxRank <= 0) then", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("if isSpecial and (not maxRank or maxRank <= 0) then", 1, true) ~= nil,
         'Suite 84: recordScannedAA sets synthetic maxRank for repeatable Special AAs')
+end
+
+-- ============================================================================
+-- Suite 85: Auto AA Fireworks & Summon Firework (/alt act 17788) Reliability
+-- ============================================================================
+print('--- Suite 85: Auto AA Fireworks & Summon Firework (/alt act 17788) Reliability ---')
+do
+    local triuneContent = readFile('TAC/lua/triune.lua')
+
+    -- 1. Verify post-purchase auto-summon and cooldown checks
+    assert_true(AA_CONTENT:find("AA.scheduleFireworksSummon(fwId, task.name)", 1, true) ~= nil,
+        'Suite 85: processAATrainWorkflow schedules a deferred fireworks summon after purchasing the AA')
+    assert_true(AA_CONTENT:find("AltAbilityTimer('Summon Firework')", 1, true) ~= nil,
+        'Suite 85: checkAutoSummonFireworks checks timer via Summon Firework')
+    assert_true(AA_CONTENT:find("AltAbilityTimer('Alternately Advanced Fireworks')", 1, true) ~= nil,
+        'Suite 85: checkAutoSummonFireworks checks timer via Alternately Advanced Fireworks')
+    assert_true(triuneContent:find("/alt act %d", 1, true) ~= nil,
+        'Suite 85: fireworks summoning uses /alt act command')
+
+    -- 2. Verify priority candidate canTrainMet bypass for Special tab abilities
+    assert_true(AA_CONTENT:find("local canTrainMet = isSpecial or canTrainCheck", 1, true) ~= nil,
+        'Suite 85: checkAutoSpendAA allows isSpecial to bypass canTrainCheck')
+    assert_true(AA_CONTENT:find("not fullyTrained and not isInvalidStub and levelMet and canTrainMet", 1, true) ~= nil,
+        'Suite 85: candidate qualification uses canTrainMet')
+
+    -- 3. Verify AAW_TrainFilter (CanPurchaseFilter) unchecking in processAATrainWorkflow
+    assert_true(AA_CONTENT:find("AAW_TrainFilter", 1, true) ~= nil,
+        'Suite 85: processAATrainWorkflow references AAW_TrainFilter')
+    assert_true(AA_CONTENT:find("CanPurchaseFilter", 1, true) ~= nil,
+        'Suite 85: processAATrainWorkflow references CanPurchaseFilter')
+    assert_true(AA_CONTENT:find("triedUncheckTrainFilter", 1, true) ~= nil,
+        'Suite 85: processAATrainWorkflow has triedUncheckTrainFilter fallback')
+
+    -- 4. Verify direct listbox lookup aliases in findAAInWindowLists
+    assert_true(AA_CONTENT:find("List('=Summon Firework')", 1, true) ~= nil,
+        'Suite 85: findAAInWindowLists supports direct List lookup for Summon Firework')
+    assert_true(AA_CONTENT:find("List('=Alternately Advanced Fireworks')", 1, true) ~= nil,
+        'Suite 85: findAAInWindowLists supports direct List lookup for Alternately Advanced Fireworks')
+
+    -- 5. Functional simulation of multi-path readiness check
+    local function simCheckFireworksReady(mockReadyMap, mockTimerMap, aaId, name)
+        local ready = false
+        if mockReadyMap['Summon Firework'] or (mockTimerMap['Summon Firework'] == 0) then
+            ready = true
+        elseif mockReadyMap['Alternately Advanced Fireworks'] or (mockTimerMap['Alternately Advanced Fireworks'] == 0) then
+            ready = true
+        elseif name and (mockReadyMap[name] or mockTimerMap[name] == 0) then
+            ready = true
+        elseif aaId and (mockReadyMap[aaId] or mockTimerMap[aaId] == 0) then
+            ready = true
+        end
+        return ready
+    end
+
+    assert_true(simCheckFireworksReady({ ['Summon Firework'] = true }, {}, 17788, 'Alternately Advanced Fireworks'),
+        'Suite 85: sim readiness passes when Summon Firework is ready')
+    assert_true(simCheckFireworksReady({}, { ['Summon Firework'] = 0 }, 17788, 'Alternately Advanced Fireworks'),
+        'Suite 85: sim readiness passes when Summon Firework timer is 0')
+    assert_true(simCheckFireworksReady({ ['Alternately Advanced Fireworks'] = true }, {}, 17788, 'Alternately Advanced Fireworks'),
+        'Suite 85: sim readiness passes when Alternately Advanced Fireworks is ready')
+    assert_eq(simCheckFireworksReady({}, { ['Summon Firework'] = 30 }, 17788, 'Alternately Advanced Fireworks'), false,
+        'Suite 85: sim readiness fails when Summon Firework on cooldown')
+
+    -- 6. Functional simulation of priority queue candidate selection with canTrainMet
+    local function simCanSelectCandidate(isSpecial, fullyTrained, isInvalidStub, levelMet, canTrainCheck)
+        local canTrainMet = isSpecial or canTrainCheck
+        return not fullyTrained and not isInvalidStub and levelMet and canTrainMet
+    end
+
+    assert_true(simCanSelectCandidate(true, false, false, true, false),
+        'Suite 85: Special tab ability selected even if canTrainCheck is false')
+    assert_eq(simCanSelectCandidate(false, false, false, true, false), false,
+        'Suite 85: Non-special ability rejected if canTrainCheck is false')
+    assert_true(simCanSelectCandidate(false, false, false, true, true),
+        'Suite 85: Non-special ability accepted when canTrainCheck is true')
+end
+
+-- ============================================================================
+-- Suite 86: Triune Modular Plugin System & Coroutine Fiber Execution Logic
+-- ============================================================================
+do
+    print('--- Suite 86: Modular Plugin Engine & Coroutine Fiber Execution Logic ---')
+
+    -- 1. Verify auto_accept.lua loads and adheres to the plugin specification
+    local fAutoAccept = assert(loadfile('TAC/lua/tac/auto_accept.lua'))
+    assert_true(fAutoAccept ~= nil, 'Suite 86: TAC/lua/tac/auto_accept.lua compiles cleanly')
+    local okAA, pAA = pcall(fAutoAccept)
+    assert_true(okAA and type(pAA) == 'table', 'Suite 86: auto_accept returns a valid plugin table')
+    assert_eq(pAA.id, 'auto_accept', 'Suite 86: auto_accept has correct id')
+    assert_eq(pAA.name, 'Auto-Accept Invites', 'Suite 86: auto_accept has user-facing name')
+    assert_eq(pAA.runOutOfCombatOnly, true, 'Suite 86: auto_accept sleeps during combat')
+    assert_eq(pAA.hasThread, true, 'Suite 86: auto_accept declares coroutine fiber execution')
+    assert_true(type(pAA.onInit) == 'function', 'Suite 86: auto_accept provides onInit hook')
+    assert_true(type(pAA.onTick) == 'function', 'Suite 86: auto_accept provides onTick hook')
+    assert_true(type(pAA.onDrawSettings) == 'function', 'Suite 86: auto_accept provides onDrawSettings hook')
+
+    -- 2. Verify floating_damage.lua loads and adheres to the plugin specification
+    local fFloatDmg = assert(loadfile('TAC/lua/tac/floating_damage.lua'))
+    assert_true(fFloatDmg ~= nil, 'Suite 86: TAC/lua/tac/floating_damage.lua compiles cleanly')
+    local okFD, pFD = pcall(fFloatDmg)
+    assert_true(okFD and type(pFD) == 'table', 'Suite 86: floating_damage returns a valid plugin table')
+    assert_eq(pFD.id, 'floating_damage', 'Suite 86: floating_damage has correct id')
+    assert_eq(pFD.name, 'Floating Damage Text', 'Suite 86: floating_damage has user-facing name')
+    assert_eq(pFD.runOutOfCombatOnly, false, 'Suite 86: floating_damage remains ACTIVE in combat')
+    assert_eq(pFD.hasThread, true, 'Suite 86: floating_damage declares coroutine fiber execution')
+    assert_true(type(pFD.onInit) == 'function', 'Suite 86: floating_damage provides onInit hook')
+    assert_true(type(pFD.onTick) == 'function', 'Suite 86: floating_damage provides onTick hook')
+    assert_true(type(pFD.onDrawUI) == 'function', 'Suite 86: floating_damage provides onDrawUI hook')
+
+    -- 3. Functional simulation of Plugin Manager discovery & fiber runner
+    local pm = {
+        plugins = {},
+        pluginOrder = {},
+    }
+
+    local function registerMockPlugin(rawInst)
+        local id = rawInst.id
+        local p = {
+            id = id,
+            name = rawInst.name,
+            tickInterval = rawInst.tickInterval or 0.1,
+            runOutOfCombatOnly = (rawInst.runOutOfCombatOnly == true),
+            hasThread = (rawInst.hasThread == true),
+            instance = rawInst,
+            enabled = true,
+            status = 'Active',
+            lastTickAt = 0,
+            lastExecMs = 0,
+            avgExecMs = 0,
+            errorMsg = nil,
+        }
+        if p.hasThread then
+            p.thread = coroutine.create(function()
+                while p.enabled do
+                    if p.instance.onTick then
+                        local ok, err = pcall(p.instance.onTick)
+                        if not ok then
+                            p.status = 'Error'
+                            p.errorMsg = tostring(err)
+                            break
+                        end
+                    end
+                    coroutine.yield()
+                end
+            end)
+        end
+        pm.plugins[id] = p
+        table.insert(pm.pluginOrder, id)
+        return p
+    end
+
+    local testTickCount = 0
+    local testPlugin = {
+        id = 'test_fiber',
+        name = 'Test Fiber Plugin',
+        tickInterval = 0.05,
+        runOutOfCombatOnly = true,
+        hasThread = true,
+        onTick = function()
+            testTickCount = testTickCount + 1
+        end,
+    }
+
+    local pReg = registerMockPlugin(testPlugin)
+    assert_eq(pReg.id, 'test_fiber', 'Suite 86: mock plugin registered with correct id')
+    assert_true(pReg.thread ~= nil, 'Suite 86: mock plugin fiber created')
+
+    -- Simulate main loop tick dispatcher
+    local function simTick(inCombat, simNow)
+        for _, id in ipairs(pm.pluginOrder) do
+            local p = pm.plugins[id]
+            if p and p.enabled and p.status ~= 'Error' then
+                if inCombat and p.runOutOfCombatOnly then
+                    p.status = 'Sleeping (Combat)'
+                else
+                    p.status = 'Active'
+                    if (simNow - p.lastTickAt) >= p.tickInterval then
+                        p.lastTickAt = simNow
+                        if p.hasThread and p.thread then
+                            coroutine.resume(p.thread)
+                        elseif p.instance.onTick then
+                            p.instance.onTick()
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Run tick out of combat
+    simTick(false, 1.0)
+    assert_eq(testTickCount, 1, 'Suite 86: fiber ticks out of combat')
+    assert_eq(pReg.status, 'Active', 'Suite 86: status is Active out of combat')
+
+    -- Run tick in combat: non-combat plugin MUST sleep!
+    simTick(true, 1.5)
+    assert_eq(testTickCount, 1, 'Suite 86: fiber does NOT tick during combat (zero combat latency)')
+    assert_eq(pReg.status, 'Sleeping (Combat)', 'Suite 86: status transitioned to Sleeping (Combat)')
+
+    -- Run tick out of combat again: resumes smoothly
+    simTick(false, 2.0)
+    assert_eq(testTickCount, 2, 'Suite 86: fiber resumes execution when combat ends')
+    assert_eq(pReg.status, 'Active', 'Suite 86: status returned to Active')
+
+    -- 4. Test error isolation (pcall containment in fiber)
+    local crashPlugin = {
+        id = 'crash_plugin',
+        name = 'Buggy Plugin',
+        tickInterval = 0.01,
+        runOutOfCombatOnly = false,
+        hasThread = true,
+        onTick = function()
+            error('Intentional plugin crash test')
+        end,
+    }
+    local pCrash = registerMockPlugin(crashPlugin)
+    simTick(false, 3.0)
+    assert_eq(pCrash.status, 'Error', 'Suite 86: crashed fiber isolated to Error status')
+    assert_true(pCrash.errorMsg ~= nil and pCrash.errorMsg:find('Intentional plugin crash test') ~= nil,
+        'Suite 86: error message preserved in plugin descriptor')
+    -- Verify healthy plugin continues running despite other plugin crashing
+    simTick(false, 3.5)
+    assert_eq(testTickCount, 4, 'Suite 86: healthy plugin keeps running unaffected by sibling crash')
+
+    -- 5. Source verification in triune.lua
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    assert_true(triuneContent:find('function runtime.initPluginManager()', 1, true) ~= nil,
+        'Suite 86: runtime.initPluginManager defined in triune.lua')
+    assert_true(triuneContent:find('function UI.drawPluginsTab()', 1, true) ~= nil,
+        'Suite 86: UI.drawPluginsTab defined in triune.lua')
+    assert_true(triuneContent:find("ImGui.BeginTabItem('Plugins##settingsPlugins')", 1, true) ~= nil,
+        'Suite 86: Plugins tab registered under Settings tab in triune.lua')
+    assert_true(triuneContent:find('runtime.pluginManager.tick()', 1, true) ~= nil,
+        'Suite 86: pluginManager.tick called from main loop in triune.lua')
+    assert_true(triuneContent:find('runtime.pluginManager.drawUI()', 1, true) ~= nil,
+        'Suite 86: pluginManager.drawUI called from UI.draw in triune.lua')
+    assert_true(triuneContent:find('runtime.initPluginManager()', 1, true) ~= nil,
+        'Suite 86: runtime.initPluginManager called at startup in triune.lua')
+
+    -- 6. Unit Frames HUD Plugin verification
+    local ufFn = assert(loadfile('TAC/lua/tac/hud_unitframes.lua'))
+    local ufPlugin = ufFn()
+    assert_eq(type(ufPlugin), 'table', 'Suite 86: hud_unitframes.lua returns plugin table')
+    assert_eq(ufPlugin.id, 'hud_unitframes', 'Suite 86: hud_unitframes plugin id is correct')
+    assert_eq(ufPlugin.runOutOfCombatOnly, false, 'Suite 86: hud_unitframes stays active during combat')
+    assert_eq(ufPlugin.hasThread, true, 'Suite 86: hud_unitframes has dedicated coroutine fiber')
+    assert_eq(ufPlugin.tickInterval, 0.05, 'Suite 86: hud_unitframes tickInterval is 50ms')
+
+    -- Test lifecycle with mock core API
+    local mockCore = {
+        ctrl = { show_unit_frames = true, uf_lock = false, uf_alpha = 0.85 },
+        VERSION = '2.15',
+        mq = {
+            TLO = {
+                Me = {
+                    Combat = function() return false end,
+                    PctHPs = function() return 100 end,
+                    CurrentHPs = function() return 5000 end,
+                    MaxHPs = function() return 5000 end,
+                    PctMana = function() return 100 end,
+                    CurrentMana = function() return 4000 end,
+                    MaxMana = function() return 4000 end,
+                    PctEndurance = function() return 100 end,
+                    CurrentEndurance = function() return 3000 end,
+                    MaxEndurance = function() return 3000 end,
+                    Level = function() return 65 end,
+                    PctExp = function() return 50 end,
+                    PctAAExp = function() return 75 end,
+                    AAPoints = function() return 10 end,
+                    CleanName = function() return 'TestPlayer' end,
+                    Exp = function() return 123456 end,
+                    AAPointsAssigned = function() return 100 end,
+                    AAPointsTotal = function() return 110 end,
+                    Pet = { ID = function() return 0 end },
+                },
+                Target = {
+                    ID = function() return 1234 end,
+                    CleanName = function() return 'TestMob' end,
+                    Level = function() return 65 end,
+                    Class = { ShortName = function() return 'WAR' end },
+                    ConColor = function() return 'White' end,
+                    PctHPs = function() return 80 end,
+                    CurrentHPs = function() return 8000 end,
+                    MaxHPs = function() return 10000 end,
+                    Distance = function() return 25.0 end,
+                    LineOfSight = function() return true end,
+                    BuffCount = function() return 0 end,
+                },
+            },
+        },
+        resolveTargetOfTarget = function() return 'TestPlayer', 1, 100, 100 end,
+        getMultiPetList = function() return {}, {} end,
+        getPetSpawnInfo = function() return {} end,
+        isSpawnAlive = function() return true end,
+    }
+
+    local okInit, errInit = pcall(function() ufPlugin.onInit(mockCore) end)
+    assert_true(okInit, 'Suite 86: hud_unitframes onInit runs cleanly: ' .. tostring(errInit))
+
+    local okTick, errTick = pcall(function() ufPlugin.onTick() end)
+    assert_true(okTick, 'Suite 86: hud_unitframes onTick fiber runs cleanly with mock TLO vitals: ' .. tostring(errTick))
+
+    local okDestroy, errDestroy = pcall(function() ufPlugin.onDestroy() end)
+    assert_true(okDestroy, 'Suite 86: hud_unitframes onDestroy cleans up cached snapshots: ' .. tostring(errDestroy))
+
+    -- 7. In-Combat Toggle & Modal Configuration Popup Verification
+    assert_true(triuneContent:find("ImGui.TableSetupColumn('Combat'", 1, true) ~= nil,
+        'Suite 86: Dedicated Combat column registered in Plugins table')
+    assert_true(triuneContent:find("ImGui.BeginPopupModal('Plugin Configuration##PluginConfigModal'", 1, true) ~= nil,
+        'Suite 86: Centered modal popup dialog implemented for plugin configuration')
+    assert_true(triuneContent:find('ctrl.plugins[id].runInCombat = newRunInCombat', 1, true) ~= nil,
+        'Suite 86: runInCombat preference saved upon toggle in Plugins table')
+    assert_true(triuneContent:find('ctrl.plugins[id].runInCombat = not p.runOutOfCombatOnly', 1, true) ~= nil,
+        'Suite 86: runInCombat persisted during pm.collectSettings()')
+end
+
+
+-- ============================================================================
+-- Suite 87: Plugin Manager Hardening & Shipped Plugin Contract
+-- ============================================================================
+do
+    print('--- Suite 87: Plugin Manager Hardening & Shipped Plugin Contract ---')
+    local triuneContent = readFile('TAC/lua/triune.lua')
+    local pAA87 = assert(loadfile('TAC/lua/tac/auto_accept.lua'))()
+
+    -- 1. Manager hardening: live ctrl, single fiber factory, safe rescan, draw-error isolation
+    assert_true(triuneContent:find('function pm.createFiber(p)', 1, true) ~= nil,
+        'Suite 87: fiber creation is factored into pm.createFiber')
+    assert_true(triuneContent:find('function pm.restartAll()', 1, true) ~= nil,
+        'Suite 87: pm.restartAll re-runs plugin lifecycles without touching disk')
+    assert_true(triuneContent:find('runtime.pluginManager.restartAll()', 1, true) ~= nil,
+        'Suite 87: main loop restarts plugins after a character swap replaces ctrl')
+    assert_true(triuneContent:find('function pm.drawPluginSettings(id)', 1, true) ~= nil,
+        'Suite 87: pm.drawPluginSettings lets core sub-tabs delegate to a plugin')
+    assert_true(triuneContent:find("p.errorMsg = 'onDrawUI: '", 1, true) ~= nil,
+        'Suite 87: onDrawUI failures flag the plugin as Error instead of retrying every frame')
+    assert_true(triuneContent:find('if not fileSet[low] and not loadedFiles[low] then', 1, true) ~= nil,
+        'Suite 87: pm.discover skips files that are already loaded (rescan never double-inits)')
+
+    -- The core API resolves ctrl live through __index; emulate the exact pattern
+    -- used in pm.getCoreApi so a swapped ctrl is seen by plugins immediately.
+    do
+        local liveCtrl = { a = 1 }
+        local live = { ctrl = function() return liveCtrl end }
+        local api = setmetatable({ VERSION = 'x' }, {
+            __index = function(_, k)
+                local getter = live[k]
+                if getter then return getter() end
+                return nil
+            end,
+        })
+        assert_eq(api.ctrl.a, 1, 'Suite 87: core API resolves ctrl through __index')
+        liveCtrl = { a = 2 }
+        assert_eq(api.ctrl.a, 2, 'Suite 87: core API sees a replaced ctrl without re-init')
+        assert_eq(api.VERSION, 'x', 'Suite 87: static core API fields still resolve normally')
+        assert_true(triuneContent:find('ctrl       = function() return ctrl end', 1, true) ~= nil,
+            'Suite 87: pm.getCoreApi exposes ctrl via a live getter')
+        assert_true(triuneContent:find('if pm.coreApi then return pm.coreApi end', 1, true) ~= nil,
+            'Suite 87: pm.getCoreApi returns one shared API table')
+    end
+
+    -- 2. Plugins do not double-persist ctrl keys through onSaveSettings
+    assert_true(type(pAA87.onSaveSettings) ~= 'function' and type(pAA87.onLoadSettings) ~= 'function',
+        'Suite 87: auto_accept relies on ctrl persistence instead of duplicating settings')
+
+    -- 3. HUD plugins respect saved visibility and the core visual toggle
+    do
+    local ufSrc = readFile('TAC/lua/tac/hud_unitframes.lua')
+    assert_true(ufSrc:find('core.ctrl.show_unit_frames = true', 1, true) == nil,
+        'Suite 87: hud_unitframes no longer forces the window open on init')
+    assert_true(ufSrc:find('(now - lastRefreshAt) < REFRESH_INTERVAL', 1, true) ~= nil,
+        'Suite 87: hud_unitframes throttles TLO snapshots on the render pass')
+    local fdSrc = readFile('TAC/lua/tac/floating_damage.lua')
+    assert_true(fdSrc:find('show_crit_floaters', 1, true) ~= nil,
+        'Suite 87: floating_damage honors ctrl.show_crit_floaters')
+    end
+
+    -- 4. Every shipped plugin loads, declares the contract, and reports a stable id
+    do
+    local shipped = {
+        { file = 'auto_aa',         id = 'auto_aa' },
+        { file = 'auto_accept',     id = 'auto_accept' },
+        { file = 'floating_damage', id = 'floating_damage' },
+        { file = 'hud_unitframes',  id = 'hud_unitframes' },
+        { file = 'hud_group',       id = 'hud_group' },
+        { file = 'hud_cooldowns',   id = 'hud_cooldowns' },
+        { file = 'hud_effects',     id = 'hud_effects' },
+        { file = 'hud_spellgems',   id = 'hud_spellgems' },
+        { file = 'hud_xtarget',     id = 'hud_xtarget' },
+        { file = 'spellbook',       id = 'spellbook' },
+        { file = 'buffbot',         id = 'buffbot' },
+        { file = 'cursor',          id = 'cursor' },
+        { file = 'dps',             id = 'dps' },
+        { file = 'inventory',       id = 'inventory' },
+        { file = 'map',             id = 'map' },
+    }
+    for _, sp in ipairs(shipped) do
+        local fn = assert(loadfile('TAC/lua/tac/' .. sp.file .. '.lua'))
+        local okP, inst = pcall(fn)
+        assert_true(okP and type(inst) == 'table', 'Suite 87: ' .. sp.file .. '.lua returns a plugin table')
+        assert_eq(inst.id, sp.id, 'Suite 87: ' .. sp.file .. ' id matches filename')
+        assert_type(inst.onInit, 'function', 'Suite 87: ' .. sp.file .. ' defines onInit')
+        assert_type(inst.onDestroy, 'function', 'Suite 87: ' .. sp.file .. ' defines onDestroy')
+        assert_type(inst.onDrawSettings, 'function', 'Suite 87: ' .. sp.file .. ' defines onDrawSettings')
+        assert_true(type(inst.tickInterval) == 'number' and inst.tickInterval > 0,
+            'Suite 87: ' .. sp.file .. ' declares a positive tickInterval')
+        if inst.hasThread then
+            assert_type(inst.onTick, 'function', 'Suite 87: ' .. sp.file .. ' declares hasThread and provides onTick')
+        end
+    end
+    end
+end
+
+
+-- ============================================================================
+-- Suite 88: Plugin Manager Integration (real initPluginManager + shipped plugins)
+-- ============================================================================
+do
+    print('--- Suite 88: Plugin Manager Integration (real initPluginManager + shipped plugins) ---')
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+
+    local inCombat = false
+    local mockMq = {
+        event = function() end,
+        unevent = function() end,
+        cmd = function() end,
+        cmdf = function() end,
+        TLO = {
+            Me = {
+                Combat = function() return inCombat end,
+                CombatState = function() return inCombat and 'COMBAT' or 'ACTIVE' end,
+                Invited = function() return false end,
+            },
+            Target = { ID = function() return 0 end },
+            Window = function() return { Open = function() return false end } end,
+            Spawn = function() return setmetatable({}, { __call = function() return false end }) end,
+        },
+    }
+    -- Widget stubs return their input value unchanged (nothing "clicked"), so a
+    -- settings panel can render in the sandbox without mutating ctrl.
+    local passthrough = function(_, v) return v end
+    local mockImGui = setmetatable({
+        Checkbox = passthrough,
+        SliderFloat = passthrough,
+        SliderInt = passthrough,
+        Combo = passthrough,
+        InputTextWithHint = function(_, _, v) return v, false end,
+        Button = function() return false end,
+        SmallButton = function() return false end,
+        MenuItem = function() return false end,
+        Selectable = function() return false end,
+        IsItemHovered = function() return false end,
+        BeginTable = function() return false end,
+    }, { __index = function() return function() end end })
+    local noop = function() end
+    local mockUI = {
+        accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop,
+        preBeginWindow = noop, postBeginWindow = noop, drawStatusProgressBar = noop,
+        drawSpellIcon = function() return false end,
+        getConColorRgb = function() return { 1, 1, 1, 1 } end,
+        resolveTargetOfTarget = function() return nil, nil, nil, nil end,
+    }
+    local ctrl88 = { plugins = {} }
+    local saveCount = 0
+    local env = {
+        ctrl = ctrl88,
+        mq = mockMq,
+        ImGui = mockImGui,
+        UI = mockUI,
+        VERSION = '2.15',
+        DATA = {},
+        loadout = {},
+        scriptDir = './',
+        GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 },
+        GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
+        saveLoadout = function() saveCount = saveCount + 1 end,
+        print = quietPrint,
+        idxOf = function(tbl, val) for i, v in ipairs(tbl) do if v == val then return i end end return 0 end,
+        fmtSec = function(v) return tostring(v) .. 's' end,
+        parseDurationSec = function() return 0 end,
+        cleanSpellName = function(n) return (tostring(n or ''):gsub('%s*%([%w%s/]+%)$', '')) end,
+        normalizeSpellName = function(n) return (tostring(n or ''):lower():gsub('[%p%s]', '')) end,
+    }
+    local initPM = loadFunc(src, 'initPluginManager', env)
+    local sandbox = debug.getfenv(initPM)
+    local rt = sandbox.runtime
+    rt.saveLoadout = env.saveLoadout
+
+    -- 1. Discovery loads every shipped plugin from TAC/lua/tac and enables the defaults
+    initPM()
+    local pm = rt.pluginManager
+    assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
+    local expected = { 'auto_aa', 'auto_accept', 'buffbot', 'cursor', 'dps', 'floating_damage', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
+    for _, id in ipairs(expected) do
+        local p = pm.plugins[id]
+        assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
+        if p then
+            assert_eq(p.enabled, true, 'Suite 88: ' .. id .. ' enabled by default')
+            assert_eq(p.status, 'Active', 'Suite 88: ' .. id .. ' initialised without error (' .. tostring(p.errorMsg) .. ')')
+            assert_eq(ctrl88.plugins[id] and ctrl88.plugins[id].enabled, true, 'Suite 88: ' .. id .. ' enabled flag persisted to ctrl.plugins')
+        end
+    end
+    assert_eq(#pm.pluginOrder, #expected, 'Suite 88: exactly the shipped plugins are registered')
+
+    -- Plugins seeded their ctrl defaults through the live core API
+    assert_eq(ctrl88.show_group_window, false, 'Suite 88: hud_group seeded show_group_window default')
+    assert_eq(ctrl88.xt_bar_height, 16, 'Suite 88: hud_xtarget seeded xt_bar_height default')
+    assert_eq(ctrl88.eff_sort_by, 'Time Left (Ascending)', 'Suite 88: hud_effects seeded eff_sort_by default')
+    assert_eq(ctrl88.show_unit_frames, false, 'Suite 88: hud_unitframes does not force the window open')
+    assert_eq(ctrl88.show_crit_floaters, true, 'Suite 88: floating_damage seeded show_crit_floaters default')
+    assert_eq(type(ctrl88.auto_accept_names), 'table', 'Suite 88: auto_accept seeded whitelist table')
+
+    -- 2. Rescan never double-loads: instances stay identical
+    local instBefore = pm.plugins.hud_group.instance
+    pm.discover()
+    assert_eq(pm.plugins.hud_group.instance, instBefore, 'Suite 88: rescan keeps the existing instance (no re-init)')
+    assert_eq(#pm.pluginOrder, #expected, 'Suite 88: rescan does not duplicate registrations')
+
+    -- 3. Tick dispatch respects combat sleep for out-of-combat plugins only
+    inCombat = false
+    pm.tick()
+    assert_eq(pm.plugins.auto_accept.status, 'Active', 'Suite 88: auto_accept Active out of combat')
+    inCombat = true
+    pm.tick()
+    assert_eq(pm.plugins.auto_accept.status, 'Sleeping (Combat)', 'Suite 88: auto_accept sleeps in combat')
+    assert_eq(pm.plugins.hud_unitframes.status, 'Active', 'Suite 88: hud_unitframes keeps running in combat')
+    assert_eq(pm.plugins.floating_damage.status, 'Active', 'Suite 88: floating_damage keeps running in combat')
+    inCombat = false
+
+    -- 4. Disable / enable round-trips through ctrl.plugins and onDestroy/onInit
+    pm.disablePlugin('hud_xtarget')
+    assert_eq(pm.plugins.hud_xtarget.enabled, false, 'Suite 88: disablePlugin clears enabled')
+    assert_eq(ctrl88.plugins.hud_xtarget.enabled, false, 'Suite 88: disablePlugin persists enabled=false')
+    pm.enablePlugin('hud_xtarget')
+    assert_eq(pm.plugins.hud_xtarget.status, 'Active', 'Suite 88: enablePlugin re-initialises cleanly')
+
+    -- 5. Character swap: ctrl is replaced, restartAll re-seeds the new table and honors its flags
+    local ctrlNew = { plugins = { hud_group = { enabled = false, runInCombat = true }, auto_accept = { enabled = true, runInCombat = true } } }
+    sandbox.ctrl = ctrlNew
+    pm.restartAll()
+    assert_eq(pm.getCoreApi().ctrl, ctrlNew, 'Suite 88: core API resolves the replaced ctrl live')
+    assert_eq(ctrlNew.show_xtarget_window, false, 'Suite 88: restartAll re-seeded defaults onto the new ctrl')
+    assert_eq(pm.plugins.hud_group.enabled, false, 'Suite 88: restartAll honors the new character\'s disabled flag')
+    assert_eq(ctrlNew.plugins.hud_group.enabled, false, 'Suite 88: disabled flag survives restartAll (not overwritten by disablePlugin)')
+    assert_eq(pm.plugins.auto_accept.enabled, true, 'Suite 88: restartAll keeps enabled plugins enabled')
+    assert_eq(pm.plugins.auto_accept.runOutOfCombatOnly, false, 'Suite 88: restartAll applies the new character\'s runInCombat flag')
+    assert_eq(pm.plugins.hud_unitframes.enabled, true, 'Suite 88: plugins with no saved config fall back to defaultEnabled')
+    assert_eq(ctrl88.show_group_window, false, 'Suite 88: old ctrl is left untouched after the swap')
+
+    -- 6. collectSettings writes the current state back for persistence
+    pm.collectSettings()
+    assert_eq(ctrlNew.plugins.hud_group.enabled, false, 'Suite 88: collectSettings persists hud_group disabled')
+    assert_eq(ctrlNew.plugins.auto_accept.runInCombat, true, 'Suite 88: collectSettings persists runInCombat')
+    assert_true(ctrlNew.plugins.auto_accept.settings == nil, 'Suite 88: auto_accept does not double-persist ctrl keys')
+
+    -- 7. A crashing render hook flags the plugin instead of retrying every frame
+    pm.plugins.hud_group.enabled = true
+    pm.plugins.hud_group.status = 'Active'
+    local realDraw = pm.plugins.hud_group.instance.onDrawUI
+    pm.plugins.hud_group.instance.onDrawUI = function() error('boom') end
+    pm.drawUI()
+    assert_eq(pm.plugins.hud_group.status, 'Error', 'Suite 88: onDrawUI error transitions plugin to Error')
+    assert_true(tostring(pm.plugins.hud_group.errorMsg):find('onDrawUI: ') ~= nil, 'Suite 88: onDrawUI error message recorded')
+    local drawCalls = 0
+    pm.plugins.hud_group.instance.onDrawUI = function() drawCalls = drawCalls + 1 end
+    pm.drawUI()
+    assert_eq(drawCalls, 0, 'Suite 88: errored plugin is not drawn again until reloaded')
+    pm.plugins.hud_group.instance.onDrawUI = realDraw
+
+    -- 8. drawPluginSettings handles missing / errored / disabled plugins without touching the instance
+    assert_eq(pm.drawPluginSettings('does_not_exist'), false, 'Suite 88: drawPluginSettings reports a missing plugin')
+    assert_eq(pm.drawPluginSettings('hud_group'), false, 'Suite 88: drawPluginSettings reports an errored plugin')
+    pm.reloadPlugin('hud_group')
+    assert_eq(pm.plugins.hud_group.status, 'Active', 'Suite 88: reloadPlugin clears the Error state')
+    pm.disablePlugin('hud_group')
+    assert_eq(pm.drawPluginSettings('hud_group'), false, 'Suite 88: drawPluginSettings reports a disabled plugin')
+    pm.enablePlugin('hud_group')
+    assert_eq(pm.plugins.hud_group.status, 'Active', 'Suite 88: reloaded plugin re-enables cleanly')
+    assert_eq(pm.drawPluginSettings('hud_group'), true, 'Suite 88: drawPluginSettings renders an active plugin\'s settings')
+    for _, id in ipairs(expected) do
+        if pm.plugins[id].enabled then
+            local okS = pm.drawPluginSettings(id)
+            assert_true(okS, 'Suite 88: ' .. id .. ' onDrawSettings renders without error (' .. tostring(pm.plugins[id].errorMsg) .. ')')
+        end
+    end
+    assert_eq(ctrlNew.gw_alpha, 0.85, 'Suite 88: rendering settings with no interaction leaves ctrl untouched')
+
+    -- 9. Reloading an enabled plugin keeps it enabled (disablePlugin must not clobber the saved flag)
+    local instPre = pm.plugins.hud_xtarget.instance
+    pm.reloadPlugin('hud_xtarget')
+    assert_eq(pm.plugins.hud_xtarget.enabled, true, 'Suite 88: reloadPlugin keeps an enabled plugin enabled')
+    assert_eq(pm.plugins.hud_xtarget.status, 'Active', 'Suite 88: reloaded plugin is Active')
+    assert_true(pm.plugins.hud_xtarget.instance ~= instPre, 'Suite 88: reloadPlugin re-executes the file (fresh instance)')
+    assert_eq(ctrlNew.plugins.hud_xtarget.enabled, true, 'Suite 88: reloadPlugin persists enabled=true')
+
+    -- 10. Hook dispatch: combat hold, between-pulls, commands, help, tabs, loadout-saved
+    do
+        local aa = pm.plugins.auto_aa
+        assert_true(aa ~= nil and aa.enabled, 'Suite 88: auto_aa plugin loaded and enabled')
+        assert_eq(pm.combatHold(), false, 'Suite 88: no combat hold while no AA workflow is pending')
+        assert_eq(rt.combatHold and rt.combatHold() or pm.combatHold(), false, 'Suite 88: runtime.combatHold mirrors pm.combatHold')
+        aa.instance.AA.pendingAATrain = { name = 'Test AA', step = 'open' }
+        assert_eq(pm.combatHold(), true, 'Suite 88: pending AA workflow requests a combat hold')
+        aa.instance.AA.pendingAATrain = nil
+        assert_eq(pm.combatHold(), false, 'Suite 88: combat hold released when the workflow clears')
+
+        assert_eq(pm.onBetweenPulls(), false, 'Suite 88: onBetweenPulls is a no-op with auto_spend_aa off')
+
+        ctrlNew.auto_spend_aa = false
+        assert_eq(pm.onCommand('autoaa', { 'autoaa', 'on' }), true, 'Suite 88: /ac autoaa on is handled by auto_aa')
+        assert_eq(ctrlNew.auto_spend_aa, true, 'Suite 88: /ac autoaa on enables auto_spend_aa')
+        assert_eq(pm.onCommand('autoaa', { 'autoaa', 'off' }), true, 'Suite 88: /ac autoaa off is handled by auto_aa')
+        assert_eq(ctrlNew.auto_spend_aa, false, 'Suite 88: /ac autoaa off disables auto_spend_aa')
+        assert_eq(pm.onCommand('aathreshold', { 'aathreshold', '42' }), true, 'Suite 88: /ac aathreshold handled')
+        assert_eq(ctrlNew.auto_spend_aa_threshold, 42, 'Suite 88: /ac aathreshold sets the threshold')
+        assert_eq(pm.onCommand('definitely_not_a_command', { 'definitely_not_a_command' }), false,
+            'Suite 88: unknown commands fall through the plugin dispatcher')
+
+        local help = pm.helpLines()
+        local sawAutoAA = false
+        for _, hl in ipairs(help) do if hl:find('/ac autoaa', 1, true) then sawAutoAA = true end end
+        assert_true(sawAutoAA, 'Suite 88: pm.helpLines includes the auto_aa command help')
+
+        -- Plugins no longer contribute main-window tabs: Auto AA is a popout window
+        assert_eq(pm.drawTabs, nil, 'Suite 88: pm.drawTabs removed (plugins contribute windows, not tabs)')
+        assert_eq(aa.instance.onDrawTab, nil, 'Suite 88: auto_aa no longer defines onDrawTab')
+        assert_type(aa.instance.onDrawUI, 'function', 'Suite 88: auto_aa draws its popout window from onDrawUI')
+        assert_eq(aa.instance.window and aa.instance.window.flag, 'show_auto_aa', 'Suite 88: auto_aa declares the show_auto_aa window')
+        assert_eq(sandbox.ctrl.show_auto_aa, false, 'Suite 88: auto_aa seeds show_auto_aa = false')
+        assert_true(pm.onCommand('aawin', { 'aawin' }), 'Suite 88: /ac aawin handled by auto_aa')
+        assert_eq(sandbox.ctrl.show_auto_aa, true, 'Suite 88: /ac aawin opens the Auto AA window')
+        pm.onCommand('aawin', { 'aawin' })
+        assert_eq(sandbox.ctrl.show_auto_aa, false, 'Suite 88: /ac aawin toggles the Auto AA window closed')
+        assert_eq(sandbox.ctrl.show_auto_accept, false, 'Suite 88: auto_accept seeds show_auto_accept = false')
+        assert_true(pm.onCommand('autoaccept', { 'autoaccept' }), 'Suite 88: /ac autoaccept handled by auto_accept')
+        assert_eq(sandbox.ctrl.show_auto_accept, true, 'Suite 88: /ac autoaccept opens the Auto-Accept window')
+        assert_type(pm.plugins.auto_accept.instance.onDrawUI, 'function', 'Suite 88: auto_accept draws its popout window from onDrawUI')
+        pm.onCommand('autoaccept', { 'autoaccept' })
+        assert_eq(sandbox.ctrl.show_auto_accept, false, 'Suite 88: /ac autoaccept toggles the window closed')
+
+        local savedHook = 0
+        local realSaved = aa.instance.onLoadoutSaved
+        aa.instance.onLoadoutSaved = function() savedHook = savedHook + 1 end
+        pm.onLoadoutSaved()
+        assert_eq(savedHook, 1, 'Suite 88: pm.onLoadoutSaved dispatches to plugins')
+        aa.instance.onLoadoutSaved = realSaved
+
+        -- A hook that throws flags the plugin and stops dispatching to it
+        aa.instance.onCommand = function() error('cmd boom') end
+        assert_eq(pm.onCommand('autoaa', { 'autoaa' }), false, 'Suite 88: a throwing hook does not count as handled')
+        assert_eq(aa.status, 'Error', 'Suite 88: a throwing hook flags the plugin as Error')
+        pm.reloadPlugin('auto_aa')
+        assert_eq(aa.status, 'Active', 'Suite 88: reload recovers the plugin after a hook error')
+    end
+
+    -- 11. Spellbook plugin (was the standalone triune_spellbook.lua script)
+    do
+        local sb = pm.plugins.spellbook
+        assert_true(sb ~= nil and sb.enabled, 'Suite 88: spellbook plugin loaded and enabled')
+        assert_eq(ctrlNew.show_spellbook, false, 'Suite 88: spellbook seeds show_spellbook = false')
+        assert_eq(pm.onCommand('spellbook', { 'spellbook' }), true, 'Suite 88: /ac spellbook handled by the plugin')
+        assert_eq(ctrlNew.show_spellbook, true, 'Suite 88: /ac spellbook opens the window')
+        assert_eq(pm.onCommand('book', { 'book' }), true, 'Suite 88: /ac book handled by the plugin')
+        assert_eq(ctrlNew.show_spellbook, false, 'Suite 88: /ac book toggles the window closed')
+
+        -- Class spell lookup tolerates the key casing differences between DATA and MQ short names
+        env.DATA.spells = { War = { { 'Bash Rank', 5, 0, 'dd' } }, Shm = { { 'Minor Healing', 1, 1, 'heal' } } }
+        assert_eq(#sb.instance.getClassSpells('WAR'), 1, 'Suite 88: getClassSpells resolves uppercase class key')
+        assert_eq(#sb.instance.getClassSpells('shm'), 1, 'Suite 88: getClassSpells resolves lowercase class key')
+        assert_eq(#sb.instance.getClassSpells('Nec'), 0, 'Suite 88: getClassSpells returns empty for unknown class')
+
+        -- Mem queue drains through runtime.tryMem with the core's combat/casting gates
+        local memCalls = {}
+        rt.tryMem = function(slot, name, bypass) memCalls[#memCalls + 1] = { slot = slot, name = name, bypass = bypass } return true end
+        rt.isCasting = function() return false end
+        mockMq.TLO.Me.Moving = function() return false end
+        mockMq.TLO.Me.Gem = function() return { Name = function() return '' end } end
+        sb.instance.state.pendingQueue[3] = 'Minor Healing'
+        sb.instance.state.bypassScribedCheck = true
+        inCombat = true
+        sb.instance.processQueue()
+        assert_eq(#memCalls, 0, 'Suite 88: spellbook queue does not memorize while in combat')
+        inCombat = false
+        sb.instance.processQueue()
+        assert_eq(#memCalls, 1, 'Suite 88: spellbook queue memorizes once out of combat')
+        assert_eq(memCalls[1].slot, 3, 'Suite 88: queued gem slot is passed to runtime.tryMem')
+        assert_eq(memCalls[1].name, 'Minor Healing', 'Suite 88: queued spell name is passed to runtime.tryMem')
+        assert_eq(memCalls[1].bypass, true, 'Suite 88: bypass-scribed option is passed through')
+        assert_true(next(sb.instance.state.pendingQueue) == nil, 'Suite 88: queue entry cleared after memorizing')
+
+        local sbSrc = readFile('TAC/lua/tac/spellbook.lua')
+        for _, dup in ipairs({ 'local function pushTheme', 'local function getSpellbookMap', 'local function tryMem', 'local function detectClasses', 'local function loadData', 'mq.imgui.init' }) do
+            assert_true(sbSrc:find(dup, 1, true) == nil, 'Suite 88: spellbook plugin no longer duplicates core code: ' .. dup)
+        end
+        assert_true(io.open('TAC/lua/triune_spellbook.lua', 'r') == nil, 'Suite 88: standalone triune_spellbook.lua was removed')
+        assert_true(src:find("UI.toggleTool('triune_spellbook')", 1, true) == nil, 'Suite 88: core no longer launches triune_spellbook via /lua run')
+    end
+end
+
+
+-- ============================================================================
+-- Suite 89: Companion tools migrated to plugins (cursor / dps / inventory /
+-- buffbot / map) + the fiber-aware core.delay
+-- ============================================================================
+do
+    print('--- Suite 89: Companion tool plugins & fiber-aware delay ---')
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local noop = function() end
+    local passthrough = function(_, v) return v end
+    local mockImGui = setmetatable({
+        Checkbox = passthrough, Button = function() return false end, SmallButton = function() return false end,
+        IsItemHovered = function() return false end, BeginTable = function() return false end,
+        Begin = function() return false, false end,
+    }, { __index = function() return function() end end })
+
+    -- Fresh mock core per plugin: records commands, events, binds, saves.
+    local function makeCore()
+        local rec = { cmds = {}, events = {}, binds = {}, saves = 0, nowMs = 100000, delays = {} }
+        local ctrl = { plugins = {} }
+        local mq = {
+            configDir = './tests/__nonexistent_cfg__',
+            event = function(name) rec.events[name] = true end,
+            unevent = function(name) rec.events[name] = nil end,
+            bind = function(cmd) rec.binds[cmd] = true end,
+            unbind = function(cmd) rec.binds[cmd] = nil end,
+            cmd = function(c) rec.cmds[#rec.cmds + 1] = c end,
+            cmdf = function(f, ...) rec.cmds[#rec.cmds + 1] = string.format(f, ...) end,
+            gettime = function() return rec.nowMs end,
+            delay = function(ms) rec.delays[#rec.delays + 1] = ms end,
+            TLO = {
+                Me = { CleanName = function() return 'Tester' end, Combat = function() return false end },
+                EverQuest = { Server = function() return 'Test' end },
+                Target = { ID = function() return 0 end, Dead = function() return false end, Type = function() return 'NPC' end },
+                MacroQuest = { GameState = function() return 'INGAME' end },
+            },
+        }
+        local core = {
+            VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
+            pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+            preBeginWindow = noop, postBeginWindow = noop,
+            saveLoadout = function() rec.saves = rec.saves + 1 end,
+            delay = function(ms) rec.delays[#rec.delays + 1] = ms return false end,
+        }
+        return core, rec, ctrl, mq
+    end
+
+    local function loadPlugin(file)
+        local fn = assert(loadfile('TAC/lua/tac/' .. file .. '.lua'))
+        local origPrint = print
+        print = quietPrint
+        local ok, inst = pcall(fn)
+        print = origPrint
+        assert_true(ok and type(inst) == 'table', 'Suite 89: ' .. file .. '.lua loads')
+        return inst
+    end
+
+    local origPrint = print
+
+    -- 1. No plugin blocks the core: mq.delay / mq.doevents / mq.imgui / own theme are gone
+    for _, f in ipairs({ 'cursor', 'dps', 'inventory', 'buffbot', 'map' }) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        for _, bad in ipairs({ 'mq.delay(', 'mq.doevents()', 'mq.imgui.init', 'mq.exit(', 'local function pushTheme', 'local function popTheme', 'require(' }) do
+            assert_true(psrc:find(bad, 1, true) == nil, 'Suite 89: ' .. f .. '.lua does not use ' .. bad)
+        end
+        assert_true(psrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 89: ' .. f .. '.lua uses the core theme')
+        assert_true(io.open('TAC/lua/triune_' .. (f == 'inventory' and 'inv' or f) .. '.lua', 'r') == nil, 'Suite 89: standalone triune_' .. f .. ' script was removed')
+    end
+    for _, f in ipairs({ 'inventory', 'buffbot' }) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        assert_true(psrc:find('return core.delay(ms, cond)', 1, true) ~= nil, 'Suite 89: ' .. f .. ' waits through the fiber-aware core.delay')
+        assert_true(psrc:find('hasThread          = true', 1, true) ~= nil, 'Suite 89: ' .. f .. ' runs in a plugin fiber')
+    end
+
+    -- 2. Core wiring: window flags, layout manager entries, no more /lua run launchers
+    for _, key in ipairs({ 'show_map', 'show_dps', 'show_inv', 'show_cursor', 'show_buffbot' }) do
+        assert_true(src:find('        ' .. key .. ' ', 1, true) ~= nil, 'Suite 89: defaultCtrl seeds ' .. key)
+        assert_true(src:find('if c.' .. key .. ' == nil then c.' .. key .. ' = false end', 1, true) ~= nil, 'Suite 89: sanitize seeds ' .. key)
+    end
+    for _, gone in ipairs({ "UI.toggleTool('triune_map')", "UI.toggleTool('triune_dps'", "UI.toggleTool('triune_cursor')", "UI.toggleTool('triune_buffbot')", "/lua run triune_inv", "cmd == 'cursorui'", "cmd == 'buffbot'", "cmd == 'dpsparser'", "cmd == 'triunemap'" }) do
+        assert_true(src:find(gone, 1, true) == nil, 'Suite 89: core no longer contains ' .. gone)
+    end
+    assert_true(src:find('delay                 = function(ms, cond) return pm.delay(ms, cond) end', 1, true) ~= nil, 'Suite 89: core API exports delay')
+    for _, f in ipairs({ "'cursor.lua'", "'dps.lua'", "'inventory.lua'", "'buffbot.lua'", "'map.lua'" }) do
+        assert_true(src:find(f, 1, true) ~= nil, 'Suite 89: discover() known-plugin probe lists ' .. f)
+    end
+
+    -- 3. Cursor: one /autoinventory per tick, history logged when the cursor clears
+    do
+        local core, rec, ctrl, mq = makeCore()
+        local curId = 0
+        mq.TLO.Cursor = setmetatable({
+            ID = function() return curId end, Name = function() return 'Rusty Sword' end,
+            Stack = function() return 1 end, Lore = function() return false end, NoDrop = function() return false end,
+        }, { __call = function() return curId > 0 end })
+        local cur = loadPlugin('cursor')
+        print = quietPrint
+        cur.onInit(core)
+        assert_eq(ctrl.show_cursor, false, 'Suite 89: cursor seeds show_cursor = false')
+        cur.state.pendingAction = 'clear'
+        cur.onTick()
+        assert_eq(#rec.cmds, 0, 'Suite 89: cursor clear with empty cursor issues nothing')
+        assert_eq(cur.state.statusMsg, 'Cursor is empty.', 'Suite 89: cursor reports empty cursor')
+        curId = 1234
+        cur.state.pendingAction = 'clear'
+        cur.onTick()
+        assert_eq(rec.cmds[1], '/autoinventory', 'Suite 89: cursor issues /autoinventory on the first tick')
+        cur.onTick()
+        assert_eq(#rec.cmds, 2, 'Suite 89: cursor keeps issuing one /autoinventory per tick while the item remains')
+        curId = 0
+        cur.onTick()
+        assert_eq(#rec.cmds, 2, 'Suite 89: cursor stops once the cursor is empty')
+        assert_eq(#cur.state.sessionHistory, 1, 'Suite 89: cursor logs the cleared item')
+        assert_eq(cur.state.sessionHistory[1].action, 'Auto Inventoried', 'Suite 89: cursor history action recorded')
+        assert_eq(cur.state.clearing, nil, 'Suite 89: cursor clear sequence finished')
+        curId = 77
+        cur.state.pendingAction = 'destroy'
+        cur.onTick()
+        assert_eq(rec.cmds[#rec.cmds], '/destroy', 'Suite 89: cursor destroy issues /destroy')
+        assert_eq(cur.state.sessionHistory[1].action, 'Destroyed', 'Suite 89: cursor destroy logged')
+        cur.state.autoClearOnPick = true
+        cur.onTick()
+        assert_eq(rec.cmds[#rec.cmds], '/autoinventory', 'Suite 89: auto-clear on pick inventories items that land on the cursor')
+        assert_true(cur.onCommand('cursorui'), 'Suite 89: /ac cursorui handled by the plugin')
+        assert_eq(ctrl.show_cursor, true, 'Suite 89: /ac cursorui opens the window')
+        assert_eq(cur.onCommand('map'), false, 'Suite 89: cursor ignores other commands')
+        assert_eq(cur.onSaveSettings().autoClearOnPick, true, 'Suite 89: cursor persists auto-clear preference')
+        cur.onLoadSettings({ autoClearOnPick = false })
+        assert_eq(cur.state.autoClearOnPick, false, 'Suite 89: cursor restores auto-clear preference')
+        print = origPrint
+    end
+
+    -- 4. DPS parser: events + /dps binds on init, released on destroy; fight timeout archives
+    do
+        local core, rec, ctrl = makeCore()
+        local dps = loadPlugin('dps')
+        print = quietPrint
+        dps.onInit(core)
+        local evCount = 0
+        for _ in pairs(rec.events) do evCount = evCount + 1 end
+        assert_eq(evCount, 20, 'Suite 89: dps registers its 20 combat-log events')
+        assert_eq(#dps.registeredEvents(), 20, 'Suite 89: dps tracks registered event names')
+        assert_true(rec.binds['/dps'] and rec.binds['/triunedps'], 'Suite 89: dps binds /dps and /triunedps')
+        assert_eq(ctrl.show_dps, false, 'Suite 89: dps seeds show_dps = false')
+        assert_true(dps.onCommand('dps', { 'dps' }), 'Suite 89: /ac dps handled by the plugin')
+        assert_eq(ctrl.show_dps, true, 'Suite 89: /ac dps opens the window')
+        assert_true(dps.onCommand('dps', { 'dps', 'hide' }), 'Suite 89: /ac dps hide handled')
+        assert_eq(ctrl.show_dps, false, 'Suite 89: /ac dps hide closes the window')
+        assert_eq(dps.onCommand('inv'), false, 'Suite 89: dps ignores other commands')
+        -- Fight bookkeeping (was the standalone main loop)
+        dps.rt.inFight = true
+        dps.rt.totalDamage = 500
+        dps.rt.playerDamage = 500
+        dps.rt.currentTargetName = 'a gnoll'
+        dps.rt.fightStartTime = rec.nowMs - 10000
+        dps.rt.lastDamageTime = rec.nowMs - 1000
+        dps.cfg.combatTimeout = 6
+        dps.onTick()
+        assert_eq(dps.rt.inFight, true, 'Suite 89: dps keeps the fight open while damage is recent')
+        dps.rt.lastDamageTime = rec.nowMs - 7000
+        dps.onTick()
+        assert_eq(dps.rt.inFight, false, 'Suite 89: dps ends the fight after combatTimeout of inactivity')
+        assert_eq(#dps.rt.history, 1, 'Suite 89: dps archives the encounter')
+        assert_eq(dps.rt.history[1].totalDmg, 500, 'Suite 89: archived encounter carries the damage total')
+        dps.onDestroy()
+        evCount = 0
+        for _ in pairs(rec.events) do evCount = evCount + 1 end
+        assert_eq(evCount, 0, 'Suite 89: dps unregisters its events on destroy')
+        assert_true(rec.binds['/dps'] == nil and rec.binds['/triunedps'] == nil, 'Suite 89: dps unbinds /dps on destroy')
+        print = origPrint
+    end
+
+    -- 5. Inventory: window flag, queued actions drain through the fiber tick
+    do
+        local core, rec, ctrl = makeCore()
+        local inv = loadPlugin('inventory')
+        print = quietPrint
+        inv.onInit(core)
+        assert_eq(ctrl.show_inv, false, 'Suite 89: inventory seeds show_inv = false')
+        local scans = 0
+        inv.scanner.scanAll = function() scans = scans + 1 inv.state.lastScanTime = os.time() end
+        inv.onTick()
+        assert_eq(scans, 0, 'Suite 89: inventory does not scan while the window is closed')
+        assert_true(inv.onCommand('inv'), 'Suite 89: /ac inv handled by the plugin')
+        assert_eq(ctrl.show_inv, true, 'Suite 89: /ac inv opens the window')
+        inv.onTick()
+        assert_eq(scans, 1, 'Suite 89: inventory scans once when the window is first opened')
+        inv.state.pendingAction = { type = 'open_all_bags' }
+        inv.tick()
+        assert_eq(rec.cmds[#rec.cmds], '/keypress open_inv_bags', 'Suite 89: inventory drains queued actions on its tick')
+        assert_eq(scans, 2, 'Suite 89: inventory rescans after an action')
+        assert_eq(#rec.delays, 1, 'Suite 89: inventory waits through core.delay (never mq.delay)')
+        assert_eq(inv.onCommand('dps'), false, 'Suite 89: inventory ignores other commands')
+        print = origPrint
+    end
+
+    -- 6. Buffbot: station is off until switched on; combat hold only while casting
+    do
+        local core, rec, ctrl = makeCore()
+        local bb = loadPlugin('buffbot')
+        print = quietPrint
+        bb.onInit(core)
+        assert_eq(bb.cfg.enabled, false, 'Suite 89: buffbot station is OFF after load (never auto-starts)')
+        assert_eq(bb.rt.state, 'STOPPED', 'Suite 89: buffbot state STOPPED after load')
+        assert_eq(#bb.registeredEvents(), 11, 'Suite 89: buffbot registers its tell + hail events')
+        assert_eq(ctrl.show_buffbot, false, 'Suite 89: buffbot seeds show_buffbot = false')
+        assert_eq(bb.wantsCombatHold(), false, 'Suite 89: buffbot does not hold combat while stopped')
+        assert_true(bb.onCommand('buffbot', { 'buffbot', 'on' }), 'Suite 89: /ac buffbot on handled')
+        assert_eq(bb.cfg.enabled, true, 'Suite 89: /ac buffbot on starts the station')
+        assert_eq(bb.rt.state, 'IDLE', 'Suite 89: station IDLE once started')
+        assert_eq(ctrl.show_buffbot, true, 'Suite 89: /ac buffbot on also opens the window')
+        bb.rt.currentJob = { sender = 'Bob' }
+        assert_eq(bb.wantsCombatHold(), true, 'Suite 89: buffbot holds the combat loop while a buff job is active')
+        bb.rt.currentJob = nil
+        assert_eq(bb.wantsCombatHold(), false, 'Suite 89: hold released when the job finishes')
+        bb.rt.activeQueue = { { sender = 'Bob' } }
+        assert_true(bb.onCommand('buff', { 'buff', 'off' }), 'Suite 89: /ac buff off handled')
+        assert_eq(bb.cfg.enabled, false, 'Suite 89: /ac buff off stops the station')
+        assert_eq(#bb.rt.activeQueue, 0, 'Suite 89: stopping the station clears the queue')
+        assert_true(bb.onCommand('buffbot', { 'buffbot' }), 'Suite 89: bare /ac buffbot handled')
+        assert_eq(ctrl.show_buffbot, false, 'Suite 89: bare /ac buffbot toggles the window only')
+        assert_eq(bb.cfg.enabled, false, 'Suite 89: bare /ac buffbot leaves the station state alone')
+        bb.onTick()
+        assert_eq(bb.rt.state, 'STOPPED', 'Suite 89: tick keeps STOPPED state while off')
+        bb.onDestroy()
+        assert_eq(#bb.registeredEvents(), 0, 'Suite 89: buffbot unregisters events on destroy')
+        print = origPrint
+    end
+
+    -- 7. Map: overlays sync from the live core ctrl (no loadout file parsing)
+    do
+        local core, rec, ctrl = makeCore()
+        local map = loadPlugin('map')
+        print = quietPrint
+        map.onInit(core)
+        assert_eq(ctrl.show_map, false, 'Suite 89: map seeds show_map = false')
+        ctrl.camp_loc = { x = 10, y = 20, z = 30 }
+        ctrl.camp_radius = 80
+        ctrl.hunter_combat_loc = { x = 1, y = 2, z = 3 }
+        ctrl.hunter_combat_radius = 300
+        ctrl.zone_waypoints = { gfaydark = { waypoints = { { x = 5, y = 6, z = 7, name = 'Orc Hill' } }, waypoint_radius = 25, waypoint_loop = true } }
+        ctrl.zone_hazards = { gfaydark = { { x = 9, y = 9, z = 9, hits = 4 } } }
+        map.state.currentZoneShort = 'gfaydark'
+        map.syncTriuneLoadout()
+        local td = map.state.triuneData
+        assert_eq(td.isLoaded, true, 'Suite 89: map sync reads the live core ctrl')
+        assert_eq(td.campLoc and td.campLoc.x, 10, 'Suite 89: map sync mirrors camp_loc')
+        assert_eq(td.campRadius, 80, 'Suite 89: map sync mirrors camp_radius')
+        assert_eq(td.hunterAnchor and td.hunterAnchor.y, 2, 'Suite 89: map sync mirrors hunter anchor')
+        assert_eq(td.hunterCombatRadius, 300, 'Suite 89: map sync mirrors hunter combat radius')
+        assert_eq(#td.waypoints, 1, 'Suite 89: map sync picks up zone waypoints for the current zone')
+        assert_eq(td.waypoints[1].name, 'Orc Hill', 'Suite 89: zone waypoint name preserved')
+        assert_eq(td.useWaypoints, true, 'Suite 89: zone waypoints enable the overlay')
+        assert_eq(td.waypointRadius, 25, 'Suite 89: zone waypoint radius mirrored')
+        assert_eq(#td.zoneHazards, 1, 'Suite 89: map sync picks up zone hazards')
+        assert_eq(td.zoneHazards[1].hits, 4, 'Suite 89: hazard hit count mirrored')
+        ctrl.waypoints = { { x = 1, y = 1, z = 1, name = 'Char WP' }, { x = 2, y = 2, z = 2 } }
+        ctrl.use_waypoints = true
+        map.syncTriuneLoadout()
+        assert_eq(#td.waypoints, 2, 'Suite 89: character waypoints take precedence over zone waypoints')
+        assert_eq(td.waypoints[2].name, 'WP 2', 'Suite 89: unnamed character waypoint gets a default name')
+        assert_true(map.onCommand('track'), 'Suite 89: /ac track handled by the map plugin')
+        assert_eq(ctrl.show_map, true, 'Suite 89: /ac track opens the map window')
+        assert_eq(map.state.requestedTab, 3, 'Suite 89: /ac track selects the NPC Tracker tab')
+        assert_true(map.onCommand('map'), 'Suite 89: /ac map handled')
+        assert_eq(ctrl.show_map, false, 'Suite 89: /ac map toggles the window closed')
+        assert_eq(map.onCommand('cursorui'), false, 'Suite 89: map ignores other commands')
+        local mapSrc = readFile('TAC/lua/tac/map.lua')
+        for _, gone in ipairs({ 'triuneLoadoutCandidates', 'findTriuneLoadoutFile', '__zoneWaypoints', 'loadfile(perCharPath)' }) do
+            assert_true(mapSrc:find(gone, 1, true) == nil, 'Suite 89: map plugin dropped loadout-file discovery: ' .. gone)
+        end
+        print = origPrint
+    end
+
+    -- 8. pm.delay: yields the fiber until the condition / deadline, mq.delay outside a fiber
+    do
+        local mockMq = {
+            event = noop, unevent = noop, cmd = noop, cmdf = noop, bind = noop, unbind = noop,
+            gettime = function() return 0 end,
+            TLO = {
+                Me = { Combat = function() return false end, CombatState = function() return 'ACTIVE' end, CleanName = function() return 'T' end },
+                EverQuest = { Server = function() return 'S' end },
+                Target = { ID = function() return 0 end },
+                Window = function() return { Open = function() return false end } end,
+                Spawn = function() return setmetatable({}, { __call = function() return false end }) end,
+            },
+        }
+        local mqDelays = {}
+        mockMq.delay = function(ms) mqDelays[#mqDelays + 1] = ms end
+        local env = {
+            ctrl = { plugins = {} }, mq = mockMq, ImGui = mockImGui,
+            UI = { accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop,
+                   drawStatusProgressBar = noop, drawSpellIcon = function() return false end,
+                   getConColorRgb = function() return { 1, 1, 1, 1 } end, resolveTargetOfTarget = function() return nil end },
+            VERSION = '2.15', DATA = {}, loadout = {}, scriptDir = './',
+            GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
+            saveLoadout = noop, print = quietPrint,
+            idxOf = function() return 0 end, fmtSec = tostring, parseDurationSec = function() return 0 end,
+            cleanSpellName = tostring, normalizeSpellName = tostring,
+        }
+        local initPM = loadFunc(src, 'initPluginManager', env)
+        local sandbox = debug.getfenv(initPM)
+        local rt = sandbox.runtime
+        rt.saveLoadout = noop
+        initPM()
+        local pm = rt.pluginManager
+        assert_type(pm.delay, 'function', 'Suite 89: pm.delay exists')
+        assert_eq(pm.getCoreApi().delay, pm.getCoreApi().delay, 'Suite 89: core API exposes delay')
+
+        -- Inside a fiber: yields each tick until the condition holds
+        pm.inFiber = true
+        local ticks = 0
+        local co = coroutine.create(function() return pm.delay(60000, function() return ticks >= 3 end) end)
+        local ok, res = coroutine.resume(co)
+        assert_true(ok and coroutine.status(co) == 'suspended', 'Suite 89: pm.delay yields the fiber while waiting')
+        while coroutine.status(co) ~= 'dead' do
+            ticks = ticks + 1
+            ok, res = coroutine.resume(co)
+        end
+        assert_true(ok, 'Suite 89: fiber completed without error')
+        assert_eq(res, true, 'Suite 89: pm.delay returns true when the condition fires')
+        assert_eq(ticks, 3, 'Suite 89: pm.delay resumed exactly until the condition held')
+        local co2 = coroutine.create(function() return pm.delay(0) end)
+        local ok2, res2 = coroutine.resume(co2)
+        assert_true(ok2 and coroutine.status(co2) == 'dead', 'Suite 89: pm.delay(0) returns without yielding')
+        assert_eq(res2, false, 'Suite 89: pm.delay returns false on deadline without a condition')
+        assert_eq(#mqDelays, 0, 'Suite 89: pm.delay never calls mq.delay from a fiber')
+        pm.inFiber = false
+
+        -- Outside a fiber: falls back to mq.delay on the main coroutine
+        pm.delay(50)
+        assert_eq(mqDelays[1], 50, 'Suite 89: pm.delay outside a fiber degrades to mq.delay')
+
+        -- pm.tick marks the fiber window so plugin code can tell it is inside one
+        local seenInFiber = nil
+        local fake = {
+            id = 'fake_fiber', name = 'fake', enabled = true, status = 'Active', hasThread = true,
+            tickInterval = 0, lastTickAt = -1, lastExecMs = 0, avgExecMs = 0,
+            instance = { onTick = function() seenInFiber = pm.inFiber coroutine.yield() end },
+        }
+        fake.thread = pm.createFiber(fake)
+        pm.plugins[fake.id] = fake
+        table.insert(pm.pluginOrder, fake.id)
+        pm.tick()
+        assert_eq(seenInFiber, true, 'Suite 89: pm.inFiber is true while a plugin fiber runs')
+        assert_eq(pm.inFiber, false, 'Suite 89: pm.inFiber is cleared after the fiber yields')
+
+        -- 9. Plugin windows & main-window header buttons
+        local W = { saves = 0, ctrl = env.ctrl, custom = false, clickLabel = nil }
+        rt.saveLoadout = function() W.saves = W.saves + 1 end
+        assert_eq(pm.getWindow('map') and pm.getWindow('map').flag, 'show_map', 'Suite 89: map declares its window flag')
+        assert_eq(pm.getWindow('auto_aa') and pm.getWindow('auto_aa').flag, 'show_auto_aa', 'Suite 89: auto_aa declares its popout window')
+        assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
+        assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
+        W.all = pm.windowPlugins(false)
+        assert_eq(#W.all, 14, 'Suite 89: fourteen shipped plugins own a window')
+        assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
+        assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
+        assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
+        W.hdr = pm.windowPlugins(true)
+        assert_eq(#W.hdr, 13, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept (buffbot off)')
+        assert_eq(pm.headerButtonEnabled('buffbot'), false, 'Suite 89: buffbot header button off by default')
+        assert_eq(pm.headerButtonEnabled('hud_group'), true, 'Suite 89: hud_group header button on by default')
+        assert_eq(pm.headerButtonEnabled('floating_damage'), false, 'Suite 89: no header button for plugins without a window')
+        pm.setHeaderButton('buffbot', true)
+        assert_eq(W.ctrl.plugins.buffbot.headerButton, true, 'Suite 89: header button preference persisted to ctrl.plugins')
+        assert_eq(#pm.windowPlugins(true), 14, 'Suite 89: enabling the preference adds the button')
+        assert_true(W.saves >= 1, 'Suite 89: header button preference triggers a loadout save')
+        pm.setHeaderButton('hud_group', false)
+        assert_eq(pm.headerButtonEnabled('hud_group'), false, 'Suite 89: saved preference overrides the plugin default')
+        assert_eq(#pm.windowPlugins(true), 13, 'Suite 89: disabling the preference removes the button')
+
+        -- open / close through the manager writes the ctrl flag
+        assert_eq(pm.isWindowOpen('map'), false, 'Suite 89: map window closed initially')
+        pm.toggleWindow('map')
+        assert_eq(W.ctrl.show_map, true, 'Suite 89: toggleWindow opens via the ctrl flag')
+        assert_eq(pm.isWindowOpen('map'), true, 'Suite 89: isWindowOpen reflects the flag')
+        pm.setWindowOpen('map', false)
+        assert_eq(W.ctrl.show_map, false, 'Suite 89: setWindowOpen(false) closes the window')
+        assert_eq(pm.setWindowOpen('floating_damage', true), false, 'Suite 89: setWindowOpen is a no-op for plugins without a window')
+
+        -- isOpen / setOpen function pair is honoured for non-ctrl windows
+        pm.plugins.fake_fiber.instance.window = { label = 'Custom', isOpen = function() return W.custom end, setOpen = function(v) W.custom = v end, order = 5 }
+        assert_eq(pm.windowPlugins(false)[1].id, 'fake_fiber', 'Suite 89: window.order sorts custom window first')
+        pm.toggleWindow('fake_fiber')
+        assert_eq(W.custom, true, 'Suite 89: setOpen callback used when no flag is declared')
+        assert_eq(pm.isWindowOpen('fake_fiber'), true, 'Suite 89: isOpen callback used when no flag is declared')
+        pm.plugins.fake_fiber.instance.window = nil
+
+        -- header renderer: one button per enabled header plugin, clicks toggle
+        mockImGui.Button = function(label) return W.clickLabel ~= nil and label:find(W.clickLabel, 1, true) ~= nil end
+        assert_eq(pm.drawHeaderButtons(), 13, 'Suite 89: drawHeaderButtons draws one button per header plugin')
+        W.clickLabel = 'Map##hdrPlg_map'
+        pm.drawHeaderButtons()
+        assert_eq(W.ctrl.show_map, true, 'Suite 89: clicking the header button opens the plugin window')
+        W.clickLabel = nil
+        mockImGui.Button = function() return false end
+        pm.disablePlugin('map')
+        assert_eq(pm.drawHeaderButtons(), 12, 'Suite 89: disabled plugins get no header button')
+        pm.enablePlugin('map')
+        pm.plugins.map.status = 'Error'
+        assert_eq(pm.drawHeaderButtons(), 12, 'Suite 89: errored plugins get no header button')
+        pm.plugins.map.status = 'Active'
+
+        -- collectSettings persists the effective header preference for window plugins
+        pm.collectSettings()
+        assert_eq(W.ctrl.plugins.spellbook.headerButton, true, 'Suite 89: collectSettings records the default header preference')
+        assert_eq(W.ctrl.plugins.floating_damage.headerButton, nil, 'Suite 89: collectSettings leaves non-window plugins alone')
+
+        -- core header bar is driven by the manager now
+        assert_true(src:find('runtime.pluginManager.drawHeaderButtons()', 1, true) ~= nil, 'Suite 89: header bar calls pm.drawHeaderButtons')
+        for _, gone in ipairs({ "'Map##hdrMap'", "'DPS Parser##hdrDPS'", "'Cursor Manager##hdrCursor'", "'Inv Manager##hdrInv'", "'Open Spellbook##hdrBook'", "'Gems##hdrGems'", "'XTarget##hdrXTarget'" }) do
+            assert_true(src:find(gone, 1, true) == nil, 'Suite 89: hardcoded header button removed: ' .. gone)
+        end
+        assert_true(src:find("ImGui.BeginTable('TriunePluginsTable', 8, flags)", 1, true) ~= nil, 'Suite 89: Plugins table gained the Header column')
+        assert_true(src:find("ImGui.TableSetupColumn('Header', ImGuiTableColumnFlags.WidthFixed, 56)", 1, true) ~= nil, 'Suite 89: Header column declared')
+
+        -- 10. Settings -> Windows registry is built from the plugin window declarations
+        W.getManaged = loadFunc(src, 'getManagedWindows', { runtime = rt, ctrl = W.ctrl })
+        rt.CORE_WINDOWS = { { key = 'main', getOpen = function() return true end, setOpen = noop }, { key = 'mini', getOpen = function() return false end, setOpen = noop } }
+        W.defs = W.getManaged()
+        assert_eq(#W.defs, 2 + #pm.windowPlugins(false), 'Suite 89: registry = core windows + every enabled plugin window')
+        W.byKey = {}
+        for _, d in ipairs(W.defs) do W.byKey[d.key] = d end
+        for _, k in ipairs({ 'main', 'mini', 'unit_frames', 'group', 'effects', 'cooldowns', 'xtarget', 'spell_gems', 'spellbook', 'auto_aa', 'auto_accept', 'map', 'dps', 'inventory', 'cursor', 'buffbot' }) do
+            assert_true(W.byKey[k] ~= nil, 'Suite 89: registry lists window key ' .. k)
+        end
+        assert_eq(W.byKey.unit_frames.pluginId, 'hud_unitframes', 'Suite 89: window.key maps hud_unitframes to the unit_frames position key')
+        assert_eq(W.byKey.unit_frames.canLock, true, 'Suite 89: lockFlag makes the entry lockable')
+        assert_eq(W.byKey.map.canLock, false, 'Suite 89: windows without a lock flag are not lockable')
+        assert_eq(W.byKey.buffbot ~= nil, true, 'Suite 89: header-button-off plugins still appear in the layout registry')
+        W.ctrl.uf_lock = false
+        W.byKey.unit_frames.setLock(true)
+        assert_eq(W.ctrl.uf_lock, true, 'Suite 89: registry lock toggle writes the plugin lock flag')
+        assert_eq(W.byKey.unit_frames.getLock(), true, 'Suite 89: registry lock getter reads the plugin lock flag')
+        W.ctrl.show_dps = false
+        W.byKey.dps.setOpen(true)
+        assert_eq(W.ctrl.show_dps, true, 'Suite 89: registry Show writes the plugin window flag')
+        assert_eq(W.byKey.dps.getOpen(), true, 'Suite 89: registry status reads the plugin window flag')
+        assert_eq(W.byKey.map.desc, '2D zone map, Norrath atlas & NPC tracker', 'Suite 89: window.desc feeds the registry description')
+        -- disabling a plugin drops its window from the registry; re-enabling restores the cached entry
+        pm.disablePlugin('map')
+        W.defs = W.getManaged()
+        W.found = false
+        for _, d in ipairs(W.defs) do if d.key == 'map' then W.found = true end end
+        assert_eq(W.found, false, 'Suite 89: disabled plugin windows leave the registry')
+        pm.enablePlugin('map')
+        W.defs = W.getManaged()
+        W.found = nil
+        for _, d in ipairs(W.defs) do if d.key == 'map' then W.found = d end end
+        assert_true(W.found == W.byKey.map, 'Suite 89: registry entries are cached per plugin (same table after re-enable)')
+
+        -- 11. No plugin launches a removed standalone script; the gem bar opens the spellbook plugin window
+        for _, f in ipairs({ 'hud_spellgems', 'hud_cooldowns', 'hud_unitframes', 'hud_group', 'hud_effects', 'hud_xtarget', 'spellbook', 'auto_aa', 'auto_accept', 'floating_damage', 'map', 'dps', 'inventory', 'buffbot', 'cursor' }) do
+            assert_true(readFile('TAC/lua/tac/' .. f .. '.lua'):find("toggleTool('triune_", 1, true) == nil, 'Suite 89: ' .. f .. ' does not launch a removed standalone script')
+        end
+        W.ctrl.show_spellbook = false
+        W.gems = pm.plugins.hud_spellgems and pm.plugins.hud_spellgems.instance
+        assert_true(W.gems ~= nil, 'Suite 89: hud_spellgems loaded in the sandbox')
+        assert_type(W.gems.openSpellbook, 'function', 'Suite 89: hud_spellgems exposes openSpellbook')
+        W.gems.openSpellbook()
+        assert_eq(W.ctrl.show_spellbook, true, 'Suite 89: gem bar Open Spellbook opens the spellbook plugin window')
+        assert_eq(pm.isWindowOpen('spellbook'), true, 'Suite 89: spellbook window reported open by the manager')
+    end
+end
+
+
+-- ============================================================================
+-- Suite 90: Auto AA fireworks auto-summon only after the AA is purchased
+-- ============================================================================
+do
+    print('--- Suite 90: Fireworks auto-summon requires the purchased AA ---')
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local noop = function() end
+    local cmds = {}
+    local ownedRank = 0        -- Me.AltAbility(...).Rank()
+    local ready = false        -- Me.AltAbilityReady(...)
+    local mq = {
+        event = noop, unevent = noop, cmd = function(c) cmds[#cmds + 1] = c end,
+        cmdf = function(f, ...) cmds[#cmds + 1] = string.format(f, ...) end,
+        TLO = {
+            Me = {
+                Dead = function() return false end, Combat = function() return false end, Moving = function() return false end,
+                AltAbility = function() return setmetatable({ Rank = function() return ownedRank end }, { __call = function() return true end }) end,
+                AltAbilityReady = function() return function() return ready end end,
+                AltAbilityTimer = function() return function() return 0 end end,
+            },
+        },
+    }
+    local core = {
+        ctrl = { auto_summon_fireworks = true, auto_spend_aa_id = 17788, plugins = {} }, mq = mq,
+        ImGui = setmetatable({}, { __index = function() return noop end }),
+        runtime = { isCasting = function() return false end, cachedAAData = {} },
+        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '2.15',
+    }
+    local origPrint = print
+    print = quietPrint
+    local fn = assert(loadfile('TAC/lua/tac/auto_aa.lua'))
+    local ok, aaPlugin = pcall(fn)
+    assert_true(ok and type(aaPlugin) == 'table', 'Suite 90: auto_aa.lua loads')
+    aaPlugin.onInit(core)
+    local AA = aaPlugin.AA
+    assert_type(AA.hasFireworksAA, 'function', 'Suite 90: AA.hasFireworksAA exists')
+
+    -- Not purchased: never summons, even across repeated ticks
+    assert_eq(AA.hasFireworksAA(17788), false, 'Suite 90: hasFireworksAA false with rank 0 and not ready')
+    AA.lastAutoSummonAt = -100
+    assert_eq(AA.checkAutoSummonFireworks(), false, 'Suite 90: no auto-summon before the AA is purchased')
+    AA.lastAutoSummonAt = -100
+    AA.checkAutoSummonFireworks()
+    assert_eq(#cmds, 0, 'Suite 90: no /alt act issued while the AA is unowned')
+    assert_eq(AA.manualSummonFireworks(), false, 'Suite 90: manual summon refuses without the AA')
+    assert_eq(#cmds, 0, 'Suite 90: manual summon issues nothing without the AA')
+
+    -- Purchased (rank > 0): summons once per cadence
+    ownedRank = 1
+    AA.lastAutoSummonAt = -100
+    assert_eq(AA.hasFireworksAA(17788), true, 'Suite 90: hasFireworksAA true once a rank is trained')
+    assert_eq(AA.checkAutoSummonFireworks(), true, 'Suite 90: auto-summon fires once the AA is owned')
+    assert_eq(cmds[#cmds], '/alt act 17788', 'Suite 90: auto-summon activates the configured AA id')
+    assert_eq(AA.checkAutoSummonFireworks(), false, 'Suite 90: 3s cadence still throttles repeat summons')
+
+    -- AltAbilityReady alone (rank not reported) also counts as owned
+    ownedRank = 0
+    ready = true
+    assert_eq(AA.hasFireworksAA(17788), true, 'Suite 90: AltAbilityReady counts as proof of ownership')
+
+    -- Source guard: the auto-summon path calls the ownership check
+    local aaSrc = readFile('TAC/lua/tac/auto_aa.lua')
+    assert_true(aaSrc:find('if not AA.hasFireworksAA(aaId) then', 1, true) ~= nil, 'Suite 90: checkAutoSummonFireworks gates on AA.hasFireworksAA')
+
+    -- Post-purchase summon is deferred, not fired on the Train click
+    assert_true(aaSrc:find("Auto-summoning fireworks after purchasing", 1, true) == nil, 'Suite 90: no immediate /alt act after clicking Train')
+    assert_true(aaSrc:find('AA.scheduleFireworksSummon(fwId, task.name)', 1, true) ~= nil, 'Suite 90: Train click schedules the summon instead')
+    cmds = {}
+    ownedRank = 0
+    ready = false
+    core.ctrl.auto_summon_delay_sec = 2.0
+    AA.scheduleFireworksSummon(17788, 'Alternately Advanced Fireworks')
+    assert_true(AA.pendingFireworksSummon ~= nil, 'Suite 90: summon job scheduled')
+    assert_true(AA.pendingFireworksSummon.at > os.clock() + 1.5, 'Suite 90: summon waits for the configured delay')
+    AA.processPendingFireworksSummon()
+    assert_eq(#cmds, 0, 'Suite 90: nothing issued before the delay elapses')
+    assert_eq(AA.checkAutoSummonFireworks(), false, 'Suite 90: periodic auto-summon stands down while a post-purchase summon is pending')
+    AA.pendingFireworksSummon.at = os.clock() - 1
+    AA.processPendingFireworksSummon()
+    assert_eq(#cmds, 0, 'Suite 90: delay elapsed but purchase not visible yet -> no /alt act')
+    assert_eq(AA.pendingFireworksSummon.tries, 1, 'Suite 90: unconfirmed purchase counts a retry')
+    assert_true(AA.pendingFireworksSummon.at > os.clock() + 1.5, 'Suite 90: retry rescheduled after another delay')
+    ownedRank = 1
+    AA.pendingFireworksSummon.at = os.clock() - 1
+    assert_eq(AA.processPendingFireworksSummon(), true, 'Suite 90: summon fires once the rank is visible')
+    assert_eq(cmds[#cmds], '/alt act 17788', 'Suite 90: deferred summon activates the AA')
+    assert_eq(AA.pendingFireworksSummon, nil, 'Suite 90: job cleared after summoning')
+    -- Gives up after the retry cap
+    ownedRank = 0
+    AA.scheduleFireworksSummon(17788, 'x')
+    for _ = 1, AA.FIREWORKS_SUMMON_MAX_TRIES do
+        AA.pendingFireworksSummon.at = os.clock() - 1
+        AA.processPendingFireworksSummon()
+        if not AA.pendingFireworksSummon then break end
+    end
+    assert_eq(AA.pendingFireworksSummon, nil, 'Suite 90: pending summon abandoned after the retry cap')
+    assert_eq(cmds[#cmds], '/alt act 17788', 'Suite 90: no extra /alt act issued while giving up')
+    core.ctrl.auto_summon_delay_sec = nil
+    assert_eq(AA.fireworksSummonDelay(), 3.0, 'Suite 90: summon delay defaults to 3s')
+    aaPlugin.onDestroy()
+    print = origPrint
+end
+
+
+-- ============================================================================
+-- Suite 91: MQ2AAspend INI sync only when Auto-Spend is on and something changed
+-- ============================================================================
+do
+    print('--- Suite 91: MQ2AAspend INI sync gating ---')
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local noop = function() end
+    local cmds = {}
+    local cfgDir = os.getenv('TMPDIR') or '/tmp'
+    local iniPath = cfgDir .. '/TestServer_Tester.ini'
+    os.remove(iniPath)
+    local mq = {
+        configDir = cfgDir,
+        event = noop, unevent = noop,
+        cmd = function(c) cmds[#cmds + 1] = c end,
+        cmdf = function(f, ...) cmds[#cmds + 1] = string.format(f, ...) end,
+        TLO = {
+            Me = { CleanName = function() return 'Tester' end, Dead = function() return false end, Combat = function() return false end, Moving = function() return false end },
+            EverQuest = { Server = function() return 'TestServer' end },
+            Plugin = function() return setmetatable({ IsLoaded = function() return true end }, { __call = function() return true end }) end,
+        },
+    }
+    local core = {
+        ctrl = { plugins = {}, auto_spend_aa = false, auto_aa_delegate_aaspend = true, auto_aa_priorities = { ['Combat Agility'] = true, ['Innate Regeneration'] = true }, auto_spend_aa_threshold = 5 },
+        mq = mq, ImGui = setmetatable({}, { __index = function() return noop end }),
+        runtime = { isCasting = function() return false end, cachedAAData = { ['Combat Agility'] = { cost = 3 }, ['Innate Regeneration'] = { cost = 2 } } },
+        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '2.15',
+    }
+    local origPrint = print
+    print = quietPrint
+    local aaPlugin = assert(loadfile('TAC/lua/tac/auto_aa.lua'))()
+    aaPlugin.onInit(core)
+    local AA = aaPlugin.AA
+    local function countLoads()
+        local n = 0
+        for _, c in ipairs(cmds) do if c == '/aaspend load' then n = n + 1 end end
+        return n
+    end
+
+    -- Auto-Spend off: saving the loadout must not touch MQ2AAspend at all
+    aaPlugin.onLoadoutSaved()
+    aaPlugin.onLoadoutSaved()
+    assert_eq(countLoads(), 0, 'Suite 91: no /aaspend load while Auto-Spend is off')
+    assert_true(io.open(iniPath, 'r') == nil, 'Suite 91: INI not written while Auto-Spend is off')
+
+    -- Auto-Spend on: first save syncs once, repeated saves are no-ops
+    core.ctrl.auto_spend_aa = true
+    aaPlugin.onLoadoutSaved()
+    assert_eq(countLoads(), 1, 'Suite 91: first save with Auto-Spend on syncs and reloads MQ2AAspend')
+    local f = io.open(iniPath, 'r')
+    assert_true(f ~= nil, 'Suite 91: INI written on first sync')
+    local iniText = f and f:read('*a') or ''
+    if f then f:close() end
+    assert_true(iniText:find('1=Innate Regeneration|M', 1, true) ~= nil, 'Suite 91: cheapest priority listed first')
+    assert_true(iniText:find('BankPoints=5', 1, true) ~= nil, 'Suite 91: threshold written to BankPoints')
+    for _ = 1, 5 do aaPlugin.onLoadoutSaved() end
+    assert_eq(countLoads(), 1, 'Suite 91: unchanged priorities do not rewrite the INI or reload the plugin')
+    local okSync, wrote = AA.syncAAsToMQ2AASpendIni(true)
+    assert_true(okSync == true and wrote == false, 'Suite 91: sync reports no write when nothing changed')
+
+    -- A real change syncs again; a forced manual sync always writes
+    core.ctrl.auto_spend_aa_threshold = 9
+    aaPlugin.onLoadoutSaved()
+    assert_eq(countLoads(), 2, 'Suite 91: changed threshold triggers one more sync')
+    aaPlugin.onLoadoutSaved()
+    assert_eq(countLoads(), 2, 'Suite 91: still idempotent after the change')
+    AA.syncAAsToMQ2AASpendIni(true, true)
+    assert_eq(countLoads(), 3, 'Suite 91: forced (manual) sync rewrites even when unchanged')
+
+    -- Delegation off: never sync from the loadout hook
+    core.ctrl.auto_aa_delegate_aaspend = false
+    core.ctrl.auto_spend_aa_threshold = 11
+    aaPlugin.onLoadoutSaved()
+    assert_eq(countLoads(), 3, 'Suite 91: no sync from the loadout hook when MQ2AAspend delegation is off')
+
+    aaPlugin.onDestroy()
+    os.remove(iniPath)
+    print = origPrint
+end
+
+
+-- ============================================================================
+-- Suite 92: Multi-pet tracking (real triune.lua functions on a mock spawn world)
+-- ============================================================================
+do
+    print('--- Suite 92: Multi-pet tracking ---')
+
+    -- Mock zone: spawns[id] = { name, race, type, masterId, dist, dead }
+    local world = { spawns = {}, meId = 1, meName = 'Gennro', mePetId = 0, clock = 100 }
+    local function spawnObj(id)
+        local sp = world.spawns[id]
+        local function masterObj(mid)
+            return setmetatable({ ID = function() return mid or 0 end }, { __call = function() return (mid or 0) > 0 end })
+        end
+        return setmetatable({
+            ID = function() return sp and id or 0 end,
+            Dead = function() return sp and sp.dead or false end,
+            Type = function() return sp and (sp.dead and 'Corpse' or sp.type or 'Pet') or '' end,
+            State = function() return sp and (sp.dead and 'DEAD' or 'STAND') or '' end,
+            CleanName = function() return sp and sp.name or '' end,
+            Race = function() return sp and sp.race or '' end,
+            Distance = function() return sp and sp.dist or 999 end,
+            Master = masterObj(sp and sp.masterId),
+            Owner = masterObj(0),
+        }, { __call = function() return sp ~= nil end })
+    end
+    local function matches(filter)
+        local kind, radius = filter:match('^(%a+) radius (%d+)$')
+        radius = tonumber(radius) or 0
+        local ids = {}
+        for id, sp in pairs(world.spawns) do
+            if not sp.dead and (sp.dist or 999) <= radius then
+                local t = sp.type or 'Pet'
+                if (kind == 'pet' and t == 'Pet') or (kind == 'npc' and t == 'NPC') then ids[#ids + 1] = id end
+            end
+        end
+        table.sort(ids, function(a, b) return (world.spawns[a].dist or 0) < (world.spawns[b].dist or 0) end)
+        return ids
+    end
+    local mq = { TLO = {} }
+    mq.TLO.Spawn = spawnObj
+    mq.TLO.Me = { ID = function() return world.meId end, CleanName = function() return world.meName end,
+                  Pet = { ID = function() return world.mePetId end } }
+    mq.TLO.SpawnCount = function(filter) return function() return #matches(filter) end end
+    mq.TLO.NearestSpawn = function(i, filter) local ids = matches(filter); return ids[i] and spawnObj(ids[i]) or spawnObj(-1) end
+    local fakeOs = setmetatable({ clock = function() return world.clock end }, { __index = os })
+
+    local PET_CLASSES = { Nec = true, Mag = true, Bst = true, Enc = true, Shm = true, SK = true, Dru = true, Brd = true }
+    -- loadFunc snapshots the env at load time, so these tables are reset in place
+    local petState, ctrl, myClasses, runtime, printed = {}, {}, {}, {}, {}
+    local env = { petState = petState, ctrl = ctrl, myClasses = myClasses, runtime = runtime }
+    local function clearTable(t) for k in pairs(t) do t[k] = nil end end
+    local function resetWorld(classes, names)
+        world.spawns = {}; world.mePetId = 0; world.clock = 100
+        clearTable(petState); clearTable(ctrl); clearTable(myClasses); clearTable(runtime); clearTable(printed)
+        petState.myPets = {}; petState.lastObservedId = 0; petState.summonPending = nil; petState.summonBlockedUntil = {}
+        petState.lastReconcileAt = 0; petState.petsCache = nil; petState.PET_CLASSES = PET_CLASSES
+        petState.PET_SCOPE_LIST = { 'all', 'swarm', 'mag', 'bst', 'nec', 'enc', 'shm', 'dru', 'brd', 'shd' }
+        ctrl.pet_names = names or {}; ctrl.debug_mode = false
+        for i, c in ipairs(classes) do myClasses[i] = c end
+    end
+    local function addPet(id, name, opts)
+        opts = opts or {}
+        world.spawns[id] = { name = name, race = opts.race or 'Elemental', type = opts.type or 'Pet',
+                             masterId = (opts.masterId == nil) and world.meId or opts.masterId, dist = opts.dist or 5, dead = false }
+    end
+    local function tick() world.clock = world.clock + 1; petState.petsCache = nil; petState.lastReconcileAt = 0 end
+    resetWorld({ 'Nec', 'Mag', 'War' })
+
+    env.mq = mq; env.os = fakeOs; env.print = function(msg) printed[#printed + 1] = tostring(msg) end
+    env.isSpawnAlive = loadFunc(src, 'isSpawnAlive', env)
+    env.petClsForName = loadFunc(src, 'petClsForName', env)
+    env.spawnCleanName = loadFunc(src, 'spawnCleanName', env)
+    env.isSpawnMyPet = loadFunc(src, 'isSpawnMyPet', env)
+    env.petTrackedCls = loadFunc(src, 'petTrackedCls', env)
+    env.prunePetTracking = loadFunc(src, 'prunePetTracking', env)
+    env.trackPet = loadFunc(src, 'trackPet', env)
+    env.getAllMyPets = loadFunc(src, 'getAllMyPets', env)
+    env.classToPetCmdScope = loadFunc(src, 'classToPetCmdScope', env)
+    env.detectPetClassFromSpawn = loadFunc(src, 'detectPetClassFromSpawn', env)
+    env.reconcilePets = loadFunc(src, 'reconcilePets', env)
+    env.getMultiPetList = loadFunc(src, 'getMultiPetList', env)
+    env.PET_SUMMON_GRACE_SEC = 12
+    env.PET_SUMMON_NEAR_DIST = 40
+    env.snapshotNearbySpawnIds = loadFunc(src, 'snapshotNearbySpawnIds', env)
+    env.beginPetSummon = loadFunc(src, 'beginPetSummon', env)
+    env.updatePetTracking = loadFunc(src, 'updatePetTracking', env)
+    env.onPetSummonRefused = loadFunc(src, 'onPetSummonRefused', env)
+    env.isPetMissingForClass = loadFunc(src, 'isPetMissingForClass', env)
+    local F = env
+
+    -- A. Ownership
+    resetWorld({ 'Nec', 'Mag', 'War' }, { Mag = 'Xobarb' })
+    addPet(100, 'Gebann')
+    addPet(101, 'Xobarb', { masterId = 42 })
+    addPet(102, 'Xobarb', { masterId = 0 })
+    addPet(103, 'Jabber', { masterId = 0 })
+    addPet(104, 'Xobarb', { masterId = 0, type = 'NPC' })
+    assert_eq(F.isSpawnMyPet(100), true, 'Suite 92: pet with our master ID is ours')
+    assert_eq(F.isSpawnMyPet(101), false, 'Suite 92: learned name never overrides a foreign master')
+    assert_eq(F.isSpawnMyPet(102), true, 'Suite 92: unresolved master + learned name -> ours')
+    assert_eq(F.isSpawnMyPet(103), false, 'Suite 92: unresolved master + unknown name -> not ours')
+    assert_eq(F.isSpawnMyPet(104), false, 'Suite 92: a plain NPC is never ours, even with a learned name')
+
+    -- B. Tracking invariants
+    resetWorld({ 'Nec', 'Mag', 'War' })
+    addPet(100, 'Gebann', { race = 'Skeleton' })
+    addPet(101, 'Xobarb', { race = 'Elemental' })
+    petState.myPets.Nec = 100
+    F.reconcilePets()
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: reconcile keeps the Nec pet')
+    assert_eq(petState.myPets.Mag, 101, 'Suite 92: reconcile gives Mag the untracked pet, not the Nec pet again')
+    assert_eq(printed[1] ~= nil and printed[1]:find('1 existing pet') ~= nil, true, 'Suite 92: reconcile reports only the newly tracked pet')
+
+    petState.myPets = { Nec = 100, Mag = 100 }
+    F.prunePetTracking()
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: prune keeps the first class for a duplicated ID')
+    assert_eq(petState.myPets.Mag, nil, 'Suite 92: prune drops the duplicate class entry')
+
+    F.trackPet('Mag', 100, false)
+    assert_eq(petState.myPets.Mag, 100, 'Suite 92: trackPet assigns the pet')
+    assert_eq(petState.myPets.Nec, nil, 'Suite 92: trackPet removes the ID from the other class')
+
+    -- C. getMultiPetList never shows one pet twice (by ID or by name)
+    petState.myPets = { Nec = 100, Mag = 100 }
+    local slots, extra = F.getMultiPetList()
+    assert_eq(slots[1].petId, 100, 'Suite 92: slot 1 shows the pet')
+    assert_eq(slots[2].petId, 101, 'Suite 92: slot 2 gets the other living pet instead of a duplicate')
+    assert_eq(#extra, 0, 'Suite 92: no extras when both pets are in slots')
+    world.spawns[101].name = 'Gebann' -- same name under a second ID (stale/duplicate spawn)
+    petState.myPets = { Nec = 100, Mag = 101 }
+    slots = F.getMultiPetList()
+    assert_eq(slots[1].petId, 100, 'Suite 92: name-dup: first slot keeps its pet')
+    assert_eq(slots[2].petId, nil, 'Suite 92: name-dup: second slot does not show the same pet name')
+    assert_eq(slots[3].isPetCls, false, 'Suite 92: War slot is a non-pet class')
+    addPet(105, 'Gebann', { race = 'Skeleton' }) -- third ID with the same name
+    petState.petsCache = nil
+    slots, extra = F.getMultiPetList()
+    assert_eq(#extra, 0, 'Suite 92: name-dup: extras never repeat a name shown in a slot')
+
+    -- D. Learned names map pets back to their classes after a restart
+    resetWorld({ 'Mag', 'Nec', 'War' }, { Mag = 'Xobarb', Nec = 'Gebann' })
+    addPet(100, 'Gebann', { race = 'Unknown', dist = 3 })
+    addPet(101, 'Xobarb', { race = 'Unknown', dist = 8 })
+    F.reconcilePets()
+    assert_eq(petState.myPets.Mag, 101, 'Suite 92: learned name -> Mag gets Xobarb')
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: learned name -> Nec gets Gebann')
+
+    -- E. 'missing pet' per class + summon grace + detection without a Me.Pet change
+    resetWorld({ 'Nec', 'Mag', 'War' })
+    addPet(100, 'Gebann', { race = 'Skeleton' })
+    world.mePetId = 100
+    F.updatePetTracking()
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: Me.Pet is tracked under the first free pet class')
+    assert_eq(F.isPetMissingForClass('Nec'), false, 'Suite 92: Nec has its pet')
+    assert_eq(F.isPetMissingForClass('Mag'), true, 'Suite 92: Mag pet is missing')
+    assert_eq(F.isPetMissingForClass('War'), false, 'Suite 92: non-pet class with pets around -> not missing')
+
+    F.beginPetSummon('Mag', 'Elemental Servant')
+    assert_eq(F.isPetMissingForClass('Mag'), false, 'Suite 92: summon in flight -> Mag stays quiet')
+    assert_eq(F.isPetMissingForClass('Nec'), false, 'Suite 92: summon in flight does not affect Nec')
+    tick(); F.updatePetTracking()
+    assert_eq(petState.summonPending ~= nil, true, 'Suite 92: pending stays until a pet appears')
+    addPet(102, 'Xobarb', { race = 'Elemental' }) -- appears; Me.Pet still 100
+    tick(); F.updatePetTracking()
+    assert_eq(petState.myPets.Mag, 102, 'Suite 92: new pet pinned to the casting class without a Me.Pet change')
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: Nec keeps its own pet')
+    assert_eq(petState.summonPending, nil, 'Suite 92: pending cleared once the pet is found')
+    assert_eq(ctrl.pet_names.Mag, 'Xobarb', 'Suite 92: name learned from the confirmed summon')
+    assert_eq(ctrl.pet_names.Nec, nil, 'Suite 92: reconcile guesses do not learn names')
+    assert_eq(runtime.autoDirty, true, 'Suite 92: learned name flags the loadout for autosave')
+    assert_eq(F.isPetMissingForClass('Mag'), false, 'Suite 92: Mag no longer missing')
+
+    -- Grace expires with no pet: the gem may cast again
+    world.spawns[102].dead = true
+    tick(); F.updatePetTracking()
+    assert_eq(F.isPetMissingForClass('Mag'), true, 'Suite 92: dead Mag pet -> missing again')
+    F.beginPetSummon('Mag', 'Elemental Servant')
+    world.clock = world.clock + 5
+    assert_eq(F.isPetMissingForClass('Mag'), false, 'Suite 92: still inside the grace window')
+    world.clock = world.clock + 8; petState.petsCache = nil; petState.lastReconcileAt = 0
+    F.updatePetTracking()
+    assert_eq(petState.summonPending, nil, 'Suite 92: pending expires after the grace window')
+    assert_eq(F.isPetMissingForClass('Mag'), true, 'Suite 92: after the grace window Mag is missing again')
+
+    -- F. Master unresolved on the client: brand-new pet-typed spawn after the cast is the pet
+    resetWorld({ 'Nec', 'Mag', 'War' })
+    addPet(200, 'Kobold', { type = 'Pet', masterId = 0, dist = 30 }) -- already there before the cast
+    F.beginPetSummon('Nec', 'Leering Corpse')
+    addPet(201, 'Gebann', { type = 'Pet', masterId = 0, dist = 4 })
+    addPet(202, 'Xobarb', { type = 'Pet', masterId = 42, dist = 6 }) -- someone else's pet arriving
+    addPet(203, 'a guard', { type = 'NPC', masterId = 0, dist = 2 }) -- a mob arriving is never a pet
+    tick(); F.updatePetTracking()
+    assert_eq(petState.myPets.Nec, 201, 'Suite 92: masterless new pet spawn beside us is taken as the summoned pet')
+    assert_eq(ctrl.pet_names.Nec, 'Gebann', 'Suite 92: its name is learned')
+    assert_eq(F.isSpawnMyPet(201), true, 'Suite 92: learned name makes it ours from now on')
+    assert_eq(F.isPetMissingForClass('Nec'), false, 'Suite 92: Nec not missing (no re-summon loop)')
+
+    -- G. Me.Pet flips to the surviving pet after the other dies: no duplicate, dead class is missing
+    resetWorld({ 'Nec', 'Mag', 'War' })
+    addPet(100, 'Gebann', { race = 'Skeleton' })
+    addPet(101, 'Xobarb', { race = 'Elemental' })
+    petState.myPets = { Nec = 100, Mag = 101 }
+    world.mePetId = 101; petState.lastObservedId = 101
+    world.spawns[101].dead = true
+    world.mePetId = 100
+    tick(); F.updatePetTracking()
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: Nec still owns pet 100')
+    assert_eq(petState.myPets.Mag, nil, 'Suite 92: Mag is not handed the Nec pet when Me.Pet flips')
+    assert_eq(F.isPetMissingForClass('Mag'), true, 'Suite 92: Mag will re-summon')
+    assert_eq(F.isPetMissingForClass('Nec'), false, 'Suite 92: Nec will not')
+
+    -- H. Server refuses the summon: reassign the least-certain pet and back off
+    resetWorld({ 'Nec', 'Mag', 'War' })
+    addPet(100, 'Xobarb', { race = 'Unknown' })
+    F.reconcilePets() -- guessed onto Nec (first pet class)
+    assert_eq(petState.myPets.Nec, 100, 'Suite 92: unknown pet guessed onto the first pet class')
+    F.beginPetSummon('Mag', 'Elemental Servant')
+    F.onPetSummonRefused()
+    assert_eq(petState.myPets.Mag, 100, 'Suite 92: refused summon moves the guessed pet to the casting class')
+    assert_eq(petState.myPets.Nec, nil, 'Suite 92: the guessing class releases it')
+    assert_eq(ctrl.pet_names.Mag, 'Xobarb', 'Suite 92: refused summon confirms the name')
+    assert_eq(petState.summonPending, nil, 'Suite 92: refused summon clears pending')
+    assert_eq((petState.summonBlockedUntil.Mag or 0) > world.clock, true, 'Suite 92: refused summon blocks Mag re-casts')
+    F.beginPetSummon('Nec', 'Leering Corpse')
+    F.onPetSummonRefused() -- nothing left to reassign
+    assert_eq(petState.myPets.Nec, nil, 'Suite 92: nothing to reassign when all tracked pets are name-confirmed')
+    assert_eq(F.isPetMissingForClass('Nec'), false, 'Suite 92: blocked class does not re-cast')
+    world.clock = world.clock + 61; petState.petsCache = nil; petState.lastReconcileAt = 0
+    assert_eq(F.isPetMissingForClass('Nec'), true, 'Suite 92: block expires after 60s')
+
+    -- I. Single pet class: any of our pets satisfies it; nil cls = any pet at all
+    resetWorld({ 'Mag', 'War', 'Clr' })
+    assert_eq(F.isPetMissingForClass('Mag'), true, 'Suite 92: single pet class with no pets -> missing')
+    assert_eq(F.isPetMissingForClass(nil), true, 'Suite 92: no class, no pets -> missing')
+    addPet(100, 'Xobarb', { race = 'Unknown' })
+    tick()
+    assert_eq(F.isPetMissingForClass('Mag'), false, 'Suite 92: single pet class picks up any of our pets')
+    assert_eq(F.isPetMissingForClass(nil), false, 'Suite 92: no class, a pet exists -> not missing')
+
+    -- J. Source wiring
+    assert_true(src:find("return isPetMissingForClass%(cls%)") ~= nil, 'Suite 92: missing pet condition delegates to isPetMissingForClass')
+    assert_true(src:find("beginPetSummon%(g%.cls, g%.spell%)") ~= nil, 'Suite 92: pet gem cast starts summon tracking')
+    assert_true(src:find("\n    updatePetTracking%(%)\n") ~= nil, 'Suite 92: main loop calls updatePetTracking')
+    assert_true(src:find("lastCastCls") == nil, 'Suite 92: lastCastCls tracking removed')
+    assert_true(src:find("cannot have more than one pet") ~= nil, 'Suite 92: summon-refused event registered')
+end
+
+-- ============================================================================
+-- Suite 93: Decoupled 'has Poison' / 'has Disease' triggers
+-- ============================================================================
+do
+    print('--- Suite 93: Decoupled poison / disease triggers ---')
+
+    -- Mock world: Me is id 1; group member id 2 carries whatever counters we set.
+    local world = { mePoison = 0, meDisease = 0, memPoison = 0, memDisease = 0 }
+    local function memberObj()
+        return setmetatable({
+            ID = function() return 2 end,
+            Poisoned = function() return world.memPoison > 0 end,
+            Diseased = function() return world.memDisease > 0 end,
+            CountersPoison = function() return world.memPoison end,
+            CountersDisease = function() return world.memDisease end,
+        }, { __call = function() return true end })
+    end
+    local mockTLO = {
+        Me = {
+            ID = function() return 1 end,
+            CountersPoison = function() return world.mePoison end,
+            CountersDisease = function() return world.meDisease end,
+            Poisoned = function() return world.mePoison > 0 and 'Some Poison' or nil end,
+            Diseased = function() return world.meDisease > 0 and 'Some Disease' or nil end,
+        },
+        Spawn = function(id)
+            if id ~= 2 then return setmetatable({}, { __call = function() return false end }) end
+            return setmetatable({ CleanName = function() return 'Boxer' end }, { __call = function() return true end })
+        end,
+        NetBots = function() return setmetatable({}, { __call = function() return false end }) end,
+        Target = { ID = function() return 0 end },
+        Group = { Members = function() return 1 end, Member = function() return memberObj() end },
+    }
+    local hasAffliction = loadFunc(src, 'hasAffliction', {
+        mq = { TLO = mockTLO },
+        AFFLICTION_MEMBERS = {
+            Poison  = { flag = 'Poisoned', counter = 'CountersPoison' },
+            Disease = { flag = 'Diseased', counter = 'CountersDisease' },
+        },
+    })
+
+    -- A. Clean character: neither fires
+    assert_eq(hasAffliction(1, 'Poison'), false, 'Suite 93: clean Me is not poisoned')
+    assert_eq(hasAffliction(1, 'Disease'), false, 'Suite 93: clean Me is not diseased')
+
+    -- B. Poison only on Me: poison fires, disease does not
+    world.mePoison = 3
+    assert_eq(hasAffliction(1, 'Poison'), true, 'Suite 93: poison counters trip the poison check')
+    assert_eq(hasAffliction(1, 'Disease'), false, 'Suite 93: poison counters do not trip the disease check')
+
+    -- C. Disease only on Me
+    world.mePoison, world.meDisease = 0, 2
+    assert_eq(hasAffliction(1, 'Disease'), true, 'Suite 93: disease counters trip the disease check')
+    assert_eq(hasAffliction(1, 'Poison'), false, 'Suite 93: disease counters do not trip the poison check')
+
+    -- D. Group member, independently
+    world.meDisease = 0
+    world.memPoison = 1
+    assert_eq(hasAffliction(2, 'Poison'), true, 'Suite 93: group member poison detected')
+    assert_eq(hasAffliction(2, 'Disease'), false, 'Suite 93: group member poison is not disease')
+    world.memPoison, world.memDisease = 0, 1
+    assert_eq(hasAffliction(2, 'Disease'), true, 'Suite 93: group member disease detected')
+    assert_eq(hasAffliction(2, 'Poison'), false, 'Suite 93: group member disease is not poison')
+
+    -- E. Guards
+    assert_eq(hasAffliction(nil, 'Poison'), false, 'Suite 93: nil target is false')
+    assert_eq(hasAffliction(1, 'Curse'), false, 'Suite 93: unknown affliction kind is false')
+
+    -- F. conditionMet routes each trigger to its own checker (single target and Whole Group)
+    local calls = {}
+    local conditionMet = loadFunc(src, 'conditionMet', {
+        mq = { TLO = mockTLO },
+        runtime = {},
+        pctHP = function() return 100 end,
+        isCombat = function() return true end,
+        baseTok = function(tok) return tok:gsub('^[FESPGAC]:%s*', '') end,
+        buffActive = function() return false end,
+        sungKey = function() return '' end,
+        isFeignDeathAbility = function() return false end,
+        isPoisoned = function(id) calls[#calls + 1] = 'P' .. id; return world.mePoison > 0 end,
+        isDiseased = function(id) calls[#calls + 1] = 'D' .. id; return world.meDisease > 0 end,
+        isPoisonedOrDiseased = function(id) calls[#calls + 1] = 'PD' .. id; return world.mePoison > 0 or world.meDisease > 0 end,
+    })
+    world.mePoison, world.meDisease = 2, 0
+    assert_eq(conditionMet('has Poison', 100, 'Cure Poison', 1, 'Clr', 'F: Myself'), true, 'Suite 93: has Poison fires on poison')
+    assert_eq(conditionMet('has Disease', 100, 'Cure Disease', 1, 'Clr', 'F: Myself'), false, 'Suite 93: has Disease stays quiet on poison')
+    assert_eq(conditionMet('has Poison/Disease', 100, 'Cure', 1, 'Clr', 'F: Myself'), true, 'Suite 93: legacy combined trigger still fires')
+    world.mePoison, world.meDisease = 0, 2
+    assert_eq(conditionMet('has Poison', 100, 'Cure Poison', 1, 'Clr', 'F: Myself'), false, 'Suite 93: has Poison stays quiet on disease')
+    assert_eq(conditionMet('has Disease', 100, 'Cure Disease', 1, 'Clr', 'F: Myself'), true, 'Suite 93: has Disease fires on disease')
+    calls = {}
+    assert_eq(conditionMet('has Disease', 100, 'Cure Disease', 0, 'Clr', 'F: Whole Group'), true, 'Suite 93: Whole Group disease scan fires')
+    assert_eq(calls[1], 'D1', 'Suite 93: Whole Group scan starts with Me using the disease checker')
+    for _, c in ipairs(calls) do
+        assert_true(c:sub(1, 1) == 'D' and c:sub(2, 2) ~= 'P', 'Suite 93: Whole Group disease scan never consults the poison checker')
+    end
+
+    -- G. Dropdown and help table expose both triggers
+    assert_true(src:find("'has Poison', 'has Disease', 'has Poison/Disease'", 1, true) ~= nil, 'Suite 93: WHENS lists has Poison and has Disease')
+    assert_true(src:find("{ when = 'has Poison',", 1, true) ~= nil, 'Suite 93: help table documents has Poison')
+    assert_true(src:find("{ when = 'has Disease',", 1, true) ~= nil, 'Suite 93: help table documents has Disease')
 end
 
 

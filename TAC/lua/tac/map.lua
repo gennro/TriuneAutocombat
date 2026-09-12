@@ -1,107 +1,49 @@
 ---@diagnostic disable: undefined-global, undefined-field
 -- ============================================================================
--- TRIUNE MAP v1.0 (Standalone In-Game Map & NPC Tracker)
--- ----------------------------------------------------------------------------
--- Live 2D EverQuest map replacement and zone tracker for MacroQuest ImGui.
--- Features:
---   - Auto-loads map line and label files from EverQuest maps directory (Layers 0-3).
+-- TAC/lua/tac/map.lua — Triune Map, Norrath Atlas & NPC Tracker Plugin
+-- ============================================================================
+-- In-process replacement for the old standalone triune_map.lua script (v1.1).
+-- Live 2D EverQuest map replacement and zone tracker:
+--   - Auto-loads map line and label files from the EverQuest maps directory (Layers 0-3).
 --   - Interactive 2D map viewport: smooth pan, zoom, follow-player, and Z-filtering.
 --   - Entity overlays for Player, Group, Raid, Pets, Corpses, and all Zone NPCs.
---   - Real-time Navmesh Reachability: Visualizes NPCs as Green (Pathable) or Red (Unreachable).
---   - Map Click-to-Move: Click on any terrain location or double-click an NPC to navigate.
+--   - Real-time Navmesh Reachability: NPCs drawn Green (pathable) or Red (unreachable).
+--   - Map Click-to-Move: click terrain or double-click an NPC to navigate.
+--   - Norrath Zone Atlas with connection routing and POI drawer.
 --   - Dedicated NPC Tracking tab with live search, consideration, and pathability filters.
--- Compatible with MacroQuest LuaJIT (Lua 5.1 safe).
--- Run via:  /lua run triune_map
--- Stop via: /lua stop triune_map
+--
+-- Camp / hunter anchor / waypoint / hazard overlays are mirrored from the
+-- core's live ctrl table (the script used to re-parse triune_loadout.lua
+-- from disk every 2.5s). Map settings persist in triune_map_config.lua as
+-- before. Window visibility is ctrl.show_map (header Map button, Mini HUD,
+-- /ac map, and the Window Layout manager flip it); the engine tick (zone
+-- detection, spawn scan chunks, navmesh batches, queued nav actions) runs
+-- only while the window is open.
 -- ============================================================================
 
-local mq    = require('mq')
-local ImGui = require('ImGui')
-local bit   = require('bit') -- LuaJIT bitwise library
+local plugin = {
+    id                 = 'map',
+    name               = 'Map & NPC Tracker',
+    version            = '1.1.0',
+    author             = 'Triune',
+    description        = '2D in-game map with navmesh-aware NPC tracking, click-to-move, Norrath zone atlas, and Triune camp / waypoint overlays.',
+    defaultEnabled     = true,
+    tickInterval       = 0.04,
+    runOutOfCombatOnly = false,
+    hasThread          = false,
+    -- Window owned by this plugin (drives the main-window header button)
+    window             = { label = 'Map', tooltip = 'Toggles the Map, Zone Atlas & NPC Tracker window (map plugin).', flag = 'show_map', desc = '2D zone map, Norrath atlas & NPC tracker', headerButton = true, order = 20 },
+}
+
+local core = nil
+local ctrl, ImGui, mq = nil, nil, nil
 
 local VERSION = '1.1'
 
--- ============================================================================
--- THEME & STYLE HELPERS (Unified Dark Cyan/Blue Theme)
--- ============================================================================
-local _colN, _varN = 0, 0
-local function pushCol(id, r, g, b, a)
-    if id == nil then return end
-    local ImGuiColType = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-    local enumVal = ImGuiColType and ImGuiColType(id) or id
-    if pcall(mq.imgui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end ---@diagnostic disable-line: undefined-field
-end
-
-local function pushVar(id, a, b)
-    if id == nil then return end
-    local ok
-    local ImGuiSVType = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
-    local enumVal = ImGuiSVType and ImGuiSVType(id) or id
-    if b ~= nil then
-        local ImVec2Type = _G.ImVec2
-        if type(ImVec2Type) == 'function' then
-            ok = pcall(mq.imgui.PushStyleVar, enumVal, ImVec2Type(a, b)) ---@diagnostic disable-line: undefined-field
-        else
-            ok = pcall(mq.imgui.PushStyleVar, enumVal, a, b) ---@diagnostic disable-line: undefined-field
-        end
-    else
-        ok = pcall(mq.imgui.PushStyleVar, enumVal, a) ---@diagnostic disable-line: undefined-field
-    end
-    if ok then _varN = _varN + 1 end
-end
-
-local function pushTheme()
-    _colN, _varN = 0, 0
-    local ImGuiCol = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-    local ImGuiStyleVar = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
-    if ImGuiCol then
-        pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
-        pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
-        pushCol(ImGuiCol.PopupBg, 0.047, 0.075, 0.118, 1)
-        pushCol(ImGuiCol.Border, 0.157, 0.251, 0.345, 1)
-        pushCol(ImGuiCol.Text, 0.851, 0.898, 0.953, 1)
-        pushCol(ImGuiCol.TextDisabled, 0.490, 0.561, 0.651, 1)
-        pushCol(ImGuiCol.TitleBg, 0.043, 0.067, 0.106, 1)
-        pushCol(ImGuiCol.TitleBgActive, 0.047, 0.078, 0.125, 1)
-        pushCol(ImGuiCol.FrameBg, 0.047, 0.078, 0.125, 1)
-        pushCol(ImGuiCol.FrameBgHovered, 0.090, 0.150, 0.220, 1)
-        pushCol(ImGuiCol.FrameBgActive, 0.120, 0.190, 0.270, 1)
-        pushCol(ImGuiCol.Button, 0.086, 0.125, 0.196, 1)
-        pushCol(ImGuiCol.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
-        pushCol(ImGuiCol.ButtonActive, 0.300, 0.700, 1.000, 0.60)
-        pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
-        pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
-        pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
-        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
-        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
-        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
-        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
-        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
-        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
-        pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
-        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
-        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
-    end
-    if ImGuiStyleVar then
-        local ImGuiSV = ImGuiStyleVar
-        pushVar(ImGuiSV.WindowRounding, 6)
-        pushVar(ImGuiSV.ChildRounding, 5)
-        pushVar(ImGuiSV.FrameRounding, 4)
-        pushVar(ImGuiSV.PopupRounding, 4)
-        pushVar(ImGuiSV.TabRounding, 4)
-        pushVar(ImGuiSV.GrabRounding, 3)
-        pushVar(ImGuiSV.ScrollbarRounding, 6)
-
-        pushVar(ImGuiSV.FrameBorderSize, 1)
-        pushVar(ImGuiSV.FramePadding, 7, 4)
-        pushVar(ImGuiSV.ItemSpacing, 8, 6)
-        pushVar(ImGuiSV.WindowPadding, 12, 10)
-    end
-end
-
-local function popTheme()
-    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 end ---@diagnostic disable-line: undefined-field
-    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 end ---@diagnostic disable-line: undefined-field
+local function refresh()
+    ctrl = core.ctrl
+    ImGui = core.ImGui
+    mq = core.mq
 end
 
 -- Consideration Colors & Badges
@@ -177,8 +119,6 @@ local ATLAS_TYPE_OPTIONS = {
 -- STRUCTURED STATE TABLES (Prevents hitting Lua 200 local limit)
 -- ============================================================================
 local state = {
-    openGUI             = true,
-    isRunning           = true,
     activeTab           = 1, -- 1: Map View, 2: Zone Atlas, 3: NPC Tracker, 4: Settings & Layers
     requestedTab        = nil, -- When set, forces ImGui to switch active tab via SetSelected
     currentZoneId       = 0,
@@ -288,7 +228,7 @@ local state = {
     },
 }
 
-local ctrl = {
+local cfg = {
     -- Map Viewport Settings
     followPlayer        = true,
     showLabels          = true,
@@ -426,15 +366,14 @@ local function autoloadRequiredPlugins()
         mq.cmd('/plugin mq2moveutils')
         needWait = true
     end
-    if needWait and mq.delay then
-        mq.delay(250, function() return navLoaded() and stickLoaded() end)
-    end
+    -- No blocking wait: navLoaded()/stickLoaded() are re-checked on use.
+    return needWait
 end
 
 -- ============================================================================
 -- PERSISTENCE & CONFIGURATION (triune_map_config.lua in mq.configDir)
 -- ============================================================================
-local CONFIG_FILE = mq.configDir and (mq.configDir .. '/triune_map_config.lua') or 'triune_map_config.lua'
+local CONFIG_FILE = nil -- resolved in onInit once mq is bound
 
 local function serializeValue(val, indent)
     indent = indent or 1
@@ -458,13 +397,20 @@ local function serializeValue(val, indent)
     return "nil"
 end
 
+-- Resolved once per onInit and reused until onDestroy: after a character swap
+-- the core restarts plugins (onDestroy -> onInit) while the TLOs already report
+-- the new character, so saving under a freshly-computed key would file the old
+-- character's settings under the new name.
+local cachedCharKey = nil
 local function charKey()
+    if cachedCharKey then return cachedCharKey end
     local myName, myServer = nil, nil
     pcall(function()
         myName   = mq.TLO.Me.CleanName()
         myServer = mq.TLO.EverQuest.Server()
     end)
-    return (myServer or 'default') .. '_' .. (myName or 'default')
+    cachedCharKey = (myServer or 'default') .. '_' .. (myName or 'default')
+    return cachedCharKey
 end
 
 local function saveConfig(silent)
@@ -486,45 +432,45 @@ local function saveConfig(silent)
     allData[charKey()] = {
         -- Viewport & Zoom
         zoom                = viewport.zoom,
-        followPlayer        = ctrl.followPlayer,
+        followPlayer        = cfg.followPlayer,
 
         -- Display & Layer Toggles
-        showLabels          = ctrl.showLabels,
-        showGrid            = ctrl.showGrid,
-        showNPCs            = ctrl.showNPCs,
-        showPCs             = ctrl.showPCs,
-        showGroup           = ctrl.showGroup,
-        showRaid            = ctrl.showRaid,
-        showPets            = ctrl.showPets,
-        showCorpses         = ctrl.showCorpses,
-        showNPCNames        = ctrl.showNPCNames,
-        showNavLine         = ctrl.showNavLine,
-        colorModeIndex      = ctrl.colorModeIndex,
+        showLabels          = cfg.showLabels,
+        showGrid            = cfg.showGrid,
+        showNPCs            = cfg.showNPCs,
+        showPCs             = cfg.showPCs,
+        showGroup           = cfg.showGroup,
+        showRaid            = cfg.showRaid,
+        showPets            = cfg.showPets,
+        showCorpses         = cfg.showCorpses,
+        showNPCNames        = cfg.showNPCNames,
+        showNavLine         = cfg.showNavLine,
+        colorModeIndex      = cfg.colorModeIndex,
 
         -- Triune Overlays
-        showSearchRadius    = ctrl.showSearchRadius,
-        showCampRadius      = ctrl.showCampRadius,
-        showPullRadius      = ctrl.showPullRadius,
-        showWaypoints       = ctrl.showWaypoints,
-        showHazards         = ctrl.showHazards,
-        showAnchor          = ctrl.showAnchor,
+        showSearchRadius    = cfg.showSearchRadius,
+        showCampRadius      = cfg.showCampRadius,
+        showPullRadius      = cfg.showPullRadius,
+        showWaypoints       = cfg.showWaypoints,
+        showHazards         = cfg.showHazards,
+        showAnchor          = cfg.showAnchor,
 
         -- Map Layers 0-3
-        layer0              = ctrl.layer0,
-        layer1              = ctrl.layer1,
-        layer2              = ctrl.layer2,
-        layer3              = ctrl.layer3,
-        layerLabels         = ctrl.layerLabels,
+        layer0              = cfg.layer0,
+        layer1              = cfg.layer1,
+        layer2              = cfg.layer2,
+        layer3              = cfg.layer3,
+        layerLabels         = cfg.layerLabels,
 
         -- Z-Height Filtering & Smart Auto-Z
-        zFilterMode         = ctrl.zFilterMode,
-        zDepthFading        = ctrl.zDepthFading,
-        zFilterRange        = ctrl.zFilterRange,
+        zFilterMode         = cfg.zFilterMode,
+        zDepthFading        = cfg.zDepthFading,
+        zFilterRange        = cfg.zFilterRange,
 
         -- Visual Geometry
-        lineThickness       = ctrl.lineThickness,
-        npcNodeRadius       = ctrl.npcNodeRadius,
-        playerNodeRadius    = ctrl.playerNodeRadius,
+        lineThickness       = cfg.lineThickness,
+        npcNodeRadius       = cfg.npcNodeRadius,
+        playerNodeRadius    = cfg.playerNodeRadius,
 
         -- Tracker & Atlas Filters
         conFilterIndex      = state.conFilterIndex,
@@ -573,44 +519,44 @@ local function loadConfig()
             local zVal = tonumber(cData.zoom) or viewport.zoom
             viewport.zoom = math.max(viewport.minZoom, math.min(viewport.maxZoom, zVal))
         end
-        if cData.followPlayer ~= nil then ctrl.followPlayer = (cData.followPlayer == true) end
+        if cData.followPlayer ~= nil then cfg.followPlayer = (cData.followPlayer == true) end
 
-        if cData.showLabels ~= nil then ctrl.showLabels = (cData.showLabels == true) end
-        if cData.showGrid ~= nil then ctrl.showGrid = (cData.showGrid == true) end
-        if cData.showNPCs ~= nil then ctrl.showNPCs = (cData.showNPCs == true) end
-        if cData.showPCs ~= nil then ctrl.showPCs = (cData.showPCs == true) end
-        if cData.showGroup ~= nil then ctrl.showGroup = (cData.showGroup == true) end
-        if cData.showRaid ~= nil then ctrl.showRaid = (cData.showRaid == true) end
-        if cData.showPets ~= nil then ctrl.showPets = (cData.showPets == true) end
-        if cData.showCorpses ~= nil then ctrl.showCorpses = (cData.showCorpses == true) end
-        if cData.showNPCNames ~= nil then ctrl.showNPCNames = (cData.showNPCNames == true) end
-        if cData.showNavLine ~= nil then ctrl.showNavLine = (cData.showNavLine == true) end
-        if cData.colorModeIndex ~= nil then ctrl.colorModeIndex = tonumber(cData.colorModeIndex) or 1 end
+        if cData.showLabels ~= nil then cfg.showLabels = (cData.showLabels == true) end
+        if cData.showGrid ~= nil then cfg.showGrid = (cData.showGrid == true) end
+        if cData.showNPCs ~= nil then cfg.showNPCs = (cData.showNPCs == true) end
+        if cData.showPCs ~= nil then cfg.showPCs = (cData.showPCs == true) end
+        if cData.showGroup ~= nil then cfg.showGroup = (cData.showGroup == true) end
+        if cData.showRaid ~= nil then cfg.showRaid = (cData.showRaid == true) end
+        if cData.showPets ~= nil then cfg.showPets = (cData.showPets == true) end
+        if cData.showCorpses ~= nil then cfg.showCorpses = (cData.showCorpses == true) end
+        if cData.showNPCNames ~= nil then cfg.showNPCNames = (cData.showNPCNames == true) end
+        if cData.showNavLine ~= nil then cfg.showNavLine = (cData.showNavLine == true) end
+        if cData.colorModeIndex ~= nil then cfg.colorModeIndex = tonumber(cData.colorModeIndex) or 1 end
 
-        if cData.showSearchRadius ~= nil then ctrl.showSearchRadius = (cData.showSearchRadius == true) end
-        if cData.showCampRadius ~= nil then ctrl.showCampRadius = (cData.showCampRadius == true) end
-        if cData.showPullRadius ~= nil then ctrl.showPullRadius = (cData.showPullRadius == true) end
-        if cData.showWaypoints ~= nil then ctrl.showWaypoints = (cData.showWaypoints == true) end
-        if cData.showHazards ~= nil then ctrl.showHazards = (cData.showHazards == true) end
-        if cData.showAnchor ~= nil then ctrl.showAnchor = (cData.showAnchor == true) end
+        if cData.showSearchRadius ~= nil then cfg.showSearchRadius = (cData.showSearchRadius == true) end
+        if cData.showCampRadius ~= nil then cfg.showCampRadius = (cData.showCampRadius == true) end
+        if cData.showPullRadius ~= nil then cfg.showPullRadius = (cData.showPullRadius == true) end
+        if cData.showWaypoints ~= nil then cfg.showWaypoints = (cData.showWaypoints == true) end
+        if cData.showHazards ~= nil then cfg.showHazards = (cData.showHazards == true) end
+        if cData.showAnchor ~= nil then cfg.showAnchor = (cData.showAnchor == true) end
 
-        if cData.layer0 ~= nil then ctrl.layer0 = (cData.layer0 == true) end
-        if cData.layer1 ~= nil then ctrl.layer1 = (cData.layer1 == true) end
-        if cData.layer2 ~= nil then ctrl.layer2 = (cData.layer2 == true) end
-        if cData.layer3 ~= nil then ctrl.layer3 = (cData.layer3 == true) end
-        if cData.layerLabels ~= nil then ctrl.layerLabels = (cData.layerLabels == true) end
+        if cData.layer0 ~= nil then cfg.layer0 = (cData.layer0 == true) end
+        if cData.layer1 ~= nil then cfg.layer1 = (cData.layer1 == true) end
+        if cData.layer2 ~= nil then cfg.layer2 = (cData.layer2 == true) end
+        if cData.layer3 ~= nil then cfg.layer3 = (cData.layer3 == true) end
+        if cData.layerLabels ~= nil then cfg.layerLabels = (cData.layerLabels == true) end
 
         if cData.zFilterMode ~= nil then
-            ctrl.zFilterMode = tonumber(cData.zFilterMode) or 1
+            cfg.zFilterMode = tonumber(cData.zFilterMode) or 1
         elseif cData.useZFilter ~= nil then
-            ctrl.zFilterMode = cData.useZFilter and 2 or 3
+            cfg.zFilterMode = cData.useZFilter and 2 or 3
         end
-        if cData.zDepthFading ~= nil then ctrl.zDepthFading = (cData.zDepthFading == true) end
-        if cData.zFilterRange ~= nil then ctrl.zFilterRange = tonumber(cData.zFilterRange) or 45 end
+        if cData.zDepthFading ~= nil then cfg.zDepthFading = (cData.zDepthFading == true) end
+        if cData.zFilterRange ~= nil then cfg.zFilterRange = tonumber(cData.zFilterRange) or 45 end
 
-        if cData.lineThickness ~= nil then ctrl.lineThickness = tonumber(cData.lineThickness) or 1.0 end
-        if cData.npcNodeRadius ~= nil then ctrl.npcNodeRadius = tonumber(cData.npcNodeRadius) or 4.5 end
-        if cData.playerNodeRadius ~= nil then ctrl.playerNodeRadius = tonumber(cData.playerNodeRadius) or 6.0 end
+        if cData.lineThickness ~= nil then cfg.lineThickness = tonumber(cData.lineThickness) or 1.0 end
+        if cData.npcNodeRadius ~= nil then cfg.npcNodeRadius = tonumber(cData.npcNodeRadius) or 4.5 end
+        if cData.playerNodeRadius ~= nil then cfg.playerNodeRadius = tonumber(cData.playerNodeRadius) or 6.0 end
 
         if cData.conFilterIndex ~= nil then state.conFilterIndex = tonumber(cData.conFilterIndex) or 1 end
         if cData.sortColumn ~= nil then state.sortColumn = cData.sortColumn end
@@ -1382,7 +1328,7 @@ local function navigateToAtlasZone(zoneShort, pushHistory)
 
     state.viewMode = 'ATLAS'
     state.atlasZoneShort = zoneShort
-    ctrl.followPlayer = false
+    cfg.followPlayer = false
 
     local found = nil
     for _, z in ipairs(state.atlasAllZones) do
@@ -1404,7 +1350,7 @@ local function returnToLiveZone()
     state.viewMode = 'LIVE'
     state.atlasZoneShort = ''
     state.atlasZoneName = ''
-    ctrl.followPlayer = true
+    cfg.followPlayer = true
     loadZoneMap(state.currentZoneShort, false)
     state.statusMsg = string.format('Returned to Live View: %s (%s)', state.currentZoneName, state.currentZoneShort)
 end
@@ -1434,7 +1380,7 @@ local function focusPoi(poi)
     if not poi then return end
     viewport.centerEqX = poi.x
     viewport.centerEqY = poi.y
-    ctrl.followPlayer = false
+    cfg.followPlayer = false
     state.highlightedPoi = {
         x = poi.x,
         y = poi.y,
@@ -1534,133 +1480,29 @@ local function findZoneRoute(startShort, targetShort)
 end
 
 -- ============================================================================
--- TRIUNE LOADOUT & COMBAT RADIUS / WAYPOINTS SYNC
+-- TRIUNE COMBAT RADIUS / WAYPOINTS SYNC (live core config)
 -- ============================================================================
-local TRIUNE_LOADOUT_CANDIDATES = nil
-
--- Per-character loadout tag/name. Mirrors triune.lua's loadout writing so this
--- client syncs ONLY its own character's file (only one client can write it).
-local function triuneLoadoutTag()
-    local serverName = ''
-    pcall(function() serverName = mq.TLO.EverQuest.ServerName() or '' end)
-    if not serverName or serverName == '' then
-        pcall(function() serverName = mq.TLO.Zone.Server() or '' end)
-    end
-    local charName = ''
-    pcall(function() charName = mq.TLO.Me.CleanName() or '' end)
-    return (tostring(serverName or '') .. '_' .. tostring(charName or 'unknown')):gsub('[^%w%_-]', '_')
-end
-
-local function triuneLoadoutBaseName()
-    return 'triune_loadout_' .. triuneLoadoutTag() .. '.lua'
-end
-
-local function triuneLoadoutCandidates()
-    if TRIUNE_LOADOUT_CANDIDATES then return TRIUNE_LOADOUT_CANDIDATES end
-    local lfn = triuneLoadoutBaseName()
-    local legacy = 'triune_loadout.lua'
-    local candidates = {}
-    local function add(p)
-        candidates[#candidates + 1] = p
-    end
-    if mq.configDir then
-        add(mq.configDir .. '/' .. lfn)
-        add(mq.configDir .. '/' .. legacy)
-        add(mq.configDir .. '/../TAC/config/' .. lfn)
-        add(mq.configDir .. '/../TAC/config/' .. legacy)
-        add(mq.configDir .. '/../../TAC/config/' .. lfn)
-        add(mq.configDir .. '/../../TAC/config/' .. legacy)
-    end
-    if mq.luaDir then
-        add(mq.luaDir .. '/' .. lfn)
-        add(mq.luaDir .. '/' .. legacy)
-        add(mq.luaDir .. '/../config/' .. lfn)
-        add(mq.luaDir .. '/../config/' .. legacy)
-    end
-    add('TAC/config/' .. lfn)
-    add('TAC/config/' .. legacy)
-    add('config/' .. lfn)
-    add('config/' .. legacy)
-    add(lfn)
-    add(legacy)
-    TRIUNE_LOADOUT_CANDIDATES = candidates
-    return candidates
-end
-
-local function findTriuneLoadoutFile()
-    for _, path in ipairs(triuneLoadoutCandidates()) do
-        local f = io.open(path, 'r')
-        if f then
-            f:close()
-            return path
-        end
-    end
-    return nil
-end
-
+-- The standalone script re-parsed triune_loadout.lua from disk every 2.5s and
+-- searched a dozen candidate paths for it. As a plugin we mirror the core's
+-- live cfg table straight into state.triuneData, so overlays always match
+-- what the combat loop is actually using (camp, hunter anchor, waypoints,
+-- zone hazards) with no file I/O.
 local function syncTriuneLoadout(verbose)
     local td = state.triuneData
-
-    -- Prefer THIS character's own loadout file (per-character filenames keep
-    -- multibox clients from reading/writing each other's data). Falls back to
-    -- the previously-resolved path, then to multi-path discovery + legacy name.
-    local loadoutPath = td.loadoutPath
-    local fn = nil
-
-    local perCharPath = mq.configDir and (mq.configDir .. '/' .. triuneLoadoutBaseName()) or nil
-    if perCharPath then
-        local pf = io.open(perCharPath, 'r')
-        if pf then
-            pf:close()
-            loadoutPath = perCharPath
-            fn = loadfile(perCharPath)
-        end
-    end
-
-    if not fn and loadoutPath then
-        fn = loadfile(loadoutPath)
-    end
-
-    if not fn then
-        local found = findTriuneLoadoutFile()
-        local f2 = found and loadfile(found)
-        if f2 then
-            loadoutPath = found
-            fn = f2
-        end
-    end
-
-    if not fn then
+    local charCtrl = ctrl
+    if type(charCtrl) ~= 'table' then
         td.isLoaded = false
-        td.loadoutPath = nil
-        if verbose then
-            print('\ar[Triune Map]\ax triune_loadout.lua not found. Searched: ' .. table.concat(triuneLoadoutCandidates(), ' | '))
-            print('\ar[Triune Map]\ax Run /lua run triune once on this character to create it, then Sync again.')
-        end
+        if verbose then print('\ar[Triune Map]\ax Core config not available yet.') end
         return
     end
-
-    local ok, allData = pcall(fn)
-    if not ok or type(allData) ~= 'table' then
-        -- Keep the previous state (overlays stay up) and retry next sync
-        -- rather than blanking out on a transient mid-write read.
-        if verbose then
-            print('\ar[Triune Map]\ax triune_loadout.lua failed to parse: ' .. tostring(ok and '' or tostring(allData)))
-        end
-        return
-    end
-
-    td.loadoutPath = loadoutPath
 
     local myName = nil
     local okName, nameVal = pcall(function() return mq.TLO.Me.CleanName() end)
     if okName and nameVal and nameVal ~= '' then myName = nameVal end
 
-    local charData = myName and allData[myName]
-    local charCtrl = (type(charData) == 'table' and type(charData.control) == 'table') and charData.control or {}
-
     td.charName = myName or 'Unknown'
     td.isLoaded = true
+    td.loadoutPath = 'live core config'
     td.lastSyncTime = mq.gettime()
 
     -- Camp & Combat Radii
@@ -1694,7 +1536,7 @@ local function syncTriuneLoadout(verbose)
     -- Waypoints: Character-level vs Zone-level
     local wps = {}
     local zShort = state.currentZoneShort or ''
-    local zoneWpObj = (type(allData.__zoneWaypoints) == 'table') and allData.__zoneWaypoints[zShort]
+    local zoneWpObj = (type(charCtrl.zone_waypoints) == 'table') and charCtrl.zone_waypoints[zShort]
 
     if type(charCtrl.waypoints) == 'table' and #charCtrl.waypoints > 0 then
         for _, wp in ipairs(charCtrl.waypoints) do
@@ -1728,12 +1570,14 @@ local function syncTriuneLoadout(verbose)
         td.waypointScanRadius  = tonumber(zoneWpObj.waypoint_scan_radius or 100) or 100
         td.waypointLoop        = (zoneWpObj.waypoint_loop == true)
         td.currentWaypointIdx  = 1
+    else
+        td.useWaypoints = false
     end
     td.waypoints = wps
 
     -- Zone Hazards (anti-stuck hotspots)
     local hazards = {}
-    local zoneHazardsObj = (type(allData.__zoneHazards) == 'table') and allData.__zoneHazards[zShort]
+    local zoneHazardsObj = (type(charCtrl.zone_hazards) == 'table') and charCtrl.zone_hazards[zShort]
     if type(zoneHazardsObj) == 'table' then
         for _, hz in ipairs(zoneHazardsObj) do
             if type(hz) == 'table' and hz.x and hz.y then
@@ -1749,13 +1593,14 @@ local function syncTriuneLoadout(verbose)
     td.zoneHazards = hazards
 
     if verbose then
-        print(string.format('\ag[Triune Map]\ax Triune data synced from %s -- WPs: %d | Camp: %s | Anchor: %s | Hazards: %d',
-            tostring(loadoutPath), #td.waypoints,
+        print(string.format('\ag[Triune Map]\ax Triune data synced from core -- WPs: %d | Camp: %s | Anchor: %s | Hazards: %d',
+            #td.waypoints,
             ((td.campLoc and td.campLoc.x) and 'set' or 'none'),
             ((td.hunterAnchor and td.hunterAnchor.x) and 'set' or 'none'),
             #td.zoneHazards))
     end
 end
+
 
 local Z_FILTER_MODE_OPTIONS = {
     '1: Auto-Z (Smart Floor Isolation)',
@@ -1772,8 +1617,8 @@ local function updateSmartFloorBounds(pX, pY, pZ)
     local effZ = pZ + sf.overrideOffset
 
     -- Mode 2: Manual Window
-    if ctrl.zFilterMode == 2 then
-        local r = ctrl.zFilterRange or 45
+    if cfg.zFilterMode == 2 then
+        local r = cfg.zFilterRange or 45
         sf.minZ = effZ - r
         sf.maxZ = effZ + r
         sf.activeZ = effZ
@@ -1784,7 +1629,7 @@ local function updateSmartFloorBounds(pX, pY, pZ)
         end
         sf.isMultiFloor = true
         return
-    elseif ctrl.zFilterMode == 3 then
+    elseif cfg.zFilterMode == 3 then
         -- Mode 3: Disabled (all elevations)
         sf.minZ = -99999
         sf.maxZ = 99999
@@ -1900,12 +1745,12 @@ local function updateSmartFloorBounds(pX, pY, pZ)
 end
 
 local function getZAlphaMultiplier(avgZ, minZ, maxZ, zFilterMode, zDepthFading)
-    local filterMode = (zFilterMode ~= nil) and zFilterMode or (ctrl and ctrl.zFilterMode)
+    local filterMode = (zFilterMode ~= nil) and zFilterMode or (cfg and cfg.zFilterMode)
     if filterMode == 3 then
         return 1.0, true
     end
 
-    local depthFading = (zDepthFading ~= nil) and zDepthFading or (ctrl and ctrl.zDepthFading)
+    local depthFading = (zDepthFading ~= nil) and zDepthFading or (cfg and cfg.zDepthFading)
 
     if avgZ < minZ or avgZ > maxZ then
         if depthFading then
@@ -1941,7 +1786,7 @@ end
 -- ============================================================================
 -- Chunk sizes for the incremental spawn scan. Keeping these small means each
 -- main-loop pass does only a bounded amount of work, so the ImGui draw
--- callback stays responsive between mq.delay yields.
+-- callback stays responsive between engine ticks.
 local SCAN_FETCH_CHUNK = 12
 local SCAN_LOS_CHUNK   = 4
 local SCAN_LOS_BUDGET  = 16
@@ -2101,7 +1946,7 @@ local function scanZoneSpawns(forceComplete)
             if keep and (mob.level < state.minLevel or mob.level > state.maxLevel) then keep = false end
             if keep and (mob.distance > state.maxDistance) then keep = false end
             if keep and state.losOnly and not mob.lineOfSight then keep = false end
-            if keep and ctrl.zFilterMode ~= 3 then
+            if keep and cfg.zFilterMode ~= 3 then
                 if mob.z < sf.minZ or mob.z > sf.maxZ then keep = false end
             end
 
@@ -2253,7 +2098,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
     local td = state.triuneData
 
     -- Draw Triune Patrol Waypoints & Connecting Paths
-    if ctrl.showWaypoints and td.waypoints and #td.waypoints > 0 then
+    if cfg.showWaypoints and td.waypoints and #td.waypoints > 0 then
         local wps = td.waypoints
         -- Draw Connecting Path Lines
         local wpLineCol = ImGui.GetColorU32(0.20, 0.85, 0.95, 0.75)
@@ -2277,7 +2122,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
                 local isCurrentWp = (i == (td.currentWaypointIdx or 1))
 
                 -- Waypoint Scan / Search Radius (e.g. 100yd)
-                if ctrl.showSearchRadius then
+                if cfg.showSearchRadius then
                     local scanRadScreen = (td.waypointScanRadius or 100) * viewport.zoom
                     if scanRadScreen > 4.0 then
                         local scanCol = isCurrentWp and ImGui.GetColorU32(1.0, 0.85, 0.20, 0.30) or ImGui.GetColorU32(0.20, 0.75, 0.90, 0.15)
@@ -2309,7 +2154,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
     end
 
     -- Draw Triune Camp & Combat Radius
-    if ctrl.showCampRadius and td.campLoc and td.campLoc.x and td.campLoc.y then
+    if cfg.showCampRadius and td.campLoc and td.campLoc.x and td.campLoc.y then
         local csx, csy = worldToScreen(td.campLoc.x, td.campLoc.y, cX, cY, availW, availH)
         local campRadScreen = (td.campRadius or 50) * viewport.zoom
 
@@ -2328,7 +2173,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
     end
 
     -- Draw Hunter / Puller Combat Anchor (Roam Point)
-    if ctrl.showAnchor and td.hunterAnchor and td.hunterAnchor.x and td.hunterAnchor.y then
+    if cfg.showAnchor and td.hunterAnchor and td.hunterAnchor.x and td.hunterAnchor.y then
         local hax, hay = worldToScreen(td.hunterAnchor.x, td.hunterAnchor.y, cX, cY, availW, availH)
         local haRadScreen = (td.hunterCombatRadius or 250) * viewport.zoom
 
@@ -2347,7 +2192,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
 
     -- Draw Search / Pull / Roam Radius Circle (anchored at the player so it is
     -- always visible around the toon, independent of where camp/anchor sit)
-    if ctrl.showSearchRadius or ctrl.showPullRadius then
+    if cfg.showSearchRadius or cfg.showPullRadius then
         local anchorX, anchorY = playerX or 0, playerY or 0
 
         if anchorX and anchorY then
@@ -2368,7 +2213,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
     end
 
     -- Draw Triune Hazard Avoidance Hotspots (Stuck Memory)
-    if ctrl.showHazards and td.zoneHazards and #td.zoneHazards > 0 then
+    if cfg.showHazards and td.zoneHazards and #td.zoneHazards > 0 then
         for _, hz in ipairs(td.zoneHazards) do
             local hsx, hsy = worldToScreen(hz.x, hz.y, cX, cY, availW, availH)
             if hsx >= cX - 40 and hsx <= cX + availW + 40 and hsy >= cY - 40 and hsy <= cY + availH + 40 then
@@ -2441,7 +2286,7 @@ local function DrawMapCanvas(availW, availH)
         state.cursorWorldX, state.cursorWorldY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
     end
 
-    local isOverFloorPill = (ctrl.zFilterMode ~= 3 and mousePos.x >= badgeX - 4 and mousePos.x <= badgeX + navW + 4 and mousePos.y >= badgeY - 4 and mousePos.y <= badgeY + navH + 4)
+    local isOverFloorPill = (cfg.zFilterMode ~= 3 and mousePos.x >= badgeX - 4 and mousePos.x <= badgeX + navW + 4 and mousePos.y >= badgeY - 4 and mousePos.y <= badgeY + navH + 4)
     local isOverZoomWidget = (mousePos.x >= zoomX - 6 and mousePos.x <= zoomX + zoomPanelW + 6 and mousePos.y >= zoomY - 6 and mousePos.y <= zoomY + zoomPanelH + 6)
 
     -- Safe IO check for KeyCtrl
@@ -2471,7 +2316,7 @@ local function DrawMapCanvas(availW, availH)
             local z = math.max(viewport.zoom, 0.001)
             viewport.centerEqX = viewport.dragStartCenterEqX + (dx / z)
             viewport.centerEqY = viewport.dragStartCenterEqY + (dy / z)
-            ctrl.followPlayer = false -- Temporarily suspend follow-player while manually panning
+            cfg.followPlayer = false -- Temporarily suspend follow-player while manually panning
         else
             viewport.isDragging = false
         end
@@ -2505,7 +2350,7 @@ local function DrawMapCanvas(availW, availH)
     drawList:AddRectFilled(canvasPos, ImVec2(cX + availW, cY + availH), bgCol, 0.0)
 
     -- Draw Grid Lines (if enabled)
-    if ctrl.showGrid then
+    if cfg.showGrid then
         local gridSpacing = 500 -- 500 yard grid lines
         if viewport.zoom > 1.2 then gridSpacing = 100
         elseif viewport.zoom < 0.25 then gridSpacing = 1000 end
@@ -2589,16 +2434,16 @@ local function DrawMapCanvas(availW, availH)
 
     -- Draw Map Lines (Layers 0, 1, 2, 3)
     local layerEnabled = {
-        [0] = ctrl.layer0,
-        [1] = ctrl.layer1,
-        [2] = ctrl.layer2,
-        [3] = ctrl.layer3,
+        [0] = cfg.layer0,
+        [1] = cfg.layer1,
+        [2] = cfg.layer2,
+        [3] = cfg.layer3,
     }
 
-    local lineThick = ctrl.lineThickness
+    local lineThick = cfg.lineThickness
     local sfMinZ, sfMaxZ = sf.minZ, sf.maxZ
-    local zFading = ctrl.zDepthFading
-    local zFilterMode = ctrl.zFilterMode
+    local zFading = cfg.zDepthFading
+    local zFilterMode = cfg.zFilterMode
 
     for lId = 0, 3 do
         if layerEnabled[lId] then
@@ -2633,7 +2478,7 @@ local function DrawMapCanvas(availW, availH)
     end
 
     -- Draw Map Labels
-    if ctrl.showLabels and ctrl.layerLabels then
+    if cfg.showLabels and cfg.layerLabels then
         local labels = mapData.labels or {}
         for i = 1, #labels do
             local lb = labels[i]
@@ -2705,7 +2550,7 @@ local now = mq.gettime()
         drawList:AddText(ImVec2(cX + 12, cY + 28), ImGui.GetColorU32(0.65, 0.72, 0.82, 0.8), 'Entity tracking inactive for remote zone. Click "Return to Live" on toolbar to track character.')
     else
         -- Draw Group Members
-        if ctrl.showGroup then
+        if cfg.showGroup then
             local grpCol = ImGui.GetColorU32(0.20, 0.90, 0.80, 1.0)
             for _, gm in ipairs(spawns.groupMembers) do
                 local sx, sy = worldToScreen(gm.x, gm.y, cX, cY, availW, availH)
@@ -2727,7 +2572,7 @@ local now = mq.gettime()
         local clickedMob = nil
         local doubleClickedMob = nil
 
-        if ctrl.showNPCs then
+        if cfg.showNPCs then
             for _, mob in ipairs(spawns.filteredNPCs) do
                 local alphaMult, isVis = getZAlphaMultiplier(mob.z, sf.minZ, sf.maxZ)
 
@@ -2746,15 +2591,15 @@ local now = mq.gettime()
                             navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
                         end
 
-                        local nodeRadius = ctrl.npcNodeRadius
+                        local nodeRadius = cfg.npcNodeRadius
                         local isTarget = (mob.id == targetId)
 
                         -- Draw Node by Color Mode
-                        if ctrl.colorModeIndex == 1 then
+                        if cfg.colorModeIndex == 1 then
                             -- Dual Mode: Con fill with Nav halo
                             drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
                             drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
-                        elseif ctrl.colorModeIndex == 2 then
+                        elseif cfg.colorModeIndex == 2 then
                             -- Navmesh Reachability Only
                             drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32, 0)
                             drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
@@ -2777,7 +2622,7 @@ local now = mq.gettime()
                         end
 
                         -- Optional Name Tag on Map
-                        if ctrl.showNPCNames then
+                        if cfg.showNPCNames then
                             drawList:AddText(ImVec2(sx + 6, sy - 6), conColU32, mob.cleanName)
                         end
 
@@ -2832,7 +2677,7 @@ local now = mq.gettime()
         -- Draw Active Destination / Waypoint Marker & Path Line
         local navRecentlyTriggered = state.activeNavCommandTime and ((mq.gettime() - state.activeNavCommandTime) < 5000)
         local hasPendingNav = (actionQueue.pendingNavLoc ~= nil) or (actionQueue.pendingNavId > 0)
-        local shouldDrawNav = ctrl.showNavLine and (isNavActive or navRecentlyTriggered or hasPendingNav or state.activeNavLoc ~= nil or (state.activeNavSpawnId and state.activeNavSpawnId > 0))
+        local shouldDrawNav = cfg.showNavLine and (isNavActive or navRecentlyTriggered or hasPendingNav or state.activeNavLoc ~= nil or (state.activeNavSpawnId and state.activeNavSpawnId > 0))
 
         if shouldDrawNav then
             local meX, meY = playerX, playerY
@@ -2898,7 +2743,7 @@ local now = mq.gettime()
             local psx, psy = worldToScreen(meX, meY, cX, cY, availW, availH)
 
             -- Auto-follow player
-            if ctrl.followPlayer and not viewport.isDragging then
+            if cfg.followPlayer and not viewport.isDragging then
                 viewport.centerEqX = meX
                 viewport.centerEqY = meY
             end
@@ -2906,8 +2751,8 @@ local now = mq.gettime()
             -- Calculate Heading Triangle
             local heading = meHeading or 0
             local rad = math.rad(heading)
-            local arrowLen = ctrl.playerNodeRadius + 7.0
-            local baseLen = ctrl.playerNodeRadius + 2.0
+            local arrowLen = cfg.playerNodeRadius + 7.0
+            local baseLen = cfg.playerNodeRadius + 2.0
             local wingAngle = math.rad(140)
 
             local dirX = math.sin(rad)
@@ -2939,7 +2784,7 @@ local now = mq.gettime()
     drawList:PopClipRect()
 
     -- On-Canvas Floor Navigation Widget (Top Right Pill)
-    if ctrl.zFilterMode ~= 3 then
+    if cfg.zFilterMode ~= 3 then
         ImGui.SetCursorScreenPos(ImVec2(badgeX, badgeY))
         ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90)
         ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
@@ -3008,7 +2853,7 @@ local now = mq.gettime()
                 if okX and okY and meX and meY then
                     viewport.centerEqX = meX
                     viewport.centerEqY = meY
-                    ctrl.followPlayer = true
+                    cfg.followPlayer = true
                 end
                 state.dirtySettings = true
                 state.dirtySettingsTime = mq.gettime()
@@ -3016,7 +2861,7 @@ local now = mq.gettime()
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset Zoom & Center on Player') end
 
             ImGui.SameLine()
-            local isAutoZ = (ctrl.zFilterMode ~= 3)
+            local isAutoZ = (cfg.zFilterMode ~= 3)
             if isAutoZ then
                 ImGui.PushStyleColor(ImGuiCol.Text, 0.25, 0.95, 0.40, 1.0)
                 ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.32, 0.22, 0.85)
@@ -3025,29 +2870,29 @@ local now = mq.gettime()
                 ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.18, 0.22, 0.70)
             end
             if ImGui.Button('AZ##CanvasToggleAutoZ', ImVec2(zoomBtnSize, zoomBtnSize)) then
-                if ctrl.zFilterMode == 3 then
-                    ctrl.zFilterMode = 1
+                if cfg.zFilterMode == 3 then
+                    cfg.zFilterMode = 1
                 else
-                    ctrl.zFilterMode = 3
+                    cfg.zFilterMode = 3
                 end
                 state.dirtySettings = true
                 state.dirtySettingsTime = mq.gettime()
             end
             ImGui.PopStyleColor(2)
             if ImGui.IsItemHovered() then
-                local modeDesc = (ctrl.zFilterMode == 1 and 'Auto-Z (Smart Floor Isolation: ON)')
-                    or (ctrl.zFilterMode == 2 and 'Manual Z-Window: ON')
+                local modeDesc = (cfg.zFilterMode == 1 and 'Auto-Z (Smart Floor Isolation: ON)')
+                    or (cfg.zFilterMode == 2 and 'Manual Z-Window: ON')
                     or 'Disabled (Show All Elevations)'
                 ImGui.SetTooltip('%s', string.format('Auto-Z Floor Filtering: %s\nMode: %s\n[Click] %s',
-                    (ctrl.zFilterMode ~= 3 and 'ON' or 'OFF'),
+                    (cfg.zFilterMode ~= 3 and 'ON' or 'OFF'),
                     modeDesc,
-                    (ctrl.zFilterMode ~= 3 and 'Turn Auto-Z OFF (Show All Elevations)' or 'Turn Auto-Z ON (Smart Floor Isolation)')
+                    (cfg.zFilterMode ~= 3 and 'Turn Auto-Z OFF (Show All Elevations)' or 'Turn Auto-Z ON (Smart Floor Isolation)')
                 ))
             end
 
             ImGui.SameLine()
-            local fp, cfp = ImGui.Checkbox('Follow##CanvasFollowCheck', ctrl.followPlayer)
-            if cfp then ctrl.followPlayer = fp end
+            local fp, cfp = ImGui.Checkbox('Follow##CanvasFollowCheck', cfg.followPlayer)
+            if cfp then cfg.followPlayer = fp end
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Auto-follow player location while moving') end
 
             -- Row 2: Center Me, POIs Drawer, Stop Nav
@@ -3057,7 +2902,7 @@ local now = mq.gettime()
                 if okX and okY and meX and meY then
                     viewport.centerEqX = meX
                     viewport.centerEqY = meY
-                    ctrl.followPlayer = true
+                    cfg.followPlayer = true
                 end
             end
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Center map on player location and enable follow') end
@@ -3125,7 +2970,7 @@ local now = mq.gettime()
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Reset View & Zoom to Full Zone Bounds') end
 
             ImGui.SameLine()
-            local isAutoZ = (ctrl.zFilterMode ~= 3)
+            local isAutoZ = (cfg.zFilterMode ~= 3)
             if isAutoZ then
                 ImGui.PushStyleColor(ImGuiCol.Text, 0.25, 0.95, 0.40, 1.0)
                 ImGui.PushStyleColor(ImGuiCol.Button, 0.12, 0.32, 0.22, 0.85)
@@ -3134,10 +2979,10 @@ local now = mq.gettime()
                 ImGui.PushStyleColor(ImGuiCol.Button, 0.18, 0.18, 0.22, 0.70)
             end
             if ImGui.Button('AZ##CanvasToggleAutoZ', ImVec2(zoomBtnSize, zoomBtnSize)) then
-                if ctrl.zFilterMode == 3 then
-                    ctrl.zFilterMode = 1
+                if cfg.zFilterMode == 3 then
+                    cfg.zFilterMode = 1
                 else
-                    ctrl.zFilterMode = 3
+                    cfg.zFilterMode = 3
                 end
                 state.dirtySettings = true
                 state.dirtySettingsTime = mq.gettime()
@@ -3907,7 +3752,7 @@ local function DrawNPCTrackerTab()
             if ImGui.SmallButton(mapBtnId) then
                 viewport.centerEqX = mob.x
                 viewport.centerEqY = mob.y
-                ctrl.followPlayer = false
+                cfg.followPlayer = false
                 switchToTab(1)
                 state.statusMsg = string.format('Focused map on: %s (Y: %.1f, X: %.1f)', mob.cleanName, mob.y, mob.x)
             end
@@ -4039,43 +3884,43 @@ local function DrawSettingsTab()
     ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Map Layers Visibility')
     ImGui.Separator()
 
-    local l0, c0 = ImGui.Checkbox('Layer 0 (Base Terrain / Geometry)##L0', ctrl.layer0)
-    if c0 then ctrl.layer0 = l0; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local l0, c0 = ImGui.Checkbox('Layer 0 (Base Terrain / Geometry)##L0', cfg.layer0)
+    if c0 then cfg.layer0 = l0; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local l1, c1 = ImGui.Checkbox('Layer 1 (Structures / Buildings)##L1', ctrl.layer1)
-    if c1 then ctrl.layer1 = l1; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local l1, c1 = ImGui.Checkbox('Layer 1 (Structures / Buildings)##L1', cfg.layer1)
+    if c1 then cfg.layer1 = l1; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
-    local l2, c2 = ImGui.Checkbox('Layer 2 (Objects / Details)##L2', ctrl.layer2)
-    if c2 then ctrl.layer2 = l2; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local l2, c2 = ImGui.Checkbox('Layer 2 (Objects / Details)##L2', cfg.layer2)
+    if c2 then cfg.layer2 = l2; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local l3, c3 = ImGui.Checkbox('Layer 3 (Waypoints / Triune Lines)##L3', ctrl.layer3)
-    if c3 then ctrl.layer3 = l3; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local l3, c3 = ImGui.Checkbox('Layer 3 (Waypoints / Triune Lines)##L3', cfg.layer3)
+    if c3 then cfg.layer3 = l3; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
-    local lb, cl = ImGui.Checkbox('Labels (Map Text & POIs)##LabelsCheck', ctrl.layerLabels)
-    if cl then ctrl.layerLabels = lb; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local lb, cl = ImGui.Checkbox('Labels (Map Text & POIs)##LabelsCheck', cfg.layerLabels)
+    if cl then cfg.layerLabels = lb; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local grid, cg = ImGui.Checkbox('Grid Coordinate Lines##GridCheck', ctrl.showGrid)
-    if cg then ctrl.showGrid = grid; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local grid, cg = ImGui.Checkbox('Grid Coordinate Lines##GridCheck', cfg.showGrid)
+    if cg then cfg.showGrid = grid; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.Spacing()
     ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Entity & Visual Options')
     ImGui.Separator()
 
-    local sn, csn = ImGui.Checkbox('Show NPCs on Map##ShowNPCCheck', ctrl.showNPCs)
-    if csn then ctrl.showNPCs = sn; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local sn, csn = ImGui.Checkbox('Show NPCs on Map##ShowNPCCheck', cfg.showNPCs)
+    if csn then cfg.showNPCs = sn; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local sg, csg = ImGui.Checkbox('Show Group Members##ShowGrpCheck', ctrl.showGroup)
-    if csg then ctrl.showGroup = sg; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local sg, csg = ImGui.Checkbox('Show Group Members##ShowGrpCheck', cfg.showGroup)
+    if csg then cfg.showGroup = sg; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
-    local snn, csnn = ImGui.Checkbox('Show NPC Name Labels on Map##ShowNpcNamesCheck', ctrl.showNPCNames)
-    if csnn then ctrl.showNPCNames = snn; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local snn, csnn = ImGui.Checkbox('Show NPC Name Labels on Map##ShowNpcNamesCheck', cfg.showNPCNames)
+    if csnn then cfg.showNPCNames = snn; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local snl, csnl = ImGui.Checkbox('Show Active Nav Path Line##ShowNavLineCheck', ctrl.showNavLine)
-    if csnl then ctrl.showNavLine = snl; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local snl, csnl = ImGui.Checkbox('Show Active Nav Path Line##ShowNavLineCheck', cfg.showNavLine)
+    if csnl then cfg.showNavLine = snl; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.PushItemWidth(220)
-    local cmIdx, cmChanged = ImGui.Combo('Node Color Mode##ColorModeCombo', ctrl.colorModeIndex, COLOR_MODE_OPTIONS)
-    if cmChanged then ctrl.colorModeIndex = cmIdx; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local cmIdx, cmChanged = ImGui.Combo('Node Color Mode##ColorModeCombo', cfg.colorModeIndex, COLOR_MODE_OPTIONS)
+    if cmChanged then cfg.colorModeIndex = cmIdx; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
     local scanVal, scanChanged = ImGui.SliderInt('Spawn Scan Interval (ms)##ScanIntervalSlider', state.scanIntervalMs, 250, 3000, '%d ms')
     if scanChanged then
@@ -4100,7 +3945,7 @@ local function DrawSettingsTab()
             ImGui.TextDisabled(string.format('Source: %s', td.loadoutPath))
         end
     else
-        ImGui.TextColored(1.0, 0.7, 0.2, 1.0, 'Triune Status: Loadout not detected (triune_loadout.lua)')
+        ImGui.TextColored(1.0, 0.7, 0.2, 1.0, 'Triune Status: core config not synced yet')
     end
 
     ImGui.SameLine()
@@ -4108,44 +3953,44 @@ local function DrawSettingsTab()
         syncTriuneLoadout(true)
     end
 
-    local ss, css = ImGui.Checkbox('Show Search / Roam Radius##ShowSearchRadiusCheck', ctrl.showSearchRadius)
-    if css then ctrl.showSearchRadius = ss; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local ss, css = ImGui.Checkbox('Show Search / Roam Radius##ShowSearchRadiusCheck', cfg.showSearchRadius)
+    if css then cfg.showSearchRadius = ss; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local sa, csa = ImGui.Checkbox('Show Anchor / Roam Point##ShowAnchorCheck', ctrl.showAnchor)
-    if csa then ctrl.showAnchor = sa; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local sa, csa = ImGui.Checkbox('Show Anchor / Roam Point##ShowAnchorCheck', cfg.showAnchor)
+    if csa then cfg.showAnchor = sa; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local sc, csc = ImGui.Checkbox('Show Camp / Combat Radius##ShowCampRadiusCheck', ctrl.showCampRadius)
-    if csc then ctrl.showCampRadius = sc; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local sc, csc = ImGui.Checkbox('Show Camp / Combat Radius##ShowCampRadiusCheck', cfg.showCampRadius)
+    if csc then cfg.showCampRadius = sc; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
-    local sw, csw = ImGui.Checkbox('Show Patrol Waypoints & Paths##ShowWaypointsCheck', ctrl.showWaypoints)
-    if csw then ctrl.showWaypoints = sw; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local sw, csw = ImGui.Checkbox('Show Patrol Waypoints & Paths##ShowWaypointsCheck', cfg.showWaypoints)
+    if csw then cfg.showWaypoints = sw; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.SameLine()
-    local sh, csh = ImGui.Checkbox('Show Navigation Hazard Hotspots##ShowHazardsCheck', ctrl.showHazards)
-    if csh then ctrl.showHazards = sh; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local sh, csh = ImGui.Checkbox('Show Navigation Hazard Hotspots##ShowHazardsCheck', cfg.showHazards)
+    if csh then cfg.showHazards = sh; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.Spacing()
     ImGui.TextColored(0.3, 0.8, 1.0, 1.0, 'Multi-Level Z-Height & Smart Auto-Z')
     ImGui.Separator()
 
     ImGui.PushItemWidth(260)
-    local zmIdx, zmChanged = ImGui.Combo('Z-Filter Mode##ZFilterModeCombo', ctrl.zFilterMode, Z_FILTER_MODE_OPTIONS)
+    local zmIdx, zmChanged = ImGui.Combo('Z-Filter Mode##ZFilterModeCombo', cfg.zFilterMode, Z_FILTER_MODE_OPTIONS)
     if zmChanged then
-        ctrl.zFilterMode = zmIdx
+        cfg.zFilterMode = zmIdx
         state.dirtySettings = true
         state.dirtySettingsTime = mq.gettime()
     end
     ImGui.PopItemWidth()
 
-    if ctrl.zFilterMode == 1 then
+    if cfg.zFilterMode == 1 then
         ImGui.TextColored(0.2, 0.95, 0.35, 1.0, string.format('Active Floor Bounds: %s', state.smartFloor.floorLabel))
-        local df, cdf = ImGui.Checkbox('Smooth Alpha Depth Fading (Fade Stairs/Ramps)##ZDepthFadeCheck', ctrl.zDepthFading)
-        if cdf then ctrl.zDepthFading = df; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
-    elseif ctrl.zFilterMode == 2 then
-        local df, cdf = ImGui.Checkbox('Smooth Alpha Depth Fading##ZDepthFadeCheck', ctrl.zDepthFading)
-        if cdf then ctrl.zDepthFading = df; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+        local df, cdf = ImGui.Checkbox('Smooth Alpha Depth Fading (Fade Stairs/Ramps)##ZDepthFadeCheck', cfg.zDepthFading)
+        if cdf then cfg.zDepthFading = df; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    elseif cfg.zFilterMode == 2 then
+        local df, cdf = ImGui.Checkbox('Smooth Alpha Depth Fading##ZDepthFadeCheck', cfg.zDepthFading)
+        if cdf then cfg.zDepthFading = df; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
         ImGui.PushItemWidth(250)
-        local zRangeVal, zChanged = ImGui.SliderInt('Manual Z Window (± yards)##ZRangeSlider', ctrl.zFilterRange, 10, 250)
-        if zChanged then ctrl.zFilterRange = zRangeVal; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+        local zRangeVal, zChanged = ImGui.SliderInt('Manual Z Window (± yards)##ZRangeSlider', cfg.zFilterRange, 10, 250)
+        if zChanged then cfg.zFilterRange = zRangeVal; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
         ImGui.PopItemWidth()
     else
         ImGui.TextDisabled('Z-filtering disabled. All vertical floors and elevations are rendered.')
@@ -4156,15 +4001,15 @@ local function DrawSettingsTab()
     ImGui.Separator()
 
     ImGui.PushItemWidth(250)
-    local lt, clt = ImGui.SliderFloat('Map Line Thickness##LineThickSlider', ctrl.lineThickness, 0.5, 3.5, '%.1f')
-    if clt then ctrl.lineThickness = lt; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local lt, clt = ImGui.SliderFloat('Map Line Thickness##LineThickSlider', cfg.lineThickness, 0.5, 3.5, '%.1f')
+    if clt then cfg.lineThickness = lt; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
-    local nr, cnr = ImGui.SliderFloat('NPC Node Radius##NodeRadSlider', ctrl.npcNodeRadius, 2.0, 9.0, '%.1f')
-    if cnr then ctrl.npcNodeRadius = nr; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local nr, cnr = ImGui.SliderFloat('NPC Node Radius##NodeRadSlider', cfg.npcNodeRadius, 2.0, 9.0, '%.1f')
+    if cnr then cfg.npcNodeRadius = nr; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     ImGui.PopItemWidth()
 
-    local bd, cbd = ImGui.Checkbox('Auto-Brighten Black / Dark Map Lines (High Contrast)##BoostDarkLinesCheck', ctrl.boostDarkLines)
-    if cbd then ctrl.boostDarkLines = bd; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    local bd, cbd = ImGui.Checkbox('Auto-Brighten Black / Dark Map Lines (High Contrast)##BoostDarkLinesCheck', cfg.boostDarkLines)
+    if cbd then cfg.boostDarkLines = bd; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
     if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Automatically converts black (0,0,0) and dark map lines/labels to crisp visible silver/white against dark backgrounds') end
 
     ImGui.Spacing()
@@ -4212,13 +4057,11 @@ end
 -- ============================================================================
 -- MAIN IMGUI DRAW CALLBACK
 -- ============================================================================
-local function DrawTriuneMapUI()
-    if not state.openGUI then
-        state.isRunning = false
-        return
-    end
 
-    pushTheme()
+local function DrawTriuneMapUI()
+    if not ctrl.show_map then return end
+
+    core.pushTheme()
 
     local windowFlags = bit.bor(
         ImGuiWindowFlags.NoScrollbar or 0
@@ -4228,17 +4071,19 @@ local function DrawTriuneMapUI()
 
     local zoneDisplay = (state.viewMode == 'ATLAS') and string.format('Atlas: %s', (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort) or state.currentZoneName
     local title = string.format('Triune Map v%s — %s###TriuneMapMainWindow', VERSION, zoneDisplay)
-    local open, draw = ImGui.Begin(title, state.openGUI, windowFlags)
-    state.openGUI = open
+    core.preBeginWindow('map')
+    local open, draw = ImGui.Begin(title, ctrl.show_map, windowFlags)
 
     if not open then
+        ctrl.show_map = false
         ImGui.End()
-        popTheme()
-        state.isRunning = false
+        core.popTheme()
+        core.saveLoadout(true)
         return
     end
 
     if draw then
+        core.postBeginWindow('map')
         -- Tab Bar
         local tabFlags = ImGuiTabBarFlags.None or 0
         if ImGui.BeginTabBar('##TriuneMapMainTabs', tabFlags) then
@@ -4320,49 +4165,53 @@ local function DrawTriuneMapUI()
     end
 
     ImGui.End()
-    popTheme()
+    core.popTheme()
 end
 
 -- ============================================================================
--- INITIALIZATION & MAIN YIELDABLE ENGINE LOOP
+-- INITIALIZATION & ENGINE TICK (was the standalone main loop)
 -- ============================================================================
-initAtlasRegistry()
-scanMapFolders()
-loadConfig()
-scanMapFiles()
-filterAtlasZones()
+local initialized = false
 
-local okZoneShort, zShort = pcall(function() return mq.TLO.Zone.ShortName() end)
-if okZoneShort and zShort then
-    state.currentZoneShort = zShort
-    local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
-    state.currentZoneId = (okZId and zId) or 0
-    local okZName, zName = pcall(function() return mq.TLO.Zone.Name() end)
-    state.currentZoneName = (okZName and zName) or zShort
-    loadZoneMap(zShort, false)
+local function initialize()
+    if initialized then return end
+    initialized = true
+    CONFIG_FILE = mq.configDir and (mq.configDir .. '/triune_map_config.lua') or 'triune_map_config.lua'
+    initAtlasRegistry()
+    scanMapFolders()
+    loadConfig()
+    scanMapFiles()
+    filterAtlasZones()
+
+    local okZoneShort, zShort = pcall(function() return mq.TLO.Zone.ShortName() end)
+    if okZoneShort and zShort then
+        state.currentZoneShort = zShort
+        local okZId, zId = pcall(function() return mq.TLO.Zone.ID() end)
+        state.currentZoneId = (okZId and zId) or 0
+        local okZName, zName = pcall(function() return mq.TLO.Zone.Name() end)
+        state.currentZoneName = (okZName and zName) or zShort
+        loadZoneMap(zShort, false)
+    end
+
+    autoloadRequiredPlugins()
+
+    if not navLoaded() then
+        print('\ar[Triune Map WARNING]\ax MQ2Nav plugin is not loaded! Map click-to-move and path distance require MQ2Nav (/plugin mq2nav).')
+    elseif not navMeshLoaded() then
+        local curZone = mq.TLO.Zone.ShortName() or 'current zone'
+        print(string.format('\ar[Triune Map WARNING]\ax No NavMesh loaded for zone "%s"! Map pathing requires a valid zone mesh (/nav reload).', curZone))
+    end
+    if not stickLoaded() then
+        print('\ar[Triune Map WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick movement requires MQ2MoveUtils (/plugin mq2moveutils).')
+    end
+
+    syncTriuneLoadout()
+    scanZoneSpawns(true)
+
+    print(string.format('\ag[Triune Map]\ax v%s loaded -- In-Game Map, Norrath Atlas & NPC Tracker (plugin). Toggle with /ac map.', VERSION))
 end
 
-autoloadRequiredPlugins()
-
-if not navLoaded() then
-    print('\ar[Triune Map WARNING]\ax MQ2Nav plugin is not loaded! Map click-to-move and path distance require MQ2Nav (/plugin mq2nav).')
-elseif not navMeshLoaded() then
-    local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-    print(string.format('\ar[Triune Map WARNING]\ax No NavMesh loaded for zone "%s"! Map pathing requires a valid zone mesh (/nav reload).', curZone))
-end
-if not stickLoaded() then
-    print('\ar[Triune Map WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick movement requires MQ2MoveUtils (/plugin mq2moveutils).')
-end
-
-syncTriuneLoadout()
-scanZoneSpawns(true)
-mq.imgui.init('TriuneMapUIWindow', DrawTriuneMapUI)
-
-print(string.format('\ag[Triune Map]\ax v%s Loaded -- In-Game Map, Norrath Atlas & NPC Tracker active. Run with /lua run triune_map', VERSION))
-
-while state.isRunning do
-    mq.doevents()
-
+local function tick()
     local now = mq.gettime()
 
     -- Zone Change Detector
@@ -4499,9 +4348,88 @@ while state.isRunning do
         pcall(function() mq.cmd('/nav stop') end)
         pcall(function() mq.cmd('/stick off') end)
     end
-
-    mq.delay(40)
 end
 
-saveConfig(true)
-print('\ag[Triune Map]\ax Unloaded cleanly.')
+-- ============================================================================
+-- Plugin lifecycle
+-- ============================================================================
+function plugin.onInit(coreApi)
+    core = coreApi
+    refresh()
+    cachedCharKey = nil
+    if ctrl and ctrl.show_map == nil then ctrl.show_map = false end
+    -- Map files / atlas are loaded lazily the first time the window opens so
+    -- the core start-up is not delayed by scanning the maps folder.
+    if ctrl and ctrl.show_map then initialize() end
+end
+
+function plugin.onDestroy()
+    if initialized then saveConfig(true) end
+    -- A later onInit (character swap) must reload this character's map config.
+    initialized = false
+    cachedCharKey = nil
+end
+
+function plugin.onTick()
+    if not core then return end
+    refresh()
+    if not ctrl.show_map then return end
+    if not initialized then initialize() end
+    tick()
+end
+
+function plugin.onDrawUI()
+    if not core then return end
+    refresh()
+    if not ctrl.show_map then return end
+    if not initialized then initialize() end
+    DrawTriuneMapUI()
+end
+
+-- Zone change from the core: force an immediate map reload / rescan.
+function plugin.onZoned()
+    if initialized then state.lastZoneCheckTime = 0 end
+end
+
+function plugin.onDrawSettings()
+    if not core then return end
+    refresh()
+    local GOLD = (core.colors and core.colors.GOLD) or { 1.0, 0.70, 0.54, 1 }
+    core.accent(GOLD, 'Map & NPC Tracker')
+    local isWinOpen = (ctrl.show_map == true)
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##mapToggleWin', 250, 24) then
+        ctrl.show_map = not isWinOpen
+        core.saveLoadout(true)
+    end
+    ImGui.TextDisabled(string.format('Zone: %s | NPCs tracked: %d | Nav: %s',
+        tostring(state.currentZoneName or '?'), tonumber(spawns.totalCount) or 0,
+        (initialized and navState.meshLoaded) and 'mesh loaded' or 'no mesh'))
+end
+
+-- /ac map | mapui | triunemap | track | tracker | trackui | zone toggles the
+-- window (was: /lua run triune_map). `track` variants open on the NPC Tracker tab.
+function plugin.onCommand(cmd)
+    if cmd ~= 'map' and cmd ~= 'mapui' and cmd ~= 'triunemap' and cmd ~= 'track' and cmd ~= 'tracker' and cmd ~= 'trackui' and cmd ~= 'zone' then
+        return false
+    end
+    refresh()
+    ctrl.show_map = not ctrl.show_map
+    if ctrl.show_map and (cmd == 'track' or cmd == 'tracker' or cmd == 'trackui') then
+        state.requestedTab = 3
+    end
+    core.saveLoadout(true)
+    print(string.format('\ag[Triune]\ax Map & NPC Tracker %s.', ctrl.show_map and 'OPENED' or 'CLOSED'))
+    return true
+end
+
+plugin.help = {
+    '  \ag/ac map | track | zone\ax - Toggle the 2D Map, Zone Atlas & NPC Tracker window',
+}
+
+-- Exposed for tests
+plugin.state = state
+plugin.cfg = cfg
+plugin.syncTriuneLoadout = syncTriuneLoadout
+plugin.tick = tick
+
+return plugin

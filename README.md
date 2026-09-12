@@ -133,11 +133,39 @@ Triune keeps things simple with **3 main combat modes**:
   - **Pet Assist %**: Configurable HP threshold slider (`ctrl.pet_assist_at`) so pets only engage after the target drops below a set percentage.
   - **Pet Pulling**: Command pets to tag distant targets and drag them to camp.
   - **Re-Scan / Reconcile Engine**: One-click button to re-sync pet detection if pets are summoned or rezzed outside combat.
+  - **One Pet Per Class, Never Shown Twice**: Each pet class of the trio tracks exactly one pet, a pet is never listed under two classes, and pet lists are deduplicated by name (pet names are unique per player on this server). A `missing pet` gem only fires for its own class's pet, waits for a summon in flight to land before re-casting, and pins the new pet to the casting class even when `Me.Pet` does not change. Learned pet names (`ctrl.pet_names`) map pets back to their classes after a restart or zone.
 
 ---
 
-### 🤝 Auto-Accept & Social Automation (Settings Sub-Page)
-Triune includes a dedicated **Auto-Accept** sub-page located directly under the **Settings** tab:
+### 🧩 Modular Plugin System (`lua/tac/` & Settings Sub-Page)
+Triune features a plug-and-play plugin architecture designed to keep the core combat engine blazing fast while allowing custom and auxiliary features to be dropped in seamlessly:
+- **Drop-and-Play Directory (`lua/tac/`)**: Any `.lua` plugin placed into `lua/tac/` (or `TAC/lua/tac/`) is automatically recognized and loaded by Triune.
+- **Dedicated Settings -> Plugins Tab**: View all loaded plugins, enable/disable toggles, live latency and execution time profiling (`Last ms` and `Avg ms`), author/version details, and embedded configuration panels. The **Header** column decides which plugin windows get a toggle button on the main window's top toolbar (with a Show/Hide shortcut right there); open windows are highlighted on the toolbar.
+- **Coroutine Fiber Execution ("Green Threads")**: Plugins run in their own dedicated coroutine fibers with custom tick intervals (e.g. 1.0s or 50ms) rather than firing every combat tick.
+- **Combat Latency Elimination**: Non-combat plugins automatically enter `Sleeping (Combat)` mode during active combat, preserving 100% of CPU cycles for combat logic.
+- **Crash Isolation**: Every plugin execution and render pass is wrapped in crash-containment guards. A faulty plugin displays an error tooltip and will never crash Triune or EverQuest.
+- **Plugins Included**:
+  - `hud_unitframes.lua`: Popout HUD for Player, Target, and Pet vitals (50ms throttled snapshots, stays live in combat).
+  - `hud_group.lua`: Popout Group window with vitals bars, role badges, member pets, Invite/Disband, and click-to-target.
+  - `hud_effects.lua`: Popout Effects & Songs window with spell icons, time-left bars, sorting, and Remove/Block/Inspect actions.
+  - `hud_xtarget.lua`: Popout Extended Target window with HP bars, aggro %, distance/LoS, ToT, and right-click actions.
+  - `hud_cooldowns.lua`: The popout Cooldown & Ability Monitor window with live timers, filters, and click-to-fire.
+  - `hud_spellgems.lua`: Popout Spell Gem Bar with recast timers, casting overlays, spell-set presets, and right-click actions.
+  - `spellbook.lua`: The Spellbook Browser (formerly the standalone `triune_spellbook.lua` script) - per-class spell database browser with scribed status, filters, spell info, and a mem-to-gem queue; `/ac spellbook` / `/ac book` toggle it.
+  - `auto_accept.lua`: Automated group, trade, and expedition/DZ invite acceptance with group/guild rules and whitelisting; owns the **Auto-Accept** popout window (header button, `/ac autoaccept`).
+  - `auto_aa.lua`: Priority-based AA spending (native AA window trainer or MQ2AAspend delegation with fallback), Fireworks cap spender and auto-summon; owns the **Auto AA** popout window (header button, `/ac aawin`) and the `/ac autoaa` commands.
+  - `floating_damage.lua`: Flashy animated floating damage numbers for critical hits, crippling blows, deadly strikes, and spell crits.
+  - `map.lua`: The 2D Map, Norrath Zone Atlas & NPC Tracker (formerly `triune_map.lua`) - camp / hunter anchor / waypoint / hazard overlays are mirrored from the live core config; `/ac map` / `/ac track` toggle it.
+  - `dps.lua`: The DPS Parser (formerly `triune_dps.lua`) - parses combat chat into per-fight player / multi-pet breakdowns even while its window is hidden; `/dps` and `/ac dps` toggle it.
+  - `inventory.lua`: The Inventory & Bank Manager (formerly `triune_inv.lua`) - bag moves, stack combines and sorts run in the plugin fiber through the cooperative `core.delay`; `/ac inv` toggles it.
+  - `buffbot.lua`: The Buffbot Station (formerly `triune_buffbot.lua`) - off until switched on (`/ac buffbot on` or the window button), holds the combat loop while casting a buff job.
+  - `cursor.lua`: The Cursor Item Manager (formerly `triune_cursor.lua`) - one `/autoinventory` per tick instead of a blocking loop; `/ac cursorui` toggles it.
+- **Writing a Plugin**: a plugin is a Lua file in `lua/tac/` that returns a table. Metadata fields: `id`, `name`, `version`, `author`, `description`, `defaultEnabled`, `tickInterval` (seconds), `runOutOfCombatOnly`, `hasThread`. Lifecycle hooks (all optional): `onInit(core)`, `onDestroy()`, `onTick()`, `onDrawUI()`, `onDrawSettings()`, `onCombatTick(targetId)`, `onZoned(zoneShortName)`, `onLoadoutSaved()`, `onSaveSettings()` -> table, `onLoadSettings(table)`. Combat-loop hooks: `wantsCombatHold()` -> true makes the combat loop stand still (used while the AA window is open); `onBetweenPulls()` -> return true to make the puller yield this tick. Command hooks: `onCommand(cmd, args)` -> return true if you handled `/ac <cmd>`, and `plugin.help = { 'line', ... }` adds lines to `/ac help`. Windows: declare `plugin.window = { label = 'Map', tooltip = '...', flag = 'show_map', headerButton = true, order = 20 }` (`flag` is the `ctrl.*` boolean that drives visibility, or give `isOpen()` / `setOpen(bool)` functions) and the core draws a highlighted toggle button for it on the main window header - the user picks which plugins get one in the Plugins tab's **Header** column (`headerButton` is the default), `order` sorts the buttons. The same declaration registers the window on Settings -> Windows (position save / restore / center, Show / Hide) automatically: optional `key` sets the position key used with `core.preBeginWindow(key)` (defaults to the plugin id), `lockFlag = 'my_lock'` (a `ctrl.*` boolean) or `getLock()` / `setLock(bool)` adds the Locked toggle, `desc` is the row tooltip, and `defaultPos = { x, y, w, h }` is used by *Reset to Defaults*. The `core` table passed to `onInit` exposes `mq`, `ImGui`, a **live** `ctrl` (always the current character's config), `loadout`, `runtime`, `DATA`, `VERSION`, `saveLoadout`, `colors`, and UI helpers (`pushTheme`/`popTheme`, `accent`, `setTooltip`, `preBeginWindow`/`postBeginWindow`, `drawStatusProgressBar`, `drawSpellIcon`, `getConColorRgb`, `resolveTargetOfTarget`, `getMultiPetList`, `getPetSpawnInfo`, `isSpawnAlive`, `addIgnore`, `parseDurationSec`, `fmtSec`, `idxOf`, `toggleTool`). `core.delay(ms, cond)` is a cooperative stand-in for `mq.delay` inside a plugin fiber (`hasThread = true`): it yields the fiber back to the main loop each tick until the time elapses or `cond()` is true, so a sequential workflow (casting, bag moves) never stalls the combat loop; never call `mq.delay` from a plugin. Store persistent options on `core.ctrl` so they save with the loadout.
+
+---
+
+### 🤝 Auto-Accept & Social Automation (Popout Window)
+Triune includes a dedicated **Auto-Accept** popout window (provided by the `auto_accept.lua` plugin - open it with the **Auto-Accept** header button or `/ac autoaccept`; disable or reload the plugin from Settings -> Plugins):
 - **Auto-Accept Group Invites**: Automatically accepts incoming party invites via `/invite` and dialog confirmation when received from an authorized player.
 - **Auto-Accept Trades**: Automatically clicks the Trade accept button when the other party is ready and authorized.
 - **Auto-Accept Dynamic Zone / Expedition Invites (DZAdd)**: Automatically accepts expedition (`/dzaccept`), dynamic zone, and task addition invites from authorized players.
@@ -176,7 +204,7 @@ Want to clear up screen clutter while playing?
 
 ### ⏱️ Cooldown & Ability Monitor
 Keep track of every enabled combat ability, activated AA, discipline, spell gem, and clickie item in real time:
-- **Dedicated Tab & Popout Window**: Access directly via the **Cooldowns** tab in the main window (positioned right after Auto AA) or float as a standalone window using the `Popout Window` button, `/ac cd`, `/ac cooldowns`, the top toolbar, or the Mini HUD.
+- **Popout Window** (provided by the `hud_cooldowns.lua` plugin): open it with the **Cooldowns** header button, `/ac cd`, `/ac cooldowns`, the Mini HUD, or the Window Layout manager.
 - **Active Duration Tracking**: Glowing cyan progress bars show remaining active buff/stance duration (e.g. *Defensive Discipline*, *Harmshield*, *Furious*) before transitioning to cooldown.
 - **Smart Readiness Diagnostics**: Instant feedback on why abilities are gated: `[READY]`, `[LOW END]`, `[LOW MANA]`, `[NEED BURN]`, `[NEED BOSS]`, `[MIN XTAR]`, or `[LOCKED]`.
 - **EverQuest Timer Groups**: Badges display EQ shared timer banks (`[T1]`, `[T2]`, `[T4]`) to clarify shared cooldown lockouts.
@@ -187,7 +215,7 @@ Keep track of every enabled combat ability, activated AA, discipline, spell gem,
 ---
 
 ### 🌟 Alternate Advancement (AA) Progression & Auto-Training
-Keep your character progressing without wasting unspent AA points with the dedicated **Auto AA** tab:
+Keep your character progressing without wasting unspent AA points with the dedicated **Auto AA** popout window (provided by the `auto_aa.lua` plugin - open it with the **Auto AA** header button or `/ac aawin`; the plugin also owns the `/ac autoaa` command family and can be disabled or reloaded from Settings -> Plugins):
 - **Comprehensive AA Browser**: Automatically scans and lists all available character Alternate Advancement abilities, displaying real-time ranks, max ranks, point costs, training eligibility, and total points spent.
 - **Compact Two-Row Header Layout**: Real-time unspent/spent pool metrics, master auto-spend toggle, buy order dropdown, cap threshold slider, instant search box with `X` clear, sort criteria combo, `▲ Asc / ▼ Desc` toggle, `Hide Maxed` filter, `Prio Only` filter, and live ability count badge.
 - **Instant Search & Multi-Sort**: Search abilities by name in real time, sort by **Name** (A-Z / Z-A), **Cost** (cheapest first / highest first), or **Fully Trained** status, and filter with one-click **Hide Maxed** and **Prioritized Only** checkboxes.
@@ -199,7 +227,7 @@ Keep your character progressing without wasting unspent AA points with the dedic
 
 ## Built-in Bonus Tools
 
-Triune comes packed with handy standalone tools you can open right from the main window or via chat commands:
+Triune comes packed with handy companion tools (all in-process plugins in `lua/tac/`) you can open right from the main window, the Mini HUD, the Window Layout manager, or via chat commands:
 
 | Tool | Chat Command | What It Does |
 |---|---|---|
@@ -209,14 +237,14 @@ Triune comes packed with handy standalone tools you can open right from the main
 | ⚔️ **Popout XTarget Window** | `/ac xtar` | Standalone popout extended target window replacing EQ's default with auto-scaling health bars, current target highlight, ToT, aggro %, distance, LoS, and right-click settings. |
 | 🔮 **Popout Spell Gem Bar** | `/ac gems` | Standalone popout spell gem bar window replacing EQ's default with dual orientations (Vertical/Horizontal), Compact vs Full layouts, live recast overlays, casting progress, and right-click spell inspection. |
 | 🎛️ **Hot Buttons Toolbar** | `/lua run triune_buttons` | Standalone ImGui tabbed hot button toolbar (ButtonMaster-style) replacing EQ's default hotbars with tabs, icon animations, live cooldown overlays, 1-click button creation from cursor, and multi-line macro execution. |
-| 🗺️ **2D Map & Norrath Atlas** | `/ac map` | Interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, and Point of Interest locator. |
-| 🧙 **Spellbook Browser** | `/ac spellbook` | Browse and search all spells across all 3 of your character's classes, filter by level or type, and assign them to your loadout with one click. |
-| 🖱️ **Cursor Manager** | `/ac cursorui` | Displays what's on your cursor and can automatically dump items into your bags (`/ac clearcursor`). |
-| 🛡️ **Interactive Buffbot** | `/ac buffbot` | Run an automated buffing station! Listens for `/tell` requests from nearby players, hands out buffs, and sends a reply when done. |
-| 📊 **DPS Parser** | `/dps` | Live combat parser tracking player damage, spell hits, DoTs, and pet DPS with historic fight logs. |
-| 🎯 **Zone NPC Tracker** | `/ac track` | Lists all NPCs in the zone by distance and level. Double-click any mob (or click `[Nav]`) to run straight to it! |
+| 🗺️ **2D Map & Norrath Atlas** | `/ac map` | `map.lua` plugin: interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, Point of Interest locator, and Triune camp / waypoint / hazard overlays read straight from the live config. |
+| 🧙 **Spellbook Browser** | `/ac spellbook` | In-process plugin (`tac/spellbook.lua`) window: browse and search all spells across all 3 of your character's classes, filter by level or type, inspect them, and queue them to a gem with one click (memorized through the core's spellbook-aware trainer). |
+| 🖱️ **Cursor Manager** | `/ac cursorui` | `cursor.lua` plugin: displays what's on your cursor, auto-inventories or destroys it, optional continuous auto-clear, and a session history log (`/ac clearcursor` for a quick dump). |
+| 🛡️ **Interactive Buffbot** | `/ac buffbot [on\|off]` | `buffbot.lua` plugin: run an automated buffing station! Listens for `/tell` requests from nearby players, hands out buffs (pets too), guild priority / guild-only policies, ignore list, auto-med, anti-AFK, and sends a reply when done. The station stays off until you start it. |
+| 📊 **DPS Parser** | `/dps` or `/ac dps` | `dps.lua` plugin: live combat parser tracking player damage, spell hits, DoTs, and pet DPS with historic fight logs; keeps parsing while the window is hidden. |
+| 🎯 **Zone NPC Tracker** | `/ac track` | The map plugin's NPC Tracker tab: lists all NPCs in the zone by distance and level. Double-click any mob (or click `[Nav]`) to run straight to it! |
 | 📜 **Quest Guide & Lookup** | `/lua run triune_quest` | Standalone interactive quest guide and atlas across 32 expansions with live NPC radar, dialogue triggers, inventory scanner, Norrath Zone Directory, and global quest search. |
-| 🎒 **Inventory & Bank Manager** | `/lua run triune_inv` | Standalone universal inventory, worn equipment, bank, and shared bank search, container grid visualizer, stack consolidator, and offline bank cache persistence. |
+| 🎒 **Inventory & Bank Manager** | `/ac inv` | `inventory.lua` plugin: universal inventory, worn equipment, bank, and shared bank search, container grid visualizer, stack consolidator, and offline bank cache persistence. |
 | 🤖 **LLM Test Harness & QA Agent** | `/lua run triune_test` | Standalone in-game testing harness interfacing with local LLMs (LM Studio) and cloud LLMs (Google Gemini, OpenCode) for autonomous QA testing via non-blocking bridge. |
 
 ---
@@ -280,13 +308,15 @@ You can control almost everything using simple in-game chat commands:
 | `/ac clear lockouts` | `/ac clearlockouts`, `/ac unlock` | Clear active spell lockouts, non-stacking buff backoffs, and mob immunities |
 | `/ac style [melee]` | `/ac combatstyle` | Set combat style (Melee) |
 | `/ac range [dist]` | `/ac meleerange`, `/ac dist` | Set max melee distance (5-50) |
-| `/ac track` | `/ac zone` | Open the Zone NPC Tracker |
-| `/ac map` | `/ac mapui` | Open the 2D Map & Norrath Zone Atlas |
-| `/dps` | `/triunedps` | Open/toggle the DPS parser |
+| `/ac track` | `/ac zone` | Toggle the Map window on the NPC Tracker tab |
+| `/ac map` | `/ac mapui` | Toggle the 2D Map & Norrath Zone Atlas window |
+| `/dps [show\|hide\|compact\|reset\|pause\|resume\|report <chan>]` | `/triunedps`, `/ac dps` | Toggle the DPS parser window and control it |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
 | `/lua run triune_buttons` | `/lua stop triune_buttons` | Launch or stop the standalone Hot Buttons toolbar |
 | `/lua run triune_quest` | `/lua stop triune_quest` | Launch or stop the standalone Triune Quest Guide window |
-| `/lua run triune_inv` | `/lua stop triune_inv` | Launch or stop the standalone Inventory & Bank Manager |
+| `/ac inv` | `/ac inventory`, `/ac bank` | Toggle the Inventory & Bank Manager window |
+| `/ac cursorui` | `/ac cursormgr` | Toggle the Cursor Item Manager window |
+| `/ac buffbot [on\|off\|toggle]` | `/ac buff` | Toggle the Buffbot window; `on` / `off` start or stop the buffbot station |
 | `/lua run triune_test` | `/lua stop triune_test` | Launch or stop the standalone In-Game LLM Test Harness & QA Agent |
 
 ---
@@ -304,14 +334,24 @@ TriuneAutocombat/
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
 │   │   ├── triune_buttons.lua   # Standalone ImGui hot button toolbar
-│   │   ├── triune_map.lua       # Standalone 2D in-game map, Norrath Zone Atlas & NPC tracker
 │   │   ├── triune_quest.lua     # Standalone Quest Guide, radar & dialogue assistant
-│   │   ├── triune_inv.lua       # Standalone Inventory & Bank manager
 │   │   ├── triune_test.lua      # Standalone In-Game LLM Test Harness & QA Agent
-│   │   ├── triune_spellbook.lua # Spellbook browser & loadout helper
-│   │   ├── triune_cursor.lua    # Cursor item manager
-│   │   ├── triune_buffbot.lua   # Automated tell buffbot
-│   │   └── triune_dps.lua       # Standalone DPS parser
+│   │   └── tac/                 # Modular plugin directory (lua/tac/*.lua)
+│   │       ├── hud_unitframes.lua # Popout Unit Frames HUD plugin
+│   │       ├── hud_group.lua    # Popout Group window plugin
+│   │       ├── hud_effects.lua  # Popout Effects & Songs window plugin
+│   │       ├── hud_xtarget.lua  # Popout Extended Target window plugin
+│   │       ├── hud_cooldowns.lua # Popout Cooldown Monitor plugin (/ac cd)
+│   │       ├── hud_spellgems.lua # Popout Spell Gem Bar plugin
+│   │       ├── spellbook.lua    # Spellbook Browser plugin (/ac spellbook)
+│   │       ├── auto_accept.lua  # Auto-Accept group/trade/DZ invites plugin (Auto-Accept window, /ac autoaccept)
+│   │       ├── auto_aa.lua      # Auto AA spender plugin (Auto AA window, /ac aawin, /ac autoaa)
+│   │       ├── floating_damage.lua # Floating critical damage numbers plugin
+│   │       ├── map.lua          # 2D in-game map, Norrath Zone Atlas & NPC tracker plugin (/ac map)
+│   │       ├── dps.lua          # DPS parser plugin (/dps, /ac dps)
+│   │       ├── inventory.lua    # Inventory & Bank manager plugin (/ac inv)
+│   │       ├── buffbot.lua      # Tell-driven buffbot station plugin (/ac buffbot)
+│   │       └── cursor.lua       # Cursor item manager plugin (/ac cursorui)
 │   ├── config/
 │   │   └── triune_data.lua      # Era-correct spell and ability database
 │   └── resources/
@@ -341,6 +381,6 @@ TriuneAutocombat/
 
 ## Version
 
-Current version: **2.14**
+Current version: **2.15**
 
 See [CHANGELOG.md](CHANGELOG.md) for full release notes and update history.

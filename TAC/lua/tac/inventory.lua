@@ -1,99 +1,49 @@
 ---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
--- TRIUNE INVENTORY & BANK MANAGER (Standalone ImGui Script)
--- ----------------------------------------------------------------------------
+-- TAC/lua/tac/inventory.lua — Triune Inventory & Bank Manager Plugin
+-- ============================================================================
+-- In-process replacement for the old standalone triune_inv.lua script.
 -- Comprehensive inventory, worn equipment, bank, and shared bank search,
 -- container grid visualizer, and organization assistant with offline bank
--- cache persistence for EverQuest / MacroQuest.
+-- cache persistence (triune_inv_bank_<char>.lua in the MQ config folder).
 --
--- Compatible with MQ LuaJIT (Lua 5.1 syntax safe)
+-- The bag-move / stack-combine / sort workflows are sequential and wait on
+-- the game between clicks, so they run inside the plugin fiber and use the
+-- core's cooperative `delay` (yields to the main loop instead of blocking
+-- it). Window visibility is ctrl.show_inv (header button, Settings ->
+-- External Tools, /ac inv, and the Window Layout manager flip it); the first
+-- scan runs when the window is opened.
 -- ============================================================================
 
-local mq = require('mq')
-local ImGui = require('ImGui')
-local bit = require('bit') -- LuaJIT bitwise library
+local plugin = {
+    id                 = 'inventory',
+    name               = 'Inventory & Bank Manager',
+    version            = '2.0.0',
+    author             = 'Triune',
+    description        = 'Inventory / bank / shared bank search, container visualizer, and organization assistant with an offline bank cache.',
+    defaultEnabled     = true,
+    tickInterval       = 0.05,
+    runOutOfCombatOnly = false,
+    hasThread          = true,
+    -- Window owned by this plugin (drives the main-window header button)
+    window             = { label = 'Inv Manager', tooltip = 'Toggles the Inventory & Bank Manager window (inventory plugin).', flag = 'show_inv', desc = 'Inventory / bank search, visualizer & organizer', headerButton = true, order = 110 },
+}
+
+local core = nil
+local ctrl, ImGui, mq = nil, nil, nil
 
 -- Version
 local VERSION = '1.0.0'
 
--- Theme & style helpers for inventory window
-local _colN, _varN = 0, 0
-local function pushCol(id, r, g, b, a)
-    if id == nil then return end
-    local ImGuiColType = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-    local enumVal = ImGuiColType and ImGuiColType(id) or id
-    if pcall(mq.imgui.PushStyleColor, enumVal, r, g, b, a) then _colN = _colN + 1 end ---@diagnostic disable-line: undefined-field
-end
-local function pushVar(id, a, b)
-    if id == nil then return end
-    local ok
-    local ImGuiSVType = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
-    local enumVal = ImGuiSVType and ImGuiSVType(id) or id
-    if b ~= nil then
-        local ImVec2Type = _G.ImVec2
-        if type(ImVec2Type) == 'function' then
-            ok = pcall(mq.imgui.PushStyleVar, enumVal, ImVec2Type(a, b)) ---@diagnostic disable-line: undefined-field
-        else
-            ok = pcall(mq.imgui.PushStyleVar, enumVal, a, b) ---@diagnostic disable-line: undefined-field
-        end
-    else
-        ok = pcall(mq.imgui.PushStyleVar, enumVal, a) ---@diagnostic disable-line: undefined-field
-    end
-    if ok then _varN = _varN + 1 end
+local function refresh()
+    ctrl = core.ctrl
+    ImGui = core.ImGui
+    mq = core.mq
 end
 
-local function pushTheme()
-    _colN, _varN = 0, 0
-    local ImGuiCol = mq.imgui.Col or _G.ImGuiCol ---@diagnostic disable-line: undefined-field
-    local ImGuiStyleVar = mq.imgui.StyleVar or _G.ImGuiStyleVar ---@diagnostic disable-line: undefined-field
-    if ImGuiCol then
-        pushCol(ImGuiCol.WindowBg, 0.059, 0.086, 0.133, 1)
-        pushCol(ImGuiCol.ChildBg, 0.055, 0.082, 0.125, 1)
-        pushCol(ImGuiCol.PopupBg, 0.047, 0.075, 0.118, 1)
-        pushCol(ImGuiCol.Border, 0.157, 0.251, 0.345, 1)
-        pushCol(ImGuiCol.Text, 0.851, 0.898, 0.953, 1)
-        pushCol(ImGuiCol.TextDisabled, 0.490, 0.561, 0.651, 1)
-        pushCol(ImGuiCol.TitleBg, 0.043, 0.067, 0.106, 1)
-        pushCol(ImGuiCol.TitleBgActive, 0.047, 0.078, 0.125, 1)
-        pushCol(ImGuiCol.FrameBg, 0.047, 0.078, 0.125, 1)
-        pushCol(ImGuiCol.FrameBgHovered, 0.090, 0.150, 0.220, 1)
-        pushCol(ImGuiCol.FrameBgActive, 0.120, 0.190, 0.270, 1)
-        pushCol(ImGuiCol.Button, 0.086, 0.125, 0.196, 1)
-        pushCol(ImGuiCol.ButtonHovered, 0.300, 0.700, 1.000, 0.35)
-        pushCol(ImGuiCol.ButtonActive, 0.300, 0.700, 1.000, 0.60)
-        pushCol(ImGuiCol.Header, 0.078, 0.129, 0.204, 1)
-        pushCol(ImGuiCol.HeaderHovered, 0.160, 0.440, 0.700, 0.50)
-        pushCol(ImGuiCol.HeaderActive, 0.160, 0.500, 0.750, 0.70)
-        pushCol(ImGuiCol.Tab, 0.043, 0.067, 0.098, 1)
-        pushCol(ImGuiCol.TabHovered, 0.300, 0.700, 1.000, 0.40)
-        pushCol(ImGuiCol.TabSelected, 0.075, 0.125, 0.200, 1)
-        pushCol(ImGuiCol.CheckMark, 0.370, 0.880, 0.640, 1)
-        pushCol(ImGuiCol.SliderGrab, 1.000, 0.700, 0.540, 1)
-        pushCol(ImGuiCol.SliderGrabActive, 1.000, 0.550, 0.300, 1)
-        pushCol(ImGuiCol.Separator, 0.157, 0.251, 0.345, 1)
-        pushCol(ImGuiCol.ScrollbarBg, 0.031, 0.051, 0.078, 1)
-        pushCol(ImGuiCol.ScrollbarGrab, 0.157, 0.251, 0.345, 1)
-    end
-    if ImGuiStyleVar then
-        local ImGuiSV = ImGuiStyleVar
-        pushVar(ImGuiSV.WindowRounding, 6)
-        pushVar(ImGuiSV.ChildRounding, 5)
-        pushVar(ImGuiSV.FrameRounding, 4)
-        pushVar(ImGuiSV.PopupRounding, 4)
-        pushVar(ImGuiSV.TabRounding, 4)
-        pushVar(ImGuiSV.GrabRounding, 3)
-        pushVar(ImGuiSV.ScrollbarRounding, 6)
-
-        pushVar(ImGuiSV.FrameBorderSize, 1)
-        pushVar(ImGuiSV.FramePadding, 7, 4)
-        pushVar(ImGuiSV.ItemSpacing, 8, 6)
-        pushVar(ImGuiSV.WindowPadding, 12, 10)
-    end
-end
-
-local function popTheme()
-    if _varN > 0 then pcall(mq.imgui.PopStyleVar, _varN); _varN = 0 end ---@diagnostic disable-line: undefined-field
-    if _colN > 0 then pcall(mq.imgui.PopStyleColor, _colN); _colN = 0 end ---@diagnostic disable-line: undefined-field
+-- Cooperative wait (yields the plugin fiber; see pm.delay in triune.lua)
+local function delay(ms, cond)
+    return core.delay(ms, cond)
 end
 
 -- Color constants
@@ -320,8 +270,6 @@ local state = {
     autoScanInterval = 15, -- seconds
 }
 
-local openGUI = true
-local isRunning = true
 
 -- Module for pure logic functions
 local invLogic = {}
@@ -2338,12 +2286,9 @@ function UI.drawSettings()
 end
 
 local function DrawInventoryManagerUI()
-    if not openGUI then
-        isRunning = false
-        return
-    end
+    if not ctrl.show_inv then return end
 
-    pushTheme()
+    core.pushTheme()
 
     ImGui.SetNextWindowCollapsed(false, ImGuiCond.Appearing)
     ImGui.SetNextWindowSize(780, 520, ImGuiCond.FirstUseEver)
@@ -2352,16 +2297,18 @@ local function DrawInventoryManagerUI()
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
     end
 
-    local open, draw = ImGui.Begin("Triune Inventory & Bank Manager##Main", openGUI, windowFlags)
+    core.preBeginWindow('inventory')
+    local open, draw = ImGui.Begin("Triune Inventory & Bank Manager###TriuneInventoryManager", ctrl.show_inv, windowFlags)
     if not open then
-        openGUI = false
-        isRunning = false
+        ctrl.show_inv = false
         ImGui.End()
-        popTheme()
+        core.popTheme()
+        core.saveLoadout(true)
         return
     end
 
     if draw then
+        core.postBeginWindow('inventory')
         UI.drawHeader()
 
         if ImGui.BeginTabBar("InvMainTabBar", ImGuiTabBarFlags.None) then
@@ -2390,16 +2337,8 @@ local function DrawInventoryManagerUI()
     end
 
     ImGui.End()
-    popTheme()
+    core.popTheme()
 end
-
--- Initialize ImGui callback
-mq.imgui.init('TriuneInventoryManager', DrawInventoryManagerUI)
-
--- Initial scan
-scanner.scanAll()
-
-print(string.format('\ag[Triune Inventory] v%s\ax initialized. Close window or /lua stop triune_inv to exit.', VERSION))
 
 local function quantityWndOpen()
     local open = false
@@ -2412,16 +2351,16 @@ end
 
 local function acceptQuantityWnd()
     if not quantityWndOpen() then
-        mq.delay(15)
+        delay(15)
         if not quantityWndOpen() then return end
     end
     pcall(function()
         mq.cmd('/notify QuantityWnd QTYW_Accept_Button leftmouseup')
     end)
-    mq.delay(20)
+    delay(20)
     if quantityWndOpen() then
         pcall(function() mq.cmd('/yes') end)
-        mq.delay(20)
+        delay(20)
     end
 end
 
@@ -2433,8 +2372,10 @@ local function notifyLeft(cmd)
     acceptQuantityWnd()
 end
 
--- Main loop (coroutine thread: yields via mq.delay)
-while isRunning do
+-- ============================================================================
+-- Fiber body: one pass of the old main loop (queued action + background scan)
+-- ============================================================================
+local function tick()
     -- Process queued action
     local act = state.pendingAction
     if act then
@@ -2468,7 +2409,7 @@ while isRunning do
             notifyLeft(tostring(act.notifyCmd))
         elseif actType == 'move' and act.fromCmd and act.toCmd then
             notifyLeft(act.fromCmd)
-            mq.delay(40)
+            delay(40)
             notifyLeft(act.toCmd)
         elseif actType == 'autoinv' then
             pcall(function()
@@ -2503,16 +2444,16 @@ while isRunning do
 
             if move then
                 notifyLeft(move.fromCmd)
-                mq.delay(80)
+                delay(80)
                 notifyLeft(move.toCmd)
-                mq.delay(80)
+                delay(80)
                 local hasCursor = false
                 pcall(function()
                     hasCursor = mq.TLO.Cursor() and (mq.TLO.Cursor.ID() or 0) > 0
                 end)
                 if hasCursor then
                     pcall(function() mq.cmd('/autoinventory') end)
-                    mq.delay(100)
+                    delay(100)
                 end
                 if state.combineAllActive then
                     state.pendingAction = { type = 'combine_stacks' }
@@ -2528,20 +2469,20 @@ while isRunning do
             local step = moves[idx]
             if step and step.fromCmd and step.toCmd then
                 notifyLeft(step.fromCmd)
-                mq.delay(80)
+                delay(80)
                 notifyLeft(step.toCmd)
                 if step.completeSwap then
-                    mq.delay(80)
+                    delay(80)
                     notifyLeft(step.fromCmd)
                 end
-                mq.delay(80)
+                delay(80)
                 local hasCursor = false
                 pcall(function()
                     hasCursor = mq.TLO.Cursor() and (mq.TLO.Cursor.ID() or 0) > 0
                 end)
                 if hasCursor then
                     pcall(function() mq.cmd('/autoinventory') end)
-                    mq.delay(100)
+                    delay(100)
                 end
                 if idx < #moves then
                     state.pendingAction = { type = 'sort_bag', moves = moves, index = idx + 1 }
@@ -2549,9 +2490,9 @@ while isRunning do
             end
         end
         if actType == 'pickup' or actType == 'move' then
-            mq.delay(20)
+            delay(20)
         else
-            mq.delay(100)
+            delay(100)
         end
         scanner.scanAll()
     end
@@ -2564,8 +2505,77 @@ while isRunning do
             scanner.scanAll()
         end
     end
-
-    mq.delay(50)
 end
 
-print('\ag[Triune Inventory]\ax Closed.')
+-- ============================================================================
+-- Plugin lifecycle
+-- ============================================================================
+function plugin.onInit(coreApi)
+    core = coreApi
+    refresh()
+    if ctrl and ctrl.show_inv == nil then ctrl.show_inv = false end
+    state.pendingAction = nil
+    state.combineAllActive = false
+    state.lastScanTime = 0
+end
+
+function plugin.onDestroy()
+    state.pendingAction = nil
+    state.combineAllActive = false
+end
+
+function plugin.onTick()
+    if not core then return end
+    refresh()
+    -- First scan happens lazily when the window is opened (the standalone
+    -- script scanned at launch); background auto-scan keeps it fresh after.
+    if ctrl.show_inv and (tonumber(state.lastScanTime) or 0) == 0 then
+        scanner.scanAll()
+    end
+    tick()
+end
+
+function plugin.onDrawUI()
+    if not core then return end
+    refresh()
+    DrawInventoryManagerUI()
+end
+
+function plugin.onDrawSettings()
+    if not core then return end
+    refresh()
+    core.accent(GOLD, 'Inventory & Bank Manager')
+    local isWinOpen = (ctrl.show_inv == true)
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##invToggleWin', 250, 24) then
+        ctrl.show_inv = not isWinOpen
+        core.saveLoadout(true)
+    end
+    if ImGui.Button('Rescan Now##invRescan', 120, 22) then
+        scanner.scanAll()
+    end
+    ImGui.SameLine()
+    ImGui.TextDisabled(string.format('%d items | Bank: %s | %s', state.counts.total or 0,
+        state.bankLive and 'live' or ('cached ' .. tostring(state.bankLastSync)), tostring(state.statusMsg or '')))
+end
+
+-- /ac inv | inventory | invui toggles the window (was: /lua run triune_inv)
+function plugin.onCommand(cmd)
+    if cmd ~= 'inv' and cmd ~= 'inventory' and cmd ~= 'invui' and cmd ~= 'bank' then return false end
+    refresh()
+    ctrl.show_inv = not ctrl.show_inv
+    core.saveLoadout(true)
+    print(string.format('\ag[Triune]\ax Inventory & Bank Manager %s.', ctrl.show_inv and 'OPENED' or 'CLOSED'))
+    return true
+end
+
+plugin.help = {
+    '  \ag/ac inv | inventory | bank\ax - Toggle the Inventory & Bank Manager window',
+}
+
+-- Exposed for tests
+plugin.state = state
+plugin.invLogic = invLogic
+plugin.scanner = scanner
+plugin.tick = tick
+
+return plugin
