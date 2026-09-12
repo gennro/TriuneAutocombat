@@ -92,6 +92,7 @@ local net = {
     dropped        = 0,
     lastSendStatus = nil,  -- last negative status reported by a callback
     versionWarned  = {},   -- peers already warned about a protocol mismatch
+    trace          = false, -- /ac net trace: log every send / receive
     log            = {},   -- newest first: { time, text, level }
     cmdInput       = '',
     allowInput     = nil,
@@ -273,6 +274,9 @@ local function rawSend(address, kind, data, cb)
         return false
     end
     net.sent = net.sent + 1
+    if net.trace then
+        logEvent(string.format('TX %s -> %s', kind, address and (address.character or 'addr') or 'all'))
+    end
     return true
 end
 
@@ -664,10 +668,19 @@ local function processMessage(message)
     local payload = message and message.content
     if type(payload) ~= 'table' or type(payload.kind) ~= 'string' then
         net.dropped = net.dropped + 1
+        net.lastDrop = 'malformed content (' .. type(payload) .. ')'
+        if net.trace then logEvent('RX dropped: ' .. net.lastDrop, 'warn') end
         return
     end
     local sender = message.sender
-    if isSelf(sender, payload) then return end
+    if net.trace then
+        logEvent(string.format('RX %s from %s (pid %s)', tostring(payload.kind),
+            tostring(sender and sender.character or payload.from), tostring(sender and sender.pid)))
+    end
+    if isSelf(sender, payload) then
+        net.selfDropped = (net.selfDropped or 0) + 1
+        return
+    end
     if payload.v ~= PROTOCOL_VERSION then
         net.dropped = net.dropped + 1
         local from = (sender and sender.character) or payload.from or '?'
@@ -1182,6 +1195,30 @@ function plugin.onCommand(cmd, args)
         end
         return true
     end
+    if subl == 'trace' then
+        net.trace = not net.trace
+        chat('Trace %s (see the Box Net event log).', net.trace and 'ON' or 'OFF')
+        return true
+    end
+    if subl == 'debug' or subl == 'diag' then
+        local pid = myPid()
+        chat('Box Network diagnostics:')
+        print(string.format('  me: %s  pid: %s  zone: %s  script mailbox: %s', myName(), tostring(pid), myZone(), MAILBOX))
+        print(string.format('  actor: %s  available: %s  err: %s', tostring(net.actor), tostring(net.available), tostring(net.err)))
+        print(string.format('  sent: %d  received: %d  dropped: %d  self-echo dropped: %d  inbox: %d  last drop: %s',
+            net.sent, net.received, net.dropped, net.selfDropped or 0, #net.inbox, tostring(net.lastDrop)))
+        print(string.format('  last send status: %s  peers: %d  heartbeat: every %.2fs (last %.1fs ago)',
+            net.lastSendStatus and statusName(net.lastSendStatus) or 'none', peerCount(), cfg.heartbeatSec,
+            nowSec() - net.lastHeartbeatAt))
+        print(string.format('  trust: %s  accept: %s  allowlist: %s', cfg.trust, tostring(cfg.acceptCommands), table.concat(cfg.allowlist or {}, ',')))
+        local shown = 0
+        for _, e in ipairs(net.log) do
+            print(string.format('  [%s] %s', e.time, e.text))
+            shown = shown + 1
+            if shown >= 12 then break end
+        end
+        return true
+    end
     if subl == 'ping' then
         local ok, why = sendPing(args[2])
         if not ok then chat('Ping not sent: %s', tostring(why)) end
@@ -1193,7 +1230,7 @@ function plugin.onCommand(cmd, args)
         return true
     end
     if #args < 2 then
-        chat('Usage: /ac net <all|zone|group|Name> <command>  |  /ac net peers  |  /ac net ping <Name>  |  /ac net camp [scope]')
+        chat('Usage: /ac net <all|zone|group|Name> <command>  |  /ac net peers  |  /ac net ping <Name>  |  /ac net camp [scope]  |  /ac net debug  |  /ac net trace')
         return true
     end
     local line = table.concat(args, ' ', 2)
