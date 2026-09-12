@@ -15616,15 +15616,14 @@ function UI.drawSpellGemBarWindow()
                     local isReady = false
                     pcall(function() isReady = (mq.TLO.Me.SpellReady(slot)() == true) end)
 
+                    local isCastingThis = (activeCastingName and activeCastingName == sName)
                     local timer = 0
                     if isReady then
                         runtime.gemCooldownEnd[slot] = nil
-                        timer = 0
                     elseif isCastingThis then
                         -- Actively casting this spell: prime recast countdown so it begins immediately on cast completion
                         local baseRecast = math.max(2.25, sRecast or 0)
                         runtime.gemCooldownEnd[slot] = nowClock + (castTimeLeft or 0) + baseRecast
-                        timer = 0
                     else
                         local endAt = runtime.gemCooldownEnd[slot]
                         local isOtherCasting = (activeCastingName and activeCastingName ~= sName)

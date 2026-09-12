@@ -33,6 +33,11 @@
   - **Gem Swap & Memorization Invalidation (`runtime.gemCooldownSpell`)**: Tracks the scribed spell name for each slot, immediately invalidating stale cooldown anchors if a gem is memorized with a different spell.
   - **Enhanced Query Parser & Overlay Formatting**: Upgraded `UI.getGemCooldownSec` to leverage `parseDurationSec` and proper MQ property extraction, and added hours support (`%dh`) to gem button overlay text for extreme recast abilities.
   - **Automated Verification**: Added discrete tick anti-freeze and continuous countdown simulation assertions to Suite 79 in `tests/test_pure_logic.lua` (2,496 tests passing).
+  - **Static Analysis Fixes**: Fixed undefined `isCastingThis` variable scoping within the gem cooldown calculation block and removed redundant `timer = 0` reassignments, achieving 0 warnings across all files in Luacheck.
+
+- **CI Test Suite & Satellite Theme Check Updates (`tests/test_pure_logic.lua`, `tests/check_theme_consistency.sh`).**
+  - **Guarded Quest Database File Loading**: Updated Suite 57 in `tests/test_pure_logic.lua` to only assert and load quest catalog, expansion, and zone data files when present on disk, resolving unit test failures following the removal of `TAC/resources/triune_quest/`.
+  - **Updated Theme Consistency Canonical & Satellites**: Set `triune_cursor.lua` as the canonical satellite module and pruned deleted modules (`triune_buttons.lua`, `triune_test.lua`) from `tests/check_theme_consistency.sh`, bringing the theme consistency check to 100% passing.
 
 ---
 

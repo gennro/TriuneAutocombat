@@ -18,17 +18,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LUA_DIR="$REPO_ROOT/TAC/lua"
 
 # The canonical satellite module (smallest, cleanest pushTheme copy)
-CANONICAL="$LUA_DIR/triune_buttons.lua"
+CANONICAL="$LUA_DIR/triune_cursor.lua"
 
 # All satellite modules that should carry identical pushTheme copies
 SATELLITES=(
     "$LUA_DIR/triune_buffbot.lua"
-    "$LUA_DIR/triune_cursor.lua"
     "$LUA_DIR/triune_dps.lua"
     "$LUA_DIR/triune_inv.lua"
     "$LUA_DIR/triune_map.lua"
     "$LUA_DIR/triune_spellbook.lua"
-    "$LUA_DIR/triune_test.lua"
 )
 
 # Extract just the color/var tuples from a pushTheme function body.

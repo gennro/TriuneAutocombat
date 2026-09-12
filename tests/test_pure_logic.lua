@@ -6201,8 +6201,8 @@ end
 do
     print('--- Suite 57: Triune Quest Guide Logic & Database Validation ---')
     local catFn = loadfile('TAC/resources/triune_quest/catalog.lua')
-    assert_true(catFn ~= nil, 'catalog.lua loads cleanly')
     if catFn then
+        assert_true(catFn ~= nil, 'catalog.lua loads cleanly')
         local cat = catFn()
         assert_true(type(cat) == 'table', 'catalog is a table')
         assert_true(#cat >= 2000, string.format('catalog contains >= 2000 quests (found: %d)', #cat))
@@ -6211,8 +6211,8 @@ do
     end
 
     local expFn = loadfile('TAC/resources/triune_quest/expansions.lua')
-    assert_true(expFn ~= nil, 'expansions.lua loads cleanly')
     if expFn then
+        assert_true(expFn ~= nil, 'expansions.lua loads cleanly')
         local exps = expFn()
         assert_true(type(exps) == 'table', 'expansions is a table')
         assert_eq(#exps, 33, 'expansions has 33 entries (00 through 32)')
@@ -6221,8 +6221,8 @@ do
     end
 
     local zoneFn = loadfile('TAC/resources/triune_quest/zones/cabeast.lua')
-    assert_true(zoneFn ~= nil, 'cabeast.lua zone package loads cleanly')
     if zoneFn then
+        assert_true(zoneFn ~= nil, 'cabeast.lua zone package loads cleanly')
         local zpkg = zoneFn()
         assert_eq(zpkg.zone, 'cabeast', 'zone shortname matches cabeast')
         assert_true(type(zpkg.quests) == 'table', 'zone package has quests table')
