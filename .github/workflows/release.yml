@@ -44,14 +44,14 @@ jobs:
 
           ### 🆕 New Installation
           1. Go here and grab the latest macroquest release https://github.com/macroquest/macroquest/releases and extract under your user folder.
-          2. Download TriuneAutocombat-full.zip below and extract contents of TAC into the root of your macroquest folder.
+          2. Download TriuneAutocombat-full.zip below and extract directly into the root of your MacroQuest folder.
           3. If running windows add an exception to your MQ folder before running.
           4. Start **`MacroQuest.exe`** before launching EverQuest.
 
-          - **Existing install
-            - Download **`TriuneAutocombat-Update.zip`** from the Assets below.
-            - Extract the TAC folder to the root of your macroquest folder.
-            - *Note: Your personal settings and saved loadouts in `triune_loadout.lua` are preserved and will never be overwritten.*
+          ### 🔄 Updating an Existing Installation
+          1. Download **`TriuneAutocombat-Update.zip`** from the Assets below.
+          2. Extract directly into the root of your MacroQuest folder (overwrite files if prompted).
+          *Note: Your personal settings and saved loadouts in `triune_loadout.lua` are preserved and will never be overwritten.*
           '''
 
           # Strip leading indentation from instructions block
@@ -73,8 +73,8 @@ jobs:
 
       - name: Package Release Archives
         run: |
-          git archive --format=zip -o TriuneAutocombat-Update.zip HEAD TAC/lua TAC/config TAC/resources/triune_quest README.md CHANGELOG.md
-          git archive --format=zip -o TriuneAutocombat-full.zip HEAD TAC/lua TAC/config TAC/triune_llm_bridge.py TAC/start_bridge.bat TAC/start_bridge.sh TAC/resources README.md CHANGELOG.md
+          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-Update.zip HEAD:TAC lua config resources/triune_quest
+          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-full.zip HEAD:TAC lua config resources
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:

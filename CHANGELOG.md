@@ -2,6 +2,12 @@
 
 ## 2026-09-12
 
+- **Release Archive Packaging at Archive Root (`.github/workflows/release.yml`, `README.md`).**
+  - **Flatten Archive Directory Structure**: Changed `git archive` packaging in `.github/workflows/release.yml` to target tree `HEAD:TAC` instead of repository root paths, placing `lua/`, `config/`, and `resources/` directly at the root of `TriuneAutocombat-full.zip` and `TriuneAutocombat-Update.zip`.
+  - **Root Documentation Inclusion**: Included `README.md` and `CHANGELOG.md` at the root of the generated release archives using `--add-file`.
+  - **Purged Deprecated Bridge Paths**: Removed deleted bridge scripts (`TAC/triune_llm_bridge.py`, `start_bridge.*`) from the release archive file list, resolving CI archive generation failures.
+  - **Updated Installation & Update Instructions**: Updated release notes and `README.md` Quick Start instructions to direct users to extract the archive directly into the MacroQuest folder without navigating or dragging out of a subfolder.
+
 - **Auto AA Minimum 5 AA Bank Slider & Auto-Purchase Reliability (`TAC/lua/triune.lua`, `tests/test_pure_logic.lua`).**
   - **Enforce 5 AA Minimum on Bank Slider**: Updated the Auto AA bank reserve slider in `UI.drawAutoAATab` (`##autoAaThresh`) to enforce a minimum of 5 AA (range 5 to 100), updated tooltips accordingly, and sanitized `ctrl.auto_spend_aa_threshold` to a minimum of 5, preventing rapid continuous re-evaluation that caused micro-pauses in the main script loop.
   - **Early Low-Point Evaluation Bypass (`checkAutoSpendAA`)**: Added an early check (`if unspent < 5 then return false end`) to immediately exit evaluation when points are below 5, eliminating unnecessary AA window querying and evaluation pauses.

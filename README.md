@@ -31,7 +31,7 @@ Getting started takes less than two minutes:
 
 1. **Download MacroQuest**: Download the latest **RoF2** release of MacroQuest from the [MacroQuest Releases page](https://github.com/macroquest/macroquest/releases) (e.g. `MacroQuest-RoF2.zip`) and extract it to your chosen directory (such as `C:\MacroQuest` or `Documents\MacroQuest`).
 2. **Download Triune AutoCombat**: Download the latest **Triune AutoCombat full release** archive from [Triune AutoCombat Releases](https://github.com/gennro/TriuneAutocombat/releases/latest).
-3. **Extract TAC to MacroQuest**: Extract the contents of the `TAC` folder directly into your root `MacroQuest` directory. This automatically merges the `lua/`, `config/`, and `resources/` directories into MacroQuest so that all scripts, databases, and zone navmeshes are placed where MacroQuest expects them.
+3. **Extract to MacroQuest**: Extract the archive directly into your root `MacroQuest` directory. This automatically merges the `lua/`, `config/`, and `resources/` directories into MacroQuest so that all scripts, databases, and zone navmeshes are placed where MacroQuest expects them.
 4. **Run MacroQuest**: Launch `MacroQuest.exe`.
 5. **Log Into Your EMU Server**: Start your EverQuest RoF2 client and log into your **[Project Triune](https://nms.bestemu.com/)** server account.
 6. **Open Triune**: Triune automatically starts on login. If the window is closed or you need to re-open it, type `/ac` or `/lua run triune` in the chat bar.
