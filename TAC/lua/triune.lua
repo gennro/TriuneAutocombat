@@ -304,6 +304,8 @@ local function defaultCtrl()
         mode                 = 'Manual',
         submode              = 'Hunt',
         manual_auto_xtarget  = true,
+        manual_stick         = true,
+        manual_auto_nav      = false,
         pull_style           = 'Melee',
         pull_spell           = '',
         pull_spell_gem       = 1,
@@ -5899,21 +5901,149 @@ function runtime.initPluginManager()
         end)
     end
 
+    -- Files in the plugin folder that could not be loaded, keyed by filename:
+    -- { msg = ..., fullPath = ..., at = os.clock() }. Shown on the Plugins page
+    -- so a bad drop-in is visible there, not only as one chat line.
+    pm.loadErrors = {}
+
+    local PLUGIN_HOOKS = {
+        'onInit', 'onDestroy', 'onTick', 'onDrawUI', 'onDrawSettings', 'onCombatTick', 'onZoned',
+        'onLoadoutSaved', 'onSaveSettings', 'onLoadSettings', 'wantsCombatHold', 'onBetweenPulls', 'onCommand',
+    }
+
+    -- Executing a dropped-in file runs its main chunk on the core's main
+    -- coroutine. A standalone MQ script would start its own mq.delay loop
+    -- there (hanging Triune), or register ImGui callbacks / binds / events
+    -- that nothing ever cleans up. While a plugin file's chunk runs, those
+    -- entry points raise instead, so the file fails to load with a clear
+    -- message and no side effects. Real plugins do all of this in onInit.
+    local function runPluginChunk(fn, filename)
+        local guards = {
+            { tbl = mq, key = 'delay',    why = 'mq.delay (a plugin must not block at load; use onTick / core.delay)' },
+            { tbl = mq, key = 'doevents', why = 'mq.doevents (the core pumps events)' },
+            { tbl = mq, key = 'bind',     why = 'mq.bind at load (register binds in onInit, release them in onDestroy)' },
+            { tbl = mq, key = 'event',    why = 'mq.event at load (register events in onInit, release them in onDestroy)' },
+            { tbl = mq, key = 'exit',     why = 'mq.exit (a plugin runs inside Triune and cannot exit the script)' },
+            { tbl = mq and mq.imgui, key = 'init', why = 'mq.imgui.init (draw from onDrawUI instead)' },
+        }
+        local saved = {}
+        for i, g in ipairs(guards) do
+            if type(g.tbl) == 'table' then
+                saved[i] = g.tbl[g.key]
+                g.tbl[g.key] = function()
+                    error(string.format('%s is a standalone script, not a Triune plugin: it called %s while loading', filename, g.why), 2)
+                end
+            end
+        end
+        local ok, res = pcall(fn)
+        for i, g in ipairs(guards) do
+            if type(g.tbl) == 'table' then g.tbl[g.key] = saved[i] end
+        end
+        return ok, res
+    end
+
+    local function looksLikePlugin(inst)
+        if type(inst) ~= 'table' then return false end
+        if type(inst.id) == 'string' and inst.id ~= '' then return true end
+        for _, h in ipairs(PLUGIN_HOOKS) do
+            if type(inst[h]) == 'function' then return true end
+        end
+        return false
+    end
+
+    local function loadFailed(filename, fullPath, msg)
+        print(string.format('\ar[Triune Plugin Error]\ax %s: %s', filename, tostring(msg)))
+        pm.loadErrors[filename] = { msg = tostring(msg), fullPath = fullPath, at = os.clock() }
+        pm.scripts[filename] = nil
+        return false, tostring(msg)
+    end
+
+    -- Files that load fine but are not plugins (standalone MQ scripts, data
+    -- files, anything without the plugin contract). They get a basic entry on
+    -- the Plugins page with Run / Stop buttons that launch them through
+    -- `/lua run`, completely independent of Triune's plugin lifecycle.
+    pm.scripts = {}
+
+    -- The name `/lua run` needs for a file inside the plugin folder: relative
+    -- to the MQ lua directory when the folder lives under it (e.g. `tac/foo`),
+    -- otherwise the folder's last path segment plus the file (`tac/foo`).
+    function pm.scriptRunName(fullPath)
+        local path = tostring(fullPath or ''):gsub('\\', '/'):gsub('%.lua$', '')
+        local luaDir = mq and mq.luaDir and tostring(mq.luaDir):gsub('\\', '/'):gsub('/+$', '') or nil
+        if luaDir and luaDir ~= '' and path:sub(1, #luaDir + 1):lower() == (luaDir .. '/'):lower() then
+            return path:sub(#luaDir + 2)
+        end
+        local folder, file = path:match('([^/]+)/([^/]+)$')
+        if folder and file then return folder .. '/' .. file end
+        return path:match('([^/]+)$') or path
+    end
+
+    local function registerScript(filename, fullPath, reason)
+        local runName = pm.scriptRunName(fullPath)
+        pm.scripts[filename] = {
+            name = (tostring(filename):gsub('%.lua$', '')),
+            file = filename,
+            fullPath = fullPath,
+            runName = runName,
+            reason = tostring(reason),
+            at = os.clock(),
+        }
+        pm.loadErrors[filename] = nil
+        print(string.format('\ay[Triune]\ax %s is not a Triune plugin (%s). Listed under Settings -> Plugins -> Standalone Scripts; run it with /lua run %s.',
+            filename, tostring(reason), runName))
+        return false, tostring(reason)
+    end
+
+    function pm.isScriptRunning(entry)
+        if not entry then return false end
+        local running = false
+        pcall(function()
+            local s = mq.TLO.Lua.Script(entry.runName)
+            running = (s() and s.Status() == 'RUNNING') == true
+        end)
+        return running
+    end
+
+    -- Run or stop a standalone script (`/lua run` / `/lua stop`). Returns
+    -- 'started' or 'stopped'.
+    function pm.toggleScript(entry)
+        if not entry then return nil end
+        if pm.isScriptRunning(entry) then
+            mq.cmd('/lua stop ' .. entry.runName)
+            return 'stopped'
+        end
+        mq.cmd('/lua run ' .. entry.runName)
+        return 'started'
+    end
+
     function pm.loadPlugin(filename, fullPath)
         local fn, err = loadfile(fullPath)
         if not fn then
-            print(string.format('\ar[Triune Plugin Error]\ax Syntax error in %s: %s', filename, tostring(err)))
-            return false, 'Syntax error: ' .. tostring(err)
+            return loadFailed(filename, fullPath, 'Syntax error: ' .. tostring(err))
         end
 
-        local ok, inst = pcall(fn)
-        if not ok or type(inst) ~= 'table' then
-            print(string.format('\ar[Triune Plugin Error]\ax Execution error in %s: %s', filename, tostring(inst)))
-            return false, 'Execution error: ' .. tostring(inst or 'Plugin must return a table')
+        local ok, inst = runPluginChunk(fn, filename)
+        if not ok then
+            local msg = tostring(inst)
+            if msg:find('standalone script, not a Triune plugin', 1, true) then
+                return registerScript(filename, fullPath, 'standalone script: ' .. (msg:match('it called (.-) while loading') or 'uses MQ script entry points at load'))
+            end
+            return loadFailed(filename, fullPath, 'Execution error: ' .. msg)
+        end
+        if type(inst) ~= 'table' then
+            return registerScript(filename, fullPath, string.format('returns %s instead of a plugin table', type(inst)))
+        end
+        if not looksLikePlugin(inst) then
+            return registerScript(filename, fullPath, 'returned table has no `id` and none of the plugin hooks')
         end
 
         local id = inst.id or filename:gsub('%.lua$', '')
         local existing = pm.plugins[id]
+        if existing and existing.filename and existing.filename:lower() ~= tostring(filename):lower() then
+            return loadFailed(filename, fullPath, string.format('Plugin id "%s" is already registered by %s; rename the id in this file', id, existing.filename))
+        end
+        pm.loadErrors[filename] = nil
+        pm.scripts[filename] = nil
 
         local p = existing or {
             id = id,
@@ -6037,6 +6167,8 @@ function runtime.initPluginManager()
         end
         pm.plugins = {}
         pm.pluginOrder = {}
+        pm.loadErrors = {}
+        pm.scripts = {}
         pm.discover()
     end
 
@@ -6089,6 +6221,9 @@ function runtime.initPluginManager()
             local p = pm.plugins[id]
             if p and p.filename then loadedFiles[p.filename:lower()] = true end
         end
+        -- Known standalone scripts are not re-executed on a rescan (their
+        -- chunk may have side effects); "Re-check" on the Plugins page does that.
+        for fname in pairs(pm.scripts or {}) do loadedFiles[tostring(fname):lower()] = true end
 
         local function addFile(fname)
             if fname and fname:match('%.lua$') then
@@ -6149,6 +6284,7 @@ function runtime.initPluginManager()
             'buffbot.lua',
             'map.lua',
             'boxnet.lua',
+            'buttons.lua',
         }
         for _, f in ipairs(known) do
             if not fileSet[f:lower()] then
@@ -6170,7 +6306,37 @@ function runtime.initPluginManager()
         pm.lastScanAt = os.clock()
     end
 
+    -- Plugin lifecycle work requested from the UI (Rescan, Reload, Retry,
+    -- Re-check, Enable / Disable) is queued here and run from pm.tick() on the
+    -- main script coroutine. Running a dropped-in file's chunk or a plugin's
+    -- onInit / onDestroy inside the ImGui render callback crashed mq2lua
+    -- (the chunk or hook can register ImGui callbacks, bind commands, or call
+    -- mq.exit while the frame is being rendered), so the render thread only
+    -- ever enqueues.
+    pm.deferred = {}
+    function pm.defer(label, fn)
+        pm.deferred[#pm.deferred + 1] = { label = tostring(label or 'plugin op'), fn = fn }
+    end
+
+    function pm.hasDeferred()
+        return #pm.deferred > 0
+    end
+
+    function pm.runDeferred()
+        if #pm.deferred == 0 then return 0 end
+        local ops = pm.deferred
+        pm.deferred = {}
+        for _, op in ipairs(ops) do
+            local ok, err = pcall(op.fn)
+            if not ok then
+                print(string.format('\ar[Triune Plugin Error]\ax %s failed: %s', op.label, tostring(err)))
+            end
+        end
+        return #ops
+    end
+
     function pm.tick()
+        pm.runDeferred()
         local inCombat = false
         pcall(function()
             inCombat = (mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT'))
@@ -6248,7 +6414,7 @@ function runtime.initPluginManager()
         if p.status == 'Error' then
             ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], string.format('%s plugin hit an error: %s', p.name, tostring(p.errorMsg or '?')))
             if ImGui.SmallButton('Reload Plugin##reload_' .. id) then
-                pm.reloadPlugin(id)
+                pm.defer('reload ' .. id, function() pm.reloadPlugin(id) end)
             end
             return false
         end
@@ -6256,8 +6422,10 @@ function runtime.initPluginManager()
             ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format('%s plugin is disabled.', p.name))
             ImGui.SameLine()
             if ImGui.SmallButton('Enable##enable_' .. id) then
-                pm.enablePlugin(id)
-                runtime.saveLoadout(true)
+                pm.defer('enable ' .. id, function()
+                    pm.enablePlugin(id)
+                    runtime.saveLoadout(true)
+                end)
             end
             return false
         end
@@ -6402,12 +6570,17 @@ function runtime.initPluginManager()
     end
 
     -- Main-window header toggle buttons for plugin windows. Open windows are
-    -- highlighted; buttons wrap to a new row when the header runs out of width.
-    -- Returns the number of buttons drawn.
-    function pm.drawHeaderButtons()
+    -- highlighted. Rows hold at most HEADER_BUTTONS_PER_ROW buttons (the
+    -- caller passes how many it already drew on the current row, e.g. the
+    -- Compact Mode button) and also wrap early when the header runs out of
+    -- width. Returns the number of buttons drawn.
+    pm.HEADER_BUTTONS_PER_ROW = 8
+    function pm.drawHeaderButtons(buttonsOnRow)
         local entries = pm.windowPlugins(true)
         if #entries == 0 then return 0 end
         local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        local perRow = tonumber(pm.HEADER_BUTTONS_PER_ROW) or 8
+        local col = tonumber(buttonsOnRow) or 0
         local winW = 0
         pcall(function()
             local w = ImGui.GetWindowContentRegionMax and ImGui.GetWindowContentRegionMax()
@@ -6416,17 +6589,23 @@ function runtime.initPluginManager()
         local drawn = 0
         for _, e in ipairs(entries) do
             local label = tostring(e.window.label or e.id)
-            if drawn > 0 then
-                ImGui.SameLine()
-                if winW > 0 then
-                    local okW, textW = pcall(function()
-                        local tw = ImGui.CalcTextSize(label)
-                        if type(tw) ~= 'number' then tw = tw and tw.x or 0 end
-                        return tw + 16
-                    end)
-                    local okX, curX = pcall(ImGui.GetCursorPosX)
-                    if okW and okX and type(curX) == 'number' and (curX + (textW or 0)) > winW then
-                        ImGui.NewLine()
+            if col > 0 then
+                if col >= perRow then
+                    -- Row is full: the next button starts a new row.
+                    col = 0
+                else
+                    ImGui.SameLine()
+                    if winW > 0 then
+                        local okW, textW = pcall(function()
+                            local tw = ImGui.CalcTextSize(label)
+                            if type(tw) ~= 'number' then tw = tw and tw.x or 0 end
+                            return tw + 16
+                        end)
+                        local okX, curX = pcall(ImGui.GetCursorPosX)
+                        if okW and okX and type(curX) == 'number' and (curX + (textW or 0)) > winW then
+                            ImGui.NewLine()
+                            col = 0
+                        end
                     end
                 end
             end
@@ -6442,6 +6621,7 @@ function runtime.initPluginManager()
                 ImGui.SetTooltip('%s', tostring(tip))
             end
             drawn = drawn + 1
+            col = col + 1
         end
         return drawn
     end
@@ -6485,7 +6665,7 @@ function UI.drawPluginsTab()
 
     ImGui.Spacing()
     if ImGui.Button('Rescan Plugins Folder##btnRescanPlugins', 170, 24) then
-        pm.discover()
+        pm.defer('rescan plugins folder', pm.discover)
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'Scans the lua/tac directory for newly dropped or updated .lua plugins.')
@@ -6493,7 +6673,7 @@ function UI.drawPluginsTab()
 
     ImGui.SameLine()
     if ImGui.Button('Reload All##btnReloadAllPlugins', 110, 24) then
-        pm.reloadAll()
+        pm.defer('reload all plugins', pm.reloadAll)
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'Restarts and reloads all discovered plugins.')
@@ -6508,12 +6688,118 @@ function UI.drawPluginsTab()
         end
     end
 
+    local failedFiles = {}
+    for fname, info in pairs(pm.loadErrors or {}) do
+        failedFiles[#failedFiles + 1] = { file = fname, info = info }
+    end
+    table.sort(failedFiles, function(a, b) return a.file:lower() < b.file:lower() end)
+
+    local scriptFiles = {}
+    for fname, entry in pairs(pm.scripts or {}) do
+        scriptFiles[#scriptFiles + 1] = entry
+        entry.file = entry.file or fname
+    end
+    table.sort(scriptFiles, function(a, b) return a.name:lower() < b.name:lower() end)
+
     ImGui.SameLine()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format('Loaded: %d | Active: %d', totalLoaded, activeCount))
+    if pm.hasDeferred() then
+        ImGui.SameLine()
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], '| working...')
+    end
+    if #scriptFiles > 0 then
+        ImGui.SameLine()
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], string.format('| Standalone scripts: %d', #scriptFiles))
+    end
+    if #failedFiles > 0 then
+        ImGui.SameLine()
+        ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], string.format('| Failed to load: %d', #failedFiles))
+    end
 
     ImGui.Spacing()
     ImGui.Separator()
     ImGui.Spacing()
+
+    -- Files in the plugin folder that are not loadable plugins (syntax errors,
+    -- standalone scripts, data files, duplicate ids). They are never registered,
+    -- so without this list a bad drop-in would only ever show as one chat line.
+    if #failedFiles > 0 then
+        ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], 'Files in the plugin folder that could not be loaded:')
+        for i, entry in ipairs(failedFiles) do
+            ImGui.Bullet()
+            ImGui.SameLine()
+            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], entry.file)
+            ImGui.SameLine()
+            if ImGui.SmallButton(string.format('Retry##retryPlg_%d', i)) then
+                pm.defer('retry ' .. entry.file, function() pm.loadPlugin(entry.file, entry.info.fullPath) end)
+            end
+            ImGui.SameLine()
+            if ImGui.SmallButton(string.format('Dismiss##dismissPlg_%d', i)) then
+                pm.loadErrors[entry.file] = nil
+            end
+            ImGui.Indent(18)
+            ImGui.TextWrapped(tostring(entry.info.msg or ''))
+            ImGui.Unindent(18)
+        end
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Only files that return a plugin table (an `id` or lifecycle hooks) are loaded as plugins; other runnable files are listed under Standalone Scripts.')
+        ImGui.Spacing()
+        ImGui.Separator()
+        ImGui.Spacing()
+    end
+
+    -- Standalone scripts dropped into the folder: not plugins, but they get a
+    -- basic entry with Run / Stop so they can be launched independently of
+    -- Triune (`/lua run <folder>/<name>`).
+    if #scriptFiles > 0 then
+        accent(GOLD, 'Standalone Scripts (run independently of Triune)')
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'These files do not follow the plugin contract, so Triune does not load them. Run / Stop launches them as their own /lua script.')
+        local sFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
+        if ImGui.BeginTable('TriuneScriptsTable', 4, sFlags) then
+            ImGui.TableSetupColumn('Script', ImGuiTableColumnFlags.WidthFixed, 200)
+            ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn('Why not a plugin', ImGuiTableColumnFlags.WidthStretch, 0)
+            ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 150)
+            ImGui.TableHeadersRow()
+            for i, entry in ipairs(scriptFiles) do
+                ImGui.TableNextRow()
+                local running = pm.isScriptRunning(entry)
+
+                ImGui.TableNextColumn()
+                ImGui.Text(entry.name)
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '/lua run ' .. tostring(entry.runName))
+
+                ImGui.TableNextColumn()
+                if running then
+                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'RUNNING')
+                else
+                    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Stopped')
+                end
+
+                ImGui.TableNextColumn()
+                ImGui.TextWrapped(tostring(entry.reason or ''))
+
+                ImGui.TableNextColumn()
+                if ImGui.SmallButton((running and 'Stop' or 'Run') .. string.format('##scr_%d', i)) then
+                    pm.toggleScript(entry)
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', running and ('Executes /lua stop ' .. tostring(entry.runName))
+                        or ('Executes /lua run ' .. tostring(entry.runName) .. '\nThe script runs as its own MQ Lua process, independent of Triune.'))
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Re-check##scrchk_%d', i)) then
+                    pm.defer('re-check ' .. entry.file, function() pm.loadPlugin(entry.file, entry.fullPath) end)
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', 'Re-evaluates the file: if it now returns a plugin table it is loaded as a plugin.')
+                end
+            end
+            ImGui.EndTable()
+        end
+        ImGui.Spacing()
+        ImGui.Separator()
+        ImGui.Spacing()
+    end
 
     if totalLoaded == 0 then
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'No plugins found in ' .. tostring(dirStr) .. '.')
@@ -6541,14 +6827,19 @@ function UI.drawPluginsTab()
                 -- Col 1: Active toggle
                 ImGui.TableNextColumn()
                 local isEn = (p.enabled == true)
+                if p.pendingEnabled ~= nil then isEn = p.pendingEnabled end
                 local newEn = ImGui.Checkbox(string.format('##enPlg_%d', idx), isEn)
                 if newEn ~= isEn then
-                    if newEn then
-                        pm.enablePlugin(id)
-                    else
-                        pm.disablePlugin(id)
-                    end
-                    runtime.saveLoadout(true)
+                    p.pendingEnabled = newEn
+                    pm.defer((newEn and 'enable ' or 'disable ') .. id, function()
+                        if newEn then
+                            pm.enablePlugin(id)
+                        else
+                            pm.disablePlugin(id)
+                        end
+                        p.pendingEnabled = nil
+                        runtime.saveLoadout(true)
+                    end)
                 end
                 if ImGui.IsItemHovered() then
                     ImGui.SetTooltip('%s', isEn and 'Plugin is enabled. Uncheck to disable.' or 'Plugin is disabled. Check to enable.')
@@ -6646,7 +6937,7 @@ function UI.drawPluginsTab()
                     ImGui.SameLine()
                 end
                 if ImGui.SmallButton(string.format('Reload##rel_%d', idx)) then
-                    pm.reloadPlugin(id)
+                    pm.defer('reload ' .. id, function() pm.reloadPlugin(id) end)
                 end
             end
         end
@@ -6677,10 +6968,16 @@ function UI.drawPluginsTab()
 
             -- Quick Toggles inside Modal
             local isEn = (p.enabled == true)
+            if p.pendingEnabled ~= nil then isEn = p.pendingEnabled end
             local newEn = ImGui.Checkbox('Enabled##modalEn', isEn)
             if newEn ~= isEn then
-                if newEn then pm.enablePlugin(pm.activeConfigPluginId) else pm.disablePlugin(pm.activeConfigPluginId) end
-                runtime.saveLoadout(true)
+                local modalId = pm.activeConfigPluginId
+                p.pendingEnabled = newEn
+                pm.defer((newEn and 'enable ' or 'disable ') .. modalId, function()
+                    if newEn then pm.enablePlugin(modalId) else pm.disablePlugin(modalId) end
+                    p.pendingEnabled = nil
+                    runtime.saveLoadout(true)
+                end)
             end
             ImGui.SameLine()
             local runInCombat = not p.runOutOfCombatOnly
@@ -6705,7 +7002,8 @@ function UI.drawPluginsTab()
             end
             ImGui.SameLine()
             if ImGui.SmallButton('Reload Plugin##modalReload') then
-                pm.reloadPlugin(pm.activeConfigPluginId)
+                local modalId = pm.activeConfigPluginId
+                pm.defer('reload ' .. modalId, function() pm.reloadPlugin(modalId) end)
             end
 
             ImGui.Spacing()
@@ -6827,8 +7125,10 @@ function UI.drawHeaderBar()
     -- Which plugins get a button here is chosen per plugin on Settings -> Plugins.
     if not runtime.pluginManager then runtime.initPluginManager() end
     if runtime.pluginManager then
-        ImGui.SameLine()
-        if runtime.pluginManager.drawHeaderButtons() == 0 then
+        -- Compact Mode already occupies the first slot of the first row; the
+        -- manager keeps rows to 8 buttons (pm.HEADER_BUTTONS_PER_ROW).
+        if runtime.pluginManager.drawHeaderButtons(1) == 0 then
+            ImGui.SameLine()
             ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '(no plugin window buttons - enable them on Settings -> Plugins)')
         end
     end
@@ -6941,6 +7241,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac inv / /ac bank',                 desc = 'Toggle the Inventory & Bank Manager window (inventory plugin)' },
                 { cmd = '/ac dps / /dps',                     desc = 'Toggle the DPS Parser window (dps plugin)' },
                 { cmd = '/ac net [all|zone|group|Name] [command]', desc = 'Toggle the Box Network window, or run an /ac command on your other boxes (boxnet plugin)' },
+                { cmd = '/ac btn [n|new|exec <set> <index>|import bm]', desc = 'Toggle the Hot Buttons hotbars, show/hide hotbar n, or fire a button (buttons plugin; also /btn, /btnexec)' },
                 { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
                 { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
                 { cmd = '/dps reset',                         desc = 'Reset active combat damage counters' },
@@ -6952,6 +7253,8 @@ function UI.drawHelpTab()
                 { cmd = '/ac chasedist [5-100]',              desc = 'Configure following distance (how far to stay back) from Main Assist (default 15)' },
                 { cmd = '/ac selfdefense [on|off]',           desc = 'Toggle Assist mode self-defense when attacked while MA has no target' },
                 { cmd = '/ac assistbehind [on|off]',          desc = 'Toggle Assist mode positioning behind NPC in combat (default: on)' },
+                { cmd = '/ac manualstick [on|off]',           desc = 'Manual mode: stick to / chase the NPC being fought (default: on). Off = you drive.' },
+                { cmd = '/ac manualnav [on|off]',             desc = 'Manual mode: auto-navigate to a hostile NPC as soon as you select it (default: off)' },
                 { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
                 { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
                 { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
@@ -9275,6 +9578,9 @@ function UI.drawStatusTab()
             end
             ImGui.Text(string.format('• Auto-Target Hostiles on XTarget: %s | Chase Dist: %d ft',
                 ctrl.manual_auto_xtarget ~= false and 'Enabled' or 'Disabled', ctrl.xtar_nav_dist or 150))
+            ImGui.Text(string.format('• Stick to Target: %s | Auto-Nav to Selected Target: %s',
+                ctrl.manual_stick ~= false and 'Enabled' or 'Disabled',
+                ctrl.manual_auto_nav and 'Enabled' or 'Disabled'))
             ImGui.TextDisabled('• ' .. campInfo)
         end
 
@@ -9769,6 +10075,29 @@ function UI.drawControlTab()
                 ImGui.SetTooltip(
                     'Maximum distance (units) to navigate toward an active NPC on Extended Target (XTarget).')
             end
+        end
+
+        local manualStick, manualStickChanged = ImGui.Checkbox('Stick to Target in Combat##manualStick',
+            ctrl.manual_stick ~= false)
+        if manualStickChanged then
+            ctrl.manual_stick = manualStick
+            if not manualStick and runtime.stopMoving then runtime.stopMoving() end
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Checked: Once a fight starts, Triune navigates to and sticks to the NPC being attacked.\nUnchecked: You drive. The character stays where you leave it and only attacks/casts when the NPC is in reach.')
+        end
+
+        local manualNav, manualNavChanged = ImGui.Checkbox('Auto-Nav to Selected Target##manualAutoNav',
+            ctrl.manual_auto_nav == true)
+        if manualNavChanged then
+            ctrl.manual_auto_nav = manualNav
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Checked: Selecting a hostile NPC immediately navigates to it and engages.\nUnchecked: A selected NPC is only engaged once it is on XTarget or combat starts.')
         end
     end
 
@@ -16152,6 +16481,8 @@ end
 
 local function repositionCloser()
     if not isCombat() then return end
+    -- Manual mode with Stick off: the player owns movement.
+    if ctrl.mode == 'Manual' and ctrl.manual_stick == false then return end
     local tgt = mq.TLO.Target
     if not (tgt() and tgt.Type() == 'NPC' and not tgt.Dead()) then return end
     local tid = tgt.ID()
@@ -16196,6 +16527,8 @@ end
 
 local function handleCantHitFromHere()
     if not isCombat() then return end
+    -- Manual mode with Stick off: the player owns movement (and their target).
+    if ctrl.mode == 'Manual' and ctrl.manual_stick == false then return end
     local tgt = mq.TLO.Target
     if not (tgt() and (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and tgt.Type() ~= 'Corpse') then return end
     local tid = tgt.ID()
@@ -17840,6 +18173,24 @@ function runtime.processDowntimeBuffing()
     end
 end
 
+-- Manual mode movement policy. combatTick asks this whether to drive
+-- nav/stick toward the current hostile target:
+--   'move' -- close to / stick to it (moveToward)
+--   'hold' -- fight from wherever the player left the character; never move
+--   'wait' -- target is merely selected; do nothing until it engages
+-- `engaged` means the target is on XTarget or we are already in combat.
+-- `approaching` means an auto-nav approach to this target is still in flight
+-- (pursuit.id still points at it), which is allowed to finish even with stick
+-- off so a selected target is actually reached before we plant our feet.
+local function manualMovePolicy(engaged, approaching)
+    if engaged then
+        if ctrl.manual_stick ~= false then return 'move' end
+        if ctrl.manual_auto_nav and approaching then return 'move' end
+        return 'hold'
+    end
+    return ctrl.manual_auto_nav and 'move' or 'wait'
+end
+
 local function combatTick()
     local fullStop = runtime.fullStop
     local anyXtarAlive = runtime.anyXtarAlive
@@ -18097,6 +18448,9 @@ local function combatTick()
         end
     end
     local engage = false
+    -- Manual mode with Stick off: we are fighting from where the player put us,
+    -- so the approach timeout below must not mark the target unreachable.
+    local manualHold = false
 
     if ctrl.mode == 'Manual' then
         if haveNPC and isUnreachable(mq.TLO.Target.ID()) then
@@ -18124,9 +18478,20 @@ local function combatTick()
             else
                 local inCombatState = mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')
                 local isXtar = isXTargetId(id)
-                if isXtar or inCombatState then
+                local policy = manualMovePolicy(isXtar or inCombatState, pursuit.id == id)
+                if policy == 'move' then
                     if moveToward(id, desiredRange(id)) then
                         engage = true
+                    end
+                elseif policy == 'hold' then
+                    -- Engaged but Stick is off: cancel any leftover nav/stick and
+                    -- let the attack/cast logic work from the current spot.
+                    manualHold = true
+                    engage = true
+                    if isMoveActive() then
+                        stopMoving()
+                        pursuit.id = 0
+                        pursuit.lastNavTargetId = 0
                     end
                 end
             end
@@ -18535,7 +18900,7 @@ local function combatTick()
     -- If we have an active target but cannot get in striking range or establish LoS after 15s,
     -- mark it unreachable and switch to a different mob.
     local inCombatNow = mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')
-    if haveNPC and (ctrl.mode ~= 'Manual' or isXTargetId(mq.TLO.Target.ID() or 0) or inCombatNow) then
+    if haveNPC and not manualHold and (ctrl.mode ~= 'Manual' or isXTargetId(mq.TLO.Target.ID() or 0) or inCombatNow) then
         local tid = mq.TLO.Target.ID() or 0
         if tid > 0 then
             if pursuit.approachTargetId ~= tid then
@@ -19277,6 +19642,8 @@ local function triuneCommand(...)
         print('  \ag/ac chasedist [5-100]\ax - Set following distance to stay back from Main Assist')
         print('  \ag/ac selfdefense [on|off]\ax - Toggle Assist mode self-defense when attacked')
         print('  \ag/ac assistbehind [on|off]\ax - Toggle positioning behind NPC in Assist mode')
+        print('  \ag/ac manualstick [on|off]\ax - Manual mode: stick to the NPC being fought (off = you drive)')
+        print('  \ag/ac manualnav [on|off]\ax - Manual mode: auto-nav to a hostile NPC when you select it')
         print('  \ag/ac pausezone [on|off]\ax - Toggle automatic script pause when zoning (default: on)')
         print('  \ag/ac fov [50-150|on|off]\ax - Set camera FOV and toggle maintain on zone')
         print('  \ag/ac winpos [save|restore|reset]\ax - Save or restore window positions & layout')
@@ -19457,6 +19824,31 @@ local function triuneCommand(...)
             print(string.format('\ag[Triune]\ax Assist Self-Defense When Attacked: %s.',
                 ctrl.assist_self_defense and '\agENABLED\ax' or '\arDISABLED\ax'))
         end
+    elseif cmd == 'manualstick' or cmd == 'stick' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            ctrl.manual_stick = true
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            ctrl.manual_stick = false
+        else
+            ctrl.manual_stick = ctrl.manual_stick == false
+        end
+        if not ctrl.manual_stick and runtime.stopMoving then runtime.stopMoving() end
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Manual Mode Stick to Target: %s.',
+            ctrl.manual_stick and '\agENABLED\ax' or '\arDISABLED\ax (you drive; attacks/casts only when the NPC is in reach)'))
+    elseif cmd == 'manualnav' or cmd == 'autonav' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            ctrl.manual_auto_nav = true
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            ctrl.manual_auto_nav = false
+        else
+            ctrl.manual_auto_nav = not ctrl.manual_auto_nav
+        end
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Manual Mode Auto-Nav to Selected Target: %s.',
+            ctrl.manual_auto_nav and '\agENABLED\ax' or '\arDISABLED\ax'))
     elseif cmd == 'assistbehind' or cmd == 'behind' or cmd == 'posbehind' then
         local sub = args[2] and string.lower(args[2]) or ''
         if sub == 'on' or sub == '1' or sub == 'true' then
@@ -19738,7 +20130,7 @@ local function triuneCommand(...)
         return
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|map|inv|buffbot|net|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|map|inv|buffbot|net|btn|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 

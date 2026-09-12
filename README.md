@@ -47,7 +47,7 @@ Triune keeps things simple with **3 main combat modes**:
 
 | Mode | Best For | How It Works |
 |---|---|---|
-| **Manual** | When you want to drive | You control movement and pick where to go. Triune handles attacking, casting your 3-class loadout spells, using AAs/discs, and healing allies. When the fight is over, it will walk back to your camp if you have one set. |
+| **Manual** | When you want to drive | You control movement and pick where to go. Triune handles attacking, casting your 3-class loadout spells, using AAs/discs, and healing allies. When the fight is over, it will walk back to your camp if you have one set. Three checkboxes on the Control tab decide how much it moves for you: **Auto-Target Hostiles on XTarget** (pick up and switch between mobs on your XTarget list), **Stick to Target in Combat** (chase and stick to the NPC being fought — untick it to fight from wherever you stand; `/ac manualstick`), and **Auto-Nav to Selected Target** (walk to a hostile NPC the moment you select it; `/ac manualnav`, off by default). |
 | **Puller** | The group leader / puller | Automates finding and engaging mobs. Comes in two flavors:<br>• **`Camp`**: Runs out, tags a mob (with a spell, bow, melee hit, or pet), brings it back to camp, and tanks it there.<br>• **`Hunt`**: Roams around the zone, finds mobs, and kills them right where they stand. |
 | **Assist** | Box characters & helpers | Follows and assists your Main Assist (MA). Automatically positions behind the attacked NPC so only the MA tanks in front (toggleable via checkbox or `/ac assistbehind`). Comes in three flavors:<br>• **`Chase`**: Runs right behind the MA and attacks whatever the MA targets.<br>• **`Camp`**: Holds position at camp and only hits mobs that get brought into camp.<br>• **`Backline`**: For healers and casters — stays safely at range and never charges into melee. |
 
@@ -144,6 +144,7 @@ Triune features a plug-and-play plugin architecture designed to keep the core co
 - **Coroutine Fiber Execution ("Green Threads")**: Plugins run in their own dedicated coroutine fibers with custom tick intervals (e.g. 1.0s or 50ms) rather than firing every combat tick.
 - **Combat Latency Elimination**: Non-combat plugins automatically enter `Sleeping (Combat)` mode during active combat, preserving 100% of CPU cycles for combat logic.
 - **Crash Isolation**: Every plugin execution and render pass is wrapped in crash-containment guards. A faulty plugin displays an error tooltip and will never crash Triune or EverQuest.
+- **Safe Drop-Ins & Standalone Scripts**: only files that return a plugin table (an `id` or lifecycle hooks) are loaded as plugins. Any other runnable `.lua` file dropped into the folder (a standalone MQ script, a data file, anything without the plugin contract) gets a basic entry under **Settings -> Plugins -> Standalone Scripts** with **Run / Stop** buttons that launch it as its own `/lua run` process, completely independent of Triune, plus a **Re-check** button that loads it as a plugin once it conforms. A standalone script cannot start its own `mq.delay` loop on the core, register ImGui callbacks, or bind commands while being inspected. Files with syntax errors or a duplicate plugin id are listed under *Failed to load* with the reason and Retry / Dismiss buttons.
 - **Plugins Included**:
   - `hud_unitframes.lua`: Popout HUD for Player, Target, and Pet vitals (50ms throttled snapshots, stays live in combat).
   - `hud_group.lua`: Popout Group window with vitals bars, role badges, member pets, Invite/Disband, and click-to-target.
@@ -154,13 +155,14 @@ Triune features a plug-and-play plugin architecture designed to keep the core co
   - `spellbook.lua`: The Spellbook Browser (formerly the standalone `triune_spellbook.lua` script) - per-class spell database browser with scribed status, filters, spell info, and a mem-to-gem queue; `/ac spellbook` / `/ac book` toggle it.
   - `auto_accept.lua`: Automated group, trade, and expedition/DZ invite acceptance with group/guild rules and whitelisting; owns the **Auto-Accept** popout window (header button, `/ac autoaccept`).
   - `auto_aa.lua`: Priority-based AA spending (native AA window trainer or MQ2AAspend delegation with fallback), Fireworks cap spender and auto-summon; owns the **Auto AA** popout window (header button, `/ac aawin`) and the `/ac autoaa` commands.
-  - `floating_damage.lua`: Flashy animated floating damage numbers for critical hits, crippling blows, deadly strikes, and spell crits.
+  - `floating_damage.lua`: Flashy animated floating damage numbers for critical hits, crippling blows, deadly strikes, and spell crits - elastic impact pop, outlined text with a count-up number, BIG / HUGE / MASSIVE damage tiers with particle bursts, shockwave rings, rainbow shimmer, screen flash and shake, a combo streak counter with milestone shouts, and NEW RECORD! callouts; text scale, effects intensity and tier thresholds are adjustable in its settings panel.
   - `map.lua`: The 2D Map, Norrath Zone Atlas & NPC Tracker (formerly `triune_map.lua`) - camp / hunter anchor / waypoint / hazard overlays are mirrored from the live core config; `/ac map` / `/ac track` toggle it.
   - `dps.lua`: The DPS Parser (formerly `triune_dps.lua`) - parses combat chat into per-fight player / multi-pet breakdowns even while its window is hidden; `/dps` and `/ac dps` toggle it.
   - `inventory.lua`: The Inventory & Bank Manager (formerly `triune_inv.lua`) - bag moves, stack combines and sorts run in the plugin fiber through the cooperative `core.delay`; `/ac inv` toggles it.
   - `buffbot.lua`: The Buffbot Station (formerly `triune_buffbot.lua`) - off until switched on (`/ac buffbot on` or the window button), holds the combat loop while casting a buff job.
   - `cursor.lua`: The Cursor Item Manager (formerly `triune_cursor.lua`) - one `/autoinventory` per tick instead of a blocking loop; `/ac cursorui` toggles it.
   - `boxnet.lua`: The **Box Network** - communication between your boxed characters on the same computer over MacroQuest's native **Actors** API (no EQBC / DanNet needed): live peer roster with vitals, `/ac net <all|zone|group|Name> <command>` to run any `/ac` command on other boxes, Follow Me / Set Me as MA / Camp Here buttons, ping, an allowlist, and a `core.boxnet` message API for other plugins.
+  - `buttons.lua`: **Hot Buttons** - a Button Master-style replacement for EverQuest's hot button bars: a button library shared by every character, named sets shown as tabs, any number of hotbars per character, cooldown overlays (spell gem / AA / disc / ability / item / manual / custom Lua), one-click capture from whatever is on your cursor, drag-and-drop, Button Master share strings, and a one-click `ButtonMaster.lua` import; `/ac btn`, `/btn <n>`, `/btnexec` toggle and fire them.
 - **Writing a Plugin**: a plugin is a Lua file in `lua/tac/` that returns a table. Metadata fields: `id`, `name`, `version`, `author`, `description`, `defaultEnabled`, `tickInterval` (seconds), `runOutOfCombatOnly`, `hasThread`. Lifecycle hooks (all optional): `onInit(core)`, `onDestroy()`, `onTick()`, `onDrawUI()`, `onDrawSettings()`, `onCombatTick(targetId)`, `onZoned(zoneShortName)`, `onLoadoutSaved()`, `onSaveSettings()` -> table, `onLoadSettings(table)`. Combat-loop hooks: `wantsCombatHold()` -> true makes the combat loop stand still (used while the AA window is open); `onBetweenPulls()` -> return true to make the puller yield this tick. Command hooks: `onCommand(cmd, args)` -> return true if you handled `/ac <cmd>`, and `plugin.help = { 'line', ... }` adds lines to `/ac help`. Windows: declare `plugin.window = { label = 'Map', tooltip = '...', flag = 'show_map', headerButton = true, order = 20 }` (`flag` is the `ctrl.*` boolean that drives visibility, or give `isOpen()` / `setOpen(bool)` functions) and the core draws a highlighted toggle button for it on the main window header - the user picks which plugins get one in the Plugins tab's **Header** column (`headerButton` is the default), `order` sorts the buttons. The same declaration registers the window on Settings -> Windows (position save / restore / center, Show / Hide) automatically: optional `key` sets the position key used with `core.preBeginWindow(key)` (defaults to the plugin id), `lockFlag = 'my_lock'` (a `ctrl.*` boolean) or `getLock()` / `setLock(bool)` adds the Locked toggle, `desc` is the row tooltip, and `defaultPos = { x, y, w, h }` is used by *Reset to Defaults*. The `core` table passed to `onInit` exposes `mq`, `ImGui`, a **live** `ctrl` (always the current character's config), `loadout`, `runtime`, `DATA`, `VERSION`, `saveLoadout`, `colors`, and UI helpers (`pushTheme`/`popTheme`, `accent`, `setTooltip`, `preBeginWindow`/`postBeginWindow`, `drawStatusProgressBar`, `drawSpellIcon`, `getConColorRgb`, `resolveTargetOfTarget`, `getMultiPetList`, `getPetSpawnInfo`, `isSpawnAlive`, `addIgnore`, `parseDurationSec`, `fmtSec`, `idxOf`, `toggleTool`). `core.delay(ms, cond)` is a cooperative stand-in for `mq.delay` inside a plugin fiber (`hasThread = true`): it yields the fiber back to the main loop each tick until the time elapses or `cond()` is true, so a sequential workflow (casting, bag moves) never stalls the combat loop; never call `mq.delay` from a plugin. Store persistent options on `core.ctrl` so they save with the loadout.
 
 ---
@@ -173,6 +175,18 @@ Running two, three, or six characters on one computer? The **Box Network** plugi
 - **Trust & Safety**: By default any box connected to the same MacroQuest launcher is trusted; flip on **Only accept from the allowlist** and name the characters you box, or turn remote commands off entirely for a character. Nested `net` commands are refused on both ends so a command can never loop. Broadcasts echoed back by the launcher are dropped, and boxes on a different Triune protocol version are ignored with a one-time warning.
 - **Launcher Awareness**: If `MacroQuest.exe` is not running, sends come back `NoConnection` and the window says so; a roster that stays empty shows the same hint.
 - **For Plugin Authors**: `core.boxnet` exposes `peers()`, `peer(name)`, `command(scope, lines)`, `campHere(scope)`, `ping(name)`, `broadcast(kind, data)`, `send(name, kind, data, callback)` (an RPC when a callback is given), and `subscribe(kind, fn(data, sender, message))` -> unsubscribe function (`message:reply(status, payload)` answers an RPC). Payloads must be plain Lua values - MQ datatype objects cannot be serialized.
+
+---
+
+### 🔘 Hot Buttons: Button Master-Style Hotbars (Popout Windows)
+Miss Button Master? The **Hot Buttons** plugin (`tac/buttons.lua`) is a Triune-native version of Derple's [Button Master](https://github.com/DerpleDude/buttonmaster): custom hot button bars that replace EverQuest's built-in hotbars, running inside Triune with the Triune theme, the Window Layout manager, and Box Network sync - no second script to keep running.
+- **Shared Button Library & Sets**: Buttons (label, multi-line commands, icon, colours, cooldown timer) live in one file shared by every character (`config/triune_buttons.lua`). Named **sets** are sparse grids of up to 100 slots; each **hotbar** window shows one or more sets as tabs (or a single set in **Compact Mode**). Create as many hotbars per character as you like, each with its own button size (30-120 px), font scale, opacity, lock, hidden title bar, search box, and per-character or global window position.
+- **Add From Game Browser**: Right-click an empty slot -> **Add AAs... / Spell Gems... / Abilities... / Discs... / Items...** (or gear menu -> **Add From Game...**, or `/ac btn add [aa|gem|ability|disc|item]`) opens a searchable browser of what your character actually has: trained activatable AAs (`/alt act <id>` + AA timer), your spell gems (`/cast <gem>` + gem timer), trained skills (`/doability` + ability timer), disciplines (`/disc` + disc timer), and worn/bagged clickies (`/useitem` + item timer). One click creates the button with the right icon and cooldown and drops it in the slot (or the first free slot of the set, so you can keep clicking); the editor's **Fill From Game...** does the same into a button you're editing.
+- **Make a Button in One Click**: Left-click an empty slot with a spell gem, item, ability, discipline, AA, social, or command on your cursor and the editor opens pre-filled (`/cast <gem>`, `/useitem "Name"`, `/doability`, `/disc`, `/alt act`, or the social's command lines) with the matching icon and cooldown timer. Right-click a slot to assign any existing button, edit, duplicate, unassign, delete, or copy its share string; drag a button onto another slot (even on another hotbar) to swap them.
+- **Cooldown Overlays**: A dark sweep with a countdown covers each button while its timer runs - **Spell Gem**, **AA**, **Disc**, **Ability**, **Item** clicky, a manual **Seconds Timer** that starts when the button fires, or **Custom Lua** (remaining / total / active-toggle expressions). Labels and icons can be Lua too (`return string.format("HP %d%%", mq.TLO.Me.PctHPs())`), and each button has its own evaluation rate.
+- **Runs on the Plugin Fiber**: Clicks are queued and executed from the plugin tick, never from the render callback, so multi-line command buttons and `--lua` script buttons can `delay()` without stalling the combat loop.
+- **Button Master Compatible**: Share strings use Button Master's format - paste a friend's Button Master button or set straight into **Import Button or Set...**, and your exports work in Button Master. **Import Button Master Config** (Settings -> Plugins -> Hot Buttons, or `/ac btn import bm`) converts an existing `ButtonMaster.lua` - buttons, sets, and this character's windows - in one click. `/btn [n]`, `/btnexec "<set>" <index>`, and `/btncopy <server> <char>` keep working.
+- **Box Network Sync**: Saving on one box tells the other Triune boxes on the computer to reload the shared library, so a button edited on your tank shows up on your cleric.
 
 ---
 
@@ -248,7 +262,6 @@ Triune comes packed with handy companion tools (all in-process plugins in `lua/t
 | 👥 **Popout Group Window** | `/ac group` | Standalone popout group window replacing EQ's default group window with auto-scaling vitals, role & leader badges, pet tracking, offline/other-zone states, and right-click settings. |
 | ⚔️ **Popout XTarget Window** | `/ac xtar` | Standalone popout extended target window replacing EQ's default with auto-scaling health bars, current target highlight, ToT, aggro %, distance, LoS, and right-click settings. |
 | 🔮 **Popout Spell Gem Bar** | `/ac gems` | Standalone popout spell gem bar window replacing EQ's default with dual orientations (Vertical/Horizontal), Compact vs Full layouts, live recast overlays, casting progress, and right-click spell inspection. |
-| 🎛️ **Hot Buttons Toolbar** | `/lua run triune_buttons` | Standalone ImGui tabbed hot button toolbar (ButtonMaster-style) replacing EQ's default hotbars with tabs, icon animations, live cooldown overlays, 1-click button creation from cursor, and multi-line macro execution. |
 | 🗺️ **2D Map & Norrath Atlas** | `/ac map` | `map.lua` plugin: interactive 2D vector map, Norrath Zone Atlas & Travel Explorer, live NPC radar, Point of Interest locator, and Triune camp / waypoint / hazard overlays read straight from the live config. |
 | 🧙 **Spellbook Browser** | `/ac spellbook` | In-process plugin (`tac/spellbook.lua`) window: browse and search all spells across all 3 of your character's classes, filter by level or type, inspect them, and queue them to a gem with one click (memorized through the core's spellbook-aware trainer). |
 | 🖱️ **Cursor Manager** | `/ac cursorui` | `cursor.lua` plugin: displays what's on your cursor, auto-inventories or destroys it, optional continuous auto-clear, and a session history log (`/ac clearcursor` for a quick dump). |
@@ -258,6 +271,7 @@ Triune comes packed with handy companion tools (all in-process plugins in `lua/t
 | 📜 **Quest Guide & Lookup** | `/lua run triune_quest` | Standalone interactive quest guide and atlas across 32 expansions with live NPC radar, dialogue triggers, inventory scanner, Norrath Zone Directory, and global quest search. |
 | 🎒 **Inventory & Bank Manager** | `/ac inv` | `inventory.lua` plugin: universal inventory, worn equipment, bank, and shared bank search, container grid visualizer, stack consolidator, and offline bank cache persistence. |
 | 📡 **Box Network** | `/ac net` | `boxnet.lua` plugin: see and steer your other boxed characters on this computer over MacroQuest Actors - live vitals roster, `/ac net <scope> <command>` remote commands, Follow Me / Set Me as MA / Camp Here, ping, allowlist. |
+| 🔘 **Hot Buttons** | `/ac btn` | `buttons.lua` plugin: Button Master-style hot button bars - shared button library, tabbed sets, multiple hotbars per character, cooldown overlays, cursor capture, drag-and-drop, Button Master share strings and config import. |
 | 🤖 **LLM Test Harness & QA Agent** | `/lua run triune_test` | Standalone in-game testing harness interfacing with local LLMs (LM Studio) and cloud LLMs (Google Gemini, OpenCode) for autonomous QA testing via non-blocking bridge. |
 
 ---
@@ -293,6 +307,8 @@ You can control almost everything using simple in-game chat commands:
 | `/ac chasedist [5-100]` | `/ac chase`, `/ac followdist` | Configure following distance (how far to stay back) from Main Assist (default: 15) |
 | `/ac selfdefense [on\|off]` | `/ac assistdefend`, `/ac defend` | Toggle Assist mode self-defense when attacked while MA has no target |
 | `/ac assistbehind [on\|off]` | `/ac behind`, `/ac posbehind` | Toggle Assist mode positioning behind NPC in combat (default: on) |
+| `/ac manualstick [on\|off]` | `/ac stick` | Manual mode: stick to / chase the NPC being fought (default: on). Off = you drive; Triune only attacks/casts when the NPC is in reach |
+| `/ac manualnav [on\|off]` | `/ac autonav` | Manual mode: auto-navigate to a hostile NPC as soon as you select it (default: off) |
 | `/ac pullhp [0-95]` | `/ac minhp` | Set minimum HP % threshold before pausing pulling to rest until 100% |
 | `/ac pullcon [preset\|con]` | `/ac con`, `/ac confilter` | Configure faction filters (`hostile`, `indifferent`, `all`, `none`) or toggle single considerations |
 | `/ac wp [add\|clear\|del\|on\|off\|list]` | `/ac waypoint`, `/ac waypoints` | Manage waypoint patrol routes, arrival radius, and scan distance |
@@ -329,8 +345,15 @@ You can control almost everything using simple in-game chat commands:
 | `/ac net peers` | `/ac net list` | Print the roster of boxes with zone, mode, state, and vitals |
 | `/ac net ping <Name>` | | Round-trip ping to a box (also checks the MacroQuest launcher is routing) |
 | `/ac net camp [all\|zone\|group\|Name]` | `/ac net camphere` | Push your current location as the camp anchor to boxes in this zone |
+| `/ac btn` | `/ac buttons`, `/ac hotbar` | Toggle the Hot Buttons hotbars (Button Master-style) |
+| `/ac btn <n>` | `/btn <n>` | Show / hide hotbar n (`/btn` alone toggles all hotbars) |
+| `/ac btn new` | | Create another hotbar for this character |
+| `/ac btn add [aa\|gem\|ability\|disc\|item]` | `/ac btn browse` | Open the Add From Game browser on that tab (AAs, spell gems, skills, discs, clickies) |
+| `/ac btn exec <set> <index>` | `/btnexec "<set>" <index>` | Fire the button in slot `<index>` of set `<set>` |
+| `/ac btn import [bm]` | | Open the share-string importer, or import `config/ButtonMaster.lua` |
+| `/ac btn copy <server> <char>` | `/btncopy <server> <char>` | Copy another character's hotbars onto this one |
+| `/ac btn list` | | Print every set and its buttons to chat |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
-| `/lua run triune_buttons` | `/lua stop triune_buttons` | Launch or stop the standalone Hot Buttons toolbar |
 | `/lua run triune_quest` | `/lua stop triune_quest` | Launch or stop the standalone Triune Quest Guide window |
 | `/ac inv` | `/ac inventory`, `/ac bank` | Toggle the Inventory & Bank Manager window |
 | `/ac cursorui` | `/ac cursormgr` | Toggle the Cursor Item Manager window |
@@ -351,7 +374,6 @@ TriuneAutocombat/
 │   │   └── build_triune_quest.py # Quest database compilation script
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
-│   │   ├── triune_buttons.lua   # Standalone ImGui hot button toolbar
 │   │   ├── triune_quest.lua     # Standalone Quest Guide, radar & dialogue assistant
 │   │   ├── triune_test.lua      # Standalone In-Game LLM Test Harness & QA Agent
 │   │   └── tac/                 # Modular plugin directory (lua/tac/*.lua)
@@ -370,7 +392,8 @@ TriuneAutocombat/
 │   │       ├── inventory.lua    # Inventory & Bank manager plugin (/ac inv)
 │   │       ├── buffbot.lua      # Tell-driven buffbot station plugin (/ac buffbot)
 │   │       ├── cursor.lua       # Cursor item manager plugin (/ac cursorui)
-│   │       └── boxnet.lua       # Box Network plugin: MQ Actors inter-box comms (/ac net)
+│   │       ├── boxnet.lua       # Box Network plugin: MQ Actors inter-box comms (/ac net)
+│   │       └── buttons.lua      # Hot Buttons plugin: Button Master-style hotbars (/ac btn)
 │   ├── config/
 │   │   └── triune_data.lua      # Era-correct spell and ability database
 │   └── resources/

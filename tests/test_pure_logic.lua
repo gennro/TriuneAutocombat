@@ -9184,7 +9184,7 @@ do
     -- 3. Verify two-line header toolbar and compact button height
     assert_true(triuneContent:find("ImGuiStyleVar%.FramePadding,%s*5,%s*2") ~= nil,
         'Suite 78: Header toolbar buttons have compact FramePadding (5, 2)')
-    assert_true(triuneContent:find("runtime.pluginManager.drawHeaderButtons()", 1, true) ~= nil,
+    assert_true(triuneContent:find("runtime.pluginManager.drawHeaderButtons(1)", 1, true) ~= nil,
         'Suite 78: Toolbar draws plugin window buttons through the plugin manager')
     assert_true(readFile('TAC/lua/tac/hud_xtarget.lua'):find("flag = 'show_xtarget_window'", 1, true) ~= nil,
         'Suite 78: hud_xtarget declares its header window button (drawn by pm.drawHeaderButtons)')
@@ -9840,6 +9840,99 @@ do
     assert_true(type(pFD.onTick) == 'function', 'Suite 86: floating_damage provides onTick hook')
     assert_true(type(pFD.onDrawUI) == 'function', 'Suite 86: floating_damage provides onDrawUI hook')
 
+    -- 2b. Drive the real spawn / render path: events fire floaters, tiers and
+    --     combo bookkeeping work, and a full draw pass survives a mock draw list.
+    do
+        local fdHandlers = {}
+        local fdMq = {
+            event = function(name, _, fn) fdHandlers[name] = fn end,
+            unevent = function() end,
+        }
+        local drawCalls = { text = 0, circle = 0, circleFilled = 0, rect = 0 }
+        local fdDrawList = {
+            AddText = function() drawCalls.text = drawCalls.text + 1 end,
+            AddCircle = function() drawCalls.circle = drawCalls.circle + 1 end,
+            AddCircleFilled = function() drawCalls.circleFilled = drawCalls.circleFilled + 1 end,
+            AddRectFilled = function() drawCalls.rect = drawCalls.rect + 1 end,
+        }
+        local fdImGui = setmetatable({
+            GetIO = function() return { DisplaySize = { x = 1920, y = 1080 } } end,
+            Begin = function() return true, true end,
+            GetWindowDrawList = function() return fdDrawList end,
+            CalcTextSize = function(txt) return #txt * 7, 13 end,
+            GetFontSize = function() return 13 end,
+            GetColorU32 = function() return 0 end,
+            Checkbox = function(_, v) return v end,
+            SliderFloat = function(_, v) return v end,
+            Button = function() return false end,
+            IsItemHovered = function() return false end,
+        }, { __index = function() return function() end end })
+        local fdCtrl = {}
+        local fdSaves = 0
+        pFD.onInit({ ctrl = fdCtrl, mq = fdMq, ImGui = fdImGui, colors = {}, saveLoadout = function() fdSaves = fdSaves + 1 end })
+        assert_eq(fdCtrl.show_crit_floaters, true, 'Suite 86: floating_damage seeds show_crit_floaters')
+        for _, n in ipairs({ 'TacCritHit', 'TacCripBlow', 'TacDeadlyStrike', 'TacSlayUndead', 'TacFinishBlow', 'TacAssassinate', 'TacHeadshot', 'TacFlurry', 'TacSpellCrit', 'TacHealCrit', 'TacDotCrit' }) do
+            assert_true(type(fdHandlers[n]) == 'function', 'Suite 86: floating_damage registers ' .. n)
+        end
+
+        -- Settings round-trip with clamping
+        pFD.onLoadSettings({ textScale = 9, intensity = -1, tierScale = 0.5, comboCounter = true, screenFlash = false, screenShake = true })
+        local saved = pFD.onSaveSettings()
+        assert_eq(saved.textScale, 2.0, 'Suite 86: floating_damage clamps textScale')
+        assert_eq(saved.intensity, 0.0, 'Suite 86: floating_damage clamps intensity')
+        assert_eq(saved.tierScale, 0.5, 'Suite 86: floating_damage keeps tierScale')
+        assert_eq(saved.screenFlash, false, 'Suite 86: floating_damage keeps screenFlash')
+        pFD.onLoadSettings({ textScale = 1.0, intensity = 1.0, tierScale = 1.0, screenFlash = true })
+
+        local enumNames = { 'ImGuiCond', 'ImGuiWindowFlags' }
+        local savedEnums = {}
+        for _, n in ipairs(enumNames) do
+            savedEnums[n] = rawget(_G, n)
+            rawset(_G, n, setmetatable({}, { __index = function() return 0 end }))
+        end
+        local savedVec, savedBit, savedCol = rawget(_G, 'ImVec2'), rawget(_G, 'bit'), rawget(_G, 'IM_COL32')
+        rawset(_G, 'ImVec2', function(x, y) return { x = x, y = y } end)
+        if not savedBit then rawset(_G, 'bit', { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end }) end
+        rawset(_G, 'IM_COL32', function(r, g, b, a) return r + g * 256 + b * 65536 + a * 16777216 end)
+
+        -- Nothing to draw: the overlay window is never opened
+        local begun = 0
+        fdImGui.Begin = function() begun = begun + 1 return true, true end
+        pFD.onDrawUI()
+        assert_eq(begun, 0, 'Suite 86: floating_damage skips the overlay when idle')
+
+        -- A crit, a bigger crit (record), and a massive spell crit (particles + rings + flash)
+        fdHandlers.TacCritHit('You score a critical hit! (420)', '420')
+        fdHandlers.TacCritHit('You score a critical hit! (1450)', '1450')
+        fdHandlers.TacSpellCrit('Bob hit a mob for 12450 points of non-melee damage. (Critical blast!) (12450)', '12450')
+        fdHandlers.TacHealCrit('You perform an exceptional heal! (3000)', '3000')
+        fdHandlers.TacAssassinate('You assassinate a rat!')
+        pFD.onDrawUI()
+        assert_eq(begun, 1, 'Suite 86: floating_damage opens the overlay once floaters exist')
+        assert_true(drawCalls.text > 0, 'Suite 86: floating_damage draws text')
+        assert_true(drawCalls.circleFilled > 0, 'Suite 86: floating_damage draws particle sparks for big hits')
+        assert_true(drawCalls.circle > 0, 'Suite 86: floating_damage draws shockwave rings for huge hits')
+        assert_true(drawCalls.rect > 0, 'Suite 86: floating_damage draws the screen flash / combo bar')
+
+        -- Combo + record state is visible through the settings panel; disabled toggle hides everything
+        pFD.onDrawSettings()
+        fdCtrl.show_crit_floaters = false
+        begun = 0
+        pFD.onDrawUI()
+        assert_eq(begun, 0, 'Suite 86: floating_damage honors show_crit_floaters=false at draw time')
+        fdCtrl.show_crit_floaters = true
+        pFD.onTick()
+        pFD.onDestroy()
+        begun = 0
+        pFD.onDrawUI()
+        assert_eq(begun, 0, 'Suite 86: floating_damage onDestroy clears floaters and effects')
+
+        for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
+        rawset(_G, 'ImVec2', savedVec)
+        rawset(_G, 'IM_COL32', savedCol)
+        if not savedBit then rawset(_G, 'bit', nil) end
+    end
+
     -- 3. Functional simulation of Plugin Manager discovery & fiber runner
     local pm = {
         plugins = {},
@@ -10127,6 +10220,7 @@ do
         { file = 'inventory',       id = 'inventory' },
         { file = 'map',             id = 'map' },
         { file = 'boxnet',          id = 'boxnet' },
+        { file = 'buttons',         id = 'buttons' },
     }
     for _, sp in ipairs(shipped) do
         local fn = assert(loadfile('TAC/lua/tac/' .. sp.file .. '.lua'))
@@ -10225,7 +10319,7 @@ do
     initPM()
     local pm = rt.pluginManager
     assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
-    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'cursor', 'dps', 'floating_damage', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
+    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'cursor', 'dps', 'floating_damage', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
     for _, id in ipairs(expected) do
         local p = pm.plugins[id]
         assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
@@ -10789,22 +10883,22 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 15, 'Suite 89: fifteen shipped plugins own a window')
+        assert_eq(#W.all, 16, 'Suite 89: sixteen shipped plugins own a window')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
         W.hdr = pm.windowPlugins(true)
-        assert_eq(#W.hdr, 14, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net (buffbot off)')
+        assert_eq(#W.hdr, 15, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net + Buttons (buffbot off)')
         assert_eq(pm.headerButtonEnabled('buffbot'), false, 'Suite 89: buffbot header button off by default')
         assert_eq(pm.headerButtonEnabled('hud_group'), true, 'Suite 89: hud_group header button on by default')
         assert_eq(pm.headerButtonEnabled('floating_damage'), false, 'Suite 89: no header button for plugins without a window')
         pm.setHeaderButton('buffbot', true)
         assert_eq(W.ctrl.plugins.buffbot.headerButton, true, 'Suite 89: header button preference persisted to ctrl.plugins')
-        assert_eq(#pm.windowPlugins(true), 15, 'Suite 89: enabling the preference adds the button')
+        assert_eq(#pm.windowPlugins(true), 16, 'Suite 89: enabling the preference adds the button')
         assert_true(W.saves >= 1, 'Suite 89: header button preference triggers a loadout save')
         pm.setHeaderButton('hud_group', false)
         assert_eq(pm.headerButtonEnabled('hud_group'), false, 'Suite 89: saved preference overrides the plugin default')
-        assert_eq(#pm.windowPlugins(true), 14, 'Suite 89: disabling the preference removes the button')
+        assert_eq(#pm.windowPlugins(true), 15, 'Suite 89: disabling the preference removes the button')
 
         -- open / close through the manager writes the ctrl flag
         assert_eq(pm.isWindowOpen('map'), false, 'Suite 89: map window closed initially')
@@ -10825,17 +10919,44 @@ do
 
         -- header renderer: one button per enabled header plugin, clicks toggle
         mockImGui.Button = function(label) return W.clickLabel ~= nil and label:find(W.clickLabel, 1, true) ~= nil end
-        assert_eq(pm.drawHeaderButtons(), 14, 'Suite 89: drawHeaderButtons draws one button per header plugin')
+        assert_eq(pm.drawHeaderButtons(), 15, 'Suite 89: drawHeaderButtons draws one button per header plugin')
         W.clickLabel = 'Map##hdrPlg_map'
         pm.drawHeaderButtons()
         assert_eq(W.ctrl.show_map, true, 'Suite 89: clicking the header button opens the plugin window')
         W.clickLabel = nil
         mockImGui.Button = function() return false end
+
+        -- Rows hold at most 8 buttons: SameLine is skipped when a row is full
+        W.sameLines = 0
+        mockImGui.SameLine = function() W.sameLines = W.sameLines + 1 end
+        assert_eq(pm.HEADER_BUTTONS_PER_ROW, 8, 'Suite 89: header rows are capped at 8 buttons')
+        -- Expected SameLine calls = buttons - row starts, where a button at absolute
+        -- slot k (Compact Mode = slot 1) starts a row when (k-1) % perRow == 0.
+        W.expectSameLines = function(n, start, perRow)
+            local rowStarts = 0
+            for k = start + 1, start + n do
+                if (k - 1) % perRow == 0 then rowStarts = rowStarts + 1 end
+            end
+            return n - rowStarts
+        end
+        W.sameLines = 0
+        W.n = pm.drawHeaderButtons(1)
+        assert_true(W.n >= 9, 'Suite 89: enough header buttons to need a second row')
+        assert_eq(W.sameLines, W.expectSameLines(W.n, 1, 8), 'Suite 89: with Compact Mode in slot 1, 7 buttons join row 1 and the 8th starts row 2')
+        W.sameLines = 0
+        pm.drawHeaderButtons(0)
+        assert_eq(W.sameLines, W.expectSameLines(W.n, 0, 8), 'Suite 89: from an empty row, buttons 1-8 fill row 1 and button 9 starts row 2')
+        pm.HEADER_BUTTONS_PER_ROW = 4
+        W.sameLines = 0
+        pm.drawHeaderButtons(0)
+        assert_eq(W.sameLines, W.expectSameLines(W.n, 0, 4), 'Suite 89: per-row cap is honoured (rows of 4)')
+        pm.HEADER_BUTTONS_PER_ROW = 8
+        mockImGui.SameLine = nil
         pm.disablePlugin('map')
-        assert_eq(pm.drawHeaderButtons(), 13, 'Suite 89: disabled plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 14, 'Suite 89: disabled plugins get no header button')
         pm.enablePlugin('map')
         pm.plugins.map.status = 'Error'
-        assert_eq(pm.drawHeaderButtons(), 13, 'Suite 89: errored plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 14, 'Suite 89: errored plugins get no header button')
         pm.plugins.map.status = 'Active'
 
         -- collectSettings persists the effective header preference for window plugins
@@ -10844,7 +10965,7 @@ do
         assert_eq(W.ctrl.plugins.floating_damage.headerButton, nil, 'Suite 89: collectSettings leaves non-window plugins alone')
 
         -- core header bar is driven by the manager now
-        assert_true(src:find('runtime.pluginManager.drawHeaderButtons()', 1, true) ~= nil, 'Suite 89: header bar calls pm.drawHeaderButtons')
+        assert_true(src:find('runtime.pluginManager.drawHeaderButtons(1)', 1, true) ~= nil, 'Suite 89: header bar calls pm.drawHeaderButtons')
         for _, gone in ipairs({ "'Map##hdrMap'", "'DPS Parser##hdrDPS'", "'Cursor Manager##hdrCursor'", "'Inv Manager##hdrInv'", "'Open Spellbook##hdrBook'", "'Gems##hdrGems'", "'XTarget##hdrXTarget'" }) do
             assert_true(src:find(gone, 1, true) == nil, 'Suite 89: hardcoded header button removed: ' .. gone)
         end
@@ -11438,6 +11559,242 @@ do
     assert_true(src:find("{ when = 'has Disease',", 1, true) ~= nil, 'Suite 93: help table documents has Disease')
 end
 
+-- ============================================================================
+-- Suite 94: Manual mode Stick / Auto-Nav options
+-- ============================================================================
+do
+    print('--- Suite 94: Manual mode Stick / Auto-Nav options ---')
+
+    local ctrl = {}
+    local manualMovePolicy = loadFunc(src, 'manualMovePolicy', { ctrl = ctrl })
+
+    -- A. Defaults (stick on, auto-nav off) reproduce the classic behaviour
+    ctrl.manual_stick, ctrl.manual_auto_nav = nil, nil
+    assert_eq(manualMovePolicy(true, false), 'move', 'Suite 94: default engaged -> move')
+    assert_eq(manualMovePolicy(false, false), 'wait', 'Suite 94: default selected-only -> wait')
+
+    -- B. Stick off: engaged target is fought from where the player stands
+    ctrl.manual_stick, ctrl.manual_auto_nav = false, false
+    assert_eq(manualMovePolicy(true, false), 'hold', 'Suite 94: stick off + engaged -> hold')
+    assert_eq(manualMovePolicy(false, false), 'wait', 'Suite 94: stick off + selected-only -> wait')
+
+    -- C. Auto-nav on: a merely selected hostile is approached
+    ctrl.manual_stick, ctrl.manual_auto_nav = true, true
+    assert_eq(manualMovePolicy(false, false), 'move', 'Suite 94: auto-nav on + selected-only -> move')
+    assert_eq(manualMovePolicy(true, false), 'move', 'Suite 94: auto-nav on + stick on + engaged -> move')
+
+    -- D. Auto-nav on, stick off: the approach finishes, then we hold
+    ctrl.manual_stick, ctrl.manual_auto_nav = false, true
+    assert_eq(manualMovePolicy(false, false), 'move', 'Suite 94: auto-nav on + stick off: approach a selected target')
+    assert_eq(manualMovePolicy(true, true), 'move', 'Suite 94: auto-nav on + stick off: in-flight approach finishes after engage')
+    assert_eq(manualMovePolicy(true, false), 'hold', 'Suite 94: auto-nav on + stick off: hold once the approach is done')
+
+    -- E. Defaults and wiring
+    assert_true(src:find("manual_stick%s*=%s*true,") ~= nil, 'Suite 94: manual_stick defaults to true')
+    assert_true(src:find("manual_auto_nav%s*=%s*false,") ~= nil, 'Suite 94: manual_auto_nav defaults to false')
+    assert_true(src:find("manualMovePolicy(isXtar or inCombatState, pursuit.id == id)", 1, true) ~= nil, 'Suite 94: combatTick consults the policy')
+    assert_true(src:find("if haveNPC and not manualHold and (ctrl.mode ~= 'Manual'", 1, true) ~= nil, 'Suite 94: approach timeout skipped while holding')
+    assert_true(src:find("Stick to Target in Combat##manualStick", 1, true) ~= nil, 'Suite 94: Stick checkbox on the Control tab')
+    assert_true(src:find("Auto-Nav to Selected Target##manualAutoNav", 1, true) ~= nil, 'Suite 94: Auto-Nav checkbox on the Control tab')
+    assert_true(src:find("cmd == 'manualstick'", 1, true) ~= nil, 'Suite 94: /ac manualstick command')
+    assert_true(src:find("cmd == 'manualnav'", 1, true) ~= nil, 'Suite 94: /ac manualnav command')
+    assert_eq(select(2, src:gsub("if ctrl%.mode == 'Manual' and ctrl%.manual_stick == false then return end", '')), 2,
+        'Suite 94: too-far / cannot-hit repositioning stays out of the way with stick off')
+end
+
+
+-- ============================================================================
+-- Suite 92: Random files dropped into the plugin folder are rejected safely
+-- ============================================================================
+do
+    print('--- Suite 92: Non-plugin files in lua/tac ---')
+    local S = { printed = {}, junkDir = (os.getenv('TMPDIR') or '/tmp') .. '/triune_junk_plugins' }
+    local quietPrint = function(...) S.printed[#S.printed + 1] = table.concat({ ... }, ' ') end
+    local noop = function() end
+    os.execute('mkdir -p "' .. S.junkDir .. '"')
+    local function writeJunk(name, body)
+        local f = assert(io.open(S.junkDir .. '/' .. name, 'w'))
+        f:write(body)
+        f:close()
+        return S.junkDir .. '/' .. name
+    end
+    S.delays = 0
+    S.imguiInits = 0
+    S.binds = 0
+    local mockMq = {
+        event = noop, unevent = noop, cmd = noop, cmdf = noop, unbind = noop,
+        bind = function() S.binds = S.binds + 1 end,
+        delay = function() S.delays = S.delays + 1 if S.delays > 5 then error('main loop would hang') end end,
+        doevents = noop,
+        gettime = function() return 0 end,
+        imgui = { init = function() S.imguiInits = S.imguiInits + 1 end },
+        TLO = {
+            Me = { Combat = function() return false end, CombatState = function() return 'ACTIVE' end, CleanName = function() return 'T' end },
+            EverQuest = { Server = function() return 'S' end },
+            Target = { ID = function() return 0 end },
+            Window = function() return { Open = function() return false end } end,
+            Spawn = function() return setmetatable({}, { __call = function() return false end }) end,
+        },
+    }
+    package.loaded['mq'] = mockMq
+    local env = {
+        ctrl = { plugins = {} }, mq = mockMq,
+        ImGui = setmetatable({ Button = function() return false end, SmallButton = function() return false end, Checkbox = function(_, v) return v end, IsItemHovered = function() return false end, BeginTable = function() return false end }, { __index = function() return noop end }),
+        UI = { accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop,
+               drawStatusProgressBar = noop, drawSpellIcon = function() return false end,
+               getConColorRgb = function() return { 1, 1, 1, 1 } end, resolveTargetOfTarget = function() return nil end },
+        VERSION = '2.15', DATA = {}, loadout = {}, scriptDir = './',
+        GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
+        saveLoadout = noop, print = quietPrint,
+        idxOf = function() return 0 end, fmtSec = tostring, parseDurationSec = function() return 0 end,
+        cleanSpellName = tostring, normalizeSpellName = tostring,
+    }
+    local initPM = loadFunc(src, 'initPluginManager', env)
+    local rt = debug.getfenv(initPM).runtime
+    rt.saveLoadout = noop
+    initPM()
+    local pm = rt.pluginManager
+    S.shipped = #pm.pluginOrder
+    assert_eq(S.shipped, 17, 'Suite 92: all shipped plugins still load under the load-time guards')
+    assert_eq(next(pm.loadErrors), nil, 'Suite 92: shipped plugins produce no load errors')
+
+    -- 1. A standalone MQ script: its main loop must never run on the core
+    S.delays = 0
+    S.binds = 0 -- (dps bound /dps in its onInit above; that is the legitimate path)
+    S.path = writeJunk('standalone_script.lua', "local mq = require('mq')\nmq.imgui.init('Junk', function() end)\nmq.bind('/junk', function() end)\nwhile true do mq.delay(50) end\n")
+    S.ok, S.err = pm.loadPlugin('standalone_script.lua', S.path)
+    assert_eq(S.ok, false, 'Suite 92: standalone script is not loaded as a plugin')
+    assert_true(tostring(S.err):find('standalone script', 1, true) ~= nil, 'Suite 92: reason explains it is a standalone script')
+    assert_eq(S.imguiInits, 0, 'Suite 92: no ImGui callback leaked from the script')
+    assert_eq(S.binds, 0, 'Suite 92: no /bind leaked from the script')
+    assert_eq(S.delays, 0, 'Suite 92: the script main loop never ran (mq.delay guarded)')
+    assert_true(pm.scripts['standalone_script.lua'] ~= nil, 'Suite 92: standalone script gets a Standalone Scripts entry')
+    assert_eq(pm.loadErrors['standalone_script.lua'], nil, 'Suite 92: a runnable script is not listed as a load failure')
+    assert_eq(pm.scripts['standalone_script.lua'].runName, 'triune_junk_plugins/standalone_script', 'Suite 92: run name is <folder>/<file> when the folder is outside mq.luaDir')
+    assert_eq(mockMq.delay ~= nil and S.delays, 0, 'Suite 92: guards restored mq.delay afterwards')
+    mockMq.delay(1)
+    assert_eq(S.delays, 1, 'Suite 92: original mq.delay restored after the load attempt')
+
+    -- 1b. A script that calls mq.exit while loading cannot kill Triune's script
+    S.exits = 0
+    mockMq.exit = function() S.exits = S.exits + 1 end
+    S.path = writeJunk('exits_at_load.lua', "local mq = require('mq')\nmq.exit()\n")
+    S.ok, S.err = pm.loadPlugin('exits_at_load.lua', S.path)
+    assert_eq(S.ok, false, 'Suite 92: mq.exit at load is not a plugin')
+    assert_eq(S.exits, 0, 'Suite 92: mq.exit guarded while the file is inspected')
+    assert_true(tostring(S.err):find('mq.exit', 1, true) ~= nil, 'Suite 92: reason names mq.exit')
+    mockMq.exit(); assert_eq(S.exits, 1, 'Suite 92: original mq.exit restored afterwards')
+    pm.scripts['exits_at_load.lua'] = nil
+
+    -- 1c. UI-triggered lifecycle work is queued and runs from pm.tick (main coroutine), never in the render callback
+    S.ran = {}
+    pm.defer('op A', function() S.ran[#S.ran + 1] = 'A' end)
+    pm.defer('op B', function() error('boom') end)
+    pm.defer('op C', function() S.ran[#S.ran + 1] = 'C' end)
+    assert_eq(pm.hasDeferred(), true, 'Suite 92: deferred ops are queued, not run immediately')
+    assert_eq(#S.ran, 0, 'Suite 92: nothing ran at enqueue time')
+    pm.tick()
+    assert_eq(table.concat(S.ran, ','), 'A,C', 'Suite 92: pm.tick drains the queue in order and survives a failing op')
+    assert_eq(pm.hasDeferred(), false, 'Suite 92: queue empty after the tick')
+    for _, direct in ipairs({ "btnRescanPlugins', 170, 24) then\n        pm.discover()", "btnReloadAllPlugins', 110, 24) then\n        pm.reloadAll()", "                pm.loadPlugin(entry.file, entry.info.fullPath)\n", "                    pm.loadPlugin(entry.file, entry.fullPath)\n" }) do
+        assert_true(src:find(direct, 1, true) == nil, 'Suite 92: Plugins page does not run plugin code directly from the render callback: ' .. direct:gsub('%s+', ' '))
+    end
+    for _, queued in ipairs({ "pm.defer('rescan plugins folder', pm.discover)", "pm.defer('reload all plugins', pm.reloadAll)", "pm.defer('retry ' .. entry.file", "pm.defer('re-check ' .. entry.file", "pm.defer((newEn and 'enable ' or 'disable ') .. id" }) do
+        assert_true(src:find(queued, 1, true) ~= nil, 'Suite 92: Plugins page queues ' .. queued)
+    end
+    assert_true(src:find('function pm.tick()\n        pm.runDeferred()', 1, true) ~= nil, 'Suite 92: pm.tick drains deferred ops first')
+
+    -- 2. A plain data table is not a plugin
+    S.path = writeJunk('data_file.lua', "return { ['Some Spell'] = { level = 5 } }\n")
+    S.ok, S.err = pm.loadPlugin('data_file.lua', S.path)
+    assert_eq(S.ok, false, 'Suite 92: data file is not loaded as a plugin')
+    assert_true(tostring(S.err):find('no `id` and none of the plugin hooks', 1, true) ~= nil, 'Suite 92: data file reason names the contract')
+    assert_eq(pm.plugins.data_file, nil, 'Suite 92: data file not registered as a plugin')
+    assert_true(pm.scripts['data_file.lua'] ~= nil, 'Suite 92: data file listed as a standalone script entry')
+
+    -- 3. Syntax error and non-table return
+    S.path = writeJunk('broken.lua', 'local x = = 1\n')
+    S.ok, S.err = pm.loadPlugin('broken.lua', S.path)
+    assert_true(S.ok == false and tostring(S.err):find('Syntax error', 1, true) ~= nil, 'Suite 92: syntax error rejected and reported')
+    assert_true(pm.loadErrors['broken.lua'] ~= nil and pm.scripts['broken.lua'] == nil, 'Suite 92: a file with a syntax error is a load failure, not a runnable script')
+    S.path = writeJunk('returns_number.lua', 'return 42\n')
+    S.ok, S.err = pm.loadPlugin('returns_number.lua', S.path)
+    assert_true(S.ok == false and tostring(S.err):find('returns number', 1, true) ~= nil, 'Suite 92: non-table return becomes a script entry with a reason')
+    assert_true(pm.scripts['returns_number.lua'] ~= nil, 'Suite 92: non-table return listed as a standalone script')
+
+    -- 4. Duplicate id cannot hijack a loaded plugin
+    S.path = writeJunk('dup_id.lua', "return { id = 'map', name = 'Impostor', onInit = function() end }\n")
+    S.ok, S.err = pm.loadPlugin('dup_id.lua', S.path)
+    assert_eq(S.ok, false, 'Suite 92: duplicate id rejected')
+    assert_true(tostring(S.err):find('already registered by map.lua', 1, true) ~= nil, 'Suite 92: duplicate id names the owning file')
+    assert_eq(pm.plugins.map.name, 'Map & NPC Tracker', 'Suite 92: real map plugin untouched by the impostor')
+    assert_true(pm.loadErrors['dup_id.lua'] ~= nil and pm.scripts['dup_id.lua'] == nil, 'Suite 92: duplicate id is a load failure, not a runnable script')
+    assert_eq(#pm.pluginOrder, S.shipped, 'Suite 92: nothing junk got registered')
+
+    -- Run / Stop drive the script through /lua run|stop, status comes from the Lua TLO
+    S.cmds = {}
+    mockMq.cmd = function(c) S.cmds[#S.cmds + 1] = c end
+    S.running = false
+    mockMq.TLO.Lua = { Script = function(name) S.lastLookup = name return setmetatable({ Status = function() return S.running and 'RUNNING' or 'STOPPED' end }, { __call = function() return true end }) end }
+    S.entry = pm.scripts['standalone_script.lua']
+    assert_eq(pm.isScriptRunning(S.entry), false, 'Suite 92: script reported stopped')
+    assert_eq(pm.toggleScript(S.entry), 'started', 'Suite 92: Run starts the script')
+    assert_eq(S.cmds[#S.cmds], '/lua run triune_junk_plugins/standalone_script', 'Suite 92: Run issues /lua run with the folder-relative name')
+    assert_eq(S.lastLookup, 'triune_junk_plugins/standalone_script', 'Suite 92: status looked up under the same run name')
+    S.running = true
+    assert_eq(pm.isScriptRunning(S.entry), true, 'Suite 92: script reported running')
+    assert_eq(pm.toggleScript(S.entry), 'stopped', 'Suite 92: Stop stops a running script')
+    assert_eq(S.cmds[#S.cmds], '/lua stop triune_junk_plugins/standalone_script', 'Suite 92: Stop issues /lua stop')
+    mockMq.cmd = noop
+    -- run names resolve relative to mq.luaDir when the folder lives under it
+    mockMq.luaDir = '/mq/lua'
+    assert_eq(pm.scriptRunName('/mq/lua/tac/foo.lua'), 'tac/foo', 'Suite 92: run name relative to mq.luaDir')
+    assert_eq(pm.scriptRunName('C:\\MQ\\lua\\tac\\bar.lua'), 'tac/bar', 'Suite 92: run name strips the drive path outside luaDir (folder/file)')
+    mockMq.luaDir = nil
+
+    -- 5. A minimal valid plugin still loads (hooks only, no id -> filename id), and clears its error entry
+    S.path = writeJunk('minimal_ok.lua', "return { onTick = function() end }\n")
+    pm.loadErrors['minimal_ok.lua'] = { msg = 'stale', fullPath = S.path }
+    S.ok = pm.loadPlugin('minimal_ok.lua', S.path)
+    assert_eq(S.ok, true, 'Suite 92: hook-only plugin table is accepted')
+    assert_eq(pm.plugins.minimal_ok and pm.plugins.minimal_ok.status, 'Active', 'Suite 92: minimal plugin registered under its filename id')
+    assert_eq(pm.loadErrors['minimal_ok.lua'], nil, 'Suite 92: successful load clears the failure entry')
+    S.count = 0
+    for _ in pairs(pm.loadErrors) do S.count = S.count + 1 end
+    assert_eq(S.count, 2, 'Suite 92: two genuinely broken files listed as load failures')
+    S.count = 0
+    for _ in pairs(pm.scripts) do S.count = S.count + 1 end
+    assert_eq(S.count, 3, 'Suite 92: three runnable non-plugin files listed as standalone scripts')
+
+    -- 6. Re-check promotes a script entry to a plugin once it conforms
+    S.path = writeJunk('data_file.lua', "return { id = 'data_file', onTick = function() end }\n")
+    S.ok = pm.loadPlugin('data_file.lua', S.path)
+    assert_eq(S.ok, true, 'Suite 92: Re-check loads the file once it returns a plugin table')
+    assert_eq(pm.scripts['data_file.lua'], nil, 'Suite 92: promoted file leaves the Standalone Scripts list')
+    assert_eq(pm.plugins.data_file and pm.plugins.data_file.status, 'Active', 'Suite 92: promoted file is an active plugin')
+
+    -- 7. Rescans do not re-execute known scripts; the Plugins page lists both sections; reloadAll clears them
+    S.delays = 0
+    S.imguiInits = 0
+    pm.dirPath = S.junkDir
+    pm.discover()
+    assert_eq(S.imguiInits, 0, 'Suite 92: rescan does not re-run a known standalone script chunk')
+    assert_true(pm.scripts['standalone_script.lua'] ~= nil, 'Suite 92: known script entry survives a rescan')
+    assert_true(src:find("'| Standalone scripts: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the standalone script count')
+    assert_true(src:find("ImGui.BeginTable('TriuneScriptsTable', 4, sFlags)", 1, true) ~= nil, 'Suite 92: Plugins page has the Standalone Scripts table')
+    assert_true(src:find("'| Failed to load: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the failed-file count')
+    assert_true(src:find('Files in the plugin folder that could not be loaded:', 1, true) ~= nil, 'Suite 92: Plugins page lists failed files')
+    pm.dirPath = nil
+    pm.loadErrors = {}
+    pm.scripts = {}
+    pm.reloadAll()
+    assert_eq(next(pm.loadErrors), nil, 'Suite 92: reloadAll starts with a clean failure list')
+    assert_eq(next(pm.scripts), nil, 'Suite 92: reloadAll starts with a clean script list')
+
+    os.execute('rm -rf "' .. S.junkDir .. '"')
+    package.loaded['mq'] = nil
+end
+
 
 -- ============================================================================
 -- Suite 95: Box Network plugin (MacroQuest Actors) - fake post office, 3 boxes
@@ -11989,7 +12346,7 @@ end
     -- 19. Core wiring
     assert_true(src:find("'boxnet.lua',", 1, true) ~= nil, 'Suite 95: core discover() probes boxnet.lua')
     assert_true(src:find("cmd = '/ac net [all|zone|group|Name] [command]'", 1, true) ~= nil, 'Suite 95: help table documents /ac net')
-    assert_true(src:find('|buffbot|net|clearcursor|', 1, true) ~= nil, 'Suite 95: /ac usage line lists net')
+    assert_true(src:find('|buffbot|net|btn|clearcursor|', 1, true) ~= nil, 'Suite 95: /ac usage line lists net')
     local bnSrc = readFile('TAC/lua/tac/boxnet.lua')
     assert_true(bnSrc:find('mq.delay(', 1, true) == nil and bnSrc:find('core.delay(', 1, true) == nil, 'Suite 95: boxnet never calls mq.delay / core.delay (forbidden in actor handlers)')
     assert_true(bnSrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 95: window uses the core theme')
@@ -11998,6 +12355,565 @@ end
     print = realPrint ---@diagnostic disable-line: lowercase-global
 end)()
 
+
+-- ============================================================================
+-- Suite 96: Hot Buttons plugin (Button Master-style hotbars)
+-- ============================================================================
+;(function()
+    print('--- Suite 96: Hot Buttons plugin (Button Master-style hotbars) ---')
+    local realPrint = print
+    local printed = {}
+    print = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end ---@diagnostic disable-line: lowercase-global
+    local function printedFind(needle)
+        for _, l in ipairs(printed) do if l:find(needle, 1, true) then return true end end
+        return false
+    end
+
+    local noop = function() end
+    local mockImGui = setmetatable({
+        Button = function() return false end, SmallButton = function() return false end,
+        Checkbox = function(_, v) return v end, MenuItem = function() return false end,
+        IsItemHovered = function() return false end, BeginTable = function() return false end,
+        BeginMenu = function() return false end, BeginPopup = function() return false end,
+        BeginPopupContextItem = function() return false end, BeginTabBar = function() return false end,
+        InputText = function(_, v) return v, false end, Combo = function(_, v) return v end,
+        InvisibleButton = function() return false end, SliderFloat = function(_, v) return v end,
+        GetContentRegionAvail = function() return 300, 120 end,
+        GetItemRectMin = function() return 0, 0 end, GetItemRectMax = function() return 60, 60 end,
+        CalcTextSize = function(t) return #tostring(t) * 7, 14 end,
+        GetWindowDrawList = function() return nil end,
+    }, { __index = function() return noop end })
+
+    local tmpPath = os.tmpname()
+    local bmPath = os.tmpname()
+    local clock = { t = 1000 }
+    local cmds, saves, binds, delays = {}, 0, {}, 0
+    local gemTimers = {}
+    local ctrl = { plugins = {} }
+    local boxnetSubs = {}
+    local broadcasts = {}
+    local mq = {
+        configDir = '/nonexistent',
+        cmd = function(c) cmds[#cmds + 1] = c end,
+        cmdf = function(f, ...) cmds[#cmds + 1] = string.format(f, ...) end,
+        bind = function(name, fn) binds[name] = fn end,
+        unbind = function(name) binds[name] = nil end,
+        TLO = {
+            EverQuest = { Server = function() return 'triune' end },
+            Me = {
+                DisplayName = function() return 'Alice' end,
+                CleanName = function() return 'Alice' end,
+                GemTimer = function(n) return function() return gemTimers[n] or 0 end end,
+                Gem = function() return { RecastTime = function() return 30000 end } end,
+                AltAbilityTimer = function() return function() return 0 end end,
+                AltAbility = function() return { MyReuseTime = function() return 0 end } end,
+            },
+            CursorAttachment = { Type = function() return nil end },
+            FindItem = function() return { TimerReady = function() return 0 end } end,
+        },
+    }
+    local core = setmetatable({
+        mq = mq, ImGui = mockImGui, runtime = {}, VERSION = '2.15', colors = {},
+        saveLoadout = function() saves = saves + 1 end,
+        pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+        preBeginWindow = noop, postBeginWindow = noop,
+        col32 = function() return 0 end, toVec = function(x, y) return { x = x, y = y } end,
+        getSpellIconAnimation = function() return nil end,
+        delay = function(ms) delays = delays + 1 return false end,
+        boxnet = {
+            subscribe = function(kind, fn) boxnetSubs[kind] = fn return function() boxnetSubs[kind] = nil end end,
+            broadcast = function(kind, data) broadcasts[#broadcasts + 1] = kind return true end,
+        },
+    }, { __index = function(_, k)
+        if k == 'ctrl' then return ctrl end
+        return nil
+    end })
+
+    local inst = assert(loadfile('TAC/lua/tac/buttons.lua'))()
+    inst.configPathOverride = tmpPath
+    inst.bmConfigPathOverride = bmPath
+    local T = inst._
+
+    -- 1. Contract
+    assert_eq(inst.id, 'buttons', 'Suite 96: plugin id')
+    assert_eq(inst.hasThread, true, 'Suite 96: buttons run on the plugin fiber')
+    assert_eq(inst.window.flag, 'show_buttons', 'Suite 96: window flag is show_buttons')
+    assert_type(inst.window.isOpen, 'function', 'Suite 96: window declares isOpen')
+    assert_type(inst.window.setOpen, 'function', 'Suite 96: window declares setOpen')
+    assert_true(#inst.help >= 3, 'Suite 96: help lines contributed')
+
+    -- 2. Init: fresh library, default sets, one hotbar, binds registered, no file written yet
+    inst.onInit(core)
+    local db = T.getDb()
+    assert_eq(ctrl.show_buttons, true, 'Suite 96: hotbars visible by default')
+    assert_eq(T.charKey(), 'triune_Alice', 'Suite 96: character key is Server_Name (Button Master style)')
+    assert_true(db.sets.Primary ~= nil and db.sets.Movement ~= nil, 'Suite 96: default sets created')
+    assert_eq(#T.hotbars(), 1, 'Suite 96: one default hotbar')
+    assert_eq(T.hotbars()[1].sets[1], 'Primary', 'Suite 96: default hotbar shows Primary')
+    assert_true(binds['/btn'] ~= nil and binds['/btnexec'] ~= nil and binds['/btncopy'] ~= nil, 'Suite 96: /btn, /btnexec, /btncopy bound in onInit')
+    assert_nil(io.open(tmpPath .. '.probe', 'r'), 'Suite 96: sanity (tmp path unused)')
+    assert_eq(inst.window.isOpen(), true, 'Suite 96: window isOpen reflects show_buttons + a visible hotbar')
+
+    -- 3. Library operations
+    local key = T.addButton({ label = 'Kick', cmd = '/doability Kick', timerType = 'Ability', timerKey = 'Kick' }, false)
+    assert_eq(key, 'Button_5', 'Suite 96: next free button key')
+    T.assignButton('Primary', 7, key)
+    local b, k = T.buttonAt('Primary', 7)
+    assert_true(b ~= nil and k == key, 'Suite 96: assignButton places the key in the sparse set')
+    assert_eq(T.lastAssignedIndex('Primary'), 7, 'Suite 96: lastAssignedIndex follows the sparse set')
+    local f = io.open(tmpPath, 'r')
+    assert_true(f ~= nil, 'Suite 96: a change writes the shared library file')
+    if f then f:close() end
+    assert_eq(broadcasts[#broadcasts], 'buttons_saved', 'Suite 96: a save broadcasts buttons_saved over Box Network')
+
+    T.swapSlots('Primary', 1, 'Primary', 7)
+    assert_eq(db.sets.Primary[1], key, 'Suite 96: swapSlots moves the button (drag and drop)')
+    assert_eq(db.sets.Primary[7], 'Button_1', 'Suite 96: swapSlots swaps the other slot')
+    T.unassignButton('Primary', 7)
+    assert_nil(db.sets.Primary[7], 'Suite 96: unassign clears the slot but keeps the button')
+    assert_true(db.buttons.Button_1 ~= nil, 'Suite 96: unassigned button remains in the library')
+    T.assignButton('Movement', 2, key)
+    T.deleteButton(key)
+    assert_nil(db.buttons[key], 'Suite 96: deleteButton removes the button')
+    assert_nil(db.sets.Primary[1], 'Suite 96: deleteButton clears it from every set (Primary)')
+    assert_nil(db.sets.Movement[2], 'Suite 96: deleteButton clears it from every set (Movement)')
+
+    local setName = T.createSet('Primary')
+    assert_eq(setName, 'Primary 2', 'Suite 96: createSet makes the name unique')
+    assert_eq(T.renameSet('Primary 2', 'Burns'), true, 'Suite 96: renameSet succeeds')
+    assert_eq(T.renameSet('Burns', 'Primary'), false, 'Suite 96: renameSet refuses an existing name')
+    local hb = T.hotbars()[1]
+    T.addSetToHotbar(hb, 'Burns')
+    assert_eq(hb.sets[#hb.sets], 'Burns', 'Suite 96: addSetToHotbar appends a tab')
+    T.moveSetInHotbar(hb, #hb.sets, -1)
+    assert_eq(hb.sets[#hb.sets - 1], 'Burns', 'Suite 96: moveSetInHotbar reorders tabs')
+    assert_eq(T.renameSet('Burns', 'Burnz'), true, 'Suite 96: rename after add')
+    assert_true((function() for _, sname in ipairs(hb.sets) do if sname == 'Burnz' then return true end end return false end)(), 'Suite 96: renameSet updates hotbar tab lists')
+    T.deleteSet('Burnz')
+    assert_nil(db.sets.Burnz, 'Suite 96: deleteSet removes the set')
+    assert_true((function() for _, sname in ipairs(hb.sets) do if sname == 'Burnz' then return false end end return true end)(), 'Suite 96: deleteSet removes it from every hotbar')
+
+    -- 4. Hotbars
+    local n = T.newHotbarForMe()
+    assert_eq(n, 2, 'Suite 96: newHotbarForMe appends a hotbar')
+    assert_eq(T.toggleHotbar(2), true, 'Suite 96: toggleHotbar hides hotbar 2')
+    assert_eq(T.hotbars()[2].visible, false, 'Suite 96: hotbar 2 hidden')
+    T.toggleHotbar(2)
+    assert_eq(T.hotbars()[2].visible, true, 'Suite 96: hotbar 2 shown again')
+    T.hotbars()[1].visible = false
+    T.hotbars()[2].visible = false
+    assert_eq(inst.window.isOpen(), false, 'Suite 96: isOpen false when every hotbar is hidden')
+    inst.window.setOpen(true)
+    assert_eq(T.anyHotbarVisible(), true, 'Suite 96: setOpen(true) re-shows hidden hotbars')
+    inst.window.setOpen(false)
+    assert_eq(ctrl.show_buttons, false, 'Suite 96: setOpen(false) clears show_buttons')
+    inst.window.setOpen(true)
+    assert_eq(T.deleteHotbar(2), true, 'Suite 96: deleteHotbar removes an extra hotbar')
+    assert_eq(T.deleteHotbar(1), false, 'Suite 96: the last hotbar cannot be deleted')
+
+    -- 5. Grid geometry (Button Master rules: fill the region, keep the last assigned row, cap at 100)
+    local size, cols, count = T.gridLayout({ buttonSize = 6 }, 'Primary', 300, 124)
+    assert_eq(size, 60, 'Suite 96: button size is buttonSize x 10')
+    assert_eq(cols, 4, 'Suite 96: columns from the available width')
+    assert_eq(count, 8, 'Suite 96: slots fill the visible rows')
+    T.assignButton('Primary', 15, 'Button_2')
+    local _, _, count2 = T.gridLayout({ buttonSize = 6 }, 'Primary', 300, 124)
+    assert_eq(count2, 16, 'Suite 96: the last assigned slot is always shown, rounded to a full row')
+    T.unassignButton('Primary', 15)
+    local _, _, count3 = T.gridLayout({ buttonSize = 3 }, 'Primary', 2000, 2000)
+    assert_eq(count3, 100, 'Suite 96: never more than 100 slots')
+
+    -- 6. Execution: queued from the UI, run on the fiber, one button per tick
+    T.queueButton('Primary', 2)
+    T.queueButton('Primary', 3)
+    assert_eq(#T.state.execQueue, 2, 'Suite 96: clicks queue buttons')
+    T.tick()
+    assert_eq(cmds[#cmds], '/ac pause', 'Suite 96: tick runs the first queued button')
+    assert_eq(#T.state.execQueue, 1, 'Suite 96: one button per tick')
+    T.tick()
+    assert_eq(cmds[#cmds], '/ac burn', 'Suite 96: next tick runs the next button')
+    cmds = {}
+    local multi = T.addButton({ label = 'Multi', cmd = '/one\n# comment\n\n/two\nnot a command\n/three', timerType = 'Seconds', timerKey = '10' }, false)
+    T.assignButton('Primary', 4, multi)
+    T.execBySetIndex('Primary', 4)
+    T.tick()
+    assert_eq(table.concat(cmds, ','), '/one,/two,/three', 'Suite 96: multi-line buttons run each slash line and skip comments / blanks')
+    assert_true(printedFind('Invalid command on line 5'), 'Suite 96: non-slash lines are reported')
+    local c = T.cacheFor(multi)
+    assert_true(c.firedAt ~= nil, 'Suite 96: a Seconds Timer button records its fire time')
+    local rem, total = T.readCooldown(db.buttons[multi], c)
+    assert_true(rem > 9 and rem <= 10 and total == 10, 'Suite 96: manual seconds timer counts down from its key')
+    c.firedAt = os.clock() - 20
+    rem = T.readCooldown(db.buttons[multi], c)
+    assert_eq(rem, 0, 'Suite 96: manual timer expires')
+
+    -- 7. Lua buttons run in a sandbox with a cooperative delay
+    _G.__btnTestFlag = nil
+    local luaKey = T.addButton({ label = 'Lua', cmd = '--lua\ndelay(50)\n_G.__btnTestFlag = mq.TLO.Me.CleanName()', timerType = 'None' }, false)
+    T.runButton(db.buttons[luaKey], luaKey)
+    assert_eq(_G.__btnTestFlag, 'Alice', 'Suite 96: --lua buttons execute Lua with mq in scope')
+    assert_true(delays >= 1, 'Suite 96: delay() inside a Lua button goes through core.delay (cooperative)')
+    _G.__btnTestFlag = nil
+    assert_eq(T.isLuaButton('-- lua\nreturn 1'), true, 'Suite 96: "-- lua" header accepted')
+    assert_eq(T.isLuaButton('/cast 1'), false, 'Suite 96: slash commands are not Lua')
+
+    -- 8. Cooldown evaluation: gem timers, Custom Lua timers + toggle, update-rate caching
+    gemTimers[3] = 12000
+    local gemKey = T.addButton({ label = 'Nuke', cmd = '/cast 3', timerType = 'Gem', timerKey = '3' }, false)
+    local gc = T.evaluateButton(db.buttons[gemKey], gemKey, true)
+    assert_eq(gc.remaining, 12, 'Suite 96: gem timer converts ms to seconds')
+    assert_eq(gc.total, 30, 'Suite 96: gem total from the gem recast time')
+    gemTimers[3] = 0
+    local gc2 = T.evaluateButton(db.buttons[gemKey], gemKey, false)
+    assert_eq(gc2.remaining, 12, 'Suite 96: evaluation is rate-limited (cached value reused)')
+    local gc3 = T.evaluateButton(db.buttons[gemKey], gemKey, true)
+    assert_eq(gc3.remaining, 0, 'Suite 96: forced evaluation refreshes')
+    local luaTimer = T.addButton({ label = 'LT', cmd = '/x', timerType = 'Lua', timerLua = 'return 5', cooldownLua = 'return 20', toggleLua = 'return true' }, false)
+    local lc = T.evaluateButton(db.buttons[luaTimer], luaTimer, true)
+    assert_true(lc.remaining == 5 and lc.total == 20 and lc.locked == true, 'Suite 96: Custom Lua timer / cooldown / toggle evaluated')
+    local evalLabel = T.addButton({ label = 'return "HP " .. 42', cmd = '/x', evaluateLabel = true, timerType = 'None' }, false)
+    local ec = T.evaluateButton(db.buttons[evalLabel], evalLabel, true)
+    assert_eq(ec.label, 'HP 42', 'Suite 96: EvaluateLabel runs the label as Lua')
+    local unknownTotal = T.addButton({ label = 'U', cmd = '/x', timerType = 'Lua', timerLua = 'return 7' }, false)
+    local uc = T.evaluateButton(db.buttons[unknownTotal], unknownTotal, true)
+    assert_eq(uc.total, 7, 'Suite 96: with no total the largest remaining seen becomes the total')
+
+    -- 9. Share strings: Button Master format, round-trip, base64
+    assert_eq(T.b64dec(T.b64enc('Triune Hot Buttons!')), 'Triune Hot Buttons!', 'Suite 96: base64 round-trip')
+    local colored = T.addButton({ label = 'Shared One', cmd = '/say hi', icon = 123, iconType = 'Item', buttonColor = { 10, 20, 30 }, textColor = { 255, 255, 0 }, timerType = 'AA', timerKey = 'Burst of Power' }, false)
+    local share = T.shareButton(colored)
+    assert_type(share, 'string', 'Suite 96: shareButton produces a string')
+    local decoded = T.decodeShare(share)
+    assert_true(decoded ~= nil and decoded.Type == 'Button', 'Suite 96: share decodes as a Button Master "Button" table')
+    assert_eq(decoded.Button.Label, 'Shared One', 'Suite 96: BM Label carried')
+    assert_eq(decoded.Button.ButtonColorRGB, '10,20,30', 'Suite 96: BM ButtonColorRGB carried')
+    assert_eq(decoded.Button.TimerType, 'AA', 'Suite 96: BM TimerType carried')
+    assert_eq(decoded.Button.Cooldown, 'Burst of Power', 'Suite 96: BM Cooldown carries the timer key')
+    assert_eq(decoded.Button.IconType, 'Item', 'Suite 96: BM IconType carried')
+    local back = T.buttonFromBm(decoded.Button)
+    assert_true(back.icon == 123 and back.iconType == 'Item' and back.textColor[2] == 255 and back.timerType == 'AA' and back.timerKey == 'Burst of Power', 'Suite 96: buttonFromBm restores the Triune fields')
+    local nBefore = 0
+    for _ in pairs(db.buttons) do nBefore = nBefore + 1 end
+    local okImp = T.importShare(decoded, nil)
+    assert_eq(okImp, true, 'Suite 96: importShare accepts a Button share')
+    local nAfter = 0
+    for _ in pairs(db.buttons) do nAfter = nAfter + 1 end
+    assert_eq(nAfter, nBefore + 1, 'Suite 96: imported button added to the library')
+    assert_nil(T.decodeShare('not base64 at all!!'), 'Suite 96: garbage is rejected')
+    assert_nil(T.decodeShare(T.b64enc('return { Type = "Nope" }')), 'Suite 96: unknown share type rejected')
+
+    -- A real Button Master share string (Type=Set with one Cmd button) imports
+    local bmSet = T.b64enc('return {\n ["Type"] = "Set",\n ["Key"] = "Primary",\n ["Set"] = {\n  [1] = "Button_9",\n },\n ["Buttons"] = {\n  ["Button_9"] = {\n   ["Label"] = "Pause (all)",\n   ["Cmd"] = "/bcaa //mqp on",\n   ["TimerType"] = "Seconds Timer",\n   ["Cooldown"] = 5,\n  },\n },\n}')
+    local bmDecoded = T.decodeShare(bmSet)
+    assert_true(bmDecoded ~= nil and bmDecoded.Type == 'Set', 'Suite 96: Button Master set share decodes')
+    local okSet, newName = T.importShare(bmDecoded, T.hotbars()[1])
+    assert_eq(okSet, true, 'Suite 96: set share imports')
+    assert_eq(newName, 'Primary 2', 'Suite 96: colliding set name made unique')
+    local impBtn = T.buttonAt('Primary 2', 1)
+    assert_true(impBtn ~= nil and impBtn.timerType == 'Seconds' and impBtn.timerKey == '5', 'Suite 96: BM "Seconds Timer" maps to the Seconds timer with its key')
+    assert_eq(T.hotbars()[1].sets[#T.hotbars()[1].sets], 'Primary 2', 'Suite 96: imported set added to the hotbar')
+
+    -- 10. Button Master config import (ButtonMaster.lua)
+    local bmf = assert(io.open(bmPath, 'w'))
+    bmf:write([[return {
+  Version = 7,
+  Buttons = {
+    Button_1 = { Label = 'Burn (all)', Cmd = '/bcaa //burn', Icon = '42', IconType = 'Spell', TimerType = 'Spell Gem', Cooldown = 2, ShowLabel = false },
+    Button_2 = { Label = 'Nav', Cmd = '/bca //nav id ${Target.ID}' },
+  },
+  Sets = { Primary = { 'Button_1', 'Button_2' }, Movement = { 'Button_2' } },
+  Characters = {
+    triune_Alice = { Windows = { { Title = 'BM Bar', Visible = true, Locked = true, CompactMode = true, ButtonSize = 5, Font = 12, Sets = { 'Primary', 'Movement' } } } },
+    triune_Bob = { Windows = { { Sets = { 'Primary' } } } },
+  },
+}]])
+    bmf:close()
+    local okBm, msgBm = T.importButtonMasterConfig()
+    assert_eq(okBm, true, 'Suite 96: ButtonMaster.lua imports (' .. tostring(msgBm) .. ')')
+    assert_true(db.sets['Primary 3'] ~= nil and db.sets['Movement 2'] ~= nil, 'Suite 96: BM sets imported with unique names')
+    local bmBar = T.hotbars()[#T.hotbars()]
+    assert_eq(bmBar.title, 'BM Bar', 'Suite 96: BM window becomes a hotbar')
+    assert_true(bmBar.locked == true and bmBar.compact == true and bmBar.buttonSize == 5 and math.abs(bmBar.fontScale - 1.2) < 0.001, 'Suite 96: BM window options carried over')
+    assert_eq(bmBar.sets[1], 'Primary 3', 'Suite 96: BM window sets remapped to the imported names')
+    local bmBurn = T.buttonAt('Primary 3', 1)
+    assert_true(bmBurn ~= nil and bmBurn.icon == 42 and bmBurn.timerType == 'Gem' and bmBurn.timerKey == '2' and bmBurn.showLabel == false, 'Suite 96: BM button fields converted')
+    assert_eq(db.characters.triune_Bob, nil, 'Suite 96: other characters\' BM windows are not imported')
+    local okBad, errBad = T.importButtonMasterConfig('/nonexistent/ButtonMaster.lua')
+    assert_true(okBad == false and errBad:find('Could not read', 1, true) ~= nil, 'Suite 96: missing BM config reported')
+
+    -- 11. Persistence round-trip through the file
+    local savedHotbars = #T.hotbars()
+    T.saveDb({ silent = true })
+    T.setDb({})
+    assert_eq(#T.hotbars(), 1, 'Suite 96: setDb resets to a fresh character section')
+    assert_eq(T.loadDb(), true, 'Suite 96: loadDb reads the file back')
+    assert_eq(#T.hotbars(), savedHotbars, 'Suite 96: hotbars survive the round-trip')
+    assert_true(T.getDb().sets['Primary 3'] ~= nil, 'Suite 96: sets survive the round-trip')
+    local bak = io.open(tmpPath .. '.bak', 'r')
+    assert_true(bak ~= nil, 'Suite 96: a .bak of the previous library is kept')
+    if bak then bak:close() end
+    T.setDb({ buttons = { Bad = 'nope', Ok = { label = 'x', cmd = '/x', timerType = 'Bogus', icon = '77' } }, sets = { S = { [1] = 'Ok', [2] = 'Missing', foo = 'Ok' } }, characters = { triune_Alice = { hotbars = { { sets = { 'S', 'Nope' }, buttonSize = 99, alpha = 5 } } } } })
+    local nd = T.getDb()
+    assert_nil(nd.buttons.Bad, 'Suite 96: normalizeDb drops non-table buttons')
+    assert_eq(nd.buttons.Ok.timerType, 'None', 'Suite 96: normalizeDb resets unknown timer types')
+    assert_eq(nd.buttons.Ok.icon, 77, 'Suite 96: normalizeDb coerces icon ids to numbers')
+    assert_nil(nd.sets.S[2], 'Suite 96: normalizeDb drops dangling set references')
+    assert_nil(nd.sets.S.foo, 'Suite 96: normalizeDb drops non-numeric slots')
+    local nhb = T.hotbars()[1]
+    assert_true(nhb.buttonSize == 12 and nhb.alpha == 1 and #nhb.sets == 1 and nhb.title ~= nil, 'Suite 96: normalizeDb clamps hotbar options and drops unknown sets')
+
+    -- 12. Copy hotbars from another character
+    T.getDb().characters.triune_Bob = { hotbars = { T.newHotbar('Bob Bar'), T.newHotbar('Bob Bar 2') } }
+    assert_eq(T.copyHotbarsFrom('triune_Bob'), true, 'Suite 96: copyHotbarsFrom copies another character')
+    assert_true(#T.hotbars() == 2 and T.hotbars()[1].title == 'Bob Bar', 'Suite 96: copied hotbars replace ours')
+    assert_eq(T.copyHotbarsFrom('triune_Alice'), false, 'Suite 96: cannot copy from self')
+    assert_eq(T.copyHotbarsFrom('triune_Nobody'), false, 'Suite 96: unknown character rejected')
+
+    -- 13. Commands: /ac btn ..., /btn, /btnexec, /btncopy
+    assert_eq(inst.onCommand('cursorui', { 'cursorui' }), false, 'Suite 96: unrelated commands fall through')
+    ctrl.show_buttons = true
+    assert_eq(inst.onCommand('btn', { 'btn' }), true, 'Suite 96: /ac btn handled')
+    assert_eq(ctrl.show_buttons, false, 'Suite 96: /ac btn toggles the hotbars off')
+    inst.onCommand('buttons', { 'buttons' })
+    assert_eq(ctrl.show_buttons, true, 'Suite 96: /ac buttons toggles them back on')
+    inst.onCommand('btn', { 'btn', '2' })
+    assert_eq(T.hotbars()[2].visible, false, 'Suite 96: /ac btn 2 hides hotbar 2')
+    binds['/btn']('2')
+    assert_eq(T.hotbars()[2].visible, true, 'Suite 96: /btn 2 shows it again')
+    inst.onCommand('btn', { 'btn', 'new' })
+    assert_eq(#T.hotbars(), 3, 'Suite 96: /ac btn new creates a hotbar')
+    cmds = {}
+    T.getDb().sets.Primary = { [1] = 'Ok' }
+    binds['/btnexec']('Primary', '1')
+    assert_eq(#T.state.execQueue, 1, 'Suite 96: /btnexec queues the button')
+    T.tick()
+    assert_eq(cmds[1], '/x', 'Suite 96: /btnexec runs it')
+    inst.onCommand('btn', { 'btn', 'exec', 'Primary', '9' })
+    assert_true(printedFind('has no button at slot 9'), 'Suite 96: /ac btn exec reports an empty slot')
+    inst.onCommand('btn', { 'btn', 'exec', 'Nope', '1' })
+    assert_true(printedFind('No set named "Nope"'), 'Suite 96: /ac btn exec reports an unknown set')
+    binds['/btncopy']('triune', 'bob')
+    assert_eq(T.hotbars()[1].title, 'Bob Bar', 'Suite 96: /btncopy capitalises the name and copies the hotbars')
+    inst.onCommand('btn', { 'btn', 'list' })
+    assert_true(printedFind('Sets:'), 'Suite 96: /ac btn list prints the library')
+    inst.onCommand('btn', { 'btn', 'bogus' })
+    assert_true(printedFind('usage: /ac btn'), 'Suite 96: unknown subcommand prints usage')
+
+    -- 14. Box Network sync: a remote save marks a reload, the next tick reloads
+    assert_type(boxnetSubs.buttons_saved, 'function', 'Suite 96: subscribed to buttons_saved after the first tick')
+    T.saveDb({ silent = true })
+    local before = #T.hotbars()
+    T.hotbars()[#T.hotbars() + 1] = T.newHotbar('Unsaved')
+    boxnetSubs.buttons_saved({}, 'Bob', nil)
+    assert_eq(T.state.reloadPending, true, 'Suite 96: remote save flags a reload')
+    T.tick()
+    assert_eq(#T.hotbars(), before, 'Suite 96: tick reloads the shared file (unsaved local change dropped)')
+    T.prefs.syncBoxes = false
+    assert_eq(inst.onSaveSettings().syncBoxes, false, 'Suite 96: onSaveSettings persists the sync preference')
+    inst.onLoadSettings({ syncBoxes = true, announceRun = true })
+    assert_true(T.prefs.syncBoxes == true and T.prefs.announceRun == true, 'Suite 96: onLoadSettings restores preferences')
+
+    -- 15. Cursor capture
+    local caType, caItem, caSpell = nil, nil, nil
+    mq.TLO.CursorAttachment = {
+        Type = function() return caType end,
+        ButtonText = function() return 'Kick' end,
+        Index = function() return 0 end,
+        Item = setmetatable({ Name = function() return caItem end, Icon = function() return 1234 end }, { __call = function() return caItem end }),
+        Spell = setmetatable({ RankName = function() return caSpell end, Name = function() return caSpell end, SpellIcon = function() return 88 end }, { __call = function() return caSpell end }),
+    }
+    mq.TLO.Me.Gem = function(nameOrIdx)
+        if nameOrIdx == 'Ice Comet Rk. II' then return function() return 4 end end
+        return { RecastTime = function() return 30000 end }
+    end
+    assert_nil(T.buttonFromCursor(), 'Suite 96: empty cursor gives no button')
+    caType, caItem = 'item', 'Potion of Speed'
+    local cb = T.buttonFromCursor()
+    assert_true(cb ~= nil and cb.cmd == '/useitem "Potion of Speed"' and cb.icon == 734 and cb.iconType == 'Item' and cb.timerType == 'Item', 'Suite 96: item on cursor -> /useitem button with the item icon (Icon - 500)')
+    caType, caSpell = 'spell_gem', 'Ice Comet Rk. II'
+    cb = T.buttonFromCursor()
+    assert_true(cb ~= nil and cb.cmd == '/cast 4' and cb.icon == 88 and cb.timerType == 'Gem' and cb.timerKey == '4', 'Suite 96: spell gem on cursor -> /cast <gem> with the gem timer')
+    caType = 'skill'
+    cb = T.buttonFromCursor()
+    assert_true(cb ~= nil and cb.cmd == '/doability "Kick"' and cb.timerType == 'Ability', 'Suite 96: skill on cursor -> /doability')
+    caType = 'command'
+    mq.TLO.CursorAttachment.ButtonText = function() return '/sit' end
+    cb = T.buttonFromCursor()
+    assert_true(cb ~= nil and cb.cmd == '/sit' and cb.label == 'sit', 'Suite 96: command on cursor -> the command')
+    caType = nil
+
+    -- 16. Editor flow: a new button at an empty slot, saved into the set
+    T.openEditor(1, 'Primary', 5, nil)
+    assert_eq(T.edit.open, true, 'Suite 96: openEditor opens the editor')
+    assert_nil(T.edit.key, 'Suite 96: empty slot edits a new button')
+    assert_eq(T.saveEditor(), false, 'Suite 96: empty label refuses to save')
+    T.edit.tmp.label = 'New One'
+    T.edit.tmp.cmd = '/say new'
+    assert_eq(T.saveEditor(), true, 'Suite 96: editor saves')
+    local nb = T.buttonAt('Primary', 5)
+    assert_true(nb ~= nil and nb.label == 'New One', 'Suite 96: saved button assigned to the slot')
+    T.edit.tmp.label = 'Renamed'
+    T.saveEditor()
+    assert_eq(T.buttonAt('Primary', 5).label, 'Renamed', 'Suite 96: second save updates the same button')
+    T.closeEditor()
+    assert_eq(T.edit.open, false, 'Suite 96: closeEditor closes')
+    T.slotClicked(1, 'Primary', 5)
+    assert_eq(#T.state.execQueue, 1, 'Suite 96: clicking an assigned slot queues it')
+    T.state.execQueue = {}
+    T.slotClicked(1, 'Primary', 6)
+    assert_true(T.edit.open == true and T.edit.index == 6, 'Suite 96: clicking an empty slot opens the editor')
+    T.closeEditor()
+
+    -- 17. Draw hooks run under the mock without error
+    ctrl.show_buttons = true
+    local okDraw, errDraw = pcall(inst.onDrawUI)
+    assert_true(okDraw, 'Suite 96: onDrawUI renders under the mock (' .. tostring(errDraw) .. ')')
+    local okSet, errSet = pcall(inst.onDrawSettings)
+    assert_true(okSet, 'Suite 96: onDrawSettings renders under the mock (' .. tostring(errSet) .. ')')
+
+    -- 18. Misc helpers
+    assert_eq(T.fmtTime(75), '1:15', 'Suite 96: fmtTime m:ss')
+    assert_eq(T.fmtTime(7), '7', 'Suite 96: fmtTime seconds')
+    assert_eq(T.fmtTime(3725), '1h02m', 'Suite 96: fmtTime hours')
+    assert_eq(T.alphaGroupFor('kick'), 'G - L', 'Suite 96: alpha groups are case-insensitive')
+    assert_eq(T.alphaGroupFor('9 lives'), 'Other', 'Suite 96: digits fall into Other')
+    assert_eq(#T.split('a,b,,c', ','), 4, 'Suite 96: split keeps empty fields')
+    local ser = T.serialize({ b = 1, a = { 'x' }, [2] = true })
+    assert_true(ser:find('a = {', 1, true) ~= nil and ser:find('[2] = true', 1, true) ~= nil, 'Suite 96: serializer emits readable Lua')
+
+    -- 19. "Add From Game" browser: scans of what the character has -> ready buttons
+    local function callable(val, fields)
+        return setmetatable(fields or {}, { __call = function() return val end })
+    end
+    local aaById = {
+        [100] = { name = 'Burst of Power', rank = 3, max = 5, id = 1100, spellId = 500, icon = 41 },
+        [101] = { name = 'Innate Regeneration', rank = 2, max = 3, id = 1101, spellId = 0, icon = 0 },   -- passive: skipped
+        [4001] = { name = 'Origin', rank = 1, max = 1, id = 4001, spellId = 501, icon = 42 },
+        [4002] = { name = 'Not Trained', rank = 0, max = 3, id = 4002, spellId = 502, icon = 43 },        -- rank 0: skipped
+    }
+    mq.TLO.Me.AltAbility = function(idx)
+        local a = aaById[idx]
+        if not a then return callable(nil) end
+        return callable(a.name, {
+            Name = function() return a.name end, Rank = function() return a.rank end, MaxRank = function() return a.max end,
+            ID = function() return a.id end,
+            Spell = callable(a.spellId > 0 and a.name or nil, { ID = function() return a.spellId end, SpellIcon = function() return a.icon end }),
+        })
+    end
+    local aas = T.scanAAs()
+    assert_eq(#aas, 2, 'Suite 96: scanAAs keeps trained, activatable AAs only')
+    assert_eq(aas[1].name, 'Burst of Power', 'Suite 96: AAs sorted by name')
+    assert_eq(aas[1].button.cmd, '/alt act 1100', 'Suite 96: AA button uses /alt act <id>')
+    assert_true(aas[1].button.timerType == 'AA' and aas[1].button.timerKey == 'Burst of Power' and aas[1].button.icon == 41, 'Suite 96: AA button gets the AA timer and spell icon')
+    assert_eq(aas[1].sub, 'Rank 3/5', 'Suite 96: AA rank shown')
+
+    core.getNumGems = function() return 3 end
+    local gems = { [1] = { 'Ice Comet', 77 }, [3] = { 'Gate', 78 } }
+    mq.TLO.Me.Gem = function(g)
+        local gd = gems[g]
+        return { Name = function() return gd and gd[1] or nil end, SpellIcon = function() return gd and gd[2] or 0 end, RecastTime = function() return 30000 end }
+    end
+    local gemList = T.scanGems()
+    assert_eq(#gemList, 3, 'Suite 96: scanGems lists every gem slot')
+    assert_true(gemList[1].name == 'Ice Comet' and gemList[1].button.cmd == '/cast 1' and gemList[1].button.timerType == 'Gem' and gemList[1].button.timerKey == '1' and gemList[1].button.icon == 77, 'Suite 96: gem entry -> /cast <gem> with the gem timer')
+    assert_true(gemList[2].empty == true and gemList[2].name == '(empty gem)', 'Suite 96: empty gems are listed but marked empty')
+    assert_eq(gemList[3].sub, 'Gem 3', 'Suite 96: gem number shown')
+
+    core.runtime.getClientAbilities = function()
+        return { { name = 'Kick', isTrained = true, currentSkill = 150 }, { name = 'Bash', isTrained = false, currentSkill = 0 }, { name = 'Taunt', isTrained = true, currentSkill = 0 } }
+    end
+    local abil = T.scanAbilities()
+    assert_eq(#abil, 2, 'Suite 96: scanAbilities keeps trained skills (from the core list)')
+    assert_true(abil[1].name == 'Kick' and abil[1].button.cmd == '/doability "Kick"' and abil[1].button.timerType == 'Ability' and abil[1].sub == 'Skill 150', 'Suite 96: ability entry -> /doability with the ability timer')
+
+    mq.TLO.Me.CombatAbilityCount = function() return 2 end
+    mq.TLO.Me.CombatAbility = function(i)
+        local d = ({ { 'Fearless Discipline', 75, 91 }, { 'Evasive Discipline', 52, 92 } })[i]
+        return { Name = function() return d[1] end, Level = function() return d[2] end, SpellIcon = function() return d[3] end }
+    end
+    local discs = T.scanDiscs()
+    assert_eq(#discs, 2, 'Suite 96: scanDiscs lists combat abilities')
+    assert_true(discs[1].name == 'Evasive Discipline' and discs[1].button.cmd == '/disc Evasive Discipline' and discs[1].button.timerType == 'Disc' and discs[1].button.icon == 92 and discs[1].sub == 'Level 52', 'Suite 96: disc entry -> /disc with the disc timer')
+
+    local function mkItem(name, id, icon, clickySpell, container, contents)
+        local it = { ID = function() return id end, Name = function() return name end, Icon = function() return icon end,
+            Container = function() return container or 0 end, Item = function(j) return contents and contents[j] or callable(nil) end }
+        if clickySpell then
+            it.Clicky = callable(clickySpell, { Spell = callable(clickySpell, { Name = function() return clickySpell end }) })
+        else
+            it.Clicky = callable(nil)
+        end
+        return callable(name, it)
+    end
+    local worn = { [1] = mkItem('Circlet of Shadow', 10, 1500, 'Shadow'), [2] = mkItem('Plain Tunic', 11, 1501, nil) }
+    local packs = { pack1 = mkItem('Backpack', 12, 1502, nil, 2, { mkItem('Potion of Speed', 13, 1234, 'Haste'), mkItem('Rusty Sword', 14, 1503, nil) }) }
+    mq.TLO.Me.Inventory = function(slot)
+        if type(slot) == 'number' then return worn[slot] or callable(nil) end
+        return packs[slot] or callable(nil)
+    end
+    local items = T.scanItems()
+    assert_eq(#items, 2, 'Suite 96: scanItems keeps only clickies (worn + bags)')
+    assert_true(items[1].name == 'Circlet of Shadow' and items[1].button.cmd == '/useitem "Circlet of Shadow"' and items[1].button.icon == 1000 and items[1].button.iconType == 'Item' and items[1].button.timerType == 'Item', 'Suite 96: clicky entry -> /useitem with the item timer and item icon (Icon - 500)')
+    assert_eq(items[2].sub, 'Haste - Pack 1', 'Suite 96: clicky shows its spell and location')
+
+    -- Picking: into a chosen slot (one-shot) and into the first free slot (stays open)
+    T.getDb().sets.Primary = { [1] = 'Ok' }
+    T.openBrowser('AA', 'assign', { hbId = 1, setName = 'Primary', index = 4 })
+    assert_true(T.browser.open and T.browser.tab == 'AA', 'Suite 96: openBrowser opens on the requested tab')
+    assert_eq(#T.browserList('AA'), 2, 'Suite 96: browserList scans and caches the tab')
+    assert_eq(T.pickBrowserEntry(aas[1]), true, 'Suite 96: picking an entry into a slot succeeds')
+    local placed = T.buttonAt('Primary', 4)
+    assert_true(placed ~= nil and placed.cmd == '/alt act 1100' and placed.showLabel == false, 'Suite 96: picked AA button placed in the chosen slot (icon buttons hide the label)')
+    assert_eq(T.browser.open, false, 'Suite 96: slot-targeted pick closes the browser')
+    T.openBrowser('Gem', 'assign', { hbId = 1, setName = 'Primary' })
+    assert_eq(T.firstFreeSlot('Primary'), 2, 'Suite 96: firstFreeSlot finds the first gap')
+    T.pickBrowserEntry(gemList[1])
+    assert_eq(T.buttonAt('Primary', 2).cmd, '/cast 1', 'Suite 96: gear-menu pick lands in the first free slot')
+    assert_true(T.browser.open and T.browser.target.index == nil, 'Suite 96: gear-menu flow keeps the browser open for more picks')
+    T.pickBrowserEntry(discs[1])
+    assert_eq(T.buttonAt('Primary', 3).cmd, '/disc Evasive Discipline', 'Suite 96: next pick fills the next free slot')
+    T.openBrowser('Item', 'assign', nil)
+    assert_eq(T.pickBrowserEntry(items[1]), false, 'Suite 96: picking with no target set is refused')
+
+    -- Picking into the editor
+    T.openEditor(1, 'Primary', 9, nil)
+    T.openBrowser('Ability', 'editor', nil)
+    assert_eq(T.pickBrowserEntry(abil[1]), true, 'Suite 96: editor mode fills the open editor')
+    assert_true(T.edit.tmp.cmd == '/doability "Kick"' and T.edit.tmp.timerType == 'Ability' and T.edit.dirty == true, 'Suite 96: editor fields filled and marked dirty')
+    assert_nil(T.buttonAt('Primary', 9), 'Suite 96: editor mode does not create a button until saved')
+    T.closeEditor()
+    T.browser.open = false
+
+    -- /ac btn add <what> (hotbar 1 has no sets after the /btncopy above; hotbar 2 gets one)
+    T.hotbars()[2].sets = { 'Primary' }
+    inst.onCommand('btn', { 'btn', 'add', 'discs' })
+    assert_true(T.browser.open and T.browser.tab == 'Disc' and T.browser.target and T.browser.target.hbId == 2 and T.browser.target.setName == 'Primary', 'Suite 96: /ac btn add discs opens the browser on the Discs tab targeting the first hotbar with a set')
+    T.browser.open = false
+    ctrl.show_buttons = true
+    local okDraw2, errDraw2 = pcall(inst.onDrawUI)
+    assert_true(okDraw2, 'Suite 96: onDrawUI still renders with browser state (' .. tostring(errDraw2) .. ')')
+    T.browser.open = true
+    okDraw2, errDraw2 = pcall(inst.onDrawUI)
+    assert_true(okDraw2, 'Suite 96: browser window renders under the mock (' .. tostring(errDraw2) .. ')')
+    T.browser.open = false
+
+    -- 20. Destroy releases the binds and the Box Network subscription
+    inst.onDestroy()
+    assert_nil(binds['/btn'], 'Suite 96: onDestroy unbinds /btn')
+    assert_nil(boxnetSubs.buttons_saved, 'Suite 96: onDestroy unsubscribes from Box Network')
+
+    -- 21. Core wiring
+    assert_true(src:find("'buttons.lua',", 1, true) ~= nil, 'Suite 96: core discover() probes buttons.lua')
+    assert_true(src:find("cmd = '/ac btn [n|new|exec <set> <index>|import bm]'", 1, true) ~= nil, 'Suite 96: help table documents /ac btn')
+    local btnSrc = readFile('TAC/lua/tac/buttons.lua')
+    assert_true(btnSrc:find('mq.delay(', 1, true) == nil, 'Suite 96: the plugin never calls mq.delay directly')
+    assert_true(btnSrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 96: hotbars use the core theme')
+
+    os.remove(tmpPath)
+    os.remove(tmpPath .. '.bak')
+    os.remove(bmPath)
+    print = realPrint ---@diagnostic disable-line: lowercase-global
+end)()
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))
 if fail > 0 then
