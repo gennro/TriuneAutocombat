@@ -120,6 +120,10 @@ local rt = {
     activeTab = 1,
     guiOpen = true,
     inFight = false,
+    -- Box Network: other boxes' fights, keyed by lower-case name
+    boxes = {},
+    boxesUnsub = nil,
+    lastLiveShareAt = 0,
     fightStartTime = 0,
     lastDamageTime = 0,
     currentTargetId = 0,
@@ -533,6 +537,80 @@ local function resetCurrentFight()
     rt.petBreakdown = {}
 end
 
+-- ----------------------------------------------------------------------------
+-- Box Network sharing: broadcast a live line every 2s during a fight and the
+-- fight summary when it ends; keep what the other boxes send us.
+-- ----------------------------------------------------------------------------
+local LIVE_SHARE_SEC = 2.0
+local BOX_STALE_SEC = 60.0
+
+local function boxnet()
+    local bn = core and rawget(core, 'boxnet')
+    if type(bn) ~= 'table' or type(bn.available) ~= 'function' then return nil end
+    local ok, avail = pcall(bn.available)
+    if not ok or not avail then return nil end
+    return bn
+end
+
+local function onBoxDps(data, sender)
+    local name = sender and sender.character
+    if not name or name == '' or type(data) ~= 'table' then return end
+    local key = tostring(name):lower()
+    local b = rt.boxes[key] or { name = name }
+    b.name = name
+    b.seenAt = mq.gettime()
+    if data.live then
+        b.live = { target = data.target, dmg = tonumber(data.dmg) or 0, dps = tonumber(data.dps) or 0, dur = tonumber(data.dur) or 0 }
+    else
+        b.live = nil
+        b.lastFight = { target = data.target, dmg = tonumber(data.dmg) or 0, dps = tonumber(data.dps) or 0, dur = tonumber(data.dur) or 0,
+            playerDmg = tonumber(data.playerDmg) or 0, petDmg = tonumber(data.petDmg) or 0, at = os.date('%H:%M:%S') }
+    end
+    rt.boxes[key] = b
+end
+
+local function ensureBoxSubscription()
+    if rt.boxesUnsub then return end
+    local bn = boxnet()
+    if not bn or type(bn.subscribe) ~= 'function' then return end
+    local ok, unsub = pcall(bn.subscribe, 'dps:share', onBoxDps)
+    if ok and type(unsub) == 'function' then rt.boxesUnsub = unsub end
+end
+
+local function shareLive()
+    local bn = boxnet()
+    if not bn or not rt.inFight or rt.totalDamage == 0 then return end
+    local now = mq.gettime()
+    if (now - (rt.lastLiveShareAt or 0)) < LIVE_SHARE_SEC * 1000 then return end
+    rt.lastLiveShareAt = now
+    local dur = getCurrentFightDuration()
+    pcall(bn.broadcast, 'dps:share', { live = true, target = rt.currentTargetName, dmg = rt.totalDamage, dur = dur, dps = getFightDPS(rt.totalDamage, dur) })
+end
+
+local function shareFight(h)
+    local bn = boxnet()
+    if not bn or not h then return end
+    pcall(bn.broadcast, 'dps:share', { live = false, target = h.targetName, dmg = h.totalDmg, dur = h.duration, dps = h.peakDps, playerDmg = h.playerDmg, petDmg = h.petDmg })
+end
+
+-- Other boxes with recent data, sorted by name; live fights first.
+local function boxList()
+    local out = {}
+    local now = mq.gettime()
+    for key, b in pairs(rt.boxes) do
+        if (now - (b.seenAt or 0)) > BOX_STALE_SEC * 1000 then
+            rt.boxes[key] = nil
+        else
+            out[#out + 1] = b
+        end
+    end
+    table.sort(out, function(a, b)
+        if (a.live ~= nil) ~= (b.live ~= nil) then return a.live ~= nil end
+        return tostring(a.name):lower() < tostring(b.name):lower()
+    end)
+    return out
+end
+
 local function endFightSession()
     if not rt.inFight or rt.totalDamage == 0 then
         rt.inFight = false
@@ -575,6 +653,7 @@ local function endFightSession()
     if #rt.history > MAX_HISTORY then
         table.remove(rt.history)
     end
+    shareFight(rt.history[1])
     
     rt.inFight = false
     rt.currentTargetId = 0
@@ -1671,6 +1750,51 @@ local function drawDpsGui()
                 ImGui.EndTabItem()
             end
             
+            -- TAB: Boxes (Box Network)
+            if ImGui.BeginTabItem("Boxes##MainBoxesTab") then
+                local boxes = boxList()
+                local bn = boxnet()
+                if not bn then
+                    ImGui.TextDisabled('Box Network plugin not connected - other boxes cannot share their parses.')
+                elseif #boxes == 0 then
+                    ImGui.TextDisabled('No parses from other boxes yet (they share a live line every 2s while fighting and a summary when the fight ends).')
+                else
+                    local partyDps = rt.inFight and getFightDPS(rt.totalDamage, getCurrentFightDuration()) or 0
+                    local partyLive = rt.inFight and 1 or 0
+                    for _, b in ipairs(boxes) do
+                        if b.live then partyDps = partyDps + (b.live.dps or 0); partyLive = partyLive + 1 end
+                    end
+                    if partyLive > 0 then
+                        ImGui.Text(string.format('Live party DPS: %d (%d box%s fighting)', partyDps, partyLive, partyLive == 1 and '' or 'es'))
+                    else
+                        ImGui.TextDisabled('Nobody is fighting right now - showing each box\'s last fight.')
+                    end
+                    local tflags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit, ImGuiTableFlags.Resizable)
+                    if ImGui.BeginTable('BoxDpsTable', 6, tflags) then
+                        ImGui.TableSetupColumn('Box', ImGuiTableColumnFlags.WidthFixed, 110)
+                        ImGui.TableSetupColumn('State', ImGuiTableColumnFlags.WidthFixed, 60)
+                        ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
+                        ImGui.TableSetupColumn('Damage', ImGuiTableColumnFlags.WidthFixed, 80)
+                        ImGui.TableSetupColumn('DPS', ImGuiTableColumnFlags.WidthFixed, 70)
+                        ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, 60)
+                        ImGui.TableHeadersRow()
+                        for _, b in ipairs(boxes) do
+                            local f = b.live or b.lastFight
+                            ImGui.TableNextRow()
+                            ImGui.TableSetColumnIndex(0); ImGui.Text(tostring(b.name))
+                            ImGui.TableSetColumnIndex(1)
+                            if b.live then ImGui.TextColored(0.40, 0.85, 0.50, 1.0, 'LIVE') else ImGui.TextDisabled(b.lastFight and b.lastFight.at or '-') end
+                            ImGui.TableSetColumnIndex(2); ImGui.Text(tostring(f and f.target or '-'))
+                            ImGui.TableSetColumnIndex(3); ImGui.Text(f and tostring(f.dmg) or '-')
+                            ImGui.TableSetColumnIndex(4); ImGui.Text(f and tostring(f.dps) or '-')
+                            ImGui.TableSetColumnIndex(5); ImGui.Text(f and string.format('%.0fs', f.dur or 0) or '-')
+                        end
+                        ImGui.EndTable()
+                    end
+                end
+                ImGui.EndTabItem()
+            end
+
             -- TAB 5: Settings
             if ImGui.BeginTabItem("Settings##MainSettingsTab") then
                 rt.activeTab = 5
@@ -1829,6 +1953,9 @@ function plugin.onDestroy()
     saveConfig()
     cachedConfigPath = nil
     unregisterEvents()
+    if rt.boxesUnsub then pcall(rt.boxesUnsub) end
+    rt.boxesUnsub = nil
+    rt.boxes = {}
     if mq and mq.unbind then
         for _, cmd in ipairs(boundCommands) do pcall(mq.unbind, cmd) end
     end
@@ -1838,7 +1965,9 @@ end
 -- Fight bookkeeping that used to run in the script's main loop: archive the
 -- encounter when the target dies or damage goes quiet for cfg.combatTimeout.
 local function tick()
+    ensureBoxSubscription()
     if not rt.inFight then return end
+    shareLive()
     local okId, tId = pcall(function() return mq.TLO.Target.ID() end)
     local okDead, tDead = pcall(function() return mq.TLO.Target.Dead() or mq.TLO.Target.Type() == 'Corpse' end)
     local targetId = (okId and tId and tId > 0) and tId or 0
@@ -1900,6 +2029,11 @@ plugin.help = {
 -- Exposed for tests
 plugin.cfg = cfg
 plugin.rt = rt
+plugin.onBoxDps = onBoxDps
+plugin.boxList = boxList
+plugin.shareFight = shareFight
+plugin.shareLive = shareLive
+plugin.ensureBoxSubscription = ensureBoxSubscription
 plugin.tick = tick
 plugin.dpsCommandHandler = dpsCommandHandler
 plugin.registeredEvents = function() return registeredEvents end

@@ -12451,6 +12451,44 @@ end
     assert_eq(A.inst.api.peerCounters('bob'), nil, 'Suite 95: stale counters are not offered')
     assert_true(A.inst.api.peerFresh('bob', 10) ~= nil, 'Suite 95: caller can widen the freshness window')
 
+    -- 21. Phase 3: peersInZone and the cross-box buff request flow
+    clock.t = clock.t + 0.5
+    pump(1)
+    local inZone = A.inst.api.peersInZone()
+    assert_eq(#inZone, 1, 'Suite 95: peersInZone lists fresh same-zone peers')
+    assert_eq(inZone[1].name, 'Bob', 'Suite 95: peersInZone entry is the peer record')
+    B.mq.TLO.Me.BuffCount = function() return 2 end
+    B.mq.TLO.Me.Buff = function(i) return { Name = function() return ({ 'Temperance', 'Spirit of Wolf' })[i] end } end
+    local gotReq = nil
+    A.core.runtime.enqueueBoxBuffRequest = function(name, has) gotReq = { name = name, has = has } return 2 end
+    local okB, whyB = B.inst.sendBuffRequest('alice')
+    assert_eq(okB, true, 'Suite 95: buff request sent')
+    pump(1)
+    assert_eq(gotReq and gotReq.name, 'Bob', 'Suite 95: receiver core queues the request for the sender')
+    assert_eq(gotReq and #gotReq.has, 2, 'Suite 95: request carries the requester buff names')
+    assert_eq(gotReq and gotReq.has[2], 'Spirit of Wolf', 'Suite 95: buff names read from Me.Buff')
+    assert_true(lastLog(B, 'Alice queued 2 buff(s) for you') ~= nil, 'Suite 95: requester sees the RPC reply')
+    assert_true(lastLog(A, '<- Bob: buff me (2 to cast)') ~= nil, 'Suite 95: receiver logs the request')
+    assert_true(type(A.core.runtime.onBoxBuffRequestDone) == 'function', 'Suite 95: plugin installs the done hook on the core')
+    A.core.runtime.onBoxBuffRequestDone({ name = 'Bob', cast = 2 }, 'done')
+    pump(1)
+    assert_true(lastLog(B, 'Alice finished buffing you: 2 cast(s) (done)') ~= nil, 'Suite 95: requester is told when buffing finishes')
+    A.core.runtime.enqueueBoxBuffRequest = function() return 0 end
+    B.inst.sendBuffRequest('alice')
+    pump(1)
+    assert_true(lastLog(B, 'nothing to buff') ~= nil, 'Suite 95: zero candidates reported back')
+    A.inst.cfg.acceptCommands = false
+    B.inst.sendBuffRequest('alice')
+    pump(1)
+    assert_true(lastLog(B, 'Alice refused buffs: not trusted') ~= nil, 'Suite 95: disabled receiver refuses buff requests')
+    A.inst.cfg.acceptCommands = true
+    gotReq = nil
+    A.core.runtime.enqueueBoxBuffRequest = function(name) gotReq = name return 1 end
+    B.inst.sendBuffRequest('zone')
+    pump(1)
+    assert_eq(gotReq, 'Bob', 'Suite 95: zone-scoped buff request reaches same-zone boxes')
+    assert_eq(B.inst.onCommand('net', { 'net', 'buffme', 'alice' }), true, 'Suite 95: /ac net buffme handled')
+
     for _, b in ipairs(boxes) do b.inst.onDestroy() end
     print = realPrint ---@diagnostic disable-line: lowercase-global
 end)()
@@ -13197,6 +13235,220 @@ end)()
     local isCorrupted = loadFunc(src, 'isCorrupted', { mq = mockMq, boxnetHasCounter = boxnetHasCounter })
     S.counters = { corruption = 1 }
     assert_eq(isCorrupted(900), true, 'Suite 96: isCorrupted from Box Network counters')
+end)()
+
+
+-- ============================================================================
+-- Suite 97: Box Network Phase 3 - allies, cross-box buffs, Group HUD, DPS share
+-- ============================================================================
+;(function()
+    print('--- Suite 97: Box Network Phase 3 (allies, buffs, Group HUD, DPS) ---')
+    local function callable(ret, fields) return setmetatable(fields or {}, { __call = function() return ret end }) end
+    local S = { peers = {}, cmds = {}, buffs = {}, spellInfo = {}, groupMembers = {} }
+    local spawns = {
+        [1]   = { name = 'Me', type = 'PC', hp = 90 },
+        [10]  = { name = 'Grouper', type = 'PC', hp = 60 },
+        [20]  = { name = 'Boxer', type = 'PC', hp = 30 },
+        [21]  = { name = 'Farbox', type = 'PC', hp = 10 },
+        [777] = { name = 'a_rat', type = 'NPC', hp = 80 },
+    }
+    local byName = {}
+    for id, sp in pairs(spawns) do byName[sp.name:lower()] = id end
+    local function spawnObj(id)
+        local sp = spawns[id]
+        if not sp then return callable(nil, { ID = function() return 0 end }) end
+        return callable('spawn', {
+            ID = function() return id end, CleanName = function() return sp.name end, Type = function() return sp.type end,
+            Dead = function() return false end, PctHPs = function() return sp.hp end,
+            TargetOfTarget = { ID = function() return sp.tot or 0 end }, AggroHolder = { ID = function() return sp.aggro or 0 end },
+        })
+    end
+    local mockMq = {
+        cmd = function(c) S.cmds[#S.cmds + 1] = c end, cmdf = function(f, ...) S.cmds[#S.cmds + 1] = string.format(f, ...) end,
+        delay = function() end, gettime = function() return S.now or 0 end,
+        TLO = {
+            Me = { ID = function() return 1 end, PctHPs = function() return 90 end },
+            Group = {
+                Members = function() return #S.groupMembers end,
+                Member = function(i)
+                    local id = (i == 0) and 1 or S.groupMembers[i]
+                    if not id then return callable(nil) end
+                    local sp = spawns[id]
+                    return callable('m', { ID = function() return id end, Dead = function() return false end, PctHPs = function() return sp.hp end,
+                        CleanName = function() return sp.name end })
+                end,
+            },
+            Spawn = function(arg)
+                if type(arg) == 'string' then
+                    local nm = arg:gsub('^pc =', ''):lower()
+                    return spawnObj(byName[nm] or -1)
+                end
+                return spawnObj(arg)
+            end,
+            Spell = function(name)
+                local info = S.spellInfo[name]
+                if not info then return callable(nil) end
+                return callable('spell', { Beneficial = function() return info.bene ~= false end, Duration = function() return info.dur or 60 end, TargetType = function() return info.tt or 'Single' end })
+            end,
+            Target = callable(nil, { ID = function() return 0 end }),
+        },
+    }
+    local fakeApi = { available = function() return true end, peersInZone = function() return S.peers end }
+    local loadout97 = { gems = {} }
+    local ctrl97 = { mode = 'Assist', burn = false }
+    local env = {
+        ctrl = ctrl97, loadout = loadout97, mq = mockMq, print = function() end,
+        pluginManager = { coreApi = setmetatable({ boxnet = fakeApi }, { __index = function() return nil end }) },
+        isSpawnAlive = function(id) return spawns[id] ~= nil end,
+        distToId = function(id) return (id == 21) and 400 or 25 end,
+        baseTok = function(t) return (tostring(t or ''):gsub('^%a:%s*', '')) end,
+        buffActive = function(id, name) return S.buffs[id] and S.buffs[id][name] == true end,
+        isTargetInRange = function() return true end,
+        isGroupOrRaidMember = function(id) for _, g in ipairs(S.groupMembers) do if g == id then return true end end return false end,
+        isXTargetId = function() return false end, isSpawnPetOrPlayer = function(id) return spawns[id] and spawns[id].type == 'PC' end,
+        isHostileTarget = function(id) return spawns[id] and spawns[id].type == 'NPC' end,
+        maPcId = function() return nil end, boxnetMaTarget = function() return nil end,
+    }
+    env.boxnetApi = loadFunc(src, 'boxnetApi', env)
+    env.boxPeersInZone = loadFunc(src, 'boxPeersInZone', env)
+    env.isBoxPeerId = loadFunc(src, 'isBoxPeerId', env)
+    env.BOXNET_FRESH_SEC = 3.0
+
+    -- 1. Box peers in zone resolve to local spawn ids and live HP
+    S.peers = { { name = 'Boxer', hb = { hp = 55 } }, { name = 'Ghost', hb = { hp = 20 } } }
+    local peers = env.boxPeersInZone()
+    assert_eq(#peers, 2, 'Suite 97: every fresh peer is listed')
+    assert_eq(peers[1].id, 20, 'Suite 97: peer resolved to its local spawn id')
+    assert_eq(peers[1].hp, 30, 'Suite 97: live spawn HP preferred over heartbeat HP')
+    assert_eq(peers[2].id, 0, 'Suite 97: a peer with no spawn keeps id 0')
+    assert_eq(peers[2].hp, 20, 'Suite 97: heartbeat HP used when no spawn')
+    assert_eq(env.isBoxPeerId(20), true, 'Suite 97: isBoxPeerId true for a box spawn')
+    assert_eq(env.isBoxPeerId(10), false, 'Suite 97: isBoxPeerId false for a non-box')
+
+    -- 2. lowestHpAlly: boxes only when asked; group-wide callers leave them out
+    local lowestHpAlly = loadFunc(src, 'lowestHpAlly', env)
+    S.groupMembers = { 10 }
+    S.peers = { { name = 'Boxer', hb = { hp = 30 } }, { name = 'Farbox', hb = { hp = 10 } } }
+    assert_eq(lowestHpAlly(), 10, 'Suite 97: default excludes boxes (group-wide spells)')
+    assert_eq(lowestHpAlly(nil, true), 20, 'Suite 97: includeBoxes picks the hurt box in range')
+    assert_true(src:find("id = runtime.lowestHpAlly(nil, true)", 1, true) ~= nil, 'Suite 97: Lowest-HP Ally single-target token includes boxes')
+    assert_true(src:find("return pctHP(runtime.lowestHpAlly()) <= pct", 1, true) ~= nil, 'Suite 97: Whole Group HP check stays group-only')
+    S.groupMembers = { 10, 20 }
+    assert_eq(lowestHpAlly(nil, true), 20, 'Suite 97: a grouped box is not double counted')
+
+    -- 3. targetIsEngaged: a box holding aggro counts like a group member
+    S.groupMembers = {}
+    local targetIsEngaged = loadFunc(src, 'targetIsEngaged', env)
+    spawns[777].hp = 100
+    spawns[777].aggro = 20
+    assert_eq(targetIsEngaged(777), true, 'Suite 97: mob with a box as aggro holder is engaged')
+    spawns[777].aggro = 0
+    spawns[777].tot = 20
+    assert_eq(targetIsEngaged(777), true, 'Suite 97: mob targeting a box is engaged')
+    spawns[777].tot = 0
+    assert_eq(targetIsEngaged(777), false, 'Suite 97: untouched full-HP mob is not engaged')
+
+    -- 4. Cross-box buff requests: candidates, queue, casting order, completion
+    S.spellInfo = { ['Temperance'] = { tt = 'Single' }, ['Self Only Buff'] = { tt = 'Self' }, ['Nuke'] = { bene = false, dur = 0 }, ['Group Buff'] = { tt = 'Group v2' }, ['Pet Buff'] = { tt = 'Pet' } }
+    loadout97.gems = {
+        { spell = 'Temperance', target = 'F: Tank', when = 'missing buff', pct = 100 },
+        { spell = 'Self Only Buff', target = 'F: Myself', when = 'missing buff', pct = 100 },
+        { spell = 'Nuke', target = 'E: Assist Target', when = 'in combat', pct = 100 },
+        { spell = 'Group Buff', target = 'F: Whole Group', when = 'missing buff', pct = 100 },
+        { spell = 'Pet Buff', target = 'F: Pet', when = 'missing buff', pct = 100 },
+        { spell = 'Burn Buff', target = 'F: Myself', when = 'missing buff', pct = 100, burn_only = true },
+    }
+    S.spellInfo['Burn Buff'] = { tt = 'Single' }
+    env.isFriendlyBuffToken = loadFunc(src, 'isFriendlyBuffToken', env)
+    local boxBuffCandidates = loadFunc(src, 'boxBuffCandidates', env)
+    env.boxBuffCandidates = boxBuffCandidates
+    local cands = boxBuffCandidates()
+    local names = {}
+    for _, c in ipairs(cands) do names[#names + 1] = c.entry.spell end
+    assert_eq(table.concat(names, ','), 'Temperance,Group Buff', 'Suite 97: only friendly, non-self, beneficial duration buffs qualify (burn-only off)')
+    ctrl97.burn = true
+    assert_eq(#boxBuffCandidates(), 3, 'Suite 97: burn-only buffs join the candidates in burn mode')
+    ctrl97.burn = false
+    env.boxBuffRequests = {}
+    local enqueue = loadFunc(src, 'enqueueBoxBuffRequest', env)
+    env.enqueueBoxBuffRequest = enqueue
+    local nextCast = loadFunc(src, 'nextBoxBuffCast', env)
+    local q = env.boxBuffRequests
+    assert_eq(enqueue('Boxer', { 'temperance' }), 1, 'Suite 97: requester already has Temperance (case-insensitive) -> one buff queued')
+    assert_eq(#q, 1, 'Suite 97: request queued')
+    assert_eq(enqueue('Boxer', {}), 2, 'Suite 97: a new request from the same box replaces the old one')
+    assert_eq(#q, 1, 'Suite 97: still one request for that box')
+    assert_eq(enqueue('Boxer', { 'Temperance', 'Group Buff' }), 0, 'Suite 97: nothing to cast -> 0 and not queued')
+    assert_eq(#q, 0, 'Suite 97: zero-candidate request is dropped')
+    enqueue('Boxer', {})
+    local done = {}
+    env.onBoxBuffRequestDone = function(req, reason) done[#done + 1] = { name = req.name, cast = req.cast, reason = reason } end
+    nextCast = loadFunc(src, 'nextBoxBuffCast', env)
+    local slot, entry, tid = nextCast()
+    assert_eq(slot, 1, 'Suite 97: first candidate is gem slot 1')
+    assert_eq(entry and entry.spell, 'Temperance', 'Suite 97: first cast is Temperance')
+    assert_eq(tid, 20, 'Suite 97: target is the requester spawn')
+    S.buffs[20] = { ['Temperance'] = true } -- landed
+    slot, entry = nextCast()
+    assert_eq(entry and entry.spell, 'Group Buff', 'Suite 97: landed buff is skipped, next candidate offered')
+    for _ = 1, 8 do nextCast() end -- keeps failing -> give up after the retry cap
+    assert_eq(#q, 0, 'Suite 97: request completes once every candidate landed or hit the retry cap')
+    assert_eq(done[1] and done[1].reason, 'done', 'Suite 97: completion hook fired with done')
+    enqueue('Ghost', {})
+    assert_nil(nextCast(), 'Suite 97: requester with no spawn in zone is dropped')
+    assert_eq(done[#done].reason, 'not in zone', 'Suite 97: hook reports not in zone')
+    enqueue('Boxer', {})
+    q[1].at = os.time() - 500
+    assert_nil(nextCast(), 'Suite 97: stale request expires')
+    assert_eq(done[#done].reason, 'expired', 'Suite 97: hook reports expired')
+    assert_true(src:find("1b. A box asked us for buffs (Box Network): serve it before our own list.", 1, true) ~= nil, 'Suite 97: downtime buffing serves box requests before its own list')
+
+    -- 5. Group HUD box rows and DPS sharing (source contracts + DPS unit run)
+    local gwSrc = readFile('TAC/lua/tac/hud_group.lua')
+    assert_true(gwSrc:find("ctrl.gw_show_boxes ~= false and core.boxnet", 1, true) ~= nil, 'Suite 97: Group HUD lists Box Network peers when enabled')
+    assert_true(gwSrc:find("isBox = true", 1, true) ~= nil, 'Suite 97: box rows are flagged')
+    assert_true(gwSrc:find("accent(GOLD, '[Box]')", 1, true) ~= nil, 'Suite 97: box rows carry a [Box] badge')
+    assert_true(gwSrc:find("otherZone = not inZone", 1, true) ~= nil, 'Suite 97: boxes in another zone render as other-zone')
+    assert_true(gwSrc:find("Show Box Network Characters##gwBoxes", 1, true) ~= nil, 'Suite 97: settings toggle for box rows')
+    local dpsInst = assert(loadfile('TAC/lua/tac/dps.lua'))()
+    local subs = {}
+    local dpsCore = setmetatable({ mq = mockMq, boxnet = { available = function() return true end, subscribe = function(kind, fn) subs[kind] = fn return function() subs[kind] = nil end end, broadcast = function(kind, data) S.lastShare = { kind = kind, data = data } return true end } },
+        { __index = function() return nil end })
+    mockMq.bind, mockMq.unbind, mockMq.event, mockMq.unevent = function() end, function() end, function() end, function() end
+    mockMq.configDir = '/tmp/claude-1000/-home-gennro-Documents-github-TriuneAutocombat/ac73ae47-5c31-4666-aa5a-ca1276e99826/scratchpad'
+    mockMq.TLO.Me.CleanName = function() return 'Me' end
+    local realPrint97 = print
+    print = function() end ---@diagnostic disable-line: lowercase-global
+    local okInit, errInit = pcall(dpsInst.onInit, dpsCore)
+    print = realPrint97 ---@diagnostic disable-line: lowercase-global
+    assert_true(okInit, 'Suite 97: dps plugin initialises with a Box Network core: ' .. tostring(errInit))
+    dpsInst.rt.boxes = {}
+    dpsInst.ensureBoxSubscription()
+    assert_true(subs['dps:share'] ~= nil, 'Suite 97: dps subscribes to dps:share once the Box Network is available')
+    -- drive the receive handler directly
+    S.now = 1000
+    dpsInst.onBoxDps({ live = true, target = 'a_rat', dmg = 500, dps = 125, dur = 4 }, { character = 'Bob' })
+    local list = dpsInst.boxList()
+    assert_eq(#list, 1, 'Suite 97: DPS keeps the other box parse')
+    assert_eq(list[1].live and list[1].live.dps, 125, 'Suite 97: live line stored')
+    dpsInst.onBoxDps({ live = false, target = 'a_rat', dmg = 900, dps = 150, dur = 6, playerDmg = 700, petDmg = 200 }, { character = 'Bob' })
+    list = dpsInst.boxList()
+    assert_nil(list[1].live, 'Suite 97: fight summary clears the live line')
+    assert_eq(list[1].lastFight.dmg, 900, 'Suite 97: fight summary stored')
+    S.now = 1000 + 61 * 1000
+    assert_eq(#dpsInst.boxList(), 0, 'Suite 97: stale box parses drop after 60s')
+    local dpsSrc = readFile('TAC/lua/tac/dps.lua')
+    assert_true(dpsSrc:find("shareFight(rt.history[1])", 1, true) ~= nil, 'Suite 97: fight end broadcasts the summary')
+    assert_true(dpsSrc:find("shareLive()", 1, true) ~= nil, 'Suite 97: live line shared from the tick')
+    assert_true(dpsSrc:find('BeginTabItem("Boxes##MainBoxesTab")', 1, true) ~= nil, 'Suite 97: DPS window has a Boxes tab')
+    assert_true(dpsSrc:find("'dps:share'", 1, true) ~= nil, 'Suite 97: DPS uses the dps:share message kind')
+    -- sharing: a finished fight broadcasts its summary
+    dpsInst.shareFight({ targetName = 'a_rat', totalDmg = 1200, duration = 8, peakDps = 150, playerDmg = 1000, petDmg = 200 })
+    assert_eq(S.lastShare and S.lastShare.kind, 'dps:share', 'Suite 97: fight summary broadcast on dps:share')
+    assert_eq(S.lastShare and S.lastShare.data.live, false, 'Suite 97: summary is flagged as not live')
+    assert_eq(S.lastShare and S.lastShare.data.dmg, 1200, 'Suite 97: summary carries total damage')
+    dpsInst.onDestroy()
+    assert_nil(subs['dps:share'], 'Suite 97: dps unsubscribes on destroy')
 end)()
 
 

@@ -628,6 +628,53 @@ local function sendPing(name)
     return true
 end
 
+-- Names of the buffs currently on us, so the other box only casts what we lack.
+local function myBuffNames()
+    local names = {}
+    local n = tlo(function() return mq.TLO.Me.BuffCount() end, 0)
+    for i = 1, (tonumber(n) or 0) do
+        local nm = tlo(function() return mq.TLO.Me.Buff(i).Name() end, nil)
+        if nm and nm ~= '' then names[#names + 1] = tostring(nm) end
+    end
+    return names
+end
+
+-- Ask other boxes for buffs. The receiving box's core queues every friendly
+-- 'missing buff' gem we lack and casts them in its downtime pass (see
+-- runtime.enqueueBoxBuffRequest in triune.lua). Nothing to do with Buffbot.
+local function sendBuffRequest(scope)
+    if not net.actor then return false, net.err or 'not connected' end
+    local data = { buffs = myBuffNames() }
+    local kind, name = resolveScope(scope)
+    if kind == 'name' then
+        local peer = findPeer(name)
+        local target = peer and peer.name or name
+        data.rpc = true
+        rawSend({ character = target }, 'buffme', data, function(status, reply)
+            if noteStatus(status, 'buffme -> ' .. target) then
+                local r = reply and reply.content
+                local d = r and r.data or {}
+                if d.ok == false then
+                    logEvent(string.format('%s refused buffs: %s', target, tostring(d.reason)), 'warn')
+                elseif (tonumber(d.queued) or 0) == 0 then
+                    logEvent(target .. ': nothing to buff (you have everything they can cast)')
+                    chat('%s: nothing to buff you with.', target)
+                else
+                    logEvent(string.format('%s queued %d buff(s) for you', target, d.queued))
+                    chat('%s queued %d buff(s) for you.', target, d.queued)
+                end
+            end
+        end)
+        logEvent('-> ' .. target .. ': buff me')
+        return true
+    end
+    data.scope = kind
+    if kind == 'zone' then data.zone = myZone() end
+    rawSend(nil, 'buffme', data)
+    logEvent('-> ' .. kind .. ': buff me')
+    return true
+end
+
 -- Loopback health check: an RPC addressed to our own character has to travel
 -- client -> launcher -> client, so its status pins down which hop is broken.
 --   ok            launcher routing works (problem is on the other boxes)
@@ -772,6 +819,35 @@ local function handleCamp(message, payload, sender)
     replyTo(message, data, 0, { ok = true })
 end
 
+local function handleBuffMe(message, payload, sender)
+    local data = payload.data or {}
+    local from = (sender and sender.character) or payload.from or ''
+    if from == '' then return end
+    if data.scope == 'zone' and lower(data.zone) ~= lower(myZone()) then return end
+    if data.scope == 'group' and not isGroupMember(from) then return end
+    if not cfg.acceptCommands or not isTrusted(sender, payload) then
+        replyTo(message, data, 1, { ok = false, reason = 'not trusted' })
+        return
+    end
+    local rt = core.runtime
+    if not rt or type(rt.enqueueBoxBuffRequest) ~= 'function' then
+        replyTo(message, data, 1, { ok = false, reason = 'core too old' })
+        return
+    end
+    local ok, queued = pcall(rt.enqueueBoxBuffRequest, from, type(data.buffs) == 'table' and data.buffs or {})
+    queued = ok and tonumber(queued) or 0
+    logEvent(string.format('<- %s: buff me (%d to cast)', from, queued))
+    if cfg.announce and queued > 0 then chat('%s asked for buffs - %d to cast when idle.', from, queued) end
+    replyTo(message, data, 0, { ok = true, queued = queued })
+end
+
+-- Called by the core when a queued box buff request finishes.
+local function onBoxBuffRequestDone(req, reason)
+    if not req or not req.name then return end
+    logEvent(string.format('buffed %s: %d cast(s), %s', req.name, req.cast or 0, tostring(reason)))
+    rawSend({ character = req.name }, 'buffme:done', { cast = req.cast or 0, reason = reason })
+end
+
 local function handleQuery(message, payload)
     local data = payload.data or {}
     if data.what == 'ping' then
@@ -835,6 +911,14 @@ local function processMessage(message)
     elseif kind == 'query' then
         touchPeer(sender, nil)
         handleQuery(message, payload)
+    elseif kind == 'buffme' then
+        touchPeer(sender, nil)
+        handleBuffMe(message, payload, sender)
+    elseif kind == 'buffme:done' then
+        local from = (sender and sender.character) or payload.from or '?'
+        local d = payload.data or {}
+        logEvent(string.format('%s finished buffing you: %d cast(s) (%s)', from, tonumber(d.cast) or 0, tostring(d.reason)))
+        if cfg.announce then chat('%s finished buffing you (%d cast%s).', from, tonumber(d.cast) or 0, (tonumber(d.cast) or 0) == 1 and '' or 's') end
     else
         -- Application messages from other plugins; only they know the shape.
         touchPeer(sender, nil)
@@ -903,6 +987,15 @@ function api.peerTarget(name, maxAgeSec)
     return { id = t.id, name = t.name, hp = t.hp, type = t.type, engaged = t.engaged == true, combat = p.hb.combat == true, age = age }
 end
 
+-- Every fresh peer in our zone (sorted by name).
+function api.peersInZone(maxAgeSec)
+    local out = {}
+    for _, p in ipairs(peerList()) do
+        if api.peerFresh(p.name, maxAgeSec) then out[#out + 1] = p end
+    end
+    return out
+end
+
 -- The peer's detrimental counters { poison, disease, curse, corruption } or nil.
 function api.peerCounters(name, maxAgeSec)
     local p = api.peerFresh(name, maxAgeSec)
@@ -910,6 +1003,7 @@ function api.peerCounters(name, maxAgeSec)
     return p.hb.counters
 end
 function api.command(scope, lines) return sendCommand(scope, lines) end
+function api.requestBuffs(scope) return sendBuffRequest(scope) end
 function api.campHere(scope) return sendCampHere(scope) end
 function api.ping(name) return sendPing(name) end
 
@@ -991,6 +1085,9 @@ local function drawQuickButtons(MUTED)
     if ImGui.Button('Set Me as MA##bnMA', 100, 22) then sendCommand(scope, 'ma ' .. myName()) end
     if ImGui.IsItemHovered() then core.setTooltip('Set this character as the Main Assist on the selected boxes (mode unchanged).') end
     ImGui.SameLine()
+    if ImGui.Button('Buff Me##bnBuffMe', 70, 22) then sendBuffRequest(scope) end
+    if ImGui.IsItemHovered() then core.setTooltip('Ask the selected boxes for the friendly loadout buffs you are missing.') end
+    ImGui.SameLine()
     if ImGui.Button('Camp Here##bnCamp', 80, 22) then sendCampHere(scope) end
     if ImGui.IsItemHovered() then core.setTooltip('Set the camp anchor of every selected box in this zone to your current location.') end
     ImGui.TextDisabled('/ac')
@@ -1022,7 +1119,7 @@ local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
     ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
     ImGui.TableSetupColumn('Afflict', ImGuiTableColumnFlags.WidthFixed, 70)
     ImGui.TableSetupColumn('Seen', ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 190)
+    ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 250)
     ImGui.TableHeadersRow()
 
     local t = nowSec()
@@ -1101,6 +1198,9 @@ local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
         if ImGui.SmallButton((hb.burn and 'Burn Off' or 'Burn On') .. rowId) then
             sendCommand(p.name, hb.burn and 'burn off' or 'burn on')
         end
+        ImGui.SameLine()
+        if ImGui.SmallButton('Buff Me' .. rowId) then sendBuffRequest(p.name) end
+        if ImGui.IsItemHovered() then core.setTooltip('Ask this box to cast the friendly buffs from its loadout that you are missing (done in its downtime pass).') end
         ImGui.SameLine()
         if ImGui.SmallButton('Ping' .. rowId) then sendPing(p.name) end
     end
@@ -1207,6 +1307,7 @@ function plugin.onInit(coreApi)
     net.lastSendStatus = nil
     net.startedAt = nowSec()
     rawset(core, 'boxnet', api)
+    if core.runtime then core.runtime.onBoxBuffRequestDone = onBoxBuffRequestDone end
     -- Register straight away so other plugins' onInit can already see us.
     net.probe = { state = 'pending', at = -1e9, sentAt = nil, rttMs = nil, status = nil }
     if registerActor() then
@@ -1223,6 +1324,7 @@ function plugin.onDestroy()
     net.peers = {}
     net.subscribers = {}
     if core and rawget(core, 'boxnet') == api then rawset(core, 'boxnet', nil) end
+    if core and core.runtime and core.runtime.onBoxBuffRequestDone == onBoxBuffRequestDone then core.runtime.onBoxBuffRequestDone = nil end
 end
 
 function plugin.onTick()
@@ -1411,6 +1513,11 @@ function plugin.onCommand(cmd, args)
         if not ok then chat('Ping not sent: %s', tostring(why)) end
         return true
     end
+    if subl == 'buffme' or subl == 'buffs' then
+        local ok, why = sendBuffRequest(args[2] or cfg.defaultScope)
+        if not ok then chat('Buff request not sent: %s', tostring(why)) end
+        return true
+    end
     if subl == 'camp' or subl == 'camphere' then
         local ok, why = sendCampHere(args[2] or cfg.defaultScope)
         if not ok then chat('Camp Here not sent: %s', tostring(why)) end
@@ -1430,6 +1537,7 @@ plugin.help = {
     '  \ag/ac net\ax - Toggle the Box Network window (boxnet plugin)',
     '  \ag/ac net <all|zone|group|Name> <command>\ax - Run an /ac command on other boxes (e.g. /ac net all burn on)',
     '  \ag/ac net peers | ping <Name> | camp [scope]\ax - List boxes, ping one, or push your location as their camp',
+    '  \ag/ac net buffme [scope|Name]\ax - Ask your other boxes for the loadout buffs you are missing',
 }
 
 -- Exposed for tests
@@ -1446,6 +1554,7 @@ plugin.resolveScope = resolveScope
 plugin.sendCommand = sendCommand
 plugin.sendCampHere = sendCampHere
 plugin.sendPing = sendPing
+plugin.sendBuffRequest = sendBuffRequest
 plugin.sendHeartbeat = sendHeartbeat
 plugin.peerList = peerList
 plugin.processMessage = processMessage

@@ -82,6 +82,12 @@ local function renderGwSettingsContent()
         ctrl.gw_show_endurance = endVal
         core.saveLoadout(true)
     end
+    local boxVal = ImGui.Checkbox('Show Box Network Characters##gwBoxes', ctrl.gw_show_boxes ~= false)
+    if boxVal ~= (ctrl.gw_show_boxes ~= false) then
+        ctrl.gw_show_boxes = boxVal
+        core.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then core.setTooltip('Also list your other boxed characters (Box Network) that are not in this group, with live vitals from their heartbeat.') end
     local petVal = ImGui.Checkbox('Show Pet Bars##gwPets', ctrl.gw_show_pets ~= false)
     if petVal ~= (ctrl.gw_show_pets ~= false) then
         ctrl.gw_show_pets = petVal
@@ -305,6 +311,64 @@ function plugin.onDrawUI()
             end)
         end
 
+        -- Box Network: this computer's other Triune characters that are not in
+        -- the group (vitals from their heartbeat; spawn looked up locally so the
+        -- row can be targeted and shows distance).
+        if ctrl.gw_show_boxes ~= false and core.boxnet and type(core.boxnet.peers) == 'function' then
+            local okB, peers = pcall(core.boxnet.peers)
+            if okB and type(peers) == 'table' then
+                local seenNames = {}
+                for _, m in ipairs(members) do seenNames[tostring(m.name):lower()] = true end
+                local myZone = ''
+                pcall(function() myZone = tostring(mq.TLO.Zone.ShortName() or ''):lower() end)
+                for _, p in ipairs(peers) do
+                    local hb = p.hb
+                    if hb and p.name and not seenNames[tostring(p.name):lower()] then
+                        local inZone = tostring(hb.zone or ''):lower() == myZone
+                        local bId, bDist, bLoS = 0, 0, false
+                        if inZone then
+                            pcall(function()
+                                local sp = mq.TLO.Spawn('pc =' .. p.name)
+                                if sp and sp() and (sp.ID() or 0) > 0 then
+                                    bId = sp.ID() or 0
+                                    bDist = sp.Distance() or 0
+                                    bLoS = sp.LineOfSight() or false
+                                end
+                            end)
+                        end
+                        table.insert(members, {
+                            isSelf = false,
+                            isBox = true,
+                            index = 100 + #members,
+                            id = bId,
+                            name = p.name,
+                            level = tonumber(hb.level) or 0,
+                            cls = type(hb.classes) == 'table' and table.concat(hb.classes, '/') or '?',
+                            hpPct = tonumber(hb.hp) or 0,
+                            curHp = 0, maxHp = 0,
+                            manaPct = tonumber(hb.mana) or 0,
+                            curMana = 0, maxMana = 0,
+                            endPct = tonumber(hb.endur) or 0,
+                            curEnd = 0, maxEnd = 0,
+                            distance = bDist,
+                            los = bLoS,
+                            isLeader = false,
+                            isMT = false,
+                            isMA = (maName ~= '' and maName == p.name),
+                            isPuller = false,
+                            isMerc = false,
+                            offline = false,
+                            otherZone = not inZone,
+                            petId = (type(hb.pet) == 'table' and tonumber(hb.pet.id)) or 0,
+                            petName = (type(hb.pet) == 'table' and hb.pet.name) or 'Pet',
+                            petHpPct = (type(hb.pet) == 'table' and tonumber(hb.pet.hp)) or 0,
+                            boxMode = hb.mode, boxRunning = hb.running == true,
+                        })
+                    end
+                end
+            end
+        end
+
         -- Query current target in EverQuest
         local curTargId = 0
         local curTargName = ''
@@ -502,6 +566,14 @@ function plugin.onDrawUI()
                         ImGui.SameLine()
                         accent(MUTED, '[Merc]')
                         if ImGui.IsItemHovered() then core.setTooltip('Mercenary') end
+                    end
+                end
+                if mem.isBox then
+                    ImGui.SameLine()
+                    accent(GOLD, '[Box]')
+                    if ImGui.IsItemHovered() then
+                        core.setTooltip('%s', string.format('One of your boxes (Box Network, not in this group)\nTrio: %s\nMode: %s (%s)',
+                            mem.cls or '?', tostring(mem.boxMode or '?'), mem.boxRunning and 'running' or 'paused'))
                     end
                 end
 

@@ -13664,9 +13664,14 @@ local function hasSpellReagents(spellName)
     return has
 end
 
-function runtime.lowestHpAlly(maxDist)
+-- Lowest-HP ally for single-target heals. `includeBoxes` adds this
+-- computer's other Triune characters (Box Network peers in this zone) even
+-- when they are not grouped; group-wide spells must leave it off since they
+-- cannot reach an ungrouped box.
+function runtime.lowestHpAlly(maxDist, includeBoxes)
     maxDist = maxDist or 200
     local bestId, bestHp = mq.TLO.Me.ID(), (mq.TLO.Me.PctHPs() or 100)
+    local seen = {}
     local total = 0
     pcall(function() total = mq.TLO.Group.Members() or 0 end)
     for i = 0, total do
@@ -13682,6 +13687,7 @@ function runtime.lowestHpAlly(maxDist)
             if isPresent then
                 local mid = m.ID() or 0
                 if mid > 0 and isSpawnAlive(mid) then
+                    seen[mid] = true
                     local dist = distToId(mid)
                     if dist >= 0 and dist <= maxDist then
                         local hp = m.PctHPs() or 100
@@ -13689,6 +13695,16 @@ function runtime.lowestHpAlly(maxDist)
                             bestHp = hp; bestId = mid
                         end
                     end
+                end
+            end
+        end
+    end
+    if includeBoxes and runtime.boxPeersInZone then
+        for _, b in ipairs(runtime.boxPeersInZone()) do
+            if b.id and b.id > 0 and not seen[b.id] and isSpawnAlive(b.id) then
+                local dist = distToId(b.id)
+                if dist >= 0 and dist <= maxDist and (b.hp or 100) < bestHp then
+                    bestHp = b.hp; bestId = b.id
                 end
             end
         end
@@ -13892,6 +13908,133 @@ function runtime.boxnetCounters(name)
     return nil
 end
 
+-- This computer's other Triune characters in our zone with a fresh
+-- heartbeat: { { name, id (0 if no spawn), hp, mana, counters, ... } }.
+-- Spawn IDs come from the local client so callers can target them.
+function runtime.boxPeersInZone()
+    local bn = runtime.boxnetApi()
+    if not bn or type(bn.peersInZone) ~= 'function' then return {} end
+    local ok, list = pcall(bn.peersInZone, runtime.BOXNET_FRESH_SEC or 3.0)
+    if not ok or type(list) ~= 'table' then return {} end
+    local out = {}
+    for _, p in ipairs(list) do
+        local id = 0
+        pcall(function()
+            local sp = mq.TLO.Spawn('pc =' .. p.name)
+            if sp and sp() then id = sp.ID() or 0 end
+        end)
+        local hp = p.hb and p.hb.hp
+        if id > 0 then
+            pcall(function()
+                local sp = mq.TLO.Spawn(id)
+                local live = sp and sp() and sp.PctHPs()
+                if type(live) == 'number' then hp = live end
+            end)
+        end
+        out[#out + 1] = { name = p.name, id = id, hp = tonumber(hp) or 100, hb = p.hb }
+    end
+    return out
+end
+
+-- True when `id` is one of our boxes (fresh, in zone). Used where the core
+-- asks "is one of ours fighting this?" - a box holding aggro is as good as a
+-- group member holding it.
+function runtime.isBoxPeerId(id)
+    if not id or id <= 0 then return false end
+    for _, b in ipairs(runtime.boxPeersInZone()) do
+        if b.id == id then return true end
+    end
+    return false
+end
+
+-- ----------------------------------------------------------------------------
+-- Cross-box buff requests. A box asks us (over the Box Network) for buffs and
+-- sends the names of the buffs it already has. We queue the request and the
+-- downtime-buffing pass casts every friendly 'missing buff' gem the requester
+-- lacks, one per pass, then reports back. Nothing here touches Buffbot.
+-- ----------------------------------------------------------------------------
+runtime.boxBuffRequests = {}
+runtime.BOX_BUFF_REQUEST_TTL = 120 -- seconds a queued request stays valid
+
+function runtime.isFriendlyBuffToken(token)
+    local b = baseTok(token)
+    return b == 'Myself' or b == 'Main Assist' or b == 'Tank' or b == 'Lowest-HP Ally' or b == 'Whole Group'
+end
+
+-- Gems we could cast on another player: friendly 'missing buff' entries with a
+-- duration whose spell is not self-only.
+function runtime.boxBuffCandidates()
+    local out = {}
+    if not loadout or not loadout.gems then return out end
+    for i = 1, #loadout.gems do
+        local g = loadout.gems[i]
+        if g and g.spell and g.spell ~= '' and g.when == 'missing buff' and runtime.isFriendlyBuffToken(g.target)
+            and (tonumber(g.pct) or 100) > 0 and (not g.burn_only or ctrl.burn) then
+            local ok = false
+            pcall(function()
+                local sp = mq.TLO.Spell(g.spell)
+                if sp and sp() and sp.Beneficial() and (tonumber(sp.Duration()) or 0) > 0 then
+                    local tt = tostring(sp.TargetType() or '')
+                    ok = (tt ~= 'Self')
+                end
+            end)
+            if ok then out[#out + 1] = { slot = i, entry = g } end
+        end
+    end
+    return out
+end
+
+-- Queue a request from `name` who already has the buffs listed in `has`.
+-- Returns the number of gems we may cast for them (0 = nothing to do).
+function runtime.enqueueBoxBuffRequest(name, has)
+    if not name or name == '' then return 0, 'no requester' end
+    local hasSet = {}
+    for _, n in ipairs(has or {}) do hasSet[tostring(n):lower()] = true end
+    local pending = {}
+    for _, c in ipairs(runtime.boxBuffCandidates()) do
+        if not hasSet[c.entry.spell:lower()] then pending[#pending + 1] = c end
+    end
+    -- Replace any older request from the same box.
+    for i = #runtime.boxBuffRequests, 1, -1 do
+        if runtime.boxBuffRequests[i].name:lower() == name:lower() then table.remove(runtime.boxBuffRequests, i) end
+    end
+    if #pending == 0 then return 0 end
+    table.insert(runtime.boxBuffRequests, { name = name, pending = pending, cast = 0, at = os.time(), tries = {} })
+    return #pending
+end
+
+-- Next (slot, entry, targetId) to cast for a queued box request, or nil.
+-- Drops finished, expired, or out-of-reach requests as it goes.
+function runtime.nextBoxBuffCast()
+    while #runtime.boxBuffRequests > 0 do
+        local req = runtime.boxBuffRequests[1]
+        local id = 0
+        pcall(function()
+            local sp = mq.TLO.Spawn('pc =' .. req.name)
+            if sp and sp() then id = sp.ID() or 0 end
+        end)
+        local expired = (os.time() - (req.at or 0)) > (runtime.BOX_BUFF_REQUEST_TTL or 120)
+        if expired or id <= 0 or not isSpawnAlive(id) then
+            table.remove(runtime.boxBuffRequests, 1)
+            if runtime.onBoxBuffRequestDone then runtime.onBoxBuffRequestDone(req, expired and 'expired' or 'not in zone') end
+        else
+            while #req.pending > 0 do
+                local c = req.pending[1]
+                local tries = (req.tries[c.entry.spell] or 0)
+                if tries >= 8 or buffActive(id, c.entry.spell) then -- a swap + cast takes a few passes
+                    table.remove(req.pending, 1)
+                else
+                    req.tries[c.entry.spell] = tries + 1
+                    return c.slot, c.entry, id, req
+                end
+            end
+            table.remove(runtime.boxBuffRequests, 1)
+            if runtime.onBoxBuffRequestDone then runtime.onBoxBuffRequestDone(req, 'done') end
+        end
+    end
+    return nil
+end
+
 function runtime.maPcId()
     if not ctrl then return nil end
     -- 1. If ctrl.ma_id is set and > 0, verify it is a valid, living PC
@@ -13929,12 +14072,12 @@ function runtime.targetIsEngaged(id)
     -- Check if target of target or aggro holder is player or group member
     local totId = 0
     pcall(function() totId = s.TargetOfTarget.ID() or 0 end)
-    if totId > 0 and (isGroupOrRaidMember(totId) or totId == (mq.TLO.Me.ID() or 0)) then
+    if totId > 0 and (isGroupOrRaidMember(totId) or totId == (mq.TLO.Me.ID() or 0) or runtime.isBoxPeerId(totId)) then
         return true
     end
     local aggroId = 0
     pcall(function() aggroId = s.AggroHolder.ID() or 0 end)
-    if aggroId > 0 and (isGroupOrRaidMember(aggroId) or aggroId == (mq.TLO.Me.ID() or 0)) then
+    if aggroId > 0 and (isGroupOrRaidMember(aggroId) or aggroId == (mq.TLO.Me.ID() or 0) or runtime.isBoxPeerId(aggroId)) then
         return true
     end
 
@@ -14617,7 +14760,7 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct, extra)
     elseif b == 'Main Assist' or b == 'Tank' then
         id = runtime.maPcId()
     elseif b == 'Lowest-HP Ally' then
-        id = runtime.lowestHpAlly()
+        id = runtime.lowestHpAlly(nil, true)
     elseif b == 'Pet' then
         id = resolvePetTargetId(when, spellName, cls, pct)
     elseif b == 'Current Target' then
@@ -18084,6 +18227,21 @@ function runtime.processDowntimeBuffing()
         end
         if not candidate then
             runtime.interruptedSwap = nil
+        end
+
+        -- 1b. A box asked us for buffs (Box Network): serve it before our own list.
+        if not candidate and runtime.nextBoxBuffCast then
+            local slot, entry, targetId, req = runtime.nextBoxBuffCast()
+            if slot and entry and targetId and targetId > 0 then
+                if runtime.isTargetInRange(entry.spell, targetId) then
+                    candidate = entry
+                    candidateTargetId = targetId
+                    targetGem = tonumber(entry.gem) or math.min(slot, 12)
+                    req.cast = (req.cast or 0) + 1
+                elseif req then
+                    req.tries[entry.spell] = 8 -- out of range: give up on this one
+                end
+            end
         end
 
         -- 2. Scan for missing buffs among all configured spells
