@@ -73,7 +73,7 @@ jobs:
 
       - name: Package Release Archives
         run: |
-          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-Update.zip HEAD:TAC lua config resources/triune_quest
+          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-Update.zip HEAD:TAC lua config
           git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-full.zip HEAD:TAC lua config resources
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
