@@ -9077,8 +9077,8 @@ do
     -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.13', 'Suite 77: triune.lua VERSION is 2.13')
-    assert_eq(vReadme, '2.13', 'Suite 77: README.md version is 2.13')
+    assert_eq(vTriune, '2.14', 'Suite 77: triune.lua VERSION is 2.14')
+    assert_eq(vReadme, '2.14', 'Suite 77: README.md version is 2.14')
     assert_eq(vTriune, vReadme, 'Suite 77: Version numbers match across triune.lua and README.md')
 end
 
@@ -9146,8 +9146,8 @@ do
     -- 6. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.13', 'Suite 78: triune.lua VERSION is 2.13')
-    assert_eq(vReadme, '2.13', 'Suite 78: README.md version is 2.13')
+    assert_eq(vTriune, '2.14', 'Suite 78: triune.lua VERSION is 2.14')
+    assert_eq(vReadme, '2.14', 'Suite 78: README.md version is 2.14')
     assert_eq(vTriune, vReadme, 'Suite 78: Version numbers match across triune.lua and README.md')
 end
 
@@ -9258,8 +9258,8 @@ do
     -- 8. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.13', 'Suite 79: triune.lua VERSION is 2.13')
-    assert_eq(vReadme, '2.13', 'Suite 79: README.md version is 2.13')
+    assert_eq(vTriune, '2.14', 'Suite 79: triune.lua VERSION is 2.14')
+    assert_eq(vReadme, '2.14', 'Suite 79: README.md version is 2.14')
     assert_eq(vTriune, vReadme, 'Suite 79: Version numbers match across triune.lua and README.md')
 end
 
@@ -9420,8 +9420,8 @@ do
     -- 7. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.13', 'Suite 81: triune.lua VERSION is 2.13')
-    assert_eq(vReadme, '2.13', 'Suite 81: README.md version is 2.13')
+    assert_eq(vTriune, '2.14', 'Suite 81: triune.lua VERSION is 2.14')
+    assert_eq(vReadme, '2.14', 'Suite 81: README.md version is 2.14')
     assert_eq(vTriune, vReadme, 'Suite 81: Version numbers match across triune.lua and README.md')
 end
 

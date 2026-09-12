@@ -2,6 +2,10 @@
 
 ## 2026-09-12
 
+- **Canonical Version Bump to 2.14 (`TAC/lua/triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - Bumped canonical suite version to **2.14** across `TAC/lua/triune.lua` and `README.md`.
+  - Updated test assertions across Suites 77, 78, 79, and 81 in `tests/test_pure_logic.lua` (2,432 tests passing).
+
 - **Release Archive Packaging at Archive Root (`.github/workflows/release.yml`, `README.md`).**
   - **Flatten Archive Directory Structure**: Changed `git archive` packaging in `.github/workflows/release.yml` to target tree `HEAD:TAC` instead of repository root paths, placing `lua/`, `config/`, and `resources/` directly at the root of `TriuneAutocombat-full.zip` and `TriuneAutocombat-Update.zip`.
   - **Root Documentation Inclusion**: Included `README.md` and `CHANGELOG.md` at the root of the generated release archives using `--add-file`.
