@@ -11951,12 +11951,17 @@ end
                     Casting = { Name = function() return nil end },
                     X = function() return box.x end, Y = function() return box.y end, Z = function() return box.z end,
                     Pet = { ID = function() return 0 end },
+                    CountersPoison = function() return box.poison or 0 end,
+                    CountersDisease = function() return box.disease or 0 end,
+                    CountersCurse = function() return box.curse or 0 end,
+                    CountersCorruption = function() return box.corruption or 0 end,
                 },
                 Zone = { ShortName = function() return box.zone end, ID = function() return 54 end },
                 Target = {
                     ID = function() return box.targetId end,
                     CleanName = function() return box.targetName end,
-                    PctHPs = function() return 50 end,
+                    PctHPs = function() return box.targetHp or 50 end,
+                    Type = function() return 'NPC' end,
                 },
                 EverQuest = { PID = function() return box.pid end },
                 Group = {
@@ -12403,6 +12408,48 @@ end
     local bnSrc = readFile('TAC/lua/tac/boxnet.lua')
     assert_true(bnSrc:find('mq.delay(', 1, true) == nil and bnSrc:find('core.delay(', 1, true) == nil, 'Suite 95: boxnet never calls mq.delay / core.delay (forbidden in actor handlers)')
     assert_true(bnSrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 95: window uses the core theme')
+
+    -- 20. Phase 2 feed: MA target / engaged and counters over the heartbeat
+    B.targetId, B.targetName, B.targetHp = 777, 'a_rat', 100
+    clock.t = clock.t + 0.3
+    pump(1)
+    local ft = A.inst.api.peerTarget('bob')
+    assert_eq(ft and ft.id, 777, 'Suite 95: peerTarget reports the peer target id')
+    assert_eq(ft and ft.name, 'a_rat', 'Suite 95: peerTarget reports the name')
+    assert_eq(ft and ft.type, 'NPC', 'Suite 95: peerTarget reports the spawn type')
+    assert_eq(ft and ft.engaged, false, 'Suite 95: full-HP target with no combat is not engaged')
+    local sentB = B.inst.net.sent
+    B.targetHp = 80
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(B.inst.net.sent, sentB + 1, 'Suite 95: engaged flip triggers an immediate heartbeat')
+    assert_eq(A.inst.api.peerTarget('bob').engaged, true, 'Suite 95: hurt target counts as engaged')
+    assert_true(A.inst.api.peerTarget('bob').age < 1, 'Suite 95: peerTarget reports the heartbeat age')
+    B.targetId = 0
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(A.inst.api.peerTarget('bob'), false, 'Suite 95: fresh peer with no target -> false')
+    assert_eq(A.inst.api.peerTarget('nobody'), nil, 'Suite 95: unknown peer -> nil')
+    B.zone = 'crushbone'
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(A.inst.api.peerFresh('bob'), nil, 'Suite 95: a peer in another zone is not fresh for the feed')
+    assert_eq(A.inst.api.peerTarget('bob'), nil, 'Suite 95: other-zone peer -> nil (fall back to /assist)')
+    B.zone = 'gfaydark'
+    B.poison, B.disease = 3, 0
+    sentB = B.inst.net.sent
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(B.inst.net.sent, sentB + 1, 'Suite 95: a new counter triggers an immediate heartbeat')
+    local pc = A.inst.api.peerCounters('bob')
+    assert_eq(pc and pc.poison, 3, 'Suite 95: peerCounters carries poison counters')
+    assert_eq(pc and pc.disease, 0, 'Suite 95: peerCounters carries disease counters')
+    assert_eq(pc and pc.curse, 0, 'Suite 95: peerCounters carries curse counters')
+    clock.t = clock.t + 3.5 -- no pump: heartbeat goes stale but the peer has not expired yet
+    assert_true(A.inst.api.peer('bob') ~= nil, 'Suite 95: peer still on the roster')
+    assert_eq(A.inst.api.peerFresh('bob'), nil, 'Suite 95: heartbeat older than 3s is not fresh')
+    assert_eq(A.inst.api.peerCounters('bob'), nil, 'Suite 95: stale counters are not offered')
+    assert_true(A.inst.api.peerFresh('bob', 10) ~= nil, 'Suite 95: caller can widen the freshness window')
 
     for _, b in ipairs(boxes) do b.inst.onDestroy() end
     print = realPrint ---@diagnostic disable-line: lowercase-global
@@ -13000,6 +13047,158 @@ end)()
     os.remove(bmPath)
     print = realPrint ---@diagnostic disable-line: lowercase-global
 end)()
+
+-- ============================================================================
+-- Suite 96: Box Network feed in the core (MA target, engagement, cures)
+-- ============================================================================
+;(function()
+    print('--- Suite 96: Box Network feed in the core ---')
+    local function callable(ret, fields)
+        return setmetatable(fields or {}, { __call = function() return ret end })
+    end
+    local S = { cmds = {}, feed = nil, counters = nil, targetId = 0 }
+    local spawns = {
+        [50]  = { name = 'Tank', type = 'PC' },
+        [777] = { name = 'a_rat', type = 'NPC' },
+        [778] = { name = 'a_dead_rat', type = 'Corpse' },
+        [900] = { name = 'Boxer', type = 'PC' },
+    }
+    local mockMq = {
+        cmd = function(c) S.cmds[#S.cmds + 1] = c end,
+        cmdf = function(f, ...) S.cmds[#S.cmds + 1] = string.format(f, ...) end,
+        delay = function() end,
+        TLO = {
+            Me = { ID = function() return 1 end },
+            Target = setmetatable({ ID = function() return S.targetId end, Type = function() return 'NPC' end, Dead = function() return false end },
+                { __call = function() if S.targetId > 0 then return 'target' end return nil end }),
+            Spawn = function(id)
+                local sp = spawns[id]
+                if not sp then return callable(nil, { ID = function() return 0 end, CleanName = function() return nil end }) end
+                return callable('spawn', {
+                    ID = function() return id end, CleanName = function() return sp.name end,
+                    Type = function() return sp.type end, Dead = function() return sp.type == 'Corpse' end,
+                    PctHPs = function() return sp.hp or 100 end,
+                    Combat = function() return false end,
+                    Target = callable(nil, { ID = function() return 0 end }),
+                })
+            end,
+        },
+    }
+    local fakeApi = {
+        available = function() return true end,
+        peerTarget = function(name, maxAge) S.lastPeerName, S.lastMaxAge = name, maxAge return S.feed end,
+        peerCounters = function(name) S.lastCounterName = name return S.counters end,
+    }
+    local ctrl96 = { mode = 'Assist', xtar_nav_dist = 150, ma_id = 50, ma_name = 'Tank' }
+    local env = {
+        ctrl = ctrl96, mq = mockMq, print = function() end,
+        pluginManager = { coreApi = setmetatable({ boxnet = fakeApi }, { __index = function() return nil end }) },
+        maPcId = function() return 50 end,
+        isSpawnPetOrPlayer = function(id) return spawns[id] and spawns[id].type == 'PC' end,
+        isHostileTarget = function(id) return spawns[id] and spawns[id].type == 'NPC' end,
+        distToId = function() return 40 end,
+        anyNearbyEngagedNpc = function() S.peeked = true return true end,
+        lastAssistCmdAt = -100,
+    }
+    local boxnetApi = loadFunc(src, 'boxnetApi', env)
+    env.boxnetApi = boxnetApi
+    local boxnetMaTarget = loadFunc(src, 'boxnetMaTarget', env)
+    env.boxnetMaTarget = boxnetMaTarget
+    local boxnetCounters = loadFunc(src, 'boxnetCounters', env)
+    env.boxnetCounters = boxnetCounters
+    local boxnetHasCounter = loadFunc(src, 'boxnetHasCounter', env)
+    env.boxnetHasCounter = boxnetHasCounter
+
+    -- 1. API discovery through the plugin manager's core API table
+    assert_eq(boxnetApi(), fakeApi, 'Suite 96: boxnetApi finds the plugin API on the core API table')
+    fakeApi.available = function() return false end
+    assert_nil(boxnetApi(), 'Suite 96: boxnetApi is nil while the plugin is not connected')
+    fakeApi.available = function() return true end
+    local savedPm = env.pluginManager
+    env.pluginManager = nil
+    assert_nil(loadFunc(src, 'boxnetApi', env)(), 'Suite 96: boxnetApi is nil without a plugin manager')
+    env.pluginManager = savedPm
+
+    -- 2. boxnetMaTarget resolves the MA name and asks the feed with the freshness window
+    S.feed = { id = 777, name = 'a_rat', hp = 100, engaged = true }
+    local fed = boxnetMaTarget(50)
+    assert_eq(fed and fed.id, 777, 'Suite 96: boxnetMaTarget returns the feed target')
+    assert_eq(S.lastPeerName, 'Tank', 'Suite 96: MA name resolved from the spawn')
+    assert_eq(S.lastMaxAge, 3.0, 'Suite 96: 3s freshness window')
+    assert_eq(boxnetMaTarget(12345) and boxnetMaTarget(12345).id, 777, 'Suite 96: falls back to ctrl.ma_name when the spawn is unknown')
+    ctrl96.ma_name = ''
+    assert_nil(boxnetMaTarget(12345), 'Suite 96: no name -> nil')
+    ctrl96.ma_name = 'Tank'
+
+    -- 3. targetIsEngaged trusts the MA's own engaged flag
+    env.isGroupOrRaidMember = function() return false end
+    env.isXTargetId = function() return false end
+    local targetIsEngaged = loadFunc(src, 'targetIsEngaged', env)
+    env.targetIsEngaged = targetIsEngaged
+    assert_eq(targetIsEngaged(777), true, 'Suite 96: MA feed engaged -> target is engaged')
+    S.feed = { id = 777, engaged = false }
+    assert_eq(targetIsEngaged(777), false, 'Suite 96: MA feed not engaged and no other evidence -> not engaged')
+    S.feed = { id = 555, engaged = true }
+    assert_eq(targetIsEngaged(777), false, 'Suite 96: a different MA target does not engage this one')
+
+    -- 4. maTargetId: feed answers -> no /assist, no peek; MA without target -> nil
+    local maTargetId = loadFunc(src, 'maTargetId', env)
+    S.feed = { id = 777, name = 'a_rat', engaged = true }
+    S.cmds, S.peeked = {}, false
+    assert_eq(maTargetId(), 777, 'Suite 96: maTargetId returns the fed target')
+    assert_eq(#S.cmds, 0, 'Suite 96: no /assist issued when the feed answers')
+    assert_eq(S.peeked, false, 'Suite 96: no XTarget peek when the feed answers')
+    S.feed = false
+    assert_nil(maTargetId(), 'Suite 96: MA reports no target -> nil, still no /assist')
+    assert_eq(#S.cmds, 0, 'Suite 96: no /assist for an idle MA')
+    S.feed = { id = 778, engaged = true }
+    assert_nil(maTargetId(), 'Suite 96: a corpse from the feed is rejected')
+    S.feed = { id = 900, engaged = true }
+    assert_nil(maTargetId(), 'Suite 96: a PC from the feed is rejected')
+    S.feed = { id = 777, engaged = false }
+    assert_nil(maTargetId(), 'Suite 96: Assist mode gates on engagement even with a fed target')
+    ctrl96.mode = 'Manual'
+    assert_eq(maTargetId(), 777, 'Suite 96: outside Assist mode the fed target is not gated')
+    ctrl96.mode = 'Assist'
+    S.feed = { id = 777, engaged = true }
+    env.distToId = function() return 500 end
+    assert_nil(loadFunc(src, 'maTargetId', env)(), 'Suite 96: fed target beyond xtar_nav_dist is rejected')
+    env.distToId = function() return 40 end
+    -- no fresh feed -> legacy /assist path (the rat is hurt, so it counts as engaged)
+    S.feed = nil
+    S.targetId = 777
+    spawns[777].hp = 60
+    S.cmds = {}
+    env.lastAssistCmdAt = -100
+    maTargetId = loadFunc(src, 'maTargetId', env)
+    assert_eq(maTargetId(), 777, 'Suite 96: without a feed the /assist path still works')
+    assert_eq(S.cmds[1], '/assist Tank', 'Suite 96: legacy path issues /assist')
+
+    -- 5. Cures: heartbeat counters replace NetBots
+    S.counters = { poison = 2, disease = 0, curse = 0, corruption = 1 }
+    assert_eq(boxnetCounters('Boxer').poison, 2, 'Suite 96: boxnetCounters reads the feed')
+    assert_eq(boxnetHasCounter('Boxer', 'poison'), true, 'Suite 96: poison counter > 0')
+    assert_eq(boxnetHasCounter('Boxer', 'disease'), false, 'Suite 96: disease counter 0')
+    assert_eq(boxnetHasCounter('Boxer', 'corruption'), true, 'Suite 96: corruption counter > 0')
+    assert_eq(boxnetHasCounter('', 'poison'), false, 'Suite 96: empty name -> false')
+    S.counters = nil
+    assert_eq(boxnetHasCounter('Boxer', 'poison'), false, 'Suite 96: no feed -> false')
+    local hasAffliction = loadFunc(src, 'hasAffliction', {
+        mq = mockMq, AFFLICTION_MEMBERS = { Poison = { flag = 'Poisoned', counter = 'CountersPoison', boxnet = 'poison' } },
+        boxnetHasCounter = boxnetHasCounter, boxnetCounters = boxnetCounters,
+    })
+    S.counters = { poison = 1 }
+    assert_eq(hasAffliction(900, 'Poison'), true, 'Suite 96: hasAffliction is true from Box Network counters alone (no NetBots)')
+    S.counters = { poison = 0 }
+    assert_eq(hasAffliction(900, 'Poison'), false, 'Suite 96: hasAffliction false when the box reports no counters')
+    local isCursed = loadFunc(src, 'isCursed', { mq = mockMq, boxnetHasCounter = boxnetHasCounter })
+    S.counters = { curse = 4 }
+    assert_eq(isCursed(900), true, 'Suite 96: isCursed from Box Network counters')
+    local isCorrupted = loadFunc(src, 'isCorrupted', { mq = mockMq, boxnetHasCounter = boxnetHasCounter })
+    S.counters = { corruption = 1 }
+    assert_eq(isCorrupted(900), true, 'Suite 96: isCorrupted from Box Network counters')
+end)()
+
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))
 if fail > 0 then

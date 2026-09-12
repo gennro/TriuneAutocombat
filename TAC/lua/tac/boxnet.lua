@@ -451,6 +451,13 @@ local function snapshot()
         z       = tlo(function() return mq.TLO.Me.Z() end, 0),
         pull    = core.runtime and core.runtime.pullState or nil,
         ver     = core.VERSION,
+        -- Detrimental counters so other boxes can cure us without NetBots / EQBC.
+        counters = {
+            poison     = tlo(function() return mq.TLO.Me.CountersPoison() end, 0),
+            disease    = tlo(function() return mq.TLO.Me.CountersDisease() end, 0),
+            curse      = tlo(function() return mq.TLO.Me.CountersCurse() end, 0),
+            corruption = tlo(function() return mq.TLO.Me.CountersCorruption() end, 0),
+        },
     }
     local classes = core.myClasses
     if type(classes) == 'table' then
@@ -459,9 +466,13 @@ local function snapshot()
     local tid = tlo(function() return mq.TLO.Target.ID() end, 0)
     if tid and tid > 0 then
         s.target = {
-            id   = tid,
-            name = tlo(function() return mq.TLO.Target.CleanName() end, ''),
-            hp   = tlo(function() return mq.TLO.Target.PctHPs() end, 0),
+            id      = tid,
+            name    = tlo(function() return mq.TLO.Target.CleanName() end, ''),
+            hp      = tlo(function() return mq.TLO.Target.PctHPs() end, 0),
+            type    = tlo(function() return mq.TLO.Target.Type() end, ''),
+            -- "engaged" = we are fighting it: auto-attack on / in combat, or it is
+            -- already hurt. Assist boxes use this instead of guessing from /assist.
+            engaged = s.combat or (tlo(function() return mq.TLO.Target.PctHPs() end, 100) < 100),
         }
     end
     local petId = tlo(function() return mq.TLO.Me.Pet.ID() end, 0)
@@ -477,9 +488,12 @@ end
 
 -- Fields whose change is worth an immediate heartbeat (mode flips, targets).
 local function fingerprint(s)
+    local c = s.counters or {}
     return table.concat({
         s.zone or '', s.mode or '', s.submode or '', tostring(s.running), tostring(s.burn),
-        s.ma or '', tostring(s.target and s.target.id or 0), tostring(s.combat), tostring(s.sitting),
+        s.ma or '', tostring(s.target and s.target.id or 0), tostring(s.target and s.target.engaged),
+        tostring(s.combat), tostring(s.sitting),
+        tostring((c.poison or 0) > 0), tostring((c.disease or 0) > 0), tostring((c.curse or 0) > 0), tostring((c.corruption or 0) > 0),
     }, '|')
 end
 
@@ -865,6 +879,36 @@ function api.available() return net.actor ~= nil end
 function api.myName() return myName() end
 function api.peers() return peerList() end
 function api.peer(name) return findPeer(name) end
+
+-- A peer whose last heartbeat is at most `maxAgeSec` old (default 3s) and
+-- who is in our zone; nil otherwise. The core's Assist / cure logic only
+-- trusts data this fresh.
+function api.peerFresh(name, maxAgeSec)
+    local p = findPeer(name)
+    if not p or not p.hb then return nil end
+    local age = nowSec() - (p.seenAt or 0)
+    if age > (tonumber(maxAgeSec) or 3.0) then return nil end
+    if lower(p.hb.zone) ~= lower(myZone()) then return nil end
+    return p, age
+end
+
+-- The peer's current target as reported by its own client: { id, name, hp,
+-- type, engaged, age }. `false` when the peer is fresh but has no target,
+-- nil when there is no fresh same-zone peer to ask.
+function api.peerTarget(name, maxAgeSec)
+    local p, age = api.peerFresh(name, maxAgeSec)
+    if not p then return nil end
+    local t = p.hb.target
+    if type(t) ~= 'table' or not t.id or t.id <= 0 then return false end
+    return { id = t.id, name = t.name, hp = t.hp, type = t.type, engaged = t.engaged == true, combat = p.hb.combat == true, age = age }
+end
+
+-- The peer's detrimental counters { poison, disease, curse, corruption } or nil.
+function api.peerCounters(name, maxAgeSec)
+    local p = api.peerFresh(name, maxAgeSec)
+    if not p or type(p.hb.counters) ~= 'table' then return nil end
+    return p.hb.counters
+end
 function api.command(scope, lines) return sendCommand(scope, lines) end
 function api.campHere(scope) return sendCampHere(scope) end
 function api.ping(name) return sendPing(name) end
@@ -966,7 +1010,7 @@ end
 local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
     local peers = peerList()
     local tableFlags = ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingFixedFit + ImGuiTableFlags.Resizable + ImGuiTableFlags.ScrollY
-    if not ImGui.BeginTable('BoxNetPeers', 11, tableFlags, ImVec2(0, 200)) then return end
+    if not ImGui.BeginTable('BoxNetPeers', 12, tableFlags, ImVec2(0, 200)) then return end
     ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthFixed, 110)
     ImGui.TableSetupColumn('Trio', ImGuiTableColumnFlags.WidthFixed, 90)
     ImGui.TableSetupColumn('Zone', ImGuiTableColumnFlags.WidthFixed, 80)
@@ -976,6 +1020,7 @@ local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
     ImGui.TableSetupColumn('Mana', ImGuiTableColumnFlags.WidthFixed, 45)
     ImGui.TableSetupColumn('End', ImGuiTableColumnFlags.WidthFixed, 45)
     ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
+    ImGui.TableSetupColumn('Afflict', ImGuiTableColumnFlags.WidthFixed, 70)
     ImGui.TableSetupColumn('Seen', ImGuiTableColumnFlags.WidthFixed, 45)
     ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 190)
     ImGui.TableHeadersRow()
@@ -1023,13 +1068,31 @@ local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
         ImGui.Text(string.format('%d%%', tonumber(hb.endur) or 0))
         ImGui.TableSetColumnIndex(8)
         if hb.target and hb.target.name then
-            ImGui.Text(string.format('%s (%d%%)', tostring(hb.target.name), tonumber(hb.target.hp) or 0))
+            local tc = hb.target.engaged and WARN or MUTED
+            ImGui.TextColored(tc[1], tc[2], tc[3], tc[4], string.format('%s%s (%d%%)', hb.target.engaged and '* ' or '',
+                tostring(hb.target.name), tonumber(hb.target.hp) or 0))
+            if ImGui.IsItemHovered() then
+                core.setTooltip(hb.target.engaged and 'Engaged: this box is fighting it (Assist boxes follow this target).' or 'Targeted but not engaged.')
+            end
         else
             ImGui.TextDisabled('-')
         end
         ImGui.TableSetColumnIndex(9)
-        ImGui.TextDisabled(fmtAge(t - (p.seenAt or t)))
+        local c = type(hb.counters) == 'table' and hb.counters or {}
+        local aff = {}
+        if (tonumber(c.poison) or 0) > 0 then aff[#aff + 1] = 'P' .. c.poison end
+        if (tonumber(c.disease) or 0) > 0 then aff[#aff + 1] = 'D' .. c.disease end
+        if (tonumber(c.curse) or 0) > 0 then aff[#aff + 1] = 'C' .. c.curse end
+        if (tonumber(c.corruption) or 0) > 0 then aff[#aff + 1] = 'Co' .. c.corruption end
+        if #aff > 0 then
+            ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], table.concat(aff, ' '))
+            if ImGui.IsItemHovered() then core.setTooltip('Detrimental counters: Poison / Disease / Curse / Corruption. Your cure gems can target this box without NetBots.') end
+        else
+            ImGui.TextDisabled('-')
+        end
         ImGui.TableSetColumnIndex(10)
+        ImGui.TextDisabled(fmtAge(t - (p.seenAt or t)))
+        ImGui.TableSetColumnIndex(11)
         local rowId = '##bn_' .. lower(p.name)
         if ImGui.SmallButton((hb.running and 'Pause' or 'Run') .. rowId) then
             sendCommand(p.name, hb.running and 'pause' or 'run')

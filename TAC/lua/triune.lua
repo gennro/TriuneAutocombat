@@ -9727,6 +9727,16 @@ function runtime.getMaTargetInfo()
     local t = nil
     pcall(function() t = maSpawn.Target end)
     if not t or not t() or (t.ID() or 0) <= 0 then
+        -- Spawn.Target is only known for grouped PCs; the Box Network feed is not.
+        local fed = runtime.boxnetMaTarget(actualMaId)
+        if fed and fed.id then
+            pcall(function()
+                local sp = mq.TLO.Spawn(fed.id)
+                if sp and sp() then t = sp end
+            end)
+        end
+    end
+    if not t or not t() or (t.ID() or 0) <= 0 then
         return {
             maId = actualMaId,
             maName = cleanMaName,
@@ -13836,6 +13846,52 @@ function runtime.isTargetInRange(name, targetId)
     return dist <= (maxRange + 2)
 end
 
+-- ----------------------------------------------------------------------------
+-- Box Network feed (boxnet plugin). The plugin publishes its API on the core
+-- API table as `boxnet`; nothing here depends on the plugin being loaded.
+-- ----------------------------------------------------------------------------
+runtime.BOXNET_FRESH_SEC = 3.0 -- heartbeat age the core still trusts
+
+function runtime.boxnetApi()
+    local pm = runtime.pluginManager
+    local api = pm and pm.coreApi
+    if not api then return nil end
+    local bn = rawget(api, 'boxnet')
+    if type(bn) ~= 'table' or type(bn.available) ~= 'function' then return nil end
+    local ok, avail = pcall(bn.available)
+    if not ok or not avail then return nil end
+    return bn
+end
+
+-- The Main Assist's target as reported by the MA's own Triune over the Box
+-- Network: { id, name, hp, engaged, combat } / false (MA fresh, no target) /
+-- nil (no fresh same-zone feed - fall back to /assist).
+function runtime.boxnetMaTarget(maId)
+    local bn = runtime.boxnetApi()
+    if not bn or type(bn.peerTarget) ~= 'function' then return nil end
+    local maName = nil
+    if maId and maId > 0 then
+        pcall(function()
+            local sp = mq.TLO.Spawn(maId)
+            if sp and sp() then maName = sp.CleanName() end
+        end)
+    end
+    if (not maName or maName == '') and ctrl and ctrl.ma_name and ctrl.ma_name ~= '' then maName = ctrl.ma_name end
+    if not maName or maName == '' then return nil end
+    local ok, fed = pcall(bn.peerTarget, maName, runtime.BOXNET_FRESH_SEC or 3.0)
+    if not ok then return nil end
+    return fed
+end
+
+-- A box character's detrimental counters from its heartbeat, or nil.
+function runtime.boxnetCounters(name)
+    local bn = runtime.boxnetApi()
+    if not bn or type(bn.peerCounters) ~= 'function' or not name or name == '' then return nil end
+    local ok, c = pcall(bn.peerCounters, name, runtime.BOXNET_FRESH_SEC or 3.0)
+    if ok and type(c) == 'table' then return c end
+    return nil
+end
+
 function runtime.maPcId()
     if not ctrl then return nil end
     -- 1. If ctrl.ma_id is set and > 0, verify it is a valid, living PC
@@ -13886,6 +13942,9 @@ function runtime.targetIsEngaged(id)
     if ctrl and ctrl.mode == 'Assist' then
         local maId = runtime.maPcId()
         if maId and maId > 0 then
+            -- Box Network: the MA's own client says what it is fighting.
+            local fed = runtime.boxnetMaTarget(maId)
+            if fed and fed.id == id and fed.engaged then return true end
             local maInCombat = false
             local maTargId = 0
             pcall(function()
@@ -13960,6 +14019,23 @@ function runtime.maTargetId()
     if not maId then return nil end
     local gated = (ctrl.mode == 'Assist')
     local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+    -- Box Network first: the MA's Triune reports its exact target (spawn IDs
+    -- are the same on every client in the zone), so no /assist peek, no
+    -- blocking delay, and our own target is left alone.
+    local fed = runtime.boxnetMaTarget(maId)
+    if fed ~= nil then
+        if not fed then return nil end -- MA has no target right now
+        local id = fed.id
+        local valid = false
+        pcall(function()
+            local sp = mq.TLO.Spawn(id)
+            valid = sp() and (sp.Type() == 'NPC' or sp.Type() == 'Pet') and not sp.Dead() and sp.Type() ~= 'Corpse'
+        end)
+        if not valid or isSpawnPetOrPlayer(id) or not isHostileTarget(id) then return nil end
+        if gated and not runtime.targetIsEngaged(id) then return nil end
+        if gated and distToId(id) > maxNav then return nil end
+        return id
+    end
     if gated and not runtime.anyNearbyEngagedNpc(maxNav) then
         return nil -- nothing nearby is actually being fought -- don't even peek via /assist
     end
@@ -14093,9 +14169,16 @@ end
 -- (Me.Poisoned / Me.Diseased, CountersPoison / CountersDisease, ...), so one
 -- walker covers both and the public helpers below just pick the kind.
 local AFFLICTION_MEMBERS = {
-    Poison  = { flag = 'Poisoned', counter = 'CountersPoison' },
-    Disease = { flag = 'Diseased', counter = 'CountersDisease' },
+    Poison  = { flag = 'Poisoned', counter = 'CountersPoison', boxnet = 'poison' },
+    Disease = { flag = 'Diseased', counter = 'CountersDisease', boxnet = 'disease' },
 }
+
+-- 2a'. Box Network heartbeat counters (no NetBots / EQBC needed).
+function runtime.boxnetHasCounter(cleanName, key)
+    if not cleanName or cleanName == '' or not runtime.boxnetCounters then return false end
+    local c = runtime.boxnetCounters(cleanName)
+    return c ~= nil and (tonumber(c[key]) or 0) > 0
+end
 
 local function hasAffliction(targetId, kind)
     if not targetId or targetId <= 0 then return false end
@@ -14160,6 +14243,7 @@ local function hasAffliction(targetId, kind)
             end
         end)
         if nbCnt > 0 then return true end
+        if runtime.boxnetHasCounter and runtime.boxnetHasCounter(cleanName, members.boxnet) then return true end
     end
 
     -- 2b. Current Target check
@@ -14249,6 +14333,7 @@ local function isCursed(targetId)
             end
         end)
         if nbC > 0 then return true end
+        if runtime.boxnetHasCounter and runtime.boxnetHasCounter(cleanName, 'curse') then return true end
     end
 
     if (mq.TLO.Target.ID() or 0) == targetId then
@@ -14322,6 +14407,7 @@ local function isCorrupted(targetId)
             end
         end)
         if nbCorr > 0 then return true end
+        if runtime.boxnetHasCounter and runtime.boxnetHasCounter(cleanName, 'corruption') then return true end
     end
 
     if (mq.TLO.Target.ID() or 0) == targetId then
