@@ -10126,6 +10126,7 @@ do
         { file = 'dps',             id = 'dps' },
         { file = 'inventory',       id = 'inventory' },
         { file = 'map',             id = 'map' },
+        { file = 'boxnet',          id = 'boxnet' },
     }
     for _, sp in ipairs(shipped) do
         local fn = assert(loadfile('TAC/lua/tac/' .. sp.file .. '.lua'))
@@ -10224,7 +10225,7 @@ do
     initPM()
     local pm = rt.pluginManager
     assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
-    local expected = { 'auto_aa', 'auto_accept', 'buffbot', 'cursor', 'dps', 'floating_damage', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
+    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'cursor', 'dps', 'floating_damage', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
     for _, id in ipairs(expected) do
         local p = pm.plugins[id]
         assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
@@ -10788,22 +10789,22 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 14, 'Suite 89: fourteen shipped plugins own a window')
+        assert_eq(#W.all, 15, 'Suite 89: fifteen shipped plugins own a window')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
         W.hdr = pm.windowPlugins(true)
-        assert_eq(#W.hdr, 13, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept (buffbot off)')
+        assert_eq(#W.hdr, 14, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net (buffbot off)')
         assert_eq(pm.headerButtonEnabled('buffbot'), false, 'Suite 89: buffbot header button off by default')
         assert_eq(pm.headerButtonEnabled('hud_group'), true, 'Suite 89: hud_group header button on by default')
         assert_eq(pm.headerButtonEnabled('floating_damage'), false, 'Suite 89: no header button for plugins without a window')
         pm.setHeaderButton('buffbot', true)
         assert_eq(W.ctrl.plugins.buffbot.headerButton, true, 'Suite 89: header button preference persisted to ctrl.plugins')
-        assert_eq(#pm.windowPlugins(true), 14, 'Suite 89: enabling the preference adds the button')
+        assert_eq(#pm.windowPlugins(true), 15, 'Suite 89: enabling the preference adds the button')
         assert_true(W.saves >= 1, 'Suite 89: header button preference triggers a loadout save')
         pm.setHeaderButton('hud_group', false)
         assert_eq(pm.headerButtonEnabled('hud_group'), false, 'Suite 89: saved preference overrides the plugin default')
-        assert_eq(#pm.windowPlugins(true), 13, 'Suite 89: disabling the preference removes the button')
+        assert_eq(#pm.windowPlugins(true), 14, 'Suite 89: disabling the preference removes the button')
 
         -- open / close through the manager writes the ctrl flag
         assert_eq(pm.isWindowOpen('map'), false, 'Suite 89: map window closed initially')
@@ -10824,17 +10825,17 @@ do
 
         -- header renderer: one button per enabled header plugin, clicks toggle
         mockImGui.Button = function(label) return W.clickLabel ~= nil and label:find(W.clickLabel, 1, true) ~= nil end
-        assert_eq(pm.drawHeaderButtons(), 13, 'Suite 89: drawHeaderButtons draws one button per header plugin')
+        assert_eq(pm.drawHeaderButtons(), 14, 'Suite 89: drawHeaderButtons draws one button per header plugin')
         W.clickLabel = 'Map##hdrPlg_map'
         pm.drawHeaderButtons()
         assert_eq(W.ctrl.show_map, true, 'Suite 89: clicking the header button opens the plugin window')
         W.clickLabel = nil
         mockImGui.Button = function() return false end
         pm.disablePlugin('map')
-        assert_eq(pm.drawHeaderButtons(), 12, 'Suite 89: disabled plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 13, 'Suite 89: disabled plugins get no header button')
         pm.enablePlugin('map')
         pm.plugins.map.status = 'Error'
-        assert_eq(pm.drawHeaderButtons(), 12, 'Suite 89: errored plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 13, 'Suite 89: errored plugins get no header button')
         pm.plugins.map.status = 'Active'
 
         -- collectSettings persists the effective header preference for window plugins
@@ -11436,6 +11437,556 @@ do
     assert_true(src:find("{ when = 'has Poison',", 1, true) ~= nil, 'Suite 93: help table documents has Poison')
     assert_true(src:find("{ when = 'has Disease',", 1, true) ~= nil, 'Suite 93: help table documents has Disease')
 end
+
+
+-- ============================================================================
+-- Suite 95: Box Network plugin (MacroQuest Actors) - fake post office, 3 boxes
+-- ============================================================================
+-- Wrapped in a closure: the main chunk is close to Lua's 200-local limit.
+;(function()
+    print('--- Suite 95: Box Network plugin (MacroQuest Actors) ---')
+    local realPrint = print
+    local printed = {}
+    print = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end ---@diagnostic disable-line: lowercase-global
+
+    local function lower(v) return tostring(v or ''):lower() end
+
+    -- In-memory stand-in for the MQ post office. Mimics the launcher: every
+    -- client with the same mailbox gets a broadcast (including the sender),
+    -- addressed sends match on character / pid, RPC replies come back through
+    -- the sender's callback, and routing failures surface as status codes.
+    local function makeBus()
+        local bus = { clients = {}, queue = {}, down = false, nonSerializable = 0 }
+        local function ser(v, depth)
+            depth = depth or 0
+            local t = type(v)
+            if t == 'string' or t == 'number' or t == 'boolean' or t == 'nil' then return v end
+            if t == 'table' then
+                if depth > 16 then return nil end
+                local out = {}
+                for k, val in pairs(v) do
+                    local sv = ser(val, depth + 1)
+                    if sv ~= nil then out[k] = sv end
+                end
+                return out
+            end
+            bus.nonSerializable = bus.nonSerializable + 1
+            return nil
+        end
+        bus.ser = ser
+        function bus.client(identity)
+            local mod = { ResponseStatus = { ConnectionClosed = -1, NoConnection = -2, RoutingFailed = -3, AmbiguousRecipient = -4 } }
+            function mod.register(name, handler)
+                if type(name) == 'function' then handler, name = name, '__script' end
+                for _, c in ipairs(bus.clients) do
+                    if c.id == identity and c.mailbox == name then error('mailbox already registered: ' .. name) end
+                end
+                local entry = { id = identity, mailbox = name, handler = handler }
+                table.insert(bus.clients, entry)
+                local dropbox = {}
+                function dropbox:send(a, b, c)
+                    local address, payload, cb
+                    if type(b) == 'table' then address, payload, cb = a, b, c
+                    else payload, cb = a, b end
+                    table.insert(bus.queue, { from = entry, address = address, payload = ser(payload), cb = cb })
+                end
+                function dropbox:unregister()
+                    for i = #bus.clients, 1, -1 do
+                        if bus.clients[i] == entry then table.remove(bus.clients, i) end
+                    end
+                end
+                return dropbox
+            end
+            return mod
+        end
+        local function senderOf(entry)
+            return { character = entry.id.character, server = entry.id.server, account = entry.id.account, pid = entry.id.pid, mailbox = entry.mailbox, script = 'triune' }
+        end
+        function bus.flush()
+            local guard = 0
+            while #bus.queue > 0 and guard < 10000 do
+                guard = guard + 1
+                local item = table.remove(bus.queue, 1)
+                if item.reply then
+                    item.cb(item.status, { content = item.content, sender = item.sender })
+                elseif bus.down then
+                    if item.cb then item.cb(-2, nil) end
+                else
+                    local targets = {}
+                    for _, c in ipairs(bus.clients) do
+                        if c.mailbox == item.from.mailbox then
+                            local a = item.address
+                            local ok = true
+                            if a and a.character and lower(a.character) ~= lower(c.id.character) then ok = false end
+                            if a and a.pid and a.pid ~= c.id.pid then ok = false end
+                            if ok then targets[#targets + 1] = c end
+                        end
+                    end
+                    if item.address and #targets == 0 then
+                        if item.cb then item.cb(-3, nil) end
+                    elseif item.address and item.cb and #targets > 1 then
+                        item.cb(-4, nil)
+                    else
+                        for _, target in ipairs(targets) do
+                            local msg = { content = ser(item.payload), sender = senderOf(item.from) }
+                            local replied = false
+                            function msg:reply(status, content)
+                                if content == nil then content, status = status, 0 end
+                                if item.cb and not replied then
+                                    replied = true
+                                    table.insert(bus.queue, { reply = true, cb = item.cb, status = status, content = ser(content), sender = senderOf(target) })
+                                end
+                            end
+                            function msg:send(content)
+                                table.insert(bus.queue, { from = target, address = { character = item.from.id.character }, payload = ser(content) })
+                            end
+                            target.handler(msg)
+                        end
+                    end
+                end
+            end
+        end
+        return bus
+    end
+
+    local bus = makeBus()
+    local clock = { t = 1000 }
+    local noop = function() end
+    local passthrough = function(_, v) return v end
+    local mockImGui = setmetatable({
+        Checkbox = passthrough, SliderFloat = passthrough, SliderInt = passthrough, Combo = passthrough,
+        InputTextWithHint = function(_, _, v) return v, false end,
+        Button = function() return false end, SmallButton = function() return false end,
+        Selectable = function() return false end, BeginCombo = function() return false end,
+        BeginTable = function() return false end, BeginChild = function() return false end,
+        CollapsingHeader = function() return false end, IsItemHovered = function() return false end,
+        Begin = function(_, open) return open, true end,
+    }, { __index = function() return function() end end })
+
+    local function callable(ret, fields)
+        local t = fields or {}
+        return setmetatable(t, { __call = function() return ret end })
+    end
+
+    local boxes = {}
+    local function makeBox(name, opts)
+        opts = opts or {}
+        local box = {
+            name = name, zone = opts.zone or 'gfaydark', pid = opts.pid or (#boxes + 1) * 100,
+            cmds = {}, saves = 0, hp = opts.hp or 100, mana = opts.mana or 80, endur = 90,
+            targetId = 0, targetName = nil, x = opts.x or 10, y = opts.y or 20, z = opts.z or 5,
+            groupMembers = {},
+            ctrl = { mode = 'Manual', submode = 'Hunt', running = false, burn = false, ma_name = '', camp_radius = 100, plugins = {} },
+        }
+        local mq = {
+            cmd = function(c) box.cmds[#box.cmds + 1] = c end,
+            cmdf = function(f, ...) box.cmds[#box.cmds + 1] = string.format(f, ...) end,
+            TLO = {
+                Me = {
+                    CleanName = function() return box.name end,
+                    Level = function() return 60 end,
+                    PctHPs = function() return box.hp end,
+                    PctMana = function() return box.mana end,
+                    PctEndurance = function() return box.endur end,
+                    Combat = function() return false end,
+                    CombatState = function() return 'ACTIVE' end,
+                    Sitting = function() return false end,
+                    Casting = { Name = function() return nil end },
+                    X = function() return box.x end, Y = function() return box.y end, Z = function() return box.z end,
+                    Pet = { ID = function() return 0 end },
+                },
+                Zone = { ShortName = function() return box.zone end, ID = function() return 54 end },
+                Target = {
+                    ID = function() return box.targetId end,
+                    CleanName = function() return box.targetName end,
+                    PctHPs = function() return 50 end,
+                },
+                EverQuest = { PID = function() return box.pid end },
+                Group = {
+                    Member = function(n)
+                        if box.groupMembers[lower(n)] then return callable('member', { ID = function() return 7 end }) end
+                        return callable(nil, { ID = function() return 0 end })
+                    end,
+                },
+            },
+        }
+        local core = setmetatable({
+            mq = mq, ImGui = mockImGui, runtime = { pullState = 'IDLE' }, VERSION = '2.15',
+            colors = {}, saveLoadout = function() box.saves = box.saves + 1 end,
+            pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+            preBeginWindow = noop, postBeginWindow = noop,
+        }, { __index = function(_, k)
+            if k == 'ctrl' then return box.ctrl end
+            if k == 'myClasses' then return { 'WAR', 'CLR', 'ENC' } end
+            return nil
+        end })
+        local inst = assert(loadfile('TAC/lua/tac/boxnet.lua'))()
+        if opts.noActors then
+            inst.actorsModule = false
+        else
+            inst.actorsModule = bus.client({ character = name, server = 'triune', account = 'acct', pid = box.pid })
+        end
+        inst.clock = function() return clock.t end
+        box.inst, box.core, box.mq = inst, core, mq
+        boxes[#boxes + 1] = box
+        return box
+    end
+
+    -- One pump = every box ticks (sends), the launcher delivers, every box
+    -- ticks again (drains its inbox, sends replies), the launcher delivers.
+    local function tickAll()
+        for _, b in ipairs(boxes) do
+            if b.inst.net.actor then b.inst.tick() end
+        end
+    end
+    local function pump(n)
+        for _ = 1, (n or 1) do
+            tickAll()
+            bus.flush()
+            tickAll()
+            bus.flush()
+        end
+    end
+    local function peerNames(box)
+        local out = {}
+        for _, p in ipairs(box.inst.peerList()) do out[#out + 1] = p.name end
+        return table.concat(out, ',')
+    end
+    local function lastLog(box, needle)
+        for _, e in ipairs(box.inst.net.log) do
+            if e.text:find(needle, 1, true) then return e end
+        end
+        return nil
+    end
+
+    -- 1. Contract & helpers
+    local A = makeBox('Alice')
+    local B = makeBox('Bob')
+    local C = makeBox('Carol', { zone = 'crushbone' })
+    assert_eq(A.inst.id, 'boxnet', 'Suite 95: plugin id')
+    assert_eq(A.inst.window.flag, 'show_boxnet', 'Suite 95: window flag is show_boxnet')
+    assert_true(#A.inst.help >= 3, 'Suite 95: help lines contributed')
+    assert_eq(A.inst.normalizeLine('  /ac burn on '), 'burn on', 'Suite 95: normalizeLine strips /ac and whitespace')
+    assert_eq(A.inst.normalizeLine('net all run'), nil, 'Suite 95: nested net commands rejected')
+    assert_eq(A.inst.normalizeLine('/ac'), nil, 'Suite 95: bare /ac rejected')
+    assert_eq(A.inst.resolveScope('ZONE'), 'zone', 'Suite 95: resolveScope is case-insensitive')
+    assert_eq(A.inst.resolveScope('Bob'), 'name', 'Suite 95: resolveScope treats unknown words as a character name')
+    assert_eq(A.inst.resolveScope(''), 'all', 'Suite 95: resolveScope defaults to the configured scope')
+    local dirty = { a = 1, f = function() end, nest = { ok = true, u = coroutine.create(function() end) }, [true] = 1 }
+    local clean = A.inst.sanitize(dirty)
+    assert_eq(clean.a, 1, 'Suite 95: sanitize keeps primitives')
+    assert_nil(clean.f, 'Suite 95: sanitize drops functions')
+    assert_nil(clean.nest.u, 'Suite 95: sanitize drops nested non-serializable values')
+    assert_eq(clean.nest.ok, true, 'Suite 95: sanitize keeps nested primitives')
+    assert_nil(clean[true], 'Suite 95: sanitize drops non string/number keys')
+
+    -- 2. Discovery: hello + heartbeat on init, rosters exclude self
+    A.inst.onInit(A.core)
+    B.inst.onInit(B.core)
+    C.inst.onInit(C.core)
+    assert_eq(#bus.clients, 3, 'Suite 95: each box registers its mailbox')
+    assert_eq(bus.clients[1].mailbox, A.inst.MAILBOX, 'Suite 95: mailbox name is the plugin constant')
+    assert_true(A.inst.net.actor ~= nil, 'Suite 95: actor registered on init')
+    assert_eq(A.core.boxnet, A.inst.api, 'Suite 95: core.boxnet API published on init')
+    assert_eq(A.ctrl.show_boxnet, false, 'Suite 95: window flag seeded closed')
+    pump(2)
+    assert_eq(peerNames(A), 'Bob,Carol', 'Suite 95: Alice sees Bob and Carol (not herself)')
+    assert_eq(peerNames(B), 'Alice,Carol', 'Suite 95: Bob sees Alice and Carol')
+    assert_eq(peerNames(C), 'Alice,Bob', 'Suite 95: Carol sees Alice and Bob')
+    local bobSeenByA = A.inst.api.peer('bob')
+    assert_true(bobSeenByA ~= nil, 'Suite 95: api.peer is case-insensitive')
+    assert_eq(bobSeenByA.hb.hp, 100, 'Suite 95: heartbeat carries HP')
+    assert_eq(bobSeenByA.hb.mana, 80, 'Suite 95: heartbeat carries mana')
+    assert_eq(bobSeenByA.hb.zone, 'gfaydark', 'Suite 95: heartbeat carries zone')
+    assert_eq(bobSeenByA.hb.mode, 'Manual', 'Suite 95: heartbeat carries mode')
+    assert_eq(table.concat(bobSeenByA.hb.classes, '/'), 'WAR/CLR/ENC', 'Suite 95: heartbeat carries the trio')
+    assert_eq(bobSeenByA.hb.running, false, 'Suite 95: heartbeat carries running state')
+    assert_eq(bobSeenByA.pid, 200, 'Suite 95: sender pid recorded on the peer')
+    assert_eq(bobSeenByA.server, 'triune', 'Suite 95: sender server recorded on the peer')
+    assert_eq(bus.nonSerializable, 0, 'Suite 95: nothing non-serializable was ever handed to actors')
+
+    -- 3. Heartbeat cadence: throttled while idle, immediate on a state change
+    local sentBefore = A.inst.net.sent
+    clock.t = clock.t + 0.1
+    pump(1)
+    assert_eq(A.inst.net.sent, sentBefore, 'Suite 95: no heartbeat inside the interval when nothing changed')
+    A.ctrl.burn = true
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(A.inst.net.sent, sentBefore + 1, 'Suite 95: state change triggers an immediate heartbeat')
+    assert_eq(B.inst.api.peer('Alice').hb.burn, true, 'Suite 95: Bob sees Alice burn on within one pump')
+    clock.t = clock.t + 1.1
+    pump(1)
+    assert_eq(A.inst.net.sent, sentBefore + 2, 'Suite 95: periodic heartbeat after the interval elapses')
+    A.targetId, A.targetName = 1234, 'a_gnoll'
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(B.inst.api.peer('Alice').hb.target.name, 'a_gnoll', 'Suite 95: target change propagates (name)')
+    assert_eq(B.inst.api.peer('Alice').hb.target.id, 1234, 'Suite 95: target change propagates (id)')
+
+    -- 4. Remote commands: broadcast, self excluded, nested / empty rejected
+    local ok, why = A.inst.sendCommand('all', '/ac burn on')
+    assert_eq(ok, true, 'Suite 95: broadcast command accepted')
+    pump(1)
+    assert_eq(B.cmds[#B.cmds], '/ac burn on', 'Suite 95: Bob ran the broadcast command')
+    assert_eq(C.cmds[#C.cmds], '/ac burn on', 'Suite 95: Carol ran the broadcast command')
+    assert_eq(#A.cmds, 0, 'Suite 95: Alice does not run her own broadcast')
+    assert_true(lastLog(B, '<- Alice: burn on') ~= nil, 'Suite 95: receiver logs the command with the sender')
+    assert_true(printed[#printed]:find('Alice -> /ac burn on', 1, true) ~= nil, 'Suite 95: receiver announces the command in chat')
+    ok, why = A.inst.sendCommand('all', 'net all run')
+    assert_eq(ok, false, 'Suite 95: nested net command refused at the sender')
+    assert_true(why:find('nested', 1, true) ~= nil, 'Suite 95: nested refusal reason')
+    ok, why = A.inst.sendCommand('all', '   ')
+    assert_eq(ok, false, 'Suite 95: empty command refused')
+    -- receiver re-validates: a hand-crafted nested line never runs
+    local nB = #B.cmds
+    B.inst.processMessage({ content = { v = 1, kind = 'cmd', from = 'Alice', data = { lines = { 'net all run' }, scope = 'all' } }, sender = { character = 'Alice', pid = 100 } })
+    assert_eq(#B.cmds, nB, 'Suite 95: receiver drops a nested net line even if a peer sends one')
+    -- multiple lines in one message (Follow Me)
+    A.inst.sendCommand('all', { 'ma Alice', 'assist chase' })
+    pump(1)
+    assert_eq(B.cmds[#B.cmds - 1], '/ac ma Alice', 'Suite 95: multi-line command runs line 1')
+    assert_eq(B.cmds[#B.cmds], '/ac assist chase', 'Suite 95: multi-line command runs line 2')
+
+    -- 5. Addressed command is an RPC: reply logged, unknown target reports RoutingFailed
+    nB = #B.cmds
+    local nC = #C.cmds
+    A.inst.sendCommand('bob', 'pause')
+    pump(1)
+    assert_eq(B.cmds[#B.cmds], '/ac pause', 'Suite 95: addressed command reaches Bob')
+    assert_eq(#C.cmds, nC, 'Suite 95: addressed command does not reach Carol')
+    assert_true(lastLog(A, '-> Bob: pause') ~= nil, 'Suite 95: sender log resolves the peer\'s proper-cased name')
+    assert_nil(A.inst.net.lastSendStatus, 'Suite 95: successful RPC leaves no error status')
+    A.inst.sendCommand('Nobody', 'run')
+    pump(1)
+    assert_eq(A.inst.net.lastSendStatus, -3, 'Suite 95: unknown character -> RoutingFailed')
+    assert_true(lastLog(A, 'RoutingFailed') ~= nil, 'Suite 95: routing failure logged by name')
+    A.inst.net.lastSendStatus = nil
+
+    -- 6. Ping RPC
+    A.inst.sendPing('bob')
+    clock.t = clock.t + 0.012
+    pump(1)
+    assert_eq(A.inst.api.peer('Bob').pingMs, 12, 'Suite 95: ping round-trip recorded on the peer')
+    assert_true(lastLog(A, 'Bob pong') ~= nil, 'Suite 95: pong logged')
+
+    -- 7. Zone scope: same-zone boxes only
+    nB, nC = #B.cmds, #C.cmds
+    A.inst.sendCommand('zone', 'run')
+    pump(1)
+    assert_eq(B.cmds[#B.cmds], '/ac run', 'Suite 95: zone scope reaches Bob (same zone)')
+    assert_eq(#C.cmds, nC, 'Suite 95: zone scope skips Carol (other zone)')
+
+    -- 8. Group scope: only peers in my group; none -> refused
+    ok, why = A.inst.sendCommand('group', 'run')
+    assert_eq(ok, false, 'Suite 95: group scope with no grouped peers is refused')
+    assert_true(why:find('group', 1, true) ~= nil, 'Suite 95: group refusal reason')
+    A.groupMembers.carol = true
+    nB, nC = #B.cmds, #C.cmds
+    ok = A.inst.sendCommand('group', 'burn off')
+    assert_eq(ok, true, 'Suite 95: group scope sends to grouped peers')
+    pump(1)
+    assert_eq(C.cmds[#C.cmds], '/ac burn off', 'Suite 95: group scope reaches Carol (grouped)')
+    assert_eq(#B.cmds, nB, 'Suite 95: group scope skips Bob (not grouped)')
+
+    -- 9. Trust: allowlist and the accept switch
+    B.inst.cfg.trust = 'allow'
+    B.inst.cfg.allowlist = { 'Carol' }
+    nB = #B.cmds
+    A.inst.sendCommand('bob', 'run')
+    pump(1)
+    assert_eq(#B.cmds, nB, 'Suite 95: allowlist blocks an unlisted sender')
+    assert_true(lastLog(B, 'Refused Alice: not on allowlist') ~= nil, 'Suite 95: receiver logs the refusal')
+    assert_true(lastLog(A, 'Bob refused: not on allowlist') ~= nil, 'Suite 95: RPC reply tells the sender why')
+    B.inst.cfg.allowlist = { 'Carol', 'alice' }
+    A.inst.sendCommand('bob', 'run')
+    pump(1)
+    assert_eq(B.cmds[#B.cmds], '/ac run', 'Suite 95: allowlisted sender accepted (case-insensitive)')
+    B.inst.cfg.acceptCommands = false
+    nB = #B.cmds
+    A.inst.sendCommand('bob', 'pause')
+    pump(1)
+    assert_eq(#B.cmds, nB, 'Suite 95: acceptCommands=false ignores every command')
+    assert_true(lastLog(A, 'remote commands disabled') ~= nil, 'Suite 95: disabled receiver replies with the reason')
+    B.inst.cfg.acceptCommands = true
+    B.inst.cfg.trust = 'all'
+    assert_eq(B.inst.isTrusted({ character = 'Zed' }), true, 'Suite 95: trust=all accepts any box on the launcher')
+
+    -- 10. Camp Here: same zone sets the anchor, other zone refuses, remote save
+    A.x, A.y, A.z = 100, 200, 30
+    ok = A.inst.sendCampHere('all')
+    assert_eq(ok, true, 'Suite 95: camp here sent')
+    pump(1)
+    assert_tbl_eq(B.ctrl.camp_loc, { x = 100, y = 200, z = 30 }, 'Suite 95: Bob\'s camp anchor set to Alice\'s location')
+    assert_eq(B.ctrl.camp_radius, 100, 'Suite 95: camp radius carried along')
+    assert_true(B.saves >= 1, 'Suite 95: receiver persists the new camp')
+    assert_nil(C.ctrl.camp_loc, 'Suite 95: Carol (other zone) keeps her camp')
+    B.ctrl.camp_loc = nil
+    A.inst.sendCampHere('bob')
+    pump(1)
+    assert_eq(B.ctrl.camp_loc and B.ctrl.camp_loc.x, 100, 'Suite 95: addressed camp here works')
+    B.ctrl.camp_loc = nil
+    A.inst.sendCampHere('carol')
+    pump(1)
+    assert_nil(C.ctrl.camp_loc, 'Suite 95: addressed camp here to another zone is refused')
+    assert_true(lastLog(C, 'camp') == nil, 'Suite 95: refused camp leaves no set entry on the receiver')
+
+    -- 11. Plugin message API: broadcast, subscribe / unsubscribe, RPC reply from a subscriber
+    local got = {}
+    local unsub = B.inst.api.subscribe('test:ping', function(data, sender, message)
+        got[#got + 1] = { n = data.n, from = sender.character }
+        if message and message.reply then message:reply(0, { echoed = data.n }) end
+    end)
+    assert_eq(A.inst.api.broadcast('test:ping', { n = 1 }), true, 'Suite 95: api.broadcast sends')
+    pump(1)
+    assert_eq(#got, 1, 'Suite 95: subscriber received the broadcast')
+    assert_eq(got[1].n, 1, 'Suite 95: subscriber gets the data')
+    assert_eq(got[1].from, 'Alice', 'Suite 95: subscriber gets the sender')
+    local echoed = nil
+    A.inst.api.send('Bob', 'test:ping', { n = 2 }, function(status, reply)
+        echoed = reply.content.echoed
+        assert_eq(status, 0, 'Suite 95: RPC reply status 0')
+    end)
+    pump(1)
+    assert_eq(echoed, 2, 'Suite 95: subscriber can answer an RPC through message:reply')
+    unsub()
+    A.inst.api.broadcast('test:ping', { n = 3 })
+    pump(1)
+    assert_eq(#got, 2, 'Suite 95: unsubscribe stops delivery')
+    assert_eq(A.inst.api.broadcast('', {}), false, 'Suite 95: broadcast requires a kind')
+    assert_eq(A.inst.api.send('', 'x', {}), false, 'Suite 95: send requires a name')
+
+    -- 12. Peer expiry and 'bye'
+    clock.t = clock.t + 6
+    A.inst.tick()
+    assert_eq(peerNames(A), '', 'Suite 95: silent peers expire after the timeout')
+    assert_true(lastLog(A, 'Peer left: Bob (timeout)') ~= nil, 'Suite 95: expiry logged')
+    pump(2)
+    assert_eq(peerNames(A), 'Bob,Carol', 'Suite 95: peers return once they heartbeat again')
+    C.inst.onDestroy()
+    assert_eq(#bus.clients, 2, 'Suite 95: onDestroy unregisters the mailbox')
+    assert_nil(rawget(C.core, 'boxnet'), 'Suite 95: onDestroy removes core.boxnet')
+    bus.flush()
+    A.inst.tick()
+    assert_eq(peerNames(A), 'Bob', 'Suite 95: bye removes the peer immediately')
+    assert_true(lastLog(A, 'Peer left: Carol (left)') ~= nil, 'Suite 95: bye logged as left')
+
+    -- 13. Protocol mismatch and malformed messages are dropped, warned once
+    local droppedBefore = A.inst.net.dropped
+    A.inst.processMessage({ content = { v = 2, kind = 'heartbeat', from = 'Bob', data = {} }, sender = { character = 'Bob', pid = 200 } })
+    A.inst.processMessage({ content = { v = 2, kind = 'heartbeat', from = 'Bob', data = {} }, sender = { character = 'Bob', pid = 200 } })
+    A.inst.processMessage({ content = 'garbage' })
+    assert_eq(A.inst.net.dropped, droppedBefore + 3, 'Suite 95: version mismatch / malformed messages counted as dropped')
+    local warns = 0
+    for _, e in ipairs(A.inst.net.log) do if e.text:find('protocol v2', 1, true) then warns = warns + 1 end end
+    assert_eq(warns, 1, 'Suite 95: protocol mismatch warned once per peer')
+    -- self-echo via pid only (character casing differs)
+    local recvBefore = A.inst.net.received
+    A.inst.processMessage({ content = { v = 1, kind = 'heartbeat', from = 'ALICE', data = {} }, sender = { character = 'ALICE', pid = 100 } })
+    assert_eq(A.inst.net.received, recvBefore, 'Suite 95: own echo ignored')
+
+    -- 14. Launcher down: sends report NoConnection
+    bus.down = true
+    A.inst.sendCommand('bob', 'run')
+    pump(1)
+    assert_eq(A.inst.net.lastSendStatus, -2, 'Suite 95: launcher offline -> NoConnection')
+    bus.down = false
+
+    -- 15. Actors module missing: plugin degrades without errors
+    local D = makeBox('Dave', { noActors = true })
+    D.inst.onInit(D.core)
+    assert_eq(D.inst.net.available, false, 'Suite 95: no actors module -> unavailable')
+    assert_true(tostring(D.inst.net.err):find('actors module', 1, true) ~= nil, 'Suite 95: unavailable reason recorded')
+    D.inst.tick()
+    ok, why = D.inst.sendCommand('all', 'run')
+    assert_eq(ok, false, 'Suite 95: sendCommand refuses when not connected')
+    D.inst.onDrawUI()
+    D.inst.onDrawSettings()
+    D.inst.onDestroy()
+    table.remove(boxes)
+    -- MQ returns nil from actors.register when the mailbox already exists in this client
+    local E = makeBox('Erin')
+    E.inst.actorsModule = { register = function() return nil end, ResponseStatus = {} }
+    E.inst.onInit(E.core)
+    assert_nil(E.inst.net.actor, 'Suite 95: nil from register leaves no actor')
+    assert_true(tostring(E.inst.net.err):find('already registered', 1, true) ~= nil, 'Suite 95: duplicate mailbox reported')
+    E.inst.onDestroy()
+    table.remove(boxes)
+
+    -- 16. Settings round-trip with clamping
+    A.inst.cfg.trust = 'allow'
+    A.inst.cfg.allowlist = { 'Bob' }
+    A.inst.cfg.heartbeatSec = 2
+    A.inst.cfg.defaultScope = 'zone'
+    local saved = A.inst.onSaveSettings()
+    assert_eq(saved.trust, 'allow', 'Suite 95: trust saved')
+    assert_eq(saved.allowlist[1], 'Bob', 'Suite 95: allowlist saved')
+    assert_eq(saved.heartbeatSec, 2, 'Suite 95: heartbeat saved')
+    assert_eq(saved.defaultScope, 'zone', 'Suite 95: default scope saved')
+    B.inst.onLoadSettings(saved)
+    assert_eq(B.inst.cfg.trust, 'allow', 'Suite 95: trust loaded')
+    assert_eq(B.inst.cfg.allowlist[1], 'Bob', 'Suite 95: allowlist loaded')
+    assert_eq(B.inst.cfg.defaultScope, 'zone', 'Suite 95: default scope loaded')
+    B.inst.onLoadSettings({ heartbeatSec = 0.01, peerTimeoutSec = 999, defaultScope = 'Bob', trust = 'bogus' })
+    assert_eq(B.inst.cfg.heartbeatSec, 0.25, 'Suite 95: heartbeat clamped low')
+    assert_eq(B.inst.cfg.peerTimeoutSec, 60, 'Suite 95: timeout clamped high')
+    assert_eq(B.inst.cfg.defaultScope, 'all', 'Suite 95: a name is not a valid default scope')
+    assert_eq(B.inst.cfg.trust, 'allow', 'Suite 95: unknown trust value ignored')
+    B.inst.onLoadSettings({ trust = 'all', allowlist = {}, heartbeatSec = 1, peerTimeoutSec = 5, defaultScope = 'all' })
+    A.inst.onLoadSettings({ trust = 'all', allowlist = {}, heartbeatSec = 1, peerTimeoutSec = 5, defaultScope = 'all' })
+
+    -- 17. /ac net command surface
+    assert_eq(A.inst.onCommand('cursorui', { 'cursorui' }), false, 'Suite 95: unrelated commands fall through')
+    local savesBefore = A.saves
+    assert_eq(A.inst.onCommand('net', { 'net' }), true, 'Suite 95: /ac net handled')
+    assert_eq(A.ctrl.show_boxnet, true, 'Suite 95: /ac net toggles the window')
+    assert_true(A.saves > savesBefore, 'Suite 95: window toggle persists')
+    A.inst.onCommand('net', { 'net', 'peers' })
+    assert_true(printed[#printed]:find('Bob', 1, true) ~= nil, 'Suite 95: /ac net peers lists the roster')
+    nB = #B.cmds
+    A.inst.onCommand('net', { 'net', 'all', 'burn', 'on' })
+    pump(1)
+    assert_eq(B.cmds[#B.cmds], '/ac burn on', 'Suite 95: /ac net all <cmd> sends the joined command')
+    A.inst.onCommand('net', { 'net', 'bob' })
+    assert_true(printed[#printed]:find('Usage', 1, true) ~= nil, 'Suite 95: scope without a command prints usage')
+    A.inst.onCommand('net', { 'net', 'ping', 'bob' })
+    pump(1)
+    assert_true(lastLog(A, 'Bob pong') ~= nil, 'Suite 95: /ac net ping <name>')
+    B.ctrl.camp_loc = nil
+    A.inst.onCommand('boxnet', { 'boxnet', 'camp' })
+    pump(1)
+    assert_eq(B.ctrl.camp_loc and B.ctrl.camp_loc.x, 100, 'Suite 95: /ac boxnet camp pushes the camp')
+
+    -- 18. Render passes survive the widget stubs with the window open
+    local enumNames = { 'ImGuiCond', 'ImGuiWindowFlags', 'ImGuiTableFlags', 'ImGuiTableColumnFlags', 'ImGuiCol', 'ImGuiTreeNodeFlags' }
+    local savedEnums = {}
+    for _, n in ipairs(enumNames) do
+        savedEnums[n] = rawget(_G, n)
+        rawset(_G, n, setmetatable({}, { __index = function() return 0 end }))
+    end
+    local savedVec, savedBit = rawget(_G, 'ImVec2'), rawget(_G, 'bit')
+    rawset(_G, 'ImVec2', function(x, y) return { x = x, y = y } end)
+    if not savedBit then rawset(_G, 'bit', { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end }) end
+    A.ctrl.show_boxnet = true
+    A.inst.onDrawUI()
+    A.inst.onDrawSettings()
+    A.inst.onZoned('gfaydark')
+    for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
+    rawset(_G, 'ImVec2', savedVec)
+    if not savedBit then rawset(_G, 'bit', nil) end
+    assert_eq(bus.nonSerializable, 0, 'Suite 95: still nothing non-serializable after the full run')
+
+    -- 19. Core wiring
+    assert_true(src:find("'boxnet.lua',", 1, true) ~= nil, 'Suite 95: core discover() probes boxnet.lua')
+    assert_true(src:find("cmd = '/ac net [all|zone|group|Name] [command]'", 1, true) ~= nil, 'Suite 95: help table documents /ac net')
+    assert_true(src:find('|buffbot|net|clearcursor|', 1, true) ~= nil, 'Suite 95: /ac usage line lists net')
+    local bnSrc = readFile('TAC/lua/tac/boxnet.lua')
+    assert_true(bnSrc:find('mq.delay(', 1, true) == nil and bnSrc:find('core.delay(', 1, true) == nil, 'Suite 95: boxnet never calls mq.delay / core.delay (forbidden in actor handlers)')
+    assert_true(bnSrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 95: window uses the core theme')
+
+    for _, b in ipairs(boxes) do b.inst.onDestroy() end
+    print = realPrint ---@diagnostic disable-line: lowercase-global
+end)()
 
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

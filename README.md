@@ -160,7 +160,19 @@ Triune features a plug-and-play plugin architecture designed to keep the core co
   - `inventory.lua`: The Inventory & Bank Manager (formerly `triune_inv.lua`) - bag moves, stack combines and sorts run in the plugin fiber through the cooperative `core.delay`; `/ac inv` toggles it.
   - `buffbot.lua`: The Buffbot Station (formerly `triune_buffbot.lua`) - off until switched on (`/ac buffbot on` or the window button), holds the combat loop while casting a buff job.
   - `cursor.lua`: The Cursor Item Manager (formerly `triune_cursor.lua`) - one `/autoinventory` per tick instead of a blocking loop; `/ac cursorui` toggles it.
+  - `boxnet.lua`: The **Box Network** - communication between your boxed characters on the same computer over MacroQuest's native **Actors** API (no EQBC / DanNet needed): live peer roster with vitals, `/ac net <all|zone|group|Name> <command>` to run any `/ac` command on other boxes, Follow Me / Set Me as MA / Camp Here buttons, ping, an allowlist, and a `core.boxnet` message API for other plugins.
 - **Writing a Plugin**: a plugin is a Lua file in `lua/tac/` that returns a table. Metadata fields: `id`, `name`, `version`, `author`, `description`, `defaultEnabled`, `tickInterval` (seconds), `runOutOfCombatOnly`, `hasThread`. Lifecycle hooks (all optional): `onInit(core)`, `onDestroy()`, `onTick()`, `onDrawUI()`, `onDrawSettings()`, `onCombatTick(targetId)`, `onZoned(zoneShortName)`, `onLoadoutSaved()`, `onSaveSettings()` -> table, `onLoadSettings(table)`. Combat-loop hooks: `wantsCombatHold()` -> true makes the combat loop stand still (used while the AA window is open); `onBetweenPulls()` -> return true to make the puller yield this tick. Command hooks: `onCommand(cmd, args)` -> return true if you handled `/ac <cmd>`, and `plugin.help = { 'line', ... }` adds lines to `/ac help`. Windows: declare `plugin.window = { label = 'Map', tooltip = '...', flag = 'show_map', headerButton = true, order = 20 }` (`flag` is the `ctrl.*` boolean that drives visibility, or give `isOpen()` / `setOpen(bool)` functions) and the core draws a highlighted toggle button for it on the main window header - the user picks which plugins get one in the Plugins tab's **Header** column (`headerButton` is the default), `order` sorts the buttons. The same declaration registers the window on Settings -> Windows (position save / restore / center, Show / Hide) automatically: optional `key` sets the position key used with `core.preBeginWindow(key)` (defaults to the plugin id), `lockFlag = 'my_lock'` (a `ctrl.*` boolean) or `getLock()` / `setLock(bool)` adds the Locked toggle, `desc` is the row tooltip, and `defaultPos = { x, y, w, h }` is used by *Reset to Defaults*. The `core` table passed to `onInit` exposes `mq`, `ImGui`, a **live** `ctrl` (always the current character's config), `loadout`, `runtime`, `DATA`, `VERSION`, `saveLoadout`, `colors`, and UI helpers (`pushTheme`/`popTheme`, `accent`, `setTooltip`, `preBeginWindow`/`postBeginWindow`, `drawStatusProgressBar`, `drawSpellIcon`, `getConColorRgb`, `resolveTargetOfTarget`, `getMultiPetList`, `getPetSpawnInfo`, `isSpawnAlive`, `addIgnore`, `parseDurationSec`, `fmtSec`, `idxOf`, `toggleTool`). `core.delay(ms, cond)` is a cooperative stand-in for `mq.delay` inside a plugin fiber (`hasThread = true`): it yields the fiber back to the main loop each tick until the time elapses or `cond()` is true, so a sequential workflow (casting, bag moves) never stalls the combat loop; never call `mq.delay` from a plugin. Store persistent options on `core.ctrl` so they save with the loadout.
+
+---
+
+### 📡 Box Network: Talk Between Your Boxes (Popout Window)
+Running two, three, or six characters on one computer? The **Box Network** plugin (`tac/boxnet.lua`) lets every Triune instance on that computer see and steer the others - built on MacroQuest's native **Actors** messaging, so there is nothing extra to install: the `MacroQuest.exe` launcher you already run is the hub that routes messages between your EverQuest clients.
+- **Peer Roster with Live Vitals**: Every box broadcasts a one-second heartbeat (trio classes, zone, mode, Running / Paused, Burn, HP / Mana / End, current target, Main Assist, pet). The **Box Net** window (header button, `/ac net`) lists every other box, how long ago it was seen, and its round-trip ping.
+- **Remote `/ac` Commands**: `/ac net all burn on`, `/ac net zone pause`, `/ac net group puller camp`, `/ac net Bob ma Alice` - the receiving box simply runs `/ac <command>` locally, so every existing command works across boxes on day one. Direct sends are round-trips: the sender is told when a box refused (allowlist, commands disabled) or could not be reached.
+- **One-Click Group Control**: **Run / Pause / Burn On / Burn Off** for the selected scope (all boxes, same zone, or my group), **Follow Me** (sets you as Main Assist and switches them to Assist (Chase)), **Set Me as MA**, and **Camp Here** (pushes your current location as their camp anchor - same zone only). Per-peer Run / Pause, Burn, and Ping buttons on each roster row.
+- **Trust & Safety**: By default any box connected to the same MacroQuest launcher is trusted; flip on **Only accept from the allowlist** and name the characters you box, or turn remote commands off entirely for a character. Nested `net` commands are refused on both ends so a command can never loop. Broadcasts echoed back by the launcher are dropped, and boxes on a different Triune protocol version are ignored with a one-time warning.
+- **Launcher Awareness**: If `MacroQuest.exe` is not running, sends come back `NoConnection` and the window says so; a roster that stays empty shows the same hint.
+- **For Plugin Authors**: `core.boxnet` exposes `peers()`, `peer(name)`, `command(scope, lines)`, `campHere(scope)`, `ping(name)`, `broadcast(kind, data)`, `send(name, kind, data, callback)` (an RPC when a callback is given), and `subscribe(kind, fn(data, sender, message))` -> unsubscribe function (`message:reply(status, payload)` answers an RPC). Payloads must be plain Lua values - MQ datatype objects cannot be serialized.
 
 ---
 
@@ -245,6 +257,7 @@ Triune comes packed with handy companion tools (all in-process plugins in `lua/t
 | 🎯 **Zone NPC Tracker** | `/ac track` | The map plugin's NPC Tracker tab: lists all NPCs in the zone by distance and level. Double-click any mob (or click `[Nav]`) to run straight to it! |
 | 📜 **Quest Guide & Lookup** | `/lua run triune_quest` | Standalone interactive quest guide and atlas across 32 expansions with live NPC radar, dialogue triggers, inventory scanner, Norrath Zone Directory, and global quest search. |
 | 🎒 **Inventory & Bank Manager** | `/ac inv` | `inventory.lua` plugin: universal inventory, worn equipment, bank, and shared bank search, container grid visualizer, stack consolidator, and offline bank cache persistence. |
+| 📡 **Box Network** | `/ac net` | `boxnet.lua` plugin: see and steer your other boxed characters on this computer over MacroQuest Actors - live vitals roster, `/ac net <scope> <command>` remote commands, Follow Me / Set Me as MA / Camp Here, ping, allowlist. |
 | 🤖 **LLM Test Harness & QA Agent** | `/lua run triune_test` | Standalone in-game testing harness interfacing with local LLMs (LM Studio) and cloud LLMs (Google Gemini, OpenCode) for autonomous QA testing via non-blocking bridge. |
 
 ---
@@ -311,6 +324,11 @@ You can control almost everything using simple in-game chat commands:
 | `/ac track` | `/ac zone` | Toggle the Map window on the NPC Tracker tab |
 | `/ac map` | `/ac mapui` | Toggle the 2D Map & Norrath Zone Atlas window |
 | `/dps [show\|hide\|compact\|reset\|pause\|resume\|report <chan>]` | `/triunedps`, `/ac dps` | Toggle the DPS parser window and control it |
+| `/ac net` | `/ac boxnet` | Toggle the Box Network window (boxed characters on this computer) |
+| `/ac net <all\|zone\|group\|Name> <command>` | | Run any `/ac` command on the matching boxes (e.g. `/ac net all burn on`, `/ac net Bob pause`) |
+| `/ac net peers` | `/ac net list` | Print the roster of boxes with zone, mode, state, and vitals |
+| `/ac net ping <Name>` | | Round-trip ping to a box (also checks the MacroQuest launcher is routing) |
+| `/ac net camp [all\|zone\|group\|Name]` | `/ac net camphere` | Push your current location as the camp anchor to boxes in this zone |
 | `/triunerun` | | Fast keybind command to toggle start/pause |
 | `/lua run triune_buttons` | `/lua stop triune_buttons` | Launch or stop the standalone Hot Buttons toolbar |
 | `/lua run triune_quest` | `/lua stop triune_quest` | Launch or stop the standalone Triune Quest Guide window |
@@ -351,7 +369,8 @@ TriuneAutocombat/
 │   │       ├── dps.lua          # DPS parser plugin (/dps, /ac dps)
 │   │       ├── inventory.lua    # Inventory & Bank manager plugin (/ac inv)
 │   │       ├── buffbot.lua      # Tell-driven buffbot station plugin (/ac buffbot)
-│   │       └── cursor.lua       # Cursor item manager plugin (/ac cursorui)
+│   │       ├── cursor.lua       # Cursor item manager plugin (/ac cursorui)
+│   │       └── boxnet.lua       # Box Network plugin: MQ Actors inter-box comms (/ac net)
 │   ├── config/
 │   │   └── triune_data.lua      # Era-correct spell and ability database
 │   └── resources/

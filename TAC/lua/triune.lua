@@ -6148,6 +6148,7 @@ function runtime.initPluginManager()
             'inventory.lua',
             'buffbot.lua',
             'map.lua',
+            'boxnet.lua',
         }
         for _, f in ipairs(known) do
             if not fileSet[f:lower()] then
@@ -6939,6 +6940,7 @@ function UI.drawHelpTab()
                 { cmd = '/ac map / /ac track / /ac zone',     desc = 'Toggle the Map, Zone Atlas & NPC Tracker window (map plugin)' },
                 { cmd = '/ac inv / /ac bank',                 desc = 'Toggle the Inventory & Bank Manager window (inventory plugin)' },
                 { cmd = '/ac dps / /dps',                     desc = 'Toggle the DPS Parser window (dps plugin)' },
+                { cmd = '/ac net [all|zone|group|Name] [command]', desc = 'Toggle the Box Network window, or run an /ac command on your other boxes (boxnet plugin)' },
                 { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
                 { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
                 { cmd = '/dps reset',                         desc = 'Reset active combat damage counters' },
@@ -19736,7 +19738,7 @@ local function triuneCommand(...)
         return
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|map|inv|buffbot|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|status|spellbook|cursorui|dps|map|inv|buffbot|net|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 
