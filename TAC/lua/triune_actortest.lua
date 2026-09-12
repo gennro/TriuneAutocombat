@@ -1,10 +1,16 @@
 -- ============================================================================
 -- triune_actortest.lua — MacroQuest Actors smoke test / bisect
 -- ============================================================================
--- `/lua run triune_actortest` on one box is enough: every variant below is a
--- broadcast on the 'triune_actortest' mailbox, and the launcher echoes
--- broadcasts back to the sender, so each variant that works prints "echo OK".
--- Run it on two boxes at once and you also see the other box's messages.
+-- `/lua run triune_actortest [suffix]` on one box is enough: every variant
+-- below is a broadcast on the 'triune_actortest<suffix>' mailbox, and the
+-- launcher echoes broadcasts back to the sender, so each variant that works
+-- prints "echo OK". Run it on two boxes at once (same suffix) and you also
+-- see the other box's messages.
+--
+-- Use a new suffix for every run: MQ keeps a Lua actor's post-office mailbox
+-- alive until the old script's state is garbage collected, and registering
+-- the same name again meanwhile hands back a dropbox that silently sends and
+-- receives nothing (every variant "MISSING" and the RPC "NO REPLY").
 --
 -- The variants reproduce, one at a time, the things the boxnet plugin does
 -- differently from MQ's buffbeg.lua example, so a missing echo names the
@@ -26,11 +32,13 @@ if not ok or type(actors) ~= 'table' then
 end
 
 local me = mq.TLO.Me.CleanName() or '?'
+local suffix = tostring(... or '')
+local MAILBOX = 'triune_actortest' .. suffix
 local seen = {}      -- tag -> count of echoes of OUR OWN sends
 local others = 0     -- messages from other boxes
 local rpcStatus = nil
 
-local actor = actors.register('triune_actortest', function(message)
+local actor = actors.register(MAILBOX, function(message)
     local c = message.content
     local s = message.sender or {}
     local tag = type(c) == 'table' and (c.tag or (c.data and c.data.tag)) or nil
@@ -46,7 +54,7 @@ if not actor then
     print('\ar[actortest]\ax actors.register returned nil (mailbox already registered?)')
     return
 end
-print(string.format('\ay[actortest]\ax %s: registered, running variants...', me))
+print(string.format('\ay[actortest]\ax %s: registered mailbox %s, running variants...', me, MAILBOX))
 
 local function envelope(tag, data)
     return { v = 1, kind = 'heartbeat', from = me, data = data, tag = tag }
@@ -97,4 +105,7 @@ report('A'); report('B'); report('C'); report('D'); report('E'); report('F', 5);
 print(string.format('%s[actortest]\ax  H  RPC to self: %s', (rpcStatus ~= nil and rpcStatus >= 0) and '\ag' or '\ar',
     rpcStatus == nil and 'NO REPLY' or (rpcStatus >= 0 and 'OK' or ('status ' .. tostring(rpcStatus)))))
 print(string.format('\ay[actortest]\ax %s: done - %d message(s) from other boxes', me, others))
-actor:unregister()
+if next(seen) == nil then
+    print('\ar[actortest]\ax nothing echoed at all: if the launcher lists this client, the mailbox is a stale duplicate - rerun with a new suffix, e.g. /lua run triune_actortest ' .. tostring(os.time() % 1000))
+end
+-- no actor:unregister(): it only drops a lookup entry, the mailbox dies with this script's state

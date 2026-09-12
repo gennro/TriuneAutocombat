@@ -11984,6 +11984,7 @@ end
             inst.actorsModule = bus.client({ character = name, server = 'triune', account = 'acct', pid = box.pid })
         end
         inst.clock = function() return clock.t end
+        inst.registry = {} -- each simulated box is its own "Lua state"
         box.inst, box.core, box.mq = inst, core, mq
         boxes[#boxes + 1] = box
         return box
@@ -12221,12 +12222,46 @@ end
     pump(2)
     assert_eq(peerNames(A), 'Bob,Carol', 'Suite 95: peers return once they heartbeat again')
     C.inst.onDestroy()
-    assert_eq(#bus.clients, 2, 'Suite 95: onDestroy unregisters the mailbox')
+    -- MQ keeps the post-office mailbox alive until GC, and re-registering the same name
+    -- yields a dead dropbox, so the plugin never unregisters: it detaches its handler.
+    assert_eq(#bus.clients, 3, 'Suite 95: onDestroy keeps the mailbox registered (detach, not unregister)')
+    assert_nil(C.inst.registry.sink, 'Suite 95: onDestroy clears the handler sink')
+    assert_true(C.inst.registry.actor ~= nil, 'Suite 95: the dropbox stays cached in the registry')
     assert_nil(rawget(C.core, 'boxnet'), 'Suite 95: onDestroy removes core.boxnet')
     bus.flush()
     A.inst.tick()
     assert_eq(peerNames(A), 'Bob', 'Suite 95: bye removes the peer immediately')
     assert_true(lastLog(A, 'Peer left: Carol (left)') ~= nil, 'Suite 95: bye logged as left')
+    -- messages arriving while detached are ignored, not queued
+    A.inst.sendCommand('all', 'run')
+    pump(1)
+    assert_eq(#C.inst.net.inbox, 0, 'Suite 95: a detached instance queues nothing')
+    -- re-init (plugin reload / restartAll) reuses the cached dropbox instead of re-registering
+    local nCarolCmds = #C.cmds
+    C.inst.onInit(C.core)
+    assert_eq(#bus.clients, 3, 'Suite 95: re-init does not register a second mailbox')
+    assert_eq(C.inst.net.actor, C.inst.registry.actor, 'Suite 95: re-init reuses the registry dropbox')
+    assert_true(lastLog(C, 'Mailbox reused') ~= nil, 'Suite 95: reuse is logged')
+    pump(2)
+    assert_eq(peerNames(A), 'Bob,Carol', 'Suite 95: Carol is back on the roster after re-init')
+    A.inst.sendCommand('carol', 'pause')
+    pump(1)
+    assert_eq(C.cmds[#C.cmds], '/ac pause', 'Suite 95: the reused dropbox receives again')
+    assert_true(#C.cmds > nCarolCmds, 'Suite 95: command ran after re-init')
+    C.inst.onDestroy()
+    assert_eq(#bus.clients, 3, 'Suite 95: second destroy still keeps the mailbox')
+
+    -- 12b. A stale-registration situation: register returns nil, but the registry has the dropbox
+    local G = makeBox('Gus')
+    G.inst.onInit(G.core)
+    local gActor = G.inst.net.actor
+    G.inst.onDestroy()
+    G.inst.actorsModule = { register = function() return nil end, ResponseStatus = {} }
+    G.inst.onInit(G.core)
+    assert_eq(G.inst.net.actor, gActor, 'Suite 95: registry dropbox wins even when register would return nil')
+    assert_nil(G.inst.net.err, 'Suite 95: no error when the cached dropbox is reused')
+    G.inst.onDestroy()
+    table.remove(boxes)
 
     -- 13. Protocol mismatch and malformed messages are dropped, warned once
     local droppedBefore = A.inst.net.dropped

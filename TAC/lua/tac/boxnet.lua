@@ -30,6 +30,13 @@
 --     from our own character / PID are dropped on receipt.
 --   * If MacroQuest.exe (the launcher) is not running, sends to other
 --     processes fail with NoConnection - the window says so.
+--   * actor:unregister() only drops a weak lookup entry; the real post-office
+--     mailbox lives until the Lua userdata is garbage collected. Registering
+--     the same name again before that yields a dropbox that looks valid but
+--     silently sends nothing and receives nothing. The plugin therefore
+--     registers ONCE per Lua state, keeps the dropbox in a global registry,
+--     forwards the handler through a swappable sink, and never unregisters
+--     (the script's Lua state tears it down when Triune stops).
 -- ============================================================================
 
 local plugin = {
@@ -53,6 +60,7 @@ local ctrl, ImGui, mq = nil, nil, nil
 -- ----------------------------------------------------------------------------
 local PROTOCOL_VERSION   = 1
 local MAILBOX            = 'tac_boxnet'
+local REGISTRY_KEY       = '__TAC_BOXNET_ACTOR'   -- _G slot holding the once-per-state dropbox
 local INBOX_MAX          = 500
 local LOG_MAX            = 60
 local REGISTER_RETRY_SEC = 5.0
@@ -174,6 +182,18 @@ end
 -- ----------------------------------------------------------------------------
 -- Transport
 -- ----------------------------------------------------------------------------
+-- Once-per-Lua-state registry: { actor, module, mailbox, sink }. Tests give
+-- each simulated box its own table through plugin.registry.
+local function registry()
+    if type(plugin.registry) == 'table' then return plugin.registry end
+    local r = rawget(_G, REGISTRY_KEY)
+    if type(r) ~= 'table' then
+        r = {}
+        rawset(_G, REGISTRY_KEY, r)
+    end
+    return r
+end
+
 local function loadActors()
     if plugin.actorsModule ~= nil then
         if plugin.actorsModule == false then return nil, 'actors module unavailable' end
@@ -195,6 +215,18 @@ end
 
 local function registerActor()
     if net.actor then return true end
+    local reg = registry()
+    reg.sink = onMessage
+    if reg.actor and reg.mailbox == MAILBOX then
+        -- Registered earlier in this Lua state (plugin reload / restartAll):
+        -- reuse the live dropbox instead of re-registering the same name.
+        net.actor = reg.actor
+        net.actorsModule = reg.module
+        net.available = true
+        net.err = nil
+        logEvent('Mailbox reused (' .. MAILBOX .. ')')
+        return true
+    end
     local t = nowSec()
     if (t - net.lastRegisterAt) < REGISTER_RETRY_SEC then return false end
     net.lastRegisterAt = t
@@ -204,7 +236,11 @@ local function registerActor()
         net.err = 'MacroQuest actors module not available (' .. tostring(err) .. '). Update MacroQuest.'
         return false
     end
-    local ok, actorOrErr = pcall(actors.register, MAILBOX, onMessage)
+    -- The registered handler forwards to whichever plugin instance is live.
+    local ok, actorOrErr = pcall(actors.register, MAILBOX, function(message)
+        local sink = reg.sink
+        if sink then sink(message) end
+    end)
     if not ok then
         net.available = false
         net.err = 'actors.register failed: ' .. tostring(actorOrErr)
@@ -223,12 +259,17 @@ local function registerActor()
     net.actorsModule = actors
     net.available = true
     net.err = nil
+    reg.actor = actorOrErr
+    reg.module = actors
+    reg.mailbox = MAILBOX
     logEvent('Mailbox registered (' .. MAILBOX .. ')')
     return true
 end
 
-local function unregisterActor()
-    if net.actor and net.actor.unregister then pcall(net.actor.unregister, net.actor) end
+-- Detach this instance; the dropbox itself stays registered (see header).
+local function detachActor()
+    local reg = registry()
+    if reg.sink == onMessage then reg.sink = nil end
     net.actor = nil
     net.available = false
 end
@@ -629,7 +670,7 @@ local function probeHint()
         -- A client with no pipe connection just logs "Tried to send a message ... on a
         -- null connection" and never calls back, so this is the usual "launcher not
         -- attached" symptom; a handler that never runs looks the same.
-        return 'No reply from the launcher: this game client is not attached to MacroQuest.exe\'s pipe (open the launcher window -> Actors panel; this character should be listed). Restart MacroQuest.exe with the game running, then /ac net probe.'
+        return 'No reply from the launcher. Either this client is not attached to MacroQuest.exe (launcher window -> Actors panel should list this character) or the mailbox is a stale duplicate: run /lua run triune again (a fresh Lua state), then /ac net probe.'
     end
     return nil
 end
@@ -1114,7 +1155,7 @@ end
 
 function plugin.onDestroy()
     if net.actor then rawSend(nil, 'bye', {}) end
-    unregisterActor()
+    detachActor()
     net.inbox = {}
     net.peers = {}
     net.subscribers = {}
