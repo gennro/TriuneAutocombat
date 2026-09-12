@@ -58,6 +58,8 @@ local LOG_MAX            = 60
 local REGISTER_RETRY_SEC = 5.0
 local HB_CHANGE_MIN_SEC  = 0.25   -- min spacing for change-triggered heartbeats
 local LAUNCHER_HINT_SEC  = 6.0    -- "no peers yet" -> launcher hint after this long
+local PROBE_INTERVAL_SEC = 10.0   -- loopback RPC through the launcher while no peers are seen
+local PROBE_TIMEOUT_SEC  = 5.0    -- no reply within this -> "no answer"
 local SCOPES             = { 'all', 'zone', 'group' }
 
 -- ----------------------------------------------------------------------------
@@ -93,6 +95,7 @@ local net = {
     lastSendStatus = nil,  -- last negative status reported by a callback
     versionWarned  = {},   -- peers already warned about a protocol mismatch
     trace          = false, -- /ac net trace: log every send / receive
+    probe          = { state = 'pending', at = -1e9, sentAt = nil, rttMs = nil, status = nil }, -- launcher loopback check
     log            = {},   -- newest first: { time, text, level }
     cmdInput       = '',
     allowInput     = nil,
@@ -570,6 +573,64 @@ local function sendPing(name)
     return true
 end
 
+-- Loopback health check: an RPC addressed to our own character has to travel
+-- client -> launcher -> client, so its status pins down which hop is broken.
+--   ok            launcher routing works (problem is on the other boxes)
+--   NoConnection  this client is not attached to the launcher pipe
+--   RoutingFailed launcher cannot find this client / mailbox (version mismatch)
+--   no answer     delivered but the handler never ran / replied
+local function sendProbe()
+    if not net.actor then return false end
+    local me = myName()
+    if me == '' then return false end
+    local t0 = nowSec()
+    net.probe.sentAt = t0
+    net.probe.at = t0
+    net.probe.state = 'pending'
+    rawSend({ character = me }, 'query', { what = 'ping', probe = true, rpc = true }, function(status)
+        net.probe.sentAt = nil
+        net.probe.status = status
+        net.probe.rttMs = math.floor((nowSec() - t0) * 1000 + 0.5)
+        if type(status) == 'number' and status < 0 then
+            net.probe.state = statusName(status)
+            logEvent('Launcher loopback failed: ' .. net.probe.state, 'error')
+        else
+            net.probe.state = 'ok'
+            if net.trace then logEvent(string.format('Launcher loopback ok (%d ms)', net.probe.rttMs)) end
+        end
+    end)
+    return true
+end
+
+local function tickProbe()
+    if not net.actor then return end
+    local t = nowSec()
+    if net.probe.sentAt and (t - net.probe.sentAt) > PROBE_TIMEOUT_SEC then
+        net.probe.sentAt = nil
+        net.probe.state = 'no answer'
+        logEvent('Launcher loopback: no answer within ' .. PROBE_TIMEOUT_SEC .. 's', 'error')
+    end
+    -- Keep probing while we see nobody; once peers exist the roster is proof enough.
+    if peerCount() == 0 and not net.probe.sentAt and (t - net.probe.at) >= PROBE_INTERVAL_SEC then
+        sendProbe()
+    end
+end
+
+local function probeHint()
+    local st = net.probe.state
+    if st == 'ok' or st == 'pending' then return nil end
+    if st == 'NoConnection' or st == 'ConnectionClosed' then
+        return 'Not attached to the MacroQuest launcher pipe: start MacroQuest.exe (the tray launcher) and make sure this client was injected by it.'
+    elseif st == 'RoutingFailed' then
+        return 'The launcher cannot route to this client / mailbox - usually a MacroQuest version mismatch between MacroQuest.exe and the game client (update both).'
+    elseif st == 'AmbiguousRecipient' then
+        return 'The launcher sees more than one client with this character name.'
+    elseif st == 'no answer' then
+        return 'The launcher accepted the message but it never came back - the Lua actor handler is not being run (check the MQ console for "Lua Actor Failure").'
+    end
+    return nil
+end
+
 -- ----------------------------------------------------------------------------
 -- Inbound
 -- ----------------------------------------------------------------------------
@@ -677,6 +738,11 @@ local function processMessage(message)
         logEvent(string.format('RX %s from %s (pid %s)', tostring(payload.kind),
             tostring(sender and sender.character or payload.from), tostring(sender and sender.pid)))
     end
+    -- Our own loopback probe must be answered, not filtered as an echo.
+    if payload.kind == 'query' and type(payload.data) == 'table' and payload.data.probe then
+        replyTo(message, payload.data, 0, { pong = true, probe = true })
+        return
+    end
     if isSelf(sender, payload) then
         net.selfDropped = (net.selfDropped or 0) + 1
         return
@@ -737,11 +803,13 @@ local function tick()
             net.startedAt = nowSec()
             rawSend(nil, 'hello', {})
             sendHeartbeat(true)
+            sendProbe()
         end
     end
     drainInbox()
     if net.actor then sendHeartbeat(false) end
     pruneExpired()
+    tickProbe()
 end
 
 -- ----------------------------------------------------------------------------
@@ -944,11 +1012,15 @@ local function drawStatusLine(GOOD, WARN, ERR, MUTED)
     ImGui.SameLine()
     ImGui.TextDisabled(string.format('| %s | %d peer%s | sent %d | recv %d%s', myName(), n, n == 1 and '' or 's',
         net.sent, net.received, net.dropped > 0 and string.format(' | dropped %d', net.dropped) or ''))
-    local warn = nil
-    if net.lastSendStatus == -2 or net.lastSendStatus == -1 then
+    local pst = net.probe.state
+    local pc = (pst == 'ok') and GOOD or ((pst == 'pending') and MUTED or ERR)
+    ImGui.TextColored(pc[1], pc[2], pc[3], pc[4], string.format('Launcher check: %s%s', pst == 'ok' and 'OK' or pst,
+        (pst == 'ok' and net.probe.rttMs) and string.format(' (%d ms)', net.probe.rttMs) or ''))
+    local warn = probeHint()
+    if not warn and (net.lastSendStatus == -2 or net.lastSendStatus == -1) then
         warn = 'The MacroQuest launcher (MacroQuest.exe) does not appear to be running - it routes messages between boxes.'
-    elseif n == 0 and (nowSec() - (net.startedAt or 0)) > LAUNCHER_HINT_SEC then
-        warn = 'No other boxes seen. Make sure Triune is running on them and MacroQuest.exe (the launcher) is up.'
+    elseif not warn and n == 0 and pst == 'ok' and (nowSec() - (net.startedAt or 0)) > LAUNCHER_HINT_SEC then
+        warn = 'Launcher routing works but no other box has answered: make sure Triune (with this plugin) is running on them.'
     end
     if warn then ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], warn) end
 end
@@ -1029,9 +1101,11 @@ function plugin.onInit(coreApi)
     net.startedAt = nowSec()
     rawset(core, 'boxnet', api)
     -- Register straight away so other plugins' onInit can already see us.
+    net.probe = { state = 'pending', at = -1e9, sentAt = nil, rttMs = nil, status = nil }
     if registerActor() then
         rawSend(nil, 'hello', {})
         sendHeartbeat(true)
+        sendProbe()
     end
 end
 
@@ -1195,6 +1269,11 @@ function plugin.onCommand(cmd, args)
         end
         return true
     end
+    if subl == 'probe' or subl == 'loopback' then
+        if sendProbe() then chat('Launcher loopback probe sent - run /ac net debug in a few seconds.')
+        else chat('Probe not sent: %s', tostring(net.err or 'not connected')) end
+        return true
+    end
     if subl == 'trace' then
         net.trace = not net.trace
         chat('Trace %s (see the Box Net event log).', net.trace and 'ON' or 'OFF')
@@ -1207,6 +1286,7 @@ function plugin.onCommand(cmd, args)
         print(string.format('  actor: %s  available: %s  err: %s', tostring(net.actor), tostring(net.available), tostring(net.err)))
         print(string.format('  sent: %d  received: %d  dropped: %d  self-echo dropped: %d  inbox: %d  last drop: %s',
             net.sent, net.received, net.dropped, net.selfDropped or 0, #net.inbox, tostring(net.lastDrop)))
+        print(string.format('  launcher loopback: %s%s', tostring(net.probe.state), net.probe.rttMs and string.format(' (%d ms)', net.probe.rttMs) or ''))
         print(string.format('  last send status: %s  peers: %d  heartbeat: every %.2fs (last %.1fs ago)',
             net.lastSendStatus and statusName(net.lastSendStatus) or 'none', peerCount(), cfg.heartbeatSec,
             nowSec() - net.lastHeartbeatAt))

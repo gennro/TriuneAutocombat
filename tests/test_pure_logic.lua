@@ -12242,12 +12242,30 @@ end
     A.inst.processMessage({ content = { v = 1, kind = 'heartbeat', from = 'ALICE', data = {} }, sender = { character = 'ALICE', pid = 100 } })
     assert_eq(A.inst.net.received, recvBefore, 'Suite 95: own echo ignored')
 
-    -- 14. Launcher down: sends report NoConnection
+    -- 14. Launcher down: sends report NoConnection; loopback probe pins the hop
+    assert_eq(A.inst.net.probe.state, 'ok', 'Suite 95: loopback probe through the launcher succeeds on init')
+    assert_true(type(A.inst.net.probe.rttMs) == 'number', 'Suite 95: probe records a round-trip time')
     bus.down = true
     A.inst.sendCommand('bob', 'run')
     pump(1)
     assert_eq(A.inst.net.lastSendStatus, -2, 'Suite 95: launcher offline -> NoConnection')
+    A.inst.onCommand('net', { 'net', 'probe' })
+    pump(1)
+    assert_eq(A.inst.net.probe.state, 'NoConnection', 'Suite 95: probe reports NoConnection when the launcher is down')
     bus.down = false
+    -- probe delivered but never answered -> 'no answer' after the timeout
+    A.inst.net.peers = {}
+    clock.t = clock.t + 11
+    local realFlush = bus.flush
+    bus.flush = function() bus.queue = {} end -- launcher eats everything
+    A.inst.tick()
+    assert_true(A.inst.net.probe.sentAt ~= nil, 'Suite 95: probe re-sent while no peers are seen')
+    clock.t = clock.t + 6
+    A.inst.tick()
+    assert_eq(A.inst.net.probe.state, 'no answer', 'Suite 95: unanswered probe times out to no answer')
+    bus.flush = realFlush
+    bus.queue = {}
+    pump(2)
 
     -- 15. Actors module missing: plugin degrades without errors
     local D = makeBox('Dave', { noActors = true })
@@ -12771,7 +12789,27 @@ end)()
     local okSet, errSet = pcall(inst.onDrawSettings)
     assert_true(okSet, 'Suite 96: onDrawSettings renders under the mock (' .. tostring(errSet) .. ')')
 
-    -- 18. Misc helpers
+    -- 18. Colour swatches and per-button font size
+    assert_eq(T.BUTTON_PALETTE[1].rgb, nil, 'Suite 96: first button swatch is Default (no colour)')
+    assert_true(#T.BUTTON_PALETTE >= 10 and #T.TEXT_PALETTE >= 10, 'Suite 96: swatch palettes offer a basic colour set')
+    for _, sw in ipairs(T.BUTTON_PALETTE) do
+        if sw.rgb then assert_true(#sw.rgb == 3 and sw.rgb[1] <= 255 and sw.rgb[2] <= 255 and sw.rgb[3] <= 255, 'Suite 96: swatch ' .. sw.name .. ' is an {r,g,b} 0-255 triple') end
+    end
+    assert_true(T.sameRgb({ 150, 35, 35 }, { 150, 35, 35 }) and not T.sameRgb({ 150, 35, 35 }, { 150, 35, 36 }) and T.sameRgb(nil, nil) and not T.sameRgb(nil, { 1, 2, 3 }), 'Suite 96: sameRgb compares swatches')
+    local fkey = T.addButton({ label = 'Big', cmd = '/x', timerType = 'None', fontScale = '9', buttonColor = { 150, 35, 35 } }, false)
+    assert_eq(T.getDb().buttons[fkey].fontScale, 3.0, 'Suite 96: fontScale is coerced and clamped')
+    T.getDb().buttons[fkey].fontScale = 1.35
+    local fshare = T.decodeShare(T.shareButton(fkey))
+    assert_eq(fshare.Button.FontScale, 1.35, 'Suite 96: share strings carry the per-button font size (Button Master ignores it)')
+    assert_eq(fshare.Button.ButtonColorRGB, '150,35,35', 'Suite 96: swatch colours still export in Button Master RGB form')
+    assert_eq(T.buttonFromBm(fshare.Button).fontScale, 1.35, 'Suite 96: font size survives the round trip')
+    assert_true(T.buttonFromBm({ Label = 'x', Cmd = '/x' }).fontScale == nil, 'Suite 96: Button Master buttons without FontScale use the hotbar default')
+    T.openEditor(1, 'Primary', 12, nil)
+    okDraw, errDraw = pcall(inst.onDrawUI)
+    assert_true(okDraw, 'Suite 96: editor with swatches renders under the mock (' .. tostring(errDraw) .. ')')
+    T.closeEditor()
+
+    -- 18b. Misc helpers
     assert_eq(T.fmtTime(75), '1:15', 'Suite 96: fmtTime m:ss')
     assert_eq(T.fmtTime(7), '7', 'Suite 96: fmtTime seconds')
     assert_eq(T.fmtTime(3725), '1h02m', 'Suite 96: fmtTime hours')
@@ -12833,6 +12871,19 @@ end)()
     end
     local discs = T.scanDiscs()
     assert_eq(#discs, 2, 'Suite 96: scanDiscs lists combat abilities')
+    -- Without CombatAbilityCount (most clients) the slots are probed directly; gaps are tolerated
+    mq.TLO.Me.CombatAbilityCount = nil
+    local probed = 0
+    mq.TLO.Me.CombatAbility = function(i)
+        probed = math.max(probed, i)
+        local d = ({ [1] = { 'Fearless Discipline', 75, 91 }, [3] = { 'Evasive Discipline', 52, 92 }, [7] = { 'Fearless Discipline', 75, 91 } })[i]
+        if not d then return setmetatable({ Name = function() return nil end }, { __call = function() return nil end }) end
+        return { Name = function() return d[1] end, Level = function() return d[2] end, SpellIcon = function() return d[3] end }
+    end
+    discs = T.scanDiscs()
+    assert_eq(#discs, 2, 'Suite 96: scanDiscs probes slots when CombatAbilityCount is unavailable (gaps and duplicates handled)')
+    assert_true(probed >= 67 and probed < 400, 'Suite 96: probing stops after a run of empty slots (' .. probed .. ')')
+    mq.TLO.Me.CombatAbilityCount = function() return 2 end
     assert_true(discs[1].name == 'Evasive Discipline' and discs[1].button.cmd == '/disc Evasive Discipline' and discs[1].button.timerType == 'Disc' and discs[1].button.icon == 92 and discs[1].sub == 'Level 52', 'Suite 96: disc entry -> /disc with the disc timer')
 
     local function mkItem(name, id, icon, clickySpell, container, contents)
