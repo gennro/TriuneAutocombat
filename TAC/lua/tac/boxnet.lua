@@ -626,7 +626,10 @@ local function probeHint()
     elseif st == 'AmbiguousRecipient' then
         return 'The launcher sees more than one client with this character name.'
     elseif st == 'no answer' then
-        return 'The launcher accepted the message but it never came back - the Lua actor handler is not being run (check the MQ console for "Lua Actor Failure").'
+        -- A client with no pipe connection just logs "Tried to send a message ... on a
+        -- null connection" and never calls back, so this is the usual "launcher not
+        -- attached" symptom; a handler that never runs looks the same.
+        return 'No reply from the launcher: this game client is not attached to MacroQuest.exe\'s pipe (open the launcher window -> Actors panel; this character should be listed). Restart MacroQuest.exe with the game running, then /ac net probe.'
     end
     return nil
 end
