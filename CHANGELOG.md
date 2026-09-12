@@ -1,5 +1,62 @@
 # Triune AutoCombat Change Log
 
+## 2026-09-12
+
+- **Auto AA Minimum 5 AA Bank Slider & Auto-Purchase Reliability (`TAC/lua/triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Enforce 5 AA Minimum on Bank Slider**: Updated the Auto AA bank reserve slider in `UI.drawAutoAATab` (`##autoAaThresh`) to enforce a minimum of 5 AA (range 5 to 100), updated tooltips accordingly, and sanitized `ctrl.auto_spend_aa_threshold` to a minimum of 5, preventing rapid continuous re-evaluation that caused micro-pauses in the main script loop.
+  - **Early Low-Point Evaluation Bypass (`checkAutoSpendAA`)**: Added an early check (`if unspent < 5 then return false end`) to immediately exit evaluation when points are below 5, eliminating unnecessary AA window querying and evaluation pauses.
+  - **Multi-Character Repeatable Spender Reliability (*Alternately Advanced Fireworks*)**: Resolved an issue where *Alternately Advanced Fireworks* auto-spent on one character but stalled on another by whitelisting Special tab abilities (`runtime.isSpecialTabAA`) and `ctrl.auto_spend_aa_name` from cross-class stub rejection in `isAAAllowedForPlayer`, assigning synthetic `maxRank = 1` in `recordScannedAA`, and persisting Special tab abilities once discovered.
+  - **Window Trainer Substring Matching Safety**: Removed dangerous substring overmatching in `findAAInWindowLists` (`cleanTarget:find(cleanRow)`), preventing unintended shorter abilities from incorrectly intercepting selection of longer target abilities.
+  - **Class AA Tab Routing**: Added class abbreviation detection and ability database cross-referencing in `startAATrainWorkflow` to route Class-specific AAs directly to Tab 3 (Class) rather than falling back to Tab 1 (General).
+  - **Search Box Filter Cleanup**: Added automatic clearance of leftover in-game search filter text in `AAW_SearchBox` during window preparation to prevent search filter interference during list selection.
+  - **Added Unit Test Suite 84**: Added comprehensive tests in `tests/test_pure_logic.lua` validating the 5 AA minimum slider, low-point evaluation gating, Special tab repeatability, and safe window list matching (2,447 tests passing).
+
+- **Remove Popout Character Stats, Inventory & Currency Window (`TAC/lua/triune.lua`, `README.md`, `tests/test_pure_logic.lua`).**
+  - **Eliminated Popout Character Window (`TriuneCharacterWindow`)**: Removed the embedded Character Stats, Inventory & Currency popout window and its rendering routine `UI.drawCharacterWindow()`, streamlining the main engine codebase while preserving the dedicated standalone `triune_inv.lua` module.
+  - **Removed Associated Configuration & State**: Purged character window configuration keys (`show_character_window`, `char_lock`, `char_alpha`, `char_show_zerocur`, `char_alt_filter`, `char_slots_per_row`) from `defaultCtrl`, and removed transient cache fields (`cachedInvStats`, `statSyncRequested`) from `runtime`.
+  - **Removed Toolbar Buttons & Commands**: Removed the `Character` button from the main header toolbar, the `Char` button from the Compact Mini-Window toolbar, window manager entry (`character`), and the `/ac char` slash command and help documentation.
+  - **Pruned Redundant Background Loops**: Eliminated background equipment changes polling (`runtime.checkWornItemsChanged`), inventory stats window scraping (`runtime.scanStatsFromInventoryWindow`), and the pending currency action loop from the main combat coroutine.
+  - **Preserved Shared Vector Primitives**: Retained `UI.col32` and `UI.toVec` vector drawing primitives required by the Popout Spellbook and Popout Spell Gem Bar windows.
+  - **Canonical Version Bump**: Bumped version to **2.13** across `TAC/lua/triune.lua`, `README.md`, and test suites (2,438 pure logic tests passing).
+- **Hours Formatting for Effects & Songs Popout Window and Buff/Ability Timers (`TAC/lua/triune.lua`, `tests/test_pure_logic.lua`).**
+  - Updated `fmtSec` to format durations of 3600 seconds or greater using hours and minutes (e.g. `45h`, `45h 5m`, `1h 30m`, `1h`), preventing long-duration buffs, GM auras, and potion effects from cluttering progress bars and hover tooltips with unwieldy minute counts like `2700m`.
+  - Added unit test coverage in `tests/test_pure_logic.lua` across both the `fmtSec` core logic suite and Suite 77 (Popout Effects & Songs Window) validating exact hour/minute formatting and long duration buff edge cases.
+- **Fix Spell Recast Timer Countdown in Popout Spell Gem Bar (`TAC/lua/triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Smooth Real-Time Recast Interpolation**: Fixed a bug where `math.abs((nowClock + querySec) - endAt) > 1.2` repeatedly re-anchored `runtime.gemCooldownEnd` against static or 6-second discrete tick query values, causing the recast countdown to freeze and continuously display the initial recast delay instead of counting down.
+  - **Cast Completion & GCD Alignment**: Recast countdowns are now primed during active casting and begin immediately upon cast completion. While cooling down (`rem > 0`), the timer decrements continuously frame-by-frame (`10 -> 9 -> ... -> 1 -> 0`) without periodic mid-cooldown resets.
+  - **Gem Swap & Memorization Invalidation (`runtime.gemCooldownSpell`)**: Tracks the scribed spell name for each slot, immediately invalidating stale cooldown anchors if a gem is memorized with a different spell.
+  - **Enhanced Query Parser & Overlay Formatting**: Upgraded `UI.getGemCooldownSec` to leverage `parseDurationSec` and proper MQ property extraction, and added hours support (`%dh`) to gem button overlay text for extreme recast abilities.
+  - **Automated Verification**: Added discrete tick anti-freeze and continuous countdown simulation assertions to Suite 79 in `tests/test_pure_logic.lua` (2,496 tests passing).
+
+---
+
+## 2026-09-11
+
+- **Interactive Character Popout Currency Tab & Add/Remove Cash Controls (`TAC/lua/triune.lua`, `tests/test_pure_logic.lua`).**
+  - **Renamed Tab to "Currency"**: Replaced the "Alternate Currency" tab with a unified "Currency" tab containing both core player cash reserves and all 36+ alternate currency tokens.
+  - **Standard Cash Display (Platinum, Gold, Silver, Copper)**: Added 4 interactive coin cards representing Platinum (`pp`), Gold (`gp`), Silver (`sp`), and Copper (`cp`) with dedicated color themes, live balances (`mq.TLO.Me.Platinum()`, `Gold()`, `Silver()`, `Copper()`), and bank reserve counters (`PlatinumBank()`, `GoldBank()`, etc.).
+  - **Total Worth & Weight Summary**: Displays live net liquid worth in platinum equivalent and authentic EverQuest coin weight based on total physical coins carried.
+  - **Original In-Game Window Currency Add & Remove Interaction**:
+    - **Withdrawing (Removing Currency to Cursor)**: Clicking `[Withdraw]` opens an interactive ImGui quantity modal with quick preset buttons (`[1]`, `[5]`, `[10]`, `[50]`, `[100]`, `[500]`, `[1k]`, `[All]`) and a slider to withdraw exact amounts onto the mouse cursor, automatically synchronizing with `QuantityWnd` and `/notify InventoryWindow IW_Money<0..3>`. Clicking `[In-Game]` triggers EverQuest's native in-game quantity slider.
+    - **Depositing (Adding Currency back to Purse)**: When the cursor holds currency or items, clicking any coin card or the top "Deposit to Purse / Auto-Inventory" banner immediately returns the currency on the cursor to the character's purse (`/autoinventory` or `/notify InventoryWindow IW_Money<0..3> leftmouseup`).
+  - **Alternate Currency Search Filter**: Added a live text filter box above the alternate currencies table allowing players to quickly search and filter known currencies.
+- **Combat Style Simplification & Removal of Ranged/Spell Styles (`triune.lua`, `README.md`, `tests/test_pure_logic.lua`).** Consolidated character engagement to pure Melee combat, eliminating the obsolete `Ranged` (bow) and `Spell` combat styles along with server attack-mode hacks:
+  - **Removed Combat Style Radio Buttons & UI Controls**: Removed the "Combat Style" radio selector row (`Melee`, `Ranged (bow)`, `Spell`) from the Main Settings tab. Set combat style permanently to `Melee` and simplified the distance setting slider to purely configure Max Melee Distance (`ctrl.melee_dist`).
+  - **Removed Server Attack Mode Workarounds**: Completely removed `#attackmode ranged` / `#attackmode melee` chat commands, `runtime.serverAttackMode` state tracking, the `TriuneAttackModeChanged` chat event listener, `runtime.revertAttackModeToMelee()`, and the `runtime.ensureRangedAutoAttack()` synchronous retoggle routine.
+  - **Streamlined Navigation & Desired Range Calculation**: Simplified `desiredRange()` and `moveToward()` to calculate reach and movement strictly based on melee bounding box and user-configured melee distance without conditional branches for ranged or caster standoff distances.
+  - **Consolidated Positioning & Active LoS Recovery**: Simplified `runtime.handleCannotSeeTarget()`, `repositionCloser()`, `handleCantHitFromHere()`, and waypoint hazard navigation to use standard melee reach and step-back mechanics.
+  - **Simplified Puller Submodes & Auto-Attack Execution**: Cleaned up `Puller:Camp` and `Puller:Hunt` pull execution paths so ranged pulling uses standard `/autofire on/off` tagging without server attack mode overrides, and combat auto-attack cleanly engages `/attack on` at melee range.
+  - **Updated Slash Commands**: Simplified `/ac style` to confirm `Melee` mode and updated `/ac range [dist]` to manage melee engagement distance (5-50).
+  - **Added Unit Test Suite 83**: Added comprehensive logic and AST tests in `tests/test_pure_logic.lua` validating total eradication of server attack mode hooks and obsolete combat style controls, with automatic configuration sanitization.
+  - **Canonical Version Bump**: Bumped version to **2.12** across `triune.lua` and `README.md`.
+- **AA Tab Ability Description Tooltips (`TAC/lua/triune.lua`, `tests/test_pure_logic.lua`).**
+  - **In-Game Description Display**: Enhanced the AA tab (`UI.drawAATab`) hover tooltips to query and render the full Alternate Advancement ability description (via `runtime.getAADescription` / `mq.TLO.Me.AltAbility(name).Description` / `mq.TLO.AltAbility(name).Description` and linked spell fallback) wrapped cleanly to 55-character line widths (`runtime.wrapText`).
+  - **Structured Ability Metadata Tooltip (`runtime.showAATabTooltip`)**: Added a dedicated tooltip helper showing ability name, class association, true cooldown, tier classification, and current/max rank alongside the formatted description, with format-string safety (`UI.setTooltip`).
+  - **Tuple Cooldown & Accurate Tier Classification**: Updated the `DATA.aas` iterator in `UI.drawAATab()` to recognize `{name, cooldown}` tuple pairs, accurately categorizing AAs into `'short'`, `'mid'`, and `'burn'` cooldown tiers and showing genuine ability cooldowns rather than list indices.
+  - **Automated Verification**: Added unit test assertions in Suite 71 of `tests/test_pure_logic.lua` validating `runtime.showAATabTooltip` structure, description wrapping, and UI hook integration (2,474 tests passing).
+
+---
+
 ## 2026-09-09
 
 - Fix all 25 luacheck warnings in `triune.lua`: replace unused variables with `_` discards, remove dead initializers, eliminate unused loop variables, and add `-- luacheck: ignore 311` annotations for intentional overwrite patterns (`conR/G/B`, `cols`, `iconDrawn`, `pushedColors`).
