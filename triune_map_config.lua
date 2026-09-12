@@ -1,18 +1,16 @@
 return {
   ["S_T"] = {
-    ["showPoiDrawer"] = false,
-    ["conFilterIndex"] = 1,
+    ["pathableOnly"] = false,
+    ["losOnly"] = false,
     ["zoom"] = 0.5,
     ["followPlayer"] = true,
     ["showSearchRadius"] = true,
-    ["pathableOnly"] = false,
     ["showNPCs"] = true,
     ["colorModeIndex"] = 1,
     ["layer0"] = true,
     ["layer1"] = true,
     ["zFilterRange"] = 45,
     ["lineThickness"] = 1,
-    ["activeMapFolder"] = "No maps directory found",
     ["showLabels"] = true,
     ["showGrid"] = true,
     ["showPCs"] = true,
@@ -34,12 +32,14 @@ return {
     ["zDepthFading"] = true,
     ["npcNodeRadius"] = 4.5,
     ["playerNodeRadius"] = 6,
+    ["activeMapFolder"] = "No maps directory found",
+    ["showPoiDrawer"] = false,
     ["atlasTypeFilterIdx"] = 1,
     ["atlasEraFilterIdx"] = 1,
-    ["losOnly"] = false
+    ["conFilterIndex"] = 1
   },
   ["__global"] = {
-    ["customMapsDir"] = "",
-    ["selectedMapFolder"] = "No maps directory found"
+    ["selectedMapFolder"] = "No maps directory found",
+    ["customMapsDir"] = ""
   }
 }
