@@ -17,6 +17,7 @@ local plugin = {
     name               = 'Group Window HUD',
     version            = '1.0.0',
     author             = 'Triune',
+    uses               = { boxnet = 'Box Network characters shown as group rows' },
     description        = 'Popout group window with vitals bars, role badges, member pets, invite/disband, and click-to-target.',
     defaultEnabled     = true,
     tickInterval       = 1.0,

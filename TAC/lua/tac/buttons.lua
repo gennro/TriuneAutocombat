@@ -27,6 +27,7 @@ local plugin = {
     name               = 'Hot Buttons',
     version            = '1.0.0',
     author             = 'Triune',
+    uses               = { boxnet = 'hotbar library sync across boxes (Sync Boxes option)' },
     description        = 'Button Master-style hot button bars: shared button library, tabbed sets, multiple hotbars, cooldown overlays, cursor capture, drag-and-drop, share strings, and Button Master import.',
     defaultEnabled     = true,
     tickInterval       = 0.05,

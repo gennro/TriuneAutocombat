@@ -279,7 +279,15 @@ local function sanitizeModeConfig(c)
     end
     if c.downtime_buffing == nil then c.downtime_buffing = true end
     if c.pause_on_zone == nil then c.pause_on_zone = true end
-    c.combat_style = 'Melee'
+    if c.combat_style ~= 'Melee' and c.combat_style ~= 'Ranged' and c.combat_style ~= 'Spell' then
+        c.combat_style = 'Melee'
+    end
+    local rd = tonumber(c.ranged_dist)
+    if not rd then
+        c.ranged_dist = 40
+    else
+        c.ranged_dist = math.max(5, math.min(200, math.floor(rd)))
+    end
     if type(c.status_collapsed) ~= 'table' then c.status_collapsed = {} end
 
     if c.ma_id == nil then c.ma_id = 0 end
@@ -316,6 +324,7 @@ local function defaultCtrl()
         ignore_distant_xtargets = true,
         combat_style         = 'Melee',
         melee_dist           = 14,
+        ranged_dist          = 40,
         los_face_only        = false,
         ma_name              = '',
         ma_id                = 0,
@@ -515,6 +524,29 @@ local runtime = {
     lastProactiveDoorAt = 0,
     lastLevClearAt = 0,
     PURE_MELEE = { War = true, WAR = true, Mnk = true, MNK = true, Rog = true, ROG = true, Ber = true, BER = true },
+    -- This server's custom "#attackmode ranged"/"#attackmode melee" toggle
+    -- controls whether standard auto-attack (/attack on) swings a melee
+    -- weapon or fires a bow -- it's independent of MQ's Me.AutoFire TLO,
+    -- which stays false the whole time under this scheme. We track the
+    -- server's own confirmation ("Attack mode changed to: Ranged"/"Melee",
+    -- captured by the TriuneAttackModeChanged event) as the functional
+    -- equivalent of Me.AutoFire for combat_style == 'Ranged'. Assumed Melee
+    -- until the server tells us otherwise (a fresh login/zone-in defaults
+    -- to melee attack mode, so runtime.onZoned resets this too).
+    serverAttackMode = 'Melee',
+    serverAttackModeAssumed = false,
+    attackModeAttempts = 0,
+    attackModeRangedUsed = false,
+    lastAttackModeCmdAt = 0,
+    -- Under server Ranged attack mode, /attack behaves as a pure on/off
+    -- toggle rather than "start attacking my current target": if it's
+    -- already sitting "on" from a previous mob, sending /attack on again
+    -- for a new target is a no-op and the character never actually fires,
+    -- even though Me.Combat() keeps reporting true. ensureRangedAutoAttack()
+    -- uses this field to detect a target change and force a real
+    -- off-then-on cycle (blocking briefly via mq.delay) instead of trusting
+    -- the current toggle state.
+    lastRangedAttackTargetId = 0,
     pendingMem = {},
     lastCast = {},
     lastTick = 0,
@@ -4553,7 +4585,11 @@ function runtime.applyEntry(e)
     if type(e.control) == 'table' then
         for k, v in pairs(e.control) do ctrl[k] = v end
         sanitizeModeConfig()
-        ctrl.combat_style = 'Melee'
+        -- Migrate pre-3.6 saves (separate use_melee/use_ranged checkboxes) to the
+        -- single combat_style radio -- old saves have no combat_style field at all.
+        if not e.control.combat_style then
+            ctrl.combat_style = e.control.use_ranged and 'Ranged' or 'Melee'
+        end
         if ctrl.melee_dist == nil then ctrl.melee_dist = 14 end
         if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
         if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
@@ -6079,6 +6115,64 @@ function runtime.initPluginManager()
         return out
     end
 
+    -- Optional plugin integrations. A plugin that talks to another plugin
+    -- declares it with
+    --   uses = { 'boxnet' }                                  -- or
+    --   uses = { boxnet = 'hotbar sync across boxes' }        -- id -> what it is for
+    -- These are soft links: the plugin must keep working (feature off) when
+    -- the other plugin is missing or disabled. The Plugins page shows them
+    -- in the Uses column, amber when the used plugin is not active, and the
+    -- reverse list ("used by") on the used plugin. Returns a sorted list of
+    -- { id = 'boxnet', why = '...' }.
+    function pm.normalizeUses(uses)
+        local out = {}
+        if type(uses) ~= 'table' then return out end
+        local seen = {}
+        for k, v in pairs(uses) do
+            local id, why
+            if type(k) == 'number' then
+                id = v
+            else
+                id, why = k, v
+            end
+            if type(why) ~= 'string' or why == '' then why = nil end
+            if type(id) == 'string' and id ~= '' then
+                if seen[id] then
+                    seen[id].why = seen[id].why or why
+                else
+                    seen[id] = { id = id, why = why }
+                    out[#out + 1] = seen[id]
+                end
+            end
+        end
+        table.sort(out, function(a, b) return a.id < b.id end)
+        return out
+    end
+
+    -- 'active' when the plugin is loaded, enabled and not in error;
+    -- 'disabled' when loaded but off / errored; 'missing' when not loaded.
+    function pm.useState(id)
+        local p = pm.plugins[id]
+        if not p then return 'missing' end
+        if p.enabled and p.status ~= 'Error' then return 'active' end
+        return 'disabled'
+    end
+
+    -- Plugins (in load order) that declare `id` in their uses list.
+    function pm.usedBy(id)
+        local out = {}
+        for _, otherId in ipairs(pm.pluginOrder) do
+            local o = pm.plugins[otherId]
+            for _, u in ipairs(o and o.uses or {}) do
+                if u.id == id then
+                    out[#out + 1] = { id = otherId, why = u.why }
+                    break
+                end
+            end
+        end
+        return out
+    end
+
     function pm.loadPlugin(filename, fullPath)
         local fn, err = loadfile(fullPath)
         if not fn then
@@ -6122,6 +6216,7 @@ function runtime.initPluginManager()
         p.version = inst.version or '1.0.0'
         p.author = inst.author or 'Unknown'
         p.description = inst.description or ''
+        p.uses = pm.normalizeUses(inst.uses)
         p.tickInterval = tonumber(inst.tickInterval) or 0.1
         if not ctrl.plugins then ctrl.plugins = {} end
         local savedCfg = ctrl.plugins[id]
@@ -6735,22 +6830,20 @@ function UI.drawPluginsTab()
     local pm = runtime.pluginManager
     if not pm then return end
 
-    -- Header Toolbar
-    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Triune Modular Plugin System')
+    -- Toolbar: title, folder, actions and counts on one line.
+    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Plugins')
     ImGui.SameLine()
     local dirStr = pm.dirPath or 'lua/tac'
-    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format('(Folder: %s)', dirStr))
-
-    ImGui.Spacing()
-    if ImGui.Button('Rescan Plugins Folder##btnRescanPlugins', 170, 24) then
+    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], tostring(dirStr))
+    ImGui.SameLine()
+    if ImGui.SmallButton('Rescan##btnRescanPlugins') then
         pm.defer('rescan plugins folder', pm.discover)
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'Scans the lua/tac directory for newly dropped or updated .lua plugins.')
     end
-
     ImGui.SameLine()
-    if ImGui.Button('Reload All##btnReloadAllPlugins', 110, 24) then
+    if ImGui.SmallButton('Reload All##btnReloadAllPlugins') then
         pm.defer('reload all plugins', pm.reloadAll)
     end
     if ImGui.IsItemHovered() then
@@ -6781,10 +6874,6 @@ function UI.drawPluginsTab()
 
     ImGui.SameLine()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format('Loaded: %d | Active: %d', totalLoaded, activeCount))
-    if pm.hasDeferred() then
-        ImGui.SameLine()
-        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], '| working...')
-    end
     if #scriptFiles > 0 then
         ImGui.SameLine()
         ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], string.format('| Standalone scripts: %d', #scriptFiles))
@@ -6793,51 +6882,58 @@ function UI.drawPluginsTab()
         ImGui.SameLine()
         ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], string.format('| Failed to load: %d', #failedFiles))
     end
+    if pm.hasDeferred() then
+        ImGui.SameLine()
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], '| working...')
+    end
+    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+        'On = enabled   Cbt = keeps ticking in combat   Hdr = button on the main window header   Name colour: green active, blue sleeping in combat, grey disabled, red error. Hover a cell for details.')
 
-    ImGui.Spacing()
-    ImGui.Separator()
-    ImGui.Spacing()
+    -- Tight rows for every table on this page.
+    ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, 4, 1)
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 3, 1)
+    local tblFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.Resizable, ImGuiTableFlags.SizingFixedFit)
 
     -- Files in the plugin folder that are not loadable plugins (syntax errors,
-    -- standalone scripts, data files, duplicate ids). They are never registered,
-    -- so without this list a bad drop-in would only ever show as one chat line.
+    -- duplicate ids). They are never registered, so without this list a bad
+    -- drop-in would only ever show as one chat line.
     if #failedFiles > 0 then
-        ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], 'Files in the plugin folder that could not be loaded:')
-        for i, entry in ipairs(failedFiles) do
-            ImGui.Bullet()
-            ImGui.SameLine()
-            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], entry.file)
-            ImGui.SameLine()
-            if ImGui.SmallButton(string.format('Retry##retryPlg_%d', i)) then
-                pm.defer('retry ' .. entry.file, function() pm.loadPlugin(entry.file, entry.info.fullPath) end)
+        if ImGui.CollapsingHeader(string.format('Failed to load (%d)##plgFailedHdr', #failedFiles), ImGuiTreeNodeFlags.DefaultOpen) then
+            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Files in the plugin folder that could not be loaded:')
+            for i, entry in ipairs(failedFiles) do
+                ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], entry.file)
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Retry##retryPlg_%d', i)) then
+                    pm.defer('retry ' .. entry.file, function() pm.loadPlugin(entry.file, entry.info.fullPath) end)
+                end
+                ImGui.SameLine()
+                if ImGui.SmallButton(string.format('Dismiss##dismissPlg_%d', i)) then
+                    pm.loadErrors[entry.file] = nil
+                end
+                ImGui.SameLine()
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], tostring(entry.info.msg or ''))
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', tostring(entry.info.msg or ''))
+                end
             end
-            ImGui.SameLine()
-            if ImGui.SmallButton(string.format('Dismiss##dismissPlg_%d', i)) then
-                pm.loadErrors[entry.file] = nil
-            end
-            ImGui.Indent(18)
-            ImGui.TextWrapped(tostring(entry.info.msg or ''))
-            ImGui.Unindent(18)
+            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Only files that return a plugin table (an `id` or lifecycle hooks) are loaded as plugins; other runnable files are listed under Standalone Scripts.')
         end
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Only files that return a plugin table (an `id` or lifecycle hooks) are loaded as plugins; other runnable files are listed under Standalone Scripts.')
-        ImGui.Spacing()
-        ImGui.Separator()
-        ImGui.Spacing()
     end
 
     -- Standalone scripts dropped into the folder: not plugins, but they get a
     -- basic entry with Run / Stop so they can be launched independently of
-    -- Triune (`/lua run <folder>/<name>`).
+    -- Triune (`/lua run <folder>/<name>`), and optionally a header button.
     if #scriptFiles > 0 then
-        accent(GOLD, 'Standalone Scripts (run independently of Triune)')
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'These files do not follow the plugin contract, so Triune does not load them. Run / Stop launches them as their own /lua script. Header Btn puts a Run / Stop button for the script on the main window header, named by Button Name (blank = file name).')
-        local sFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.Resizable, ImGuiTableFlags.SizingFixedFit)
-        if ImGui.BeginTable('TriuneScriptsTable', 5, sFlags) then
-            ImGui.TableSetupColumn('Script', ImGuiTableColumnFlags.WidthFixed, 200)
-            ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, 90)
-            ImGui.TableSetupColumn('Header Btn', ImGuiTableColumnFlags.WidthFixed, 80)
+        local openScripts = ImGui.CollapsingHeader(string.format('Standalone Scripts (%d)##plgScriptsHdr', #scriptFiles), ImGuiTreeNodeFlags.DefaultOpen)
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('%s', 'Runnable .lua files in the plugin folder that do not follow the plugin contract. Triune does not load them; Run / Stop launches each as its own /lua script.\nHdr puts a Run / Stop button for the script on the main window header, named by Button Name (blank = file name).')
+        end
+        if openScripts and ImGui.BeginTable('TriuneScriptsTable', 5, tblFlags) then
+            ImGui.TableSetupColumn('Script', ImGuiTableColumnFlags.WidthFixed, 150)
+            ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, 64)
+            ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, 30)
             ImGui.TableSetupColumn('Button Name', ImGuiTableColumnFlags.WidthStretch, 0)
-            ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 150)
+            ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 120)
             ImGui.TableHeadersRow()
             for i, entry in ipairs(scriptFiles) do
                 ImGui.TableNextRow()
@@ -6846,13 +6942,12 @@ function UI.drawPluginsTab()
                 ImGui.TableNextColumn()
                 ImGui.Text(entry.name)
                 if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('%s', 'Not loaded as a plugin: ' .. tostring(entry.reason or ''))
+                    ImGui.SetTooltip('%s', string.format('/lua run %s\nNot loaded as a plugin: %s', tostring(entry.runName), tostring(entry.reason or '')))
                 end
-                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '/lua run ' .. tostring(entry.runName))
 
                 ImGui.TableNextColumn()
                 if running then
-                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'RUNNING')
+                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'Running')
                 else
                     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Stopped')
                 end
@@ -6903,33 +6998,34 @@ function UI.drawPluginsTab()
             end
             ImGui.EndTable()
         end
-        ImGui.Spacing()
-        ImGui.Separator()
-        ImGui.Spacing()
     end
 
     if totalLoaded == 0 then
+        ImGui.PopStyleVar(2)
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'No plugins found in ' .. tostring(dirStr) .. '.')
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Drop any compatible .lua plugin into the folder and click "Rescan Plugins Folder".')
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Drop any compatible .lua plugin into the folder and click "Rescan".')
         return
     end
 
-    local flags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.Resizable, ImGuiTableFlags.SizingFixedFit)
-    if ImGui.BeginTable('TriunePluginsTable', 8, flags) then
-        ImGui.TableSetupColumn('Active', ImGuiTableColumnFlags.WidthFixed, 48)
-        ImGui.TableSetupColumn('Combat', ImGuiTableColumnFlags.WidthFixed, 56)
-        ImGui.TableSetupColumn('Header', ImGuiTableColumnFlags.WidthFixed, 56)
-        ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, 120)
-        ImGui.TableSetupColumn('Plugin Name', ImGuiTableColumnFlags.WidthFixed, 170)
-        ImGui.TableSetupColumn('Latency', ImGuiTableColumnFlags.WidthFixed, 90)
+    -- One line per plugin. Status is the name colour (details in the
+    -- tooltip); the description is clipped to its column with the full text
+    -- on hover.
+    if ImGui.BeginTable('TriunePluginsTable', 8, tblFlags) then
+        ImGui.TableSetupColumn('On', ImGuiTableColumnFlags.WidthFixed, 26)
+        ImGui.TableSetupColumn('Cbt', ImGuiTableColumnFlags.WidthFixed, 30)
+        ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, 30)
+        ImGui.TableSetupColumn('Plugin', ImGuiTableColumnFlags.WidthFixed, 165)
+        ImGui.TableSetupColumn('Uses', ImGuiTableColumnFlags.WidthFixed, 105)
+        ImGui.TableSetupColumn('ms', ImGuiTableColumnFlags.WidthFixed, 44)
         ImGui.TableSetupColumn('Description', ImGuiTableColumnFlags.WidthStretch, 0)
-        ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 140)
+        ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 170)
         ImGui.TableHeadersRow()
 
         for idx, id in ipairs(pm.pluginOrder) do
             local p = pm.plugins[id]
             if p then
                 ImGui.TableNextRow()
+                local w = pm.getWindow(id)
 
                 -- Col 1: Active toggle
                 ImGui.TableNextColumn()
@@ -6949,7 +7045,14 @@ function UI.drawPluginsTab()
                     end)
                 end
                 if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('%s', isEn and 'Plugin is enabled. Uncheck to disable.' or 'Plugin is disabled. Check to enable.')
+                    local tip = isEn and 'Plugin is enabled. Uncheck to disable.' or 'Plugin is disabled. Check to enable.'
+                    local usedBy = pm.usedBy(id)
+                    if #usedBy > 0 then
+                        local names = {}
+                        for _, u in ipairs(usedBy) do names[#names + 1] = u.id end
+                        tip = tip .. string.format('\n%s by: %s (see the Uses column).', isEn and 'Disabling turns off features used' or 'Enabling restores features used', table.concat(names, ', '))
+                    end
+                    ImGui.SetTooltip('%s', tip)
                 end
 
                 -- Col 2: In-Combat toggle
@@ -6971,7 +7074,7 @@ function UI.drawPluginsTab()
 
                 -- Col 3: Header button toggle (plugins that own a window)
                 ImGui.TableNextColumn()
-                if pm.getWindow(id) then
+                if w then
                     local hdrOn = pm.headerButtonEnabled(id)
                     local newHdr = ImGui.Checkbox(string.format('##hdrPlg_%d', idx), hdrOn)
                     if newHdr ~= hdrOn then
@@ -6979,15 +7082,7 @@ function UI.drawPluginsTab()
                     end
                     if ImGui.IsItemHovered() then
                         ImGui.SetTooltip('%s', string.format('%s a "%s" button on the main window header that opens / closes this plugin\'s window.',
-                            hdrOn and 'Showing' or 'Check to show', tostring(pm.getWindow(id).label or id)))
-                    end
-                    ImGui.SameLine()
-                    local wOpen = pm.isWindowOpen(id)
-                    if ImGui.SmallButton(string.format(wOpen and 'Hide##win_%d' or 'Show##win_%d', idx)) then
-                        pm.toggleWindow(id)
-                    end
-                    if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('%s', wOpen and 'Close this plugin\'s window.' or 'Open this plugin\'s window now.')
+                            hdrOn and 'Showing' or 'Check to show', tostring(w.label or id)))
                     end
                 else
                     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '—')
@@ -6996,61 +7091,117 @@ function UI.drawPluginsTab()
                     end
                 end
 
-                -- Col 4: Status Pill
+                -- Col 4: Name, coloured by status; version / author / status in the tooltip
                 ImGui.TableNextColumn()
+                local statusCol, statusText = MUTED, 'Disabled'
                 if p.status == 'Active' then
-                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'Active')
+                    statusCol, statusText = GOOD, 'Active'
                 elseif p.status == 'Sleeping (Combat)' then
-                    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Sleeping (Combat)')
+                    statusCol, statusText = ARC, 'Sleeping (combat)'
                 elseif p.status == 'Error' then
-                    ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], 'Error')
-                    if ImGui.IsItemHovered() and p.errorMsg then
-                        ImGui.SetTooltip('%s', p.errorMsg)
-                    end
-                else
-                    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Disabled')
+                    statusCol, statusText = ERR, 'Error: ' .. tostring(p.errorMsg or '?')
+                end
+                ImGui.TextColored(statusCol[1], statusCol[2], statusCol[3], statusCol[4], p.name or id)
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', string.format('%s  (id: %s)\nv%s by %s\nStatus: %s%s', p.name or id, id, p.version or '1.0', p.author or 'Unknown', statusText,
+                        w and ('\nWindow: ' .. tostring(w.label or id) .. (pm.isWindowOpen(id) and ' (open)' or ' (closed)')) or ''))
                 end
 
-                -- Col 5: Plugin Name & Author
+                -- Col 5: Uses (optional integrations with other plugins) and
+                -- used-by. Amber when a used plugin is off or missing: that
+                -- feature is silently disabled.
                 ImGui.TableNextColumn()
-                ImGui.Text(p.name or id)
-                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format('v%s by %s', p.version or '1.0', p.author or 'Unknown'))
+                local usedBy = pm.usedBy(id)
+                if #(p.uses or {}) == 0 and #usedBy == 0 then
+                    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '—')
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('%s', 'Standalone: does not use, and is not used by, any other plugin.')
+                    end
+                else
+                    local tip = {}
+                    for i, u in ipairs(p.uses or {}) do
+                        local st = pm.useState(u.id)
+                        local col = (st == 'active') and GOOD or WARN
+                        if i > 1 then ImGui.SameLine(0, 4) end
+                        ImGui.TextColored(col[1], col[2], col[3], col[4], u.id)
+                        tip[#tip + 1] = string.format('Uses %s (%s)%s', u.id,
+                            st == 'active' and 'active' or (st == 'missing' and 'NOT LOADED' or 'DISABLED'),
+                            u.why and (': ' .. u.why) or '')
+                        if st ~= 'active' then
+                            tip[#tip + 1] = string.format('  -> %s works without it; that feature is off until %s is active.', p.name or id, u.id)
+                        end
+                    end
+                    if #usedBy > 0 then
+                        if #(p.uses or {}) > 0 then ImGui.SameLine(0, 4) end
+                        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format('(used by %d)', #usedBy))
+                        if #tip > 0 then tip[#tip + 1] = '' end
+                        tip[#tip + 1] = 'Used by:'
+                        for _, u in ipairs(usedBy) do
+                            local o = pm.plugins[u.id]
+                            tip[#tip + 1] = string.format('  %s%s', o and o.name or u.id, u.why and (' - ' .. u.why) or '')
+                        end
+                        tip[#tip + 1] = string.format('Disabling %s turns those features off; the other plugins keep running.', p.name or id)
+                    end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('%s', table.concat(tip, '\n'))
+                    end
+                end
 
                 -- Col 6: Latency Profiler
                 ImGui.TableNextColumn()
                 if p.enabled and p.status ~= 'Disabled' then
                     local avg = p.avgExecMs or 0
                     local col = (avg < 1.0) and GOOD or ((avg < 3.0) and WARN or ERR)
-                    ImGui.TextColored(col[1], col[2], col[3], col[4], string.format('%.2f ms', avg))
+                    ImGui.TextColored(col[1], col[2], col[3], col[4], string.format('%.2f', avg))
                     if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('%s', string.format('Last Tick: %.3f ms\nAverage: %.3f ms\nInterval: %.2fs\nRuns in Combat: %s',
-                            p.lastExecMs or 0, avg, p.tickInterval or 0.1, p.runOutOfCombatOnly and 'No (Sleeps)' or 'Yes'))
+                        ImGui.SetTooltip('%s', string.format('Average tick: %.3f ms\nLast tick: %.3f ms\nInterval: %.2fs\nRuns in combat: %s',
+                            avg, p.lastExecMs or 0, p.tickInterval or 0.1, p.runOutOfCombatOnly and 'No (sleeps)' or 'Yes'))
                     end
                 else
                     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '—')
                 end
 
-                -- Col 7: Description
+                -- Col 7: Description (one line, clipped; full text on hover)
                 ImGui.TableNextColumn()
-                ImGui.TextWrapped(p.description or '')
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], p.description or '')
+                if ImGui.IsItemHovered() and p.description and p.description ~= '' then
+                    ImGui.SetTooltip('%s', p.description)
+                end
 
                 -- Col 8: Actions
                 ImGui.TableNextColumn()
                 if p.instance and p.instance.onDrawSettings then
-                    if ImGui.SmallButton(string.format('Configure##cfg_%d', idx)) then
+                    if ImGui.SmallButton(string.format('Config##cfg_%d', idx)) then
                         pm.activeConfigPluginId = id
                         pm.openConfigRequested = true
+                    end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('%s', 'Open this plugin\'s settings.')
+                    end
+                    ImGui.SameLine()
+                end
+                if w then
+                    local wOpen = pm.isWindowOpen(id)
+                    if ImGui.SmallButton(string.format(wOpen and 'Hide##win_%d' or 'Show##win_%d', idx)) then
+                        pm.toggleWindow(id)
+                    end
+                    if ImGui.IsItemHovered() then
+                        ImGui.SetTooltip('%s', wOpen and 'Close this plugin\'s window.' or 'Open this plugin\'s window now.')
                     end
                     ImGui.SameLine()
                 end
                 if ImGui.SmallButton(string.format('Reload##rel_%d', idx)) then
                     pm.defer('reload ' .. id, function() pm.reloadPlugin(id) end)
                 end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', 'Restart this plugin (onDestroy -> onInit).')
+                end
             end
         end
 
         ImGui.EndTable()
     end
+    ImGui.PopStyleVar(2)
 
     -- Plugin Configuration Modal Popup Dialog
     if pm.openConfigRequested then
@@ -7356,6 +7507,8 @@ function UI.drawHelpTab()
                 { cmd = '/ac huntz [10-300]',                 desc = 'Configure Hunter Tier 2 max vertical height difference (default 75)' },
                 { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
                 { cmd = '/ac ma [target|clear|<name>|<id>]',  desc = 'Configure Main Assist by player ID or name, or set from current PC target' },
+                { cmd = '/ac style [melee|ranged|spell]',     desc = 'Set combat style: Melee (/attack at melee reach), Ranged (bow via server #attackmode), or Spell (never auto-attacks)' },
+                { cmd = '/ac range [dist]',                   desc = 'Set engagement distance for the active style (melee 5-50, ranged/spell 5-200); /ac meleerange and /ac rangeddist target a specific one' },
                 { cmd = '/ac xtardist [25-300]',              desc = 'Configure max XTarget / assist engagement chase distance (default 150)' },
                 { cmd = '/ac chasedist [5-100]',              desc = 'Configure following distance (how far to stay back) from Main Assist (default 15)' },
                 { cmd = '/ac selfdefense [on|off]',           desc = 'Toggle Assist mode self-defense when attacked while MA has no target' },
@@ -9150,7 +9303,12 @@ function UI.drawStatusTab()
 
         -- Column 3: Combat & Attack Style
         ImGui.TableNextColumn()
-        accent(ARC, '• Style: Melee')
+        local styleStr = ctrl.combat_style or 'Melee'
+        if styleStr == 'Ranged' and runtime.serverAttackMode then
+            styleStr = string.format('Ranged (Server: %s%s)', runtime.serverAttackMode,
+                runtime.serverAttackModeAssumed and ', assumed' or '')
+        end
+        accent(ARC, '• Style: ' .. styleStr)
         if ctrl.burn then
             accent({ 1.0, 0.30, 0.30, 1.0 }, '• BURN: ACTIVE')
         else
@@ -12041,43 +12199,33 @@ function UI.drawWindowSettings()
         ImGui.EndTable()
     end
 
-    -- External Triune Tools Quick Launchers
+    -- Plugin window quick launchers. Built from the plugin manager's window
+    -- declarations (every enabled plugin with a window, header button or
+    -- not), so a new plugin shows up here without editing the core and a
+    -- removed one disappears instead of leaving a dead button.
     ImGui.Spacing()
     if ImGui.CollapsingHeader('External Triune Tools & Windows', ImGuiTreeNodeFlags.None) then
         ImGui.TextDisabled('Toggle the Triune companion tool windows (plugins in lua/tac):')
         ImGui.Spacing()
-        if ImGui.Button('Inventory & Bank Manager##extInv') then
-            ctrl.show_inv = not ctrl.show_inv
-            runtime.saveLoadout(true)
+        local pm = runtime.pluginManager
+        local entries = pm and pm.windowPlugins(false) or {}
+        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
+        if #entries == 0 then
+            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'No plugin windows are loaded.')
         end
-        ImGui.SameLine()
-        if ImGui.Button('Zone Map & NPC Tracker##extMap') then
-            ctrl.show_map = not ctrl.show_map
-            runtime.saveLoadout(true)
-        end
-        ImGui.SameLine()
-        if ImGui.Button('Spellbook Browser##extBook') then
-            ctrl.show_spellbook = not ctrl.show_spellbook
-            runtime.saveLoadout(true)
-        end
-        ImGui.SameLine()
-        if ImGui.Button('Live DPS Parser##extDps') then
-            ctrl.show_dps = not ctrl.show_dps
-            runtime.saveLoadout(true)
-        end
-
-        if ImGui.Button('Cursor Item Manager##extCur') then
-            ctrl.show_cursor = not ctrl.show_cursor
-            runtime.saveLoadout(true)
-        end
-        ImGui.SameLine()
-        if ImGui.Button('Buffbot Station##extBuff') then
-            ctrl.show_buffbot = not ctrl.show_buffbot
-            runtime.saveLoadout(true)
-        end
-        ImGui.SameLine()
-        if ImGui.Button('Quick Hotbuttons##extBtns') then
-            mq.cmd('/lua run triune_buttons')
+        for i, e in ipairs(entries) do
+            if (i - 1) % 4 ~= 0 then ImGui.SameLine() end
+            local label = tostring(e.window.label or e.id)
+            local isOpen = pm.isWindowOpen(e.id)
+            local pushed = 0
+            if isOpen and Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then pushed = 1 end
+            if ImGui.Button(label .. '##extWin_' .. e.id) then
+                pm.toggleWindow(e.id)
+            end
+            if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('%s', tostring(e.window.tooltip or ('Toggles the ' .. label .. ' window (' .. e.id .. ' plugin).')))
+            end
         end
     end
 end
@@ -12090,18 +12238,60 @@ function UI.drawSettingsTab()
             -- 1. Character Classes & Profile
             UI.drawClassPicker()
 
-    -- 2. Combat & Positioning
-    if ImGui.CollapsingHeader('Combat & Positioning', ImGuiTreeNodeFlags.DefaultOpen) then
-        ImGui.SetNextItemWidth(200)
-        local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
-        if changed or (newDist and newDist ~= ctrl.melee_dist) then
-            ctrl.melee_dist = newDist
-            runtime.saveLoadout(true)
+    -- 2. Combat Style & Positioning
+    if ImGui.CollapsingHeader('Combat Style & Positioning', ImGuiTreeNodeFlags.DefaultOpen) then
+        accent(GOLD, 'Engagement Style:')
+        if ImGui.RadioButton('Melee', ctrl.combat_style == 'Melee') then
+            runtime.setCombatStyle('Melee')
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Melee: close to melee range and swing with /attack on.')
+        end
+        ImGui.SameLine()
+        if ImGui.RadioButton('Ranged (bow)', ctrl.combat_style == 'Ranged') then
+            runtime.setCombatStyle('Ranged')
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Max melee distance to position at and strike targets (default: 14).\n'
-                .. 'Adjust to stick tighter (e.g. 8-10) or fight from further away (e.g. 15-25).')
+                'Ranged: stand off at the range below and fire a bow/thrown weapon\n'
+                .. 'using this server\'s "#attackmode ranged" toggle + /attack on.\n'
+                .. 'Requires a ranged weapon and ammo equipped.')
+        end
+        ImGui.SameLine()
+        if ImGui.RadioButton('Spell', ctrl.combat_style == 'Spell') then
+            runtime.setCombatStyle('Spell')
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Spell: stand off at the range below and never auto-attack (no\n'
+                .. '/attack, no /autofire) -- your Spell Gems loadout does all the\n'
+                .. 'damage. For pure caster trios that don\'t melee or carry a bow.')
+        end
+
+        if ctrl.combat_style == 'Melee' then
+            ImGui.SetNextItemWidth(200)
+            local newDist, changed = ImGui.SliderInt('Melee Distance##meleeRangeSlider', ctrl.melee_dist or 14, 5, 50)
+            if changed or (newDist and newDist ~= ctrl.melee_dist) then
+                ctrl.melee_dist = newDist
+                runtime.saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Max melee distance to position at and strike targets (default: 14).\n'
+                    .. 'Adjust to stick tighter (e.g. 8-10) or fight from further away (e.g. 15-25).')
+            end
+        else
+            ImGui.SetNextItemWidth(200)
+            local newDist, changed = ImGui.SliderInt('Combat Distance##rangedRangeSlider', ctrl.ranged_dist or 40, 5, 200)
+            if changed or (newDist and newDist ~= ctrl.ranged_dist) then
+                ctrl.ranged_dist = newDist
+                runtime.saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Distance to position at and engage targets from with ranged/spells (default: 40).\n'
+                    .. 'Keep this within your bow / spell range or you will stand around doing nothing.')
+            end
         end
 
         local losVal = ImGui.Checkbox('Re-face Instead Of Stepping Back On Lost Line-of-Sight', ctrl.los_face_only or false)
@@ -12114,7 +12304,8 @@ function UI.drawSettingsTab()
                 'On "cannot see target", just turn to face it instead of stepping\n'
                 .. 'back and strafing. Useful in tight spaces or areas cluttered\n'
                 .. 'with obstacles, where stepping back can wedge you against a\n'
-                .. 'wall/prop instead of helping. Off by default.')
+                .. 'wall/prop instead of helping. Applies to Melee, Ranged, and\n'
+                .. 'Spell alike. Off by default.')
         end
 
         accent(GOLD, 'Spell Failures & Lockouts:')
@@ -16068,6 +16259,10 @@ local function desiredRange(id)
     if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
         return ctrl.pull_engage_dist or 100
     end
+    local style = ctrl and ctrl.combat_style or 'Melee'
+    if style ~= 'Melee' then
+        return ctrl.ranged_dist or 40
+    end
     local userDist = (ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE
     local spawnReach = 0
     if id and id > 0 then
@@ -16679,7 +16874,7 @@ function runtime.moveToward(id, dist, followOnly)
         end
     end
 
-    local isMelee = not followOnly
+    local isMelee = (not followOnly and (ctrl and ctrl.combat_style or 'Melee') == 'Melee')
     local targetDist = dist or desiredRange(id)
     local effectiveArrivalDist = targetDist + (isMelee and 2 or 3)
 
@@ -16829,7 +17024,12 @@ local function repositionCloser()
 
     local currentDist = distToId(tid)
     -- When EQ reports "too far away", ensure we close in tighter than current distance
-    local targetDist = math.max(5, math.min(desiredRange(tid), math.floor(currentDist - 8)))
+    local targetDist = desiredRange(tid)
+    if (ctrl and ctrl.combat_style) ~= 'Melee' then
+        targetDist = math.max(5, math.min(targetDist, math.floor(currentDist - 15)))
+    else
+        targetDist = math.max(5, math.min(targetDist, math.floor(currentDist - 8)))
+    end
 
     print(string.format(
         '\ay[Triune]\ax Target too far away (dist %.1f) -- repositioning closer (%d units) on target #%d.', currentDist,
@@ -16925,7 +17125,12 @@ local function handleCantHitFromHere()
         mq.cmd('/face fast')
     end
 
-    local targetDist = math.max(5, math.min(desiredRange(tid), math.floor(curDist - 8)))
+    local targetDist = desiredRange(tid)
+    if (ctrl and ctrl.combat_style) ~= 'Melee' then
+        targetDist = math.max(12, math.min(targetDist, math.floor(curDist - 10)))
+    else
+        targetDist = math.max(5, math.min(targetDist, math.floor(curDist - 8)))
+    end
 
     if navLoaded() then
         local hasPath = false
@@ -16952,6 +17157,139 @@ mq.event('TriuneTooFar3', '#*#cannot reach#*#', function() repositionCloser() en
 mq.event('TriuneCantHit1', '#*#cannot hit#*#from here#*#', function() handleCantHitFromHere() end)
 mq.event('TriuneCantHit2', '#*#can\'t hit#*#from here#*#', function() handleCantHitFromHere() end)
 mq.event('TriuneCantHit3', '#*#not in line of sight#*#', function() handleCantHitFromHere() end)
+
+-- Server-custom attack-mode toggle feedback ("#attackmode ranged"/"melee").
+-- This is the only reliable signal we have for which mode we're actually in
+-- -- Me.AutoFire never flips true under this scheme -- so keep our own
+-- runtime.serverAttackMode in sync with it. #1# captures everything after
+-- the colon; matched with find() rather than exact equality so it's not
+-- thrown off by trailing punctuation/color codes/whitespace that may or may
+-- not be present on the real server line.
+mq.event('TriuneAttackModeChanged', 'Attack mode changed to: #1#', function(_, mode)
+    if not mode then return end
+    if mode:find('Ranged') then
+        runtime.serverAttackMode = 'Ranged'
+    elseif mode:find('Melee') then
+        runtime.serverAttackMode = 'Melee'
+    else
+        return
+    end
+    runtime.serverAttackModeAssumed = false
+    runtime.attackModeAttempts = 0
+end)
+
+-- Number of unconfirmed "#attackmode ranged" sends before we stop waiting
+-- for the server echo and just drive /attack on anyway (see
+-- runtime.engageRangedAttack). Without this, a server whose confirmation
+-- line differs from the one TriuneAttackModeChanged expects would leave a
+-- Ranged-style character standing there re-sending the /say forever.
+runtime.ATTACKMODE_MAX_ATTEMPTS = 3
+
+-- Asks the server to switch auto-attack to bow mode (throttled to once a
+-- second) and, once that's confirmed, drives the actual /attack toggle via
+-- ensureRangedAutoAttack. Returns true when we're in (confirmed or assumed)
+-- Ranged attack mode and the attack toggle has been handled, false while
+-- still waiting on the server. Callers must already have checked that tid
+-- is a valid hostile in range and that we're not mid-cast.
+function runtime.engageRangedAttack(tid)
+    if runtime.serverAttackMode ~= 'Ranged' then
+        if (os.clock() - (runtime.lastAttackModeCmdAt or 0)) < 1.0 then return false end
+        if (runtime.attackModeAttempts or 0) >= runtime.ATTACKMODE_MAX_ATTEMPTS then
+            -- Never heard back. Assume the switch landed (re-sending an
+            -- explicit "ranged" set is harmless if it did) and carry on with
+            -- /attack on -- far better than never attacking at all.
+            print(string.format(
+                '\ay[Triune]\ax No "Attack mode changed" confirmation after %d tries -- assuming Ranged attack mode. '
+                .. 'If you keep swinging a melee weapon, this server may not support #attackmode.',
+                runtime.ATTACKMODE_MAX_ATTEMPTS))
+            runtime.serverAttackMode = 'Ranged'
+            runtime.serverAttackModeAssumed = true
+            runtime.attackModeAttempts = 0
+        else
+            runtime.lastAttackModeCmdAt = os.clock()
+            runtime.attackModeAttempts = (runtime.attackModeAttempts or 0) + 1
+            runtime.attackModeRangedUsed = true
+            if runtime.attackModeAttempts == 1 then
+                print(string.format('\ag[Triune]\ax Switching server attack mode -> Ranged -> %s (#%d)',
+                    tostring(mq.TLO.Spawn(tid).CleanName()), tid))
+            end
+            mq.cmd('/say #attackmode ranged')
+            return false
+        end
+    end
+    runtime.ensureRangedAutoAttack(tid)
+    return true
+end
+
+-- Reverts the server's attack mode back to melee whenever we're leaving
+-- Ranged combat style (switching combat style away from Ranged) so a later
+-- /attack on doesn't keep firing a bow instead of swinging a melee weapon.
+-- Only sends if we've ever asked for Ranged mode this session (so a user
+-- who never touches Ranged style never sees the /say line), and is
+-- throttled the same as the Ranged-side switch so repeated calls can't spam
+-- the chat line.
+runtime.revertAttackModeToMelee = function()
+    if runtime.serverAttackMode ~= 'Ranged' and not runtime.attackModeRangedUsed then return end
+    if (os.clock() - (runtime.lastAttackModeCmdAt or 0)) < 1.0 then return end
+    runtime.lastAttackModeCmdAt = os.clock()
+    runtime.serverAttackMode = 'Melee'
+    runtime.serverAttackModeAssumed = false
+    runtime.attackModeAttempts = 0
+    mq.cmd('/say #attackmode melee')
+end
+
+-- Single entry point for changing combat style (Settings radio buttons and
+-- /ac style) so the server attack-mode revert and the save always happen
+-- together. Returns false on an unknown style name.
+function runtime.setCombatStyle(style)
+    if style ~= 'Melee' and style ~= 'Ranged' and style ~= 'Spell' then return false end
+    local prev = ctrl.combat_style
+    ctrl.combat_style = style
+    if style ~= 'Ranged' then
+        runtime.revertAttackModeToMelee()
+        -- Spell style never auto-attacks; Melee re-engages from its own block
+        -- at melee reach. Either way, don't leave a bow toggle running.
+        if prev == 'Ranged' and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+    end
+    runtime.lastRangedAttackTargetId = 0
+    runtime.saveLoadout(true)
+    return true
+end
+
+-- Call only once runtime.serverAttackMode == 'Ranged' is already confirmed
+-- and tid is a valid, in-range target we want to be firing at. Handles the
+-- toggle-vs-target-change quirk described on runtime.lastRangedAttackTargetId:
+-- on a genuine target change, forces /attack off then a short beat later
+-- /attack on (so the two commands don't collapse into a same-tick no-op),
+-- rather than only checking whether the toggle currently reads off. For the
+-- common case (same target as last tick, already firing) this is just the
+-- original "turn it on if it's off" check.
+--
+-- This is synchronous (uses mq.delay) rather than spreading the retoggle
+-- across two separate ticks via a pending flag. The earlier async version
+-- required a follow-up call after the delay window to send the completing
+-- /attack on, but this function is only invoked from inside conditionally
+-- gated combat-tick code (distance/casting/haveNPC checks) -- those gates
+-- can flip false on the very next tick and never call back in, permanently
+-- stranding the character with attack off. Blocking here for one short
+-- delay (this always runs on the main-loop coroutine, never an ImGui
+-- render callback, so mq.delay is safe) guarantees /attack off is always
+-- immediately followed by /attack on within the same call.
+function runtime.ensureRangedAutoAttack(tid)
+    if tid ~= runtime.lastRangedAttackTargetId then
+        runtime.lastRangedAttackTargetId = tid
+        if mq.TLO.Me.Combat() then
+            mq.cmd('/attack off')
+            mq.delay(300)
+            mq.cmd('/attack on')
+        else
+            mq.cmd('/attack on')
+        end
+        return
+    end
+
+    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+end
 
 
 -- Same idea for a fixed camp location (used returning from a pull).
@@ -17397,9 +17735,15 @@ function runtime.checkCombatStall()
 
     local d = distToId(t.ID())
     local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee')
-    if not isPullStandBack then
+    local style = ctrl.combat_style or 'Melee'
+    if style == 'Melee' and not isPullStandBack then
         if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+    elseif style == 'Ranged' then
+        if d <= (ctrl.ranged_dist or 40) and not isCasting() then
+            runtime.engageRangedAttack(t.ID())
+        end
     end
+    -- Spell style: never auto-attacks, nothing to watchdog here.
 end
 
 -- When EQ chat reports "You cannot see your target." during combat, this active
@@ -17417,7 +17761,9 @@ runtime.handleCannotSeeTarget = function()
     local isNpc = (tgt.Type() == 'NPC' or tgt.Type() == 'Pet') and not tgt.Dead() and tgt.Type() ~= 'Corpse'
     if not isNpc or not isHostileTarget(tid) then return end
 
-    -- User override (Settings tab): skip the step-back maneuver entirely.
+    -- User override (Settings tab): skip the step-back maneuver entirely,
+    -- for any combat style. Off by default -- see below for why melee still
+    -- needs the real maneuver in most cases.
     if ctrl.los_face_only then
         mq.cmd('/face fast')
         return
@@ -17425,9 +17771,22 @@ runtime.handleCannotSeeTarget = function()
 
     local d = distToId(tid)
     local maxReach = maxMeleeDistance(tid)
-    local isMelee = mq.TLO.Me.Combat() or (d <= (maxReach + 10))
+    -- Me.Combat() is not melee-exclusive: under this server's attackmode
+    -- scheme, Ranged style also drives its bow through plain /attack on, so
+    -- Combat() reads true while ranged-attacking too. Only let it count
+    -- toward "melee" when we're not confirmed in server Ranged attack mode.
+    local isConfirmedRanged = ctrl and ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged'
+    -- combat_style == 'Ranged' always re-faces instead of stepping back: the
+    -- distance fallback below (d <= maxReach+10) used to catch Ranged too
+    -- once low ranged_dist values (down to 5) put bow users inside that
+    -- radius, causing a back-away/re-approach loop as the normal Ranged
+    -- engage logic immediately closed the gap back to ranged_dist.
+    local isMelee = (ctrl and ctrl.combat_style ~= 'Ranged') and
+        ((ctrl and ctrl.combat_style == 'Melee') or (mq.TLO.Me.Combat() and not isConfirmedRanged) or
+            (d <= (maxReach + 10)))
 
     if not isMelee then
+        -- In Ranged / caster mode or far away, re-align view vector
         mq.cmd('/face fast')
         return
     end
@@ -17583,7 +17942,9 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                 if runtime.verifyTargetCon(sid) then
                                     local sz = s.Z() or 0
                                     local inHaz = runtime.isCoordInActiveHazard(sx, sy, sz)
-                                    local pathOk = not inHaz
+                                    -- Only melee has to walk into the hazard; ranged/spell can hit it from outside.
+                                    local isMeleeStyle = (ctrl and ctrl.combat_style or 'Melee') == 'Melee'
+                                    local pathOk = not (inHaz and isMeleeStyle)
                                     if pathOk and navLoaded() and not playerOffMesh then
                                             local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
                                             if meshOk and meshLoaded then
@@ -17923,7 +18284,13 @@ function runtime.pullerTick()
             if pullStyle == 'Melee' then
                 reqRange = desiredRange(runtime.pullTargetId)
             elseif pullStyle == 'Ranged' then
-                reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or 40
+                -- Close all the way to the real ranged engagement distance
+                -- (or the Stand Back distance, if that's enabled) instead of
+                -- parking at the looser pull_engage_dist -- this uses
+                -- ctrl.ranged_dist directly rather than desiredRange() so it
+                -- still closes to bow range even if overall combat_style is
+                -- Melee/Spell (bow-tag-then-melee/spell pulling).
+                reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)
             else
                 reqRange = ctrl.pull_engage_dist or 100
             end
@@ -17942,7 +18309,19 @@ function runtime.pullerTick()
                     tagged = true
                 elseif pullStyle == 'Ranged' then
                     mq.cmd('/face fast')
-                    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                    if ctrl.combat_style == 'Ranged' then
+                        -- AutoCombat is set to Ranged: /autofire leaves the
+                        -- character not attacking at all on this server.
+                        -- Use the server's own #attackmode ranged toggle
+                        -- plus plain /attack on instead -- same approach as
+                        -- general Ranged-style combat engagement.
+                        if not isCasting() then runtime.engageRangedAttack(tid) end
+                    else
+                        -- combat_style is Melee/Spell but pull_style is
+                        -- Ranged (bow-tag then melee/spell) -- still uses
+                        -- /autofire for the tag shot.
+                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                    end
                     if isXTargetId(tid) or distToId(tid) <= 25 then
                         if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
                         tagged = true
@@ -18034,7 +18413,8 @@ function runtime.pullerTick()
         end
     elseif runtime.pullState == 'FIGHTING' then
         runtime.clearBreadcrumbs()
-        if ctrl.mode == 'Puller' and not mq.TLO.Me.Combat() then
+        -- Ranged/Spell styles are engaged by combatTick's own style block.
+        if ctrl.mode == 'Puller' and (ctrl.combat_style or 'Melee') == 'Melee' and not mq.TLO.Me.Combat() then
             mq.cmd('/attack on')
         end
     end
@@ -18083,10 +18463,20 @@ end
 
 -- Returns true once the player has demonstrably started attacking this target:
 --   Melee  -> /attack is on (auto-attack swinging)
---   Ranged -> /autofire is on (e.g. bow pull)
+--   Ranged -> /attack is on with server attack mode == Ranged (bow firing
+--             via this server's #attackmode toggle; caught by the first
+--             check below same as melee -- Me.AutoFire never flips true
+--             under this scheme, so it's kept only as a legacy fallback for
+--             any lingering bow-pull-while-melee-style case)
+--   Spell  -> mob HP has dropped below 100% AND player holds aggro
+--             (at least one spell has connected)
+-- Works for all three combat styles; safe to call with no pets present.
 function runtime.playerIsEngagingTarget(tid)
-    if mq.TLO.Me.Combat() then return true end
-    if mq.TLO.Me.AutoFire() then return true end
+    if mq.TLO.Me.Combat() then return true end   -- melee /attack on, or ranged /attack on in server Ranged attack mode
+    if mq.TLO.Me.AutoFire() then return true end -- legacy: autofire on (e.g. bow pull while combat_style == Melee)
+    -- Spell style: confirm a hit has landed via HP drop + aggro ownership
+    local tpct = pctHP(tid) or 100
+    if tpct < 100 and runtime.playerHasAggro(tid) then return true end
     return false
 end
 
@@ -18152,6 +18542,13 @@ runtime.fullStop = function()
     stopMoving()
     if not ctrl.running and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
     if not ctrl.running and mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    -- Deliberately NOT reverting server attackmode to melee here: pausing
+    -- or stopping the script should preserve whatever attack mode
+    -- (melee/ranged) was active, not force it back. revertAttackModeToMelee()
+    -- is still called on an explicit combat_style change to Melee/Spell
+    -- (radio button, /ac style command) -- that's a real user choice, unlike
+    -- a pause/stop.
+    runtime.lastRangedAttackTargetId = 0
     if isCasting() then
         mq.cmd('/stopsong')
         mq.cmd('/stopcast')
@@ -18212,6 +18609,12 @@ runtime.onZoned = function()
     runtime.pullHpRest = false
     runtime.activeDetour = nil
     runtime.clearBreadcrumbs()
+    -- Zone-in defaults the server back to melee attack mode; forget any
+    -- confirmed Ranged state so Ranged style re-asserts it on next engage.
+    runtime.serverAttackMode = 'Melee'
+    runtime.serverAttackModeAssumed = false
+    runtime.attackModeAttempts = 0
+    runtime.lastRangedAttackTargetId = 0
     runtime.discExpires = {}
     runtime.discCooldown = {}
     petState.myPets = {}
@@ -19082,7 +19485,13 @@ local function combatTick()
                 -- desiredRange() so the post-pull combat_style positioning takes over.
                 local reqRange
                 if pullStyle == 'Ranged' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
-                    reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or 40
+                    -- Close all the way to the real ranged engagement
+                    -- distance (or Stand Back distance) instead of parking
+                    -- at the looser pull_engage_dist -- uses ctrl.ranged_dist
+                    -- directly so it still closes to bow range even if
+                    -- overall combat_style is Melee/Spell (bow-tag-then-
+                    -- melee/spell pulling).
+                    reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)
                 elseif pullStyle ~= 'Melee' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
                     reqRange = ctrl.pull_engage_dist or 100
                 else
@@ -19167,6 +19576,16 @@ local function combatTick()
                         if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
                         if isXTargetId(id) or mq.TLO.Me.Combat() then
                             engage = true
+                            -- Already "tagged"/Me.Combat()==true doesn't mean we're
+                            -- actually firing at THIS id -- e.g. a fresh, already-
+                            -- adjacent mob picked up the instant the previous one
+                            -- died, while Me.Combat() is still reading true from
+                            -- that kill. Route through the ranged engage here too
+                            -- so a genuine target change still gets its off/on
+                            -- retoggle even when we think we're already engaged.
+                            if ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged' and not isCasting() then
+                                runtime.ensureRangedAutoAttack(id)
+                            end
                         else
                             local tsReady = false
                             pcall(function() tsReady = mq.TLO.Me.AbilityReady('Throw Stone')() end)
@@ -19177,7 +19596,18 @@ local function combatTick()
                                 local hasRanged = false
                                 pcall(function() hasRanged = mq.TLO.Me.Inventory('ranged')() ~= nil end)
                                 if hasRanged then
-                                    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                                    if ctrl.combat_style == 'Ranged' then
+                                        -- AutoCombat is set to Ranged: /autofire leaves
+                                        -- the character not attacking at all on this
+                                        -- server. Use the server's #attackmode ranged
+                                        -- toggle plus plain /attack on instead.
+                                        if not isCasting() then runtime.engageRangedAttack(id) end
+                                    else
+                                        -- combat_style is Melee/Spell but pull_style is
+                                        -- Ranged (bow-tag then melee/spell) -- still
+                                        -- uses /autofire for the tag shot.
+                                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
+                                    end
                                 else
                                     -- No ranged option available; fall back to melee
                                     if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
@@ -19212,7 +19642,11 @@ local function combatTick()
                 local canAttack = isSelfDefense or (pctHP(id) <= (ctrl.assist_at or 100) and targetIsEngaged(id))
                 if canAttack and distToId(id) <= maxNav then
                     closingOnMob = true
-                    if distToId(id) <= maxMeleeDistance(id) and hasLoS(id) then
+                    -- Backline never closes on the mob, so "in reach" has to be
+                    -- judged by the active style: bow/caster reach for
+                    -- Ranged/Spell, melee reach otherwise.
+                    local reach = ((ctrl.combat_style or 'Melee') == 'Melee') and maxMeleeDistance(id) or (ctrl.ranged_dist or 40)
+                    if distToId(id) <= reach and hasLoS(id) then
                         engage = true
                     end
                 end
@@ -19308,18 +19742,23 @@ local function combatTick()
         local casting = isCasting()
         local moving = isMoveActive()
         print(string.format(
-            '\ao[DEBUG]\ax Mode:%s Style:%s | Tgt:%s(#%d HP:%d%% Hostile:%s) | Dist:%.1f Reach:%.1f LoS:%s | Nav:%s Stick:%s Mov:%s | Eng:%s Combat:%s Cast:%s | XTar:%d',
-            tostring(ctrl.mode), tostring(ctrl.combat_style or 'Melee'), tostring(tname), tonumber(tid) or 0, tonumber(thp) or 0, tostring(isHostile), tonumber(dist) or 0, tonumber(reach) or 18, tostring(los),
+            '\ao[DEBUG]\ax Mode:%s Style:%s AtkMode:%s | Tgt:%s(#%d HP:%d%% Hostile:%s) | Dist:%.1f Reach:%.1f LoS:%s | Nav:%s Stick:%s Mov:%s | Eng:%s Combat:%s Cast:%s | XTar:%d',
+            tostring(ctrl.mode), tostring(ctrl.combat_style or 'Melee'), tostring(runtime.serverAttackMode or 'Melee'), tostring(tname), tonumber(tid) or 0, tonumber(thp) or 0, tostring(isHostile), tonumber(dist) or 0, tonumber(reach) or 18, tostring(los),
             tostring(navActive), tostring(stickActive), tostring(moving), tostring(engage), tostring(combat), tostring(casting), tonumber(numXtar) or 0))
     end
 
-    -- Auto-attack handling:
-    -- Engage autoattack only when target exists, target is within striking distance,
+    -- Auto-attack / Auto-fire handling:
+    -- Engage autoattack/autofire only when target exists, target is within striking distance,
     -- or target is confirmed engaged on XTarget.
-    -- Turn off autoattack whenever out of range or when no NPCs remain on XTarget list.
+    -- Turn off autoattack/autofire whenever out of range or when no NPCs remain on XTarget list.
     -- For player-directed modes (Manual, Assist), also require the NPC to be confirmed hostile before
     -- initiating auto-attack — prevents hitting friendly NPCs (merchants, etc.).
+    -- Style differences:
+    --   Melee  -> /attack on at melee reach, optional Assist behind-positioning
+    --   Ranged -> server #attackmode ranged + /attack on at ranged_dist (see runtime.engageRangedAttack)
+    --   Spell  -> never auto-attacks; just holds ranged_dist, faces, and re-closes if the mob drifts
     local xtarActive = anyXtarAlive()
+    local style = ctrl and ctrl.combat_style or 'Melee'
     local tid = mq.TLO.Target.ID() or 0
     local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee')
     local autoAttackOk = false
@@ -19344,18 +19783,34 @@ local function combatTick()
         local isDraggingToCamp = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp' and runtime.pullState == 'TO_CAMP')
         if haveNPC and not isDraggingToCamp and autoAttackOk then
             local curDist = (tid > 0) and distToId(tid) or 999
-            local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or (pursuit.NAV_CONST and pursuit.NAV_CONST.MELEE_RANGE or 14))
+            local maxReach
+            if style == 'Melee' then
+                maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or (pursuit.NAV_CONST and pursuit.NAV_CONST.MELEE_RANGE or 14))
+            else
+                maxReach = (ctrl and ctrl.ranged_dist) or 40
+            end
             if curDist <= maxReach then
-                if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then
+                if style ~= 'Spell' and (mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking()) then
                     print('\ag[Triune]\ax Standing up to attack.')
                     mq.cmd('/stand')
                 end
-                if not mq.TLO.Me.Combat() then
-                    print(string.format('\ag[Triune]\ax Engaging /attack on -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
-                        tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
-                    mq.cmd('/attack on')
+                if style == 'Melee' then
+                    if not mq.TLO.Me.Combat() then
+                        print(string.format('\ag[Triune]\ax Engaging /attack on -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
+                            tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
+                        mq.cmd('/attack on')
+                    end
+                elseif style == 'Ranged' then
+                    if not isCasting() then
+                        if runtime.serverAttackMode == 'Ranged' and (tid ~= runtime.lastRangedAttackTargetId or not mq.TLO.Me.Combat()) then
+                            print(string.format('\ag[Triune]\ax Engaging /attack on (ranged) -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
+                                tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
+                        end
+                        runtime.engageRangedAttack(tid)
+                    end
                 end
-                local isAssistBehind = (ctrl.mode == 'Assist' and ctrl.assist_behind ~= false)
+                -- Spell style: no auto-attack at all -- the gem loadout does the work.
+                local isAssistBehind = (style == 'Melee' and ctrl.mode == 'Assist' and ctrl.assist_behind ~= false)
                 if isAssistBehind then
                     if runtime.playerHasAggro(tid) then
                         -- Assistant currently has aggro: suspend behind positioning to prevent circular spinning while tanking
@@ -19382,13 +19837,13 @@ local function combatTick()
                     end
                 end
             elseif not isMoveActive() and curDist > maxReach and tid > 0 then
-                -- Mob moved, was pushed, or is out of striking reach: re-close distance
+                -- Mob moved, was pushed, or is out of striking/ranged reach: re-close distance
                 if ctrl.mode ~= 'Manual' then
                     moveToward(tid, desiredRange(tid))
                 end
             end
         else
-            -- Not engaging any NPC or dragging mob to camp: turn off auto-attack if not in manual combat
+            -- Not engaging any NPC or dragging mob to camp: turn off auto-attack/autofire if not in manual combat
             if mq.TLO.Me.Combat() and not (ctrl.mode == 'Manual' and (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')) then
                 mq.cmd('/attack off')
             end
@@ -19971,8 +20426,9 @@ local function triuneCommand(...)
         print('  \ag/ac hud | uf | targetwin\ax - Toggle popout Target & Player HUD window')
         print('  \ag/ac help | h | ?\ax - Print slash command summary')
         print('  \ag/ac clearcursor | autoinv\ax - Clear items from cursor')
-        print('  \ag/ac style [melee|ranged|spell]\ax - Configure combat style')
-        print('  \ag/ac range [dist]\ax - Configure melee or ranged distance')
+        print('  \ag/ac style [melee|ranged|spell]\ax - Configure combat style (Melee / Ranged bow / Spell)')
+        print('  \ag/ac range [dist]\ax - Configure distance for the active style (melee 5-50, ranged/spell 5-200)')
+        print('  \ag/ac meleerange [5-50]\ax | \ag/ac rangeddist [5-200]\ax - Set a specific distance regardless of style')
         print('  \ag/ac cd | cooldowns\ax - Toggle popout Cooldown & Ability Monitor window')
         print('  \ag/ac zplane [5-100]\ax - Configure Hunter Tier 1 same-floor / Z plane height threshold')
         print('  \ag/ac huntz [10-300]\ax - Configure Hunter Tier 2 max vertical height difference')
@@ -20414,17 +20870,44 @@ local function triuneCommand(...)
             '\ay[Triune]\ax usage: /ac wp [add [name]|clear|delete [idx]|on|off|toggle|radius [5-100]|scan [20-500]|list]')
         end
     elseif cmd == 'style' or cmd == 'combatstyle' then
-        ctrl.combat_style = 'Melee'
-        runtime.saveLoadout(true)
-        print('\ag[Triune]\ax Combat style is set to: \agMelee\ax (range ' .. tostring(ctrl.melee_dist or 14) .. ')')
-    elseif cmd == 'range' or cmd == 'meleerange' or cmd == 'dist' then
-        local val = tonumber(args[2])
-        if val then
-            ctrl.melee_dist = math.max(5, math.min(50, math.floor(val)))
-            runtime.saveLoadout(true)
-            print(string.format('\ag[Triune]\ax Max Melee Distance set to %d units.', ctrl.melee_dist))
+        local st = args[2] and string.lower(args[2]) or ''
+        if st == 'melee' then
+            runtime.setCombatStyle('Melee')
+            print('\ag[Triune]\ax Combat style set to: \agMelee\ax (range ' .. tostring(ctrl.melee_dist or 14) .. ')')
+        elseif st == 'ranged' or st == 'bow' then
+            runtime.setCombatStyle('Ranged')
+            print('\ag[Triune]\ax Combat style set to: \agRanged (bow)\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
+        elseif st == 'spell' or st == 'cast' or st == 'caster' then
+            runtime.setCombatStyle('Spell')
+            print('\ag[Triune]\ax Combat style set to: \agSpell\ax (range ' .. tostring(ctrl.ranged_dist or 40) .. ')')
+        elseif st == '' then
+            local cur = ctrl.combat_style or 'Melee'
+            local curRange = (cur == 'Melee') and (ctrl.melee_dist or 14) or (ctrl.ranged_dist or 40)
+            print(string.format('\ag[Triune]\ax Current combat style: \ag%s\ax (range %d). usage: /ac style [melee|ranged|spell]', cur, curRange))
         else
-            print(string.format('\ag[Triune]\ax Current Max Melee Distance: %d units. (usage: /ac range [5-50])', ctrl.melee_dist or 14))
+            print('\ay[Triune]\ax usage: /ac style [melee|ranged|spell]')
+        end
+    elseif cmd == 'range' or cmd == 'meleerange' or cmd == 'rangeddist' or cmd == 'dist' then
+        local val = tonumber(args[2])
+        -- /ac range follows the active style; /ac meleerange and /ac rangeddist
+        -- always address their own setting regardless of style.
+        local wantMelee = (cmd == 'meleerange') or (cmd ~= 'rangeddist' and (ctrl.combat_style or 'Melee') == 'Melee')
+        if val then
+            if wantMelee then
+                ctrl.melee_dist = math.max(5, math.min(50, math.floor(val)))
+                runtime.saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Max Melee Distance set to %d units.', ctrl.melee_dist))
+            else
+                ctrl.ranged_dist = math.max(5, math.min(200, math.floor(val)))
+                runtime.saveLoadout(true)
+                print(string.format('\ag[Triune]\ax Ranged/Spell Engagement Distance set to %d units.', ctrl.ranged_dist))
+            end
+        else
+            if wantMelee then
+                print(string.format('\ag[Triune]\ax Current Max Melee Distance: %d units. (usage: /ac range [5-50])', ctrl.melee_dist or 14))
+            else
+                print(string.format('\ag[Triune]\ax Current Ranged/Spell Distance: %d units. (usage: /ac range [5-200])', ctrl.ranged_dist or 40))
+            end
         end
     elseif cmd == 'huntz' or cmd == 'z' then
         local val = tonumber(args[2])

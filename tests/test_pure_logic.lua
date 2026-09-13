@@ -491,16 +491,34 @@ do
     sanitizeModeConfig(c4)
     assert_eq(c4.pause_on_zone, false, 'sanitize: pause_on_zone=false preserved')
 
-    -- combat_style consolidation to Melee
+    -- combat_style: the three real styles survive, anything else falls back to Melee
     local c5 = { mode = 'Manual', combat_style = 'Ranged' }
     sanitizeModeConfig(c5)
-    assert_eq(c5.combat_style, 'Melee', 'sanitize: combat_style Ranged normalized to Melee')
+    assert_eq(c5.combat_style, 'Ranged', 'sanitize: combat_style Ranged preserved')
     local c6 = { mode = 'Manual', combat_style = 'Spell' }
     sanitizeModeConfig(c6)
-    assert_eq(c6.combat_style, 'Melee', 'sanitize: combat_style Spell normalized to Melee')
+    assert_eq(c6.combat_style, 'Spell', 'sanitize: combat_style Spell preserved')
     local c7 = { mode = 'Manual' }
     sanitizeModeConfig(c7)
-    assert_eq(c7.combat_style, 'Melee', 'sanitize: nil combat_style normalized to Melee')
+    assert_eq(c7.combat_style, 'Melee', 'sanitize: nil combat_style defaults to Melee')
+    local c8 = { mode = 'Manual', combat_style = 'Bow' }
+    sanitizeModeConfig(c8)
+    assert_eq(c8.combat_style, 'Melee', 'sanitize: unknown combat_style normalized to Melee')
+
+    -- ranged_dist: default 40, clamped to 5..200, non-numeric garbage reset
+    assert_eq(c7.ranged_dist, 40, 'sanitize: ranged_dist default 40')
+    local c9 = { mode = 'Manual', ranged_dist = 500 }
+    sanitizeModeConfig(c9)
+    assert_eq(c9.ranged_dist, 200, 'sanitize: ranged_dist clamped to 200')
+    local c10 = { mode = 'Manual', ranged_dist = 1 }
+    sanitizeModeConfig(c10)
+    assert_eq(c10.ranged_dist, 5, 'sanitize: ranged_dist clamped to 5')
+    local c11 = { mode = 'Manual', ranged_dist = 'far' }
+    sanitizeModeConfig(c11)
+    assert_eq(c11.ranged_dist, 40, 'sanitize: non-numeric ranged_dist reset to 40')
+    local c12 = { mode = 'Manual', ranged_dist = 75.9 }
+    sanitizeModeConfig(c12)
+    assert_eq(c12.ranged_dist, 75, 'sanitize: ranged_dist floored and preserved in range')
 end
 
 -- ============================================================================
@@ -561,6 +579,7 @@ local EXPECTED_FIELDS = {
     { 'ignore_distant_xtargets', 'boolean' },
     { 'combat_style',            'string' },
     { 'melee_dist',              'number' },
+    { 'ranged_dist',             'number' },
     { 'ma_name',                 'string' },
     { 'assist_at',               'number' },
     { 'chase',                   'boolean' },
@@ -9664,35 +9683,121 @@ do
 end
 
 -- ============================================================================
--- 83. Combat Style Consolidation to Melee Only Logic Tests
+-- 83. Combat Styles (Melee / Ranged / Spell) restored + server attack-mode plumbing
 -- ============================================================================
-print('--- Suite 83: Combat Style Consolidation to Melee Only ---')
+print('--- Suite 83: Combat Styles (Melee / Ranged / Spell) ---')
 do
     local triuneContent = readFile('TAC/lua/triune.lua')
 
-    -- 1. Verify removed mechanisms
-    assert_true(triuneContent:find("TriuneAttackModeChanged", 1, true) == nil,
-        'Suite 83: TriuneAttackModeChanged event was eliminated')
-    assert_true(triuneContent:find("revertAttackModeToMelee", 1, true) == nil,
-        'Suite 83: revertAttackModeToMelee function was eliminated')
-    assert_true(triuneContent:find("ensureRangedAutoAttack", 1, true) == nil,
-        'Suite 83: ensureRangedAutoAttack function was eliminated')
-    assert_true(triuneContent:find("serverAttackMode", 1, true) == nil,
-        'Suite 83: serverAttackMode state was eliminated')
-    assert_true(triuneContent:find("RadioButton('Ranged (bow)'", 1, true) == nil,
-        'Suite 83: Ranged radio button was eliminated from UI')
-    assert_true(triuneContent:find("RadioButton('Spell'", 1, true) == nil,
-        'Suite 83: Spell radio button was eliminated from UI')
-    assert_true(triuneContent:find("rangedRangeSlider", 1, true) == nil,
-        'Suite 83: rangedRangeSlider was eliminated from Settings tab')
-
-    -- 2. Verify Melee distance slider remains
+    -- 1. Settings tab exposes all three styles and both distance sliders
+    assert_true(triuneContent:find("RadioButton('Melee', ctrl.combat_style == 'Melee')", 1, true) ~= nil,
+        'Suite 83: Melee radio button present')
+    assert_true(triuneContent:find("RadioButton('Ranged (bow)', ctrl.combat_style == 'Ranged')", 1, true) ~= nil,
+        'Suite 83: Ranged radio button present')
+    assert_true(triuneContent:find("RadioButton('Spell', ctrl.combat_style == 'Spell')", 1, true) ~= nil,
+        'Suite 83: Spell radio button present')
     assert_true(triuneContent:find("meleeRangeSlider", 1, true) ~= nil,
-        'Suite 83: meleeRangeSlider remains active in Settings tab')
+        'Suite 83: meleeRangeSlider present in Settings tab')
+    assert_true(triuneContent:find("rangedRangeSlider", 1, true) ~= nil,
+        'Suite 83: rangedRangeSlider present in Settings tab')
 
-    -- 3. Verify sanitizeModeConfig forces combat_style = 'Melee'
-    assert_true(triuneContent:find("c.combat_style = 'Melee'", 1, true) ~= nil,
-        'Suite 83: sanitizeModeConfig forces combat_style to Melee')
+    -- 2. Server attack-mode plumbing for Ranged style
+    assert_true(triuneContent:find("mq.event('TriuneAttackModeChanged', 'Attack mode changed to: #1#'", 1, true) ~= nil,
+        'Suite 83: TriuneAttackModeChanged event registered')
+    assert_true(triuneContent:find("function runtime.engageRangedAttack(tid)", 1, true) ~= nil,
+        'Suite 83: engageRangedAttack helper defined')
+    assert_true(triuneContent:find("function runtime.ensureRangedAutoAttack(tid)", 1, true) ~= nil,
+        'Suite 83: ensureRangedAutoAttack helper defined')
+    assert_true(triuneContent:find("runtime.revertAttackModeToMelee = function()", 1, true) ~= nil,
+        'Suite 83: revertAttackModeToMelee helper defined')
+    assert_true(triuneContent:find("function runtime.setCombatStyle(style)", 1, true) ~= nil,
+        'Suite 83: setCombatStyle helper defined')
+    assert_true(triuneContent:find("mq.cmd('/say #attackmode ranged')", 1, true) ~= nil,
+        'Suite 83: sends #attackmode ranged')
+    assert_true(triuneContent:find("mq.cmd('/say #attackmode melee')", 1, true) ~= nil,
+        'Suite 83: sends #attackmode melee on revert')
+    -- The #attackmode switch must live in exactly one place (the helper), not be copy-pasted per call site
+    local _, sendCount = triuneContent:gsub("mq%.cmd%('/say #attackmode ranged'%)", '')
+    assert_eq(sendCount, 1, 'Suite 83: #attackmode ranged is only sent from engageRangedAttack')
+
+    -- 3. Bounded retry: never loop forever waiting for the server echo
+    assert_true(triuneContent:find("runtime.ATTACKMODE_MAX_ATTEMPTS = 3", 1, true) ~= nil,
+        'Suite 83: attack-mode confirmation retry is bounded')
+    assert_true(triuneContent:find("runtime.serverAttackModeAssumed = true", 1, true) ~= nil,
+        'Suite 83: falls back to assumed Ranged mode after retries')
+
+    -- 4. Zone-in resets the tracked server attack mode (server defaults back to melee)
+    local onZoned = triuneContent:match("runtime%.onZoned = function%(%)(.-)\nend")
+    assert_true(onZoned ~= nil, 'Suite 83: onZoned body located')
+    assert_true(onZoned and onZoned:find("runtime.serverAttackMode = 'Melee'", 1, true) ~= nil,
+        'Suite 83: onZoned resets serverAttackMode to Melee')
+    assert_true(onZoned and onZoned:find("runtime.lastRangedAttackTargetId = 0", 1, true) ~= nil,
+        'Suite 83: onZoned resets lastRangedAttackTargetId')
+
+    -- 5. Style-aware engine paths
+    assert_true(triuneContent:find("if style ~= 'Melee' then\n        return ctrl.ranged_dist or 40", 1, true) ~= nil,
+        'Suite 83: desiredRange returns ranged_dist for non-Melee styles')
+    assert_true(triuneContent:find("local isMelee = (not followOnly and (ctrl and ctrl.combat_style or 'Melee') == 'Melee')", 1, true) ~= nil,
+        'Suite 83: moveToward arrival tolerance is style-aware')
+    assert_true(triuneContent:find("if ctrl.mode == 'Puller' and (ctrl.combat_style or 'Melee') == 'Melee' and not mq.TLO.Me.Combat() then", 1, true) ~= nil,
+        'Suite 83: Puller FIGHTING /attack on is Melee-only')
+    assert_true(triuneContent:find("reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)", 1, true) ~= nil,
+        'Suite 83: ranged pull closes to ctrl.ranged_dist')
+    assert_true(triuneContent:find("or 100) or 40\n", 1, true) == nil,
+        'Suite 83: no hard-coded 40 ranged pull distance remains')
+    assert_true(triuneContent:find("Spell style: no auto-attack at all", 1, true) ~= nil,
+        'Suite 83: Spell style branch documented in auto-attack block')
+    assert_true(triuneContent:find("local isAssistBehind = (style == 'Melee' and ctrl.mode == 'Assist' and ctrl.assist_behind ~= false)", 1, true) ~= nil,
+        'Suite 83: Assist behind-positioning is Melee-only')
+    assert_true(triuneContent:find("if tpct < 100 and runtime.playerHasAggro(tid) then return true end", 1, true) ~= nil,
+        'Suite 83: playerIsEngagingTarget detects Spell-style engagement via HP drop + aggro')
+
+    -- 6. Slash commands
+    assert_true(triuneContent:find("elseif st == 'ranged' or st == 'bow' then", 1, true) ~= nil,
+        'Suite 83: /ac style ranged|bow accepted')
+    assert_true(triuneContent:find("elseif st == 'spell' or st == 'cast' or st == 'caster' then", 1, true) ~= nil,
+        'Suite 83: /ac style spell|cast|caster accepted')
+    assert_true(triuneContent:find("cmd == 'range' or cmd == 'meleerange' or cmd == 'rangeddist' or cmd == 'dist'", 1, true) ~= nil,
+        'Suite 83: /ac range, meleerange, rangeddist, dist commands present')
+
+    -- 7. Pure logic: the setCombatStyle helper, run against a stub environment
+    local styleSrc = triuneContent:match("(function runtime%.setCombatStyle%(style%).-\nend)")
+    assert_true(styleSrc ~= nil, 'Suite 83: setCombatStyle source extracted')
+    if styleSrc then
+        local cmds = {}
+        local env = {
+            ctrl = { combat_style = 'Ranged' },
+            runtime = {
+                serverAttackMode = 'Ranged',
+                attackModeRangedUsed = true,
+                lastAttackModeCmdAt = 0,
+                lastRangedAttackTargetId = 1234,
+                saveLoadout = function() end,
+            },
+            mq = { cmd = function(c) cmds[#cmds + 1] = c end, TLO = { Me = { Combat = function() return true end } } },
+            os = { clock = function() return 100 end },
+        }
+        env.runtime.revertAttackModeToMelee = function()
+            env.runtime.serverAttackMode = 'Melee'
+            env.mq.cmd('/say #attackmode melee')
+        end
+        local styleChunk = load(styleSrc, 'setCombatStyle', 't', env)
+        assert_true(styleChunk ~= nil, 'Suite 83: setCombatStyle compiles standalone')
+        if styleChunk then
+            styleChunk()
+            assert_true(env.runtime.setCombatStyle('Bow') == false, 'Suite 83: setCombatStyle rejects unknown style')
+            assert_eq(env.ctrl.combat_style, 'Ranged', 'Suite 83: unknown style leaves combat_style untouched')
+            assert_true(env.runtime.setCombatStyle('Melee') == true, 'Suite 83: setCombatStyle accepts Melee')
+            assert_eq(env.ctrl.combat_style, 'Melee', 'Suite 83: combat_style updated to Melee')
+            assert_eq(env.runtime.serverAttackMode, 'Melee', 'Suite 83: leaving Ranged reverts server attack mode')
+            assert_eq(cmds[1], '/say #attackmode melee', 'Suite 83: leaving Ranged sends #attackmode melee')
+            assert_eq(cmds[2], '/attack off', 'Suite 83: leaving Ranged while firing turns /attack off')
+            assert_eq(env.runtime.lastRangedAttackTargetId, 0, 'Suite 83: style change resets lastRangedAttackTargetId')
+            cmds = {}
+            env.runtime.setCombatStyle('Ranged')
+            assert_eq(#cmds, 0, 'Suite 83: switching to Ranged sends nothing until a target is engaged')
+        end
+    end
 end
 
 -- ============================================================================
@@ -10130,7 +10235,7 @@ do
     assert_true(okDestroy, 'Suite 86: hud_unitframes onDestroy cleans up cached snapshots: ' .. tostring(errDestroy))
 
     -- 7. In-Combat Toggle & Modal Configuration Popup Verification
-    assert_true(triuneContent:find("ImGui.TableSetupColumn('Combat'", 1, true) ~= nil,
+    assert_true(triuneContent:find("ImGui.TableSetupColumn('Cbt'", 1, true) ~= nil,
         'Suite 86: Dedicated Combat column registered in Plugins table')
     assert_true(triuneContent:find("ImGui.BeginPopupModal('Plugin Configuration##PluginConfigModal'", 1, true) ~= nil,
         'Suite 86: Centered modal popup dialog implemented for plugin configuration')
@@ -10607,7 +10712,7 @@ do
         assert_true(src:find('        ' .. key .. ' ', 1, true) ~= nil, 'Suite 89: defaultCtrl seeds ' .. key)
         assert_true(src:find('if c.' .. key .. ' == nil then c.' .. key .. ' = false end', 1, true) ~= nil, 'Suite 89: sanitize seeds ' .. key)
     end
-    for _, gone in ipairs({ "UI.toggleTool('triune_map')", "UI.toggleTool('triune_dps'", "UI.toggleTool('triune_cursor')", "UI.toggleTool('triune_buffbot')", "/lua run triune_inv", "cmd == 'cursorui'", "cmd == 'buffbot'", "cmd == 'dpsparser'", "cmd == 'triunemap'" }) do
+    for _, gone in ipairs({ "UI.toggleTool('triune_map')", "UI.toggleTool('triune_dps'", "UI.toggleTool('triune_cursor')", "UI.toggleTool('triune_buffbot')", "/lua run triune_inv", "/lua run triune_buttons", "cmd == 'cursorui'", "cmd == 'buffbot'", "cmd == 'dpsparser'", "cmd == 'triunemap'" }) do
         assert_true(src:find(gone, 1, true) == nil, 'Suite 89: core no longer contains ' .. gone)
     end
     assert_true(src:find('delay                 = function(ms, cond) return pm.delay(ms, cond) end', 1, true) ~= nil, 'Suite 89: core API exports delay')
@@ -10969,8 +11074,9 @@ do
         for _, gone in ipairs({ "'Map##hdrMap'", "'DPS Parser##hdrDPS'", "'Cursor Manager##hdrCursor'", "'Inv Manager##hdrInv'", "'Open Spellbook##hdrBook'", "'Gems##hdrGems'", "'XTarget##hdrXTarget'" }) do
             assert_true(src:find(gone, 1, true) == nil, 'Suite 89: hardcoded header button removed: ' .. gone)
         end
-        assert_true(src:find("ImGui.BeginTable('TriunePluginsTable', 8, flags)", 1, true) ~= nil, 'Suite 89: Plugins table gained the Header column')
-        assert_true(src:find("ImGui.TableSetupColumn('Header', ImGuiTableColumnFlags.WidthFixed, 56)", 1, true) ~= nil, 'Suite 89: Header column declared')
+        assert_true(src:find("ImGui.BeginTable('TriunePluginsTable', 8, tblFlags)", 1, true) ~= nil, 'Suite 89: Plugins table has the compact 8-column layout')
+        assert_true(src:find("ImGui.TableSetupColumn('Uses', ImGuiTableColumnFlags.WidthFixed, 105)", 1, true) ~= nil, 'Suite 89: Uses column declared')
+        assert_true(src:find("ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, 30)", 1, true) ~= nil, 'Suite 89: Header button column declared')
 
         -- 10. Settings -> Windows registry is built from the plugin window declarations
         W.getManaged = loadFunc(src, 'getManagedWindows', { runtime = rt, ctrl = W.ctrl })
@@ -11656,6 +11762,46 @@ do
     local pm = rt.pluginManager
     S.shipped = #pm.pluginOrder
     assert_eq(S.shipped, 17, 'Suite 92: all shipped plugins still load under the load-time guards')
+
+    -- Soft plugin dependencies (`uses`): normalised at registration, reverse-listed, state-tracked
+    assert_eq(#pm.normalizeUses(nil), 0, 'Suite 92: no uses -> empty list')
+    S.u = pm.normalizeUses({ 'spellbook', boxnet = 'sync', 'boxnet', [3] = 42 })
+    assert_eq(#S.u, 2, 'Suite 92: uses dedupes ids and ignores non-strings')
+    assert_eq(S.u[1].id .. '/' .. tostring(S.u[1].why), 'boxnet/sync', 'Suite 92: keyed form keeps the why text (even when the id is also listed bare), sorted by id')
+    assert_eq(S.u[2].id .. '/' .. tostring(S.u[2].why), 'spellbook/nil', 'Suite 92: list form has no why text')
+    S.ids = function(list) local t = {} for _, u in ipairs(list) do t[#t + 1] = u.id end return table.concat(t, ',') end
+    assert_eq(S.ids(pm.plugins.buttons.uses), 'boxnet', 'Suite 92: buttons declares it uses boxnet')
+    assert_eq(S.ids(pm.plugins.dps.uses), 'boxnet', 'Suite 92: dps declares it uses boxnet')
+    assert_eq(S.ids(pm.plugins.hud_group.uses), 'boxnet', 'Suite 92: hud_group declares it uses boxnet')
+    assert_eq(S.ids(pm.plugins.hud_spellgems.uses), 'spellbook', 'Suite 92: hud_spellgems declares it uses spellbook')
+    assert_eq(#pm.plugins.boxnet.uses, 0, 'Suite 92: boxnet uses nothing')
+    assert_eq(S.ids(pm.usedBy('boxnet')), 'buttons,dps,hud_group', 'Suite 92: usedBy(boxnet) lists the three consumers in load order')
+    assert_eq(S.ids(pm.usedBy('spellbook')), 'hud_spellgems', 'Suite 92: usedBy(spellbook) lists the gem bar')
+    assert_eq(#pm.usedBy('cursor'), 0, 'Suite 92: cursor is used by nobody')
+    assert_eq(pm.useState('boxnet'), 'active', 'Suite 92: an enabled plugin is an active dependency')
+    pm.disablePlugin('boxnet')
+    assert_eq(pm.useState('boxnet'), 'disabled', 'Suite 92: a disabled plugin is a disabled dependency')
+    pm.enablePlugin('boxnet')
+    assert_eq(pm.useState('boxnet'), 'active', 'Suite 92: re-enabled -> active again')
+    assert_eq(pm.useState('nope'), 'missing', 'Suite 92: an unknown id is a missing dependency')
+    -- every declared use names a shipped plugin, and every real cross-plugin hook is declared
+    for _, id in ipairs(pm.pluginOrder) do
+        for _, u in ipairs(pm.plugins[id].uses) do
+            assert_true(pm.plugins[u.id] ~= nil, 'Suite 92: ' .. id .. ' uses a shipped plugin (' .. u.id .. ')')
+        end
+    end
+    for _, f in ipairs({ 'buttons', 'dps', 'hud_group', 'hud_effects', 'hud_unitframes', 'hud_xtarget', 'hud_cooldowns', 'inventory', 'map', 'cursor', 'buffbot', 'auto_aa', 'auto_accept', 'floating_damage', 'spellbook', 'hud_spellgems' }) do
+        local body = readFile('TAC/lua/tac/' .. f .. '.lua')
+        local declared = S.ids(pm.plugins[f].uses)
+        if body:find('core.boxnet', 1, true) or body:find("rawget(core, 'boxnet')", 1, true) then
+            assert_true(declared:find('boxnet', 1, true) ~= nil, 'Suite 92: ' .. f .. ' touches core.boxnet so it must declare uses boxnet')
+        else
+            assert_true(declared:find('boxnet', 1, true) == nil, 'Suite 92: ' .. f .. ' declares boxnet only if it uses it')
+        end
+        if body:find("getWindow('spellbook')", 1, true) then
+            assert_true(declared:find('spellbook', 1, true) ~= nil, 'Suite 92: ' .. f .. ' opens the spellbook window so it must declare uses spellbook')
+        end
+    end
     assert_eq(next(pm.loadErrors), nil, 'Suite 92: shipped plugins produce no load errors')
 
     -- 1. A standalone MQ script: its main loop must never run on the core
@@ -11818,8 +11964,8 @@ do
     assert_eq(S.imguiInits, 0, 'Suite 92: rescan does not re-run a known standalone script chunk')
     assert_true(pm.scripts['standalone_script.lua'] ~= nil, 'Suite 92: known script entry survives a rescan')
     assert_true(src:find("'| Standalone scripts: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the standalone script count')
-    assert_true(src:find("ImGui.BeginTable('TriuneScriptsTable', 5, sFlags)", 1, true) ~= nil, 'Suite 92: Plugins page has the Standalone Scripts table (with Header Btn / Button Name)')
-    assert_true(src:find("ImGui.TableSetupColumn('Header Btn'", 1, true) ~= nil and src:find("ImGui.TableSetupColumn('Button Name'", 1, true) ~= nil, 'Suite 92: Standalone Scripts table has the header button and name columns')
+    assert_true(src:find("ImGui.BeginTable('TriuneScriptsTable', 5, tblFlags)", 1, true) ~= nil, 'Suite 92: Plugins page has the Standalone Scripts table (with Hdr / Button Name)')
+    assert_true(src:find("ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, 30)", 1, true) ~= nil and src:find("ImGui.TableSetupColumn('Button Name'", 1, true) ~= nil, 'Suite 92: Standalone Scripts table has the header button and name columns')
     assert_true(src:find("'| Failed to load: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the failed-file count')
     assert_true(src:find('Files in the plugin folder that could not be loaded:', 1, true) ~= nil, 'Suite 92: Plugins page lists failed files')
     pm.dirPath = nil

@@ -19,6 +19,7 @@ local plugin = {
     name               = 'DPS Parser',
     version            = '4.3.0',
     author             = 'Triune',
+    uses               = { boxnet = 'shared DPS from the other boxes (Boxes tab)' },
     description        = 'Live combat-log DPS parser with per-fight player / pet breakdowns, encounter history, and chat reports.',
     defaultEnabled     = true,
     tickInterval       = 0.05,

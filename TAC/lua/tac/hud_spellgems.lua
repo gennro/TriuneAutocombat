@@ -16,6 +16,7 @@ local plugin = {
     name               = 'Spell Gem Bar HUD',
     version            = '1.0.0',
     author             = 'Triune',
+    uses               = { spellbook = 'Open Spellbook from the gem bar' },
     description        = 'Popout spell gem bar with recast timers, casting overlays, spell-set presets, and right-click actions.',
     defaultEnabled     = true,
     tickInterval       = 1.0,
