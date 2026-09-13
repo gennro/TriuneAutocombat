@@ -300,6 +300,7 @@ end
 local function defaultCtrl()
     return {
         plugins              = {},
+        scripts              = {},
         running              = false,
         mode                 = 'Manual',
         submode              = 'Hunt',
@@ -4574,6 +4575,7 @@ function runtime.applyEntry(e)
         if ctrl.winpos_auto_restore_on_resize == nil then ctrl.winpos_auto_restore_on_resize = true end
         if ctrl.winpos_restore_visibility == nil then ctrl.winpos_restore_visibility = false end
         if type(ctrl.plugins) ~= 'table' then ctrl.plugins = {} end
+        if type(ctrl.scripts) ~= 'table' then ctrl.scripts = {} end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
         -- restore it from a saved file because the player will almost certainly
         -- be in a different location or zone. Keep the user's radius setting intact.
@@ -6016,6 +6018,67 @@ function runtime.initPluginManager()
         return 'started'
     end
 
+    -- Standalone scripts can get a Run / Stop button on the main window
+    -- header too (Settings -> Plugins -> Standalone Scripts). Per-file
+    -- settings live in ctrl.scripts[filename] = { headerButton, label } and
+    -- save with the loadout like the plugin header buttons.
+    local function scriptCfg(entry, create)
+        if not entry or not entry.file then return nil end
+        if type(ctrl.scripts) ~= 'table' then ctrl.scripts = {} end
+        local c = ctrl.scripts[entry.file]
+        if not c and create then
+            c = {}
+            ctrl.scripts[entry.file] = c
+        end
+        return c
+    end
+
+    function pm.scriptHeaderButtonEnabled(entry)
+        local c = scriptCfg(entry)
+        return c ~= nil and c.headerButton == true
+    end
+
+    function pm.setScriptHeaderButton(entry, val)
+        local c = scriptCfg(entry, true)
+        if not c then return end
+        c.headerButton = (val == true)
+        runtime.saveLoadout(true)
+    end
+
+    -- The user's raw button name ('' when unset) and the text the header
+    -- actually shows (falls back to the file name).
+    function pm.scriptButtonName(entry)
+        local c = scriptCfg(entry)
+        return c and type(c.label) == 'string' and c.label or ''
+    end
+
+    function pm.scriptButtonLabel(entry)
+        local label = pm.scriptButtonName(entry)
+        if label:match('%S') then return label end
+        return tostring(entry and entry.name or '?')
+    end
+
+    -- `save` false updates the name without writing the loadout (used while
+    -- the user is still typing).
+    function pm.setScriptButtonName(entry, label, save)
+        local c = scriptCfg(entry, true)
+        if not c then return end
+        label = tostring(label or '')
+        c.label = (label ~= '') and label or nil
+        if save ~= false then runtime.saveLoadout(true) end
+    end
+
+    -- Standalone scripts with a header button, sorted by name.
+    function pm.headerScripts()
+        local out = {}
+        for fname, entry in pairs(pm.scripts or {}) do
+            entry.file = entry.file or fname
+            if pm.scriptHeaderButtonEnabled(entry) then out[#out + 1] = entry end
+        end
+        table.sort(out, function(a, b) return a.name:lower() < b.name:lower() end)
+        return out
+    end
+
     function pm.loadPlugin(filename, fullPath)
         local fn, err = loadfile(fullPath)
         if not fn then
@@ -6569,15 +6632,18 @@ function runtime.initPluginManager()
         return out
     end
 
-    -- Main-window header toggle buttons for plugin windows. Open windows are
-    -- highlighted. Rows hold at most HEADER_BUTTONS_PER_ROW buttons (the
-    -- caller passes how many it already drew on the current row, e.g. the
-    -- Compact Mode button) and also wrap early when the header runs out of
-    -- width. Returns the number of buttons drawn.
+    -- Main-window header buttons: plugin window toggles (open windows are
+    -- highlighted) followed by Run / Stop buttons for standalone scripts
+    -- that asked for one (running scripts are highlighted). Rows hold at
+    -- most HEADER_BUTTONS_PER_ROW buttons (the caller passes how many it
+    -- already drew on the current row, e.g. the Compact Mode button) and
+    -- also wrap early when the header runs out of width. Returns the number
+    -- of buttons drawn.
     pm.HEADER_BUTTONS_PER_ROW = 8
     function pm.drawHeaderButtons(buttonsOnRow)
         local entries = pm.windowPlugins(true)
-        if #entries == 0 then return 0 end
+        local scripts = pm.headerScripts()
+        if #entries == 0 and #scripts == 0 then return 0 end
         local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local perRow = tonumber(pm.HEADER_BUTTONS_PER_ROW) or 8
         local col = tonumber(buttonsOnRow) or 0
@@ -6587,8 +6653,9 @@ function runtime.initPluginManager()
             if type(w) == 'number' then winW = w elseif type(w) == 'table' or type(w) == 'userdata' then winW = w.x or 0 end
         end)
         local drawn = 0
-        for _, e in ipairs(entries) do
-            local label = tostring(e.window.label or e.id)
+        -- Places one button on the current row (or starts a new row when the
+        -- row is full / out of width) and fires onClick when pressed.
+        local function button(label, idSuffix, highlight, tip, onClick)
             if col > 0 then
                 if col >= perRow then
                     -- Row is full: the next button starts a new row.
@@ -6609,19 +6676,30 @@ function runtime.initPluginManager()
                     end
                 end
             end
-            local isOpen = pm.isWindowOpen(e.id)
             local pushed = 0
-            if isOpen and Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then pushed = 1 end
-            if ImGui.Button(label .. '##hdrPlg_' .. e.id) then
-                pm.toggleWindow(e.id)
+            if highlight and Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.45, 0.65, 1.0) then pushed = 1 end
+            if ImGui.Button(label .. idSuffix) then
+                onClick()
             end
             if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
             if ImGui.IsItemHovered() then
-                local tip = e.window.tooltip or ('Toggles the ' .. label .. ' window (' .. e.id .. ' plugin).')
                 ImGui.SetTooltip('%s', tostring(tip))
             end
             drawn = drawn + 1
             col = col + 1
+        end
+        for _, e in ipairs(entries) do
+            local label = tostring(e.window.label or e.id)
+            button(label, '##hdrPlg_' .. e.id, pm.isWindowOpen(e.id),
+                e.window.tooltip or ('Toggles the ' .. label .. ' window (' .. e.id .. ' plugin).'),
+                function() pm.toggleWindow(e.id) end)
+        end
+        for _, sc in ipairs(scripts) do
+            local running = pm.isScriptRunning(sc)
+            button(pm.scriptButtonLabel(sc), '##hdrScr_' .. tostring(sc.file), running,
+                running and string.format('Stops %s (/lua stop %s).', sc.name, tostring(sc.runName))
+                    or string.format('Runs %s as its own /lua script (/lua run %s).\nClick again while it is running to stop it.', sc.name, tostring(sc.runName)),
+                function() pm.toggleScript(sc) end)
         end
         return drawn
     end
@@ -6752,12 +6830,13 @@ function UI.drawPluginsTab()
     -- Triune (`/lua run <folder>/<name>`).
     if #scriptFiles > 0 then
         accent(GOLD, 'Standalone Scripts (run independently of Triune)')
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'These files do not follow the plugin contract, so Triune does not load them. Run / Stop launches them as their own /lua script.')
-        local sFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
-        if ImGui.BeginTable('TriuneScriptsTable', 4, sFlags) then
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'These files do not follow the plugin contract, so Triune does not load them. Run / Stop launches them as their own /lua script. Header Btn puts a Run / Stop button for the script on the main window header, named by Button Name (blank = file name).')
+        local sFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.Resizable, ImGuiTableFlags.SizingFixedFit)
+        if ImGui.BeginTable('TriuneScriptsTable', 5, sFlags) then
             ImGui.TableSetupColumn('Script', ImGuiTableColumnFlags.WidthFixed, 200)
             ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, 90)
-            ImGui.TableSetupColumn('Why not a plugin', ImGuiTableColumnFlags.WidthStretch, 0)
+            ImGui.TableSetupColumn('Header Btn', ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn('Button Name', ImGuiTableColumnFlags.WidthStretch, 0)
             ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 150)
             ImGui.TableHeadersRow()
             for i, entry in ipairs(scriptFiles) do
@@ -6766,6 +6845,9 @@ function UI.drawPluginsTab()
 
                 ImGui.TableNextColumn()
                 ImGui.Text(entry.name)
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', 'Not loaded as a plugin: ' .. tostring(entry.reason or ''))
+                end
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '/lua run ' .. tostring(entry.runName))
 
                 ImGui.TableNextColumn()
@@ -6775,8 +6857,33 @@ function UI.drawPluginsTab()
                     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Stopped')
                 end
 
+                -- Header button toggle: a Run / Stop button on the main window header
                 ImGui.TableNextColumn()
-                ImGui.TextWrapped(tostring(entry.reason or ''))
+                local hdrOn = pm.scriptHeaderButtonEnabled(entry)
+                local newHdr = ImGui.Checkbox(string.format('##hdrScr_%d', i), hdrOn)
+                if newHdr ~= hdrOn then
+                    pm.setScriptHeaderButton(entry, newHdr)
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', string.format('%s a "%s" button on the main window header that runs / stops this script.',
+                        hdrOn and 'Showing' or 'Check to show', pm.scriptButtonLabel(entry)))
+                end
+
+                -- Button name: saved when the field loses focus, not per keystroke
+                ImGui.TableNextColumn()
+                local curName = pm.scriptButtonName(entry)
+                ImGui.SetNextItemWidth(-1)
+                local newName = ImGui.InputText(string.format('##lblScr_%d', i), curName, 64)
+                if type(newName) == 'string' and newName ~= curName then
+                    pm.setScriptButtonName(entry, newName, false)
+                end
+                local okDone, done = pcall(ImGui.IsItemDeactivatedAfterEdit)
+                if (okDone and done) or (not okDone and type(newName) == 'string' and newName ~= curName) then
+                    runtime.saveLoadout(true)
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip('%s', 'Text on the header button. Leave blank to use the file name (' .. tostring(entry.name) .. ').')
+                end
 
                 ImGui.TableNextColumn()
                 if ImGui.SmallButton((running and 'Stop' or 'Run') .. string.format('##scr_%d', i)) then
@@ -7129,7 +7236,7 @@ function UI.drawHeaderBar()
         -- manager keeps rows to 8 buttons (pm.HEADER_BUTTONS_PER_ROW).
         if runtime.pluginManager.drawHeaderButtons(1) == 0 then
             ImGui.SameLine()
-            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '(no plugin window buttons - enable them on Settings -> Plugins)')
+            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '(no plugin / script buttons - enable them on Settings -> Plugins)')
         end
     end
 
@@ -18232,13 +18339,13 @@ function runtime.processDowntimeBuffing()
         -- 1b. A box asked us for buffs (Box Network): serve it before our own list.
         if not candidate and runtime.nextBoxBuffCast then
             local slot, entry, targetId, req = runtime.nextBoxBuffCast()
-            if slot and entry and targetId and targetId > 0 then
+            if slot and entry and targetId and targetId > 0 and req then
                 if runtime.isTargetInRange(entry.spell, targetId) then
                     candidate = entry
                     candidateTargetId = targetId
                     targetGem = tonumber(entry.gem) or math.min(slot, 12)
                     req.cast = (req.cast or 0) + 1
-                elseif req then
+                else
                     req.tries[entry.spell] = 8 -- out of range: give up on this one
                 end
             end

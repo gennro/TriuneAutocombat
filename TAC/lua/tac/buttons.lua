@@ -44,7 +44,7 @@ local CONFIG_NAME     = 'triune_buttons.lua'
 local BM_CONFIG_NAME  = 'ButtonMaster.lua'
 local DB_VERSION      = 1
 local MAX_SLOTS       = 100      -- slots per set (matches Button Master)
-local GRID_SPACING    = 4
+local GRID_SPACING    = 2
 local MIN_BUTTON_SIZE = 3        -- x10 px
 local MAX_BUTTON_SIZE = 12
 local DEFAULT_RATE    = 0.1      -- seconds between cooldown / label evaluations
@@ -77,6 +77,43 @@ local RATE_LABELS = {}
 for i, r in ipairs(UPDATE_RATES) do RATE_LABELS[i] = r.label end
 
 local FONT_SCALES = { 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5 }
+
+-- Per-button font size choices (nil = the hotbar's font scale).
+local BUTTON_FONT_SCALES = { 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0 }
+local BUTTON_FONT_LABELS = { 'Hotbar default' }
+for _, fs in ipairs(BUTTON_FONT_SCALES) do BUTTON_FONT_LABELS[#BUTTON_FONT_LABELS + 1] = string.format('%d%%', math.floor(fs * 100 + 0.5)) end
+
+-- Swatch palettes for the editor (stored as {r,g,b} 0-255, so share strings
+-- and Button Master imports keep working). The first entry means "default".
+local BUTTON_PALETTE = {
+    { name = 'Default', rgb = nil },
+    { name = 'Red',     rgb = { 150, 35, 35 } },
+    { name = 'Orange',  rgb = { 175, 90, 25 } },
+    { name = 'Yellow',  rgb = { 165, 140, 25 } },
+    { name = 'Green',   rgb = { 40, 125, 55 } },
+    { name = 'Teal',    rgb = { 30, 120, 120 } },
+    { name = 'Blue',    rgb = { 35, 80, 160 } },
+    { name = 'Purple',  rgb = { 105, 50, 150 } },
+    { name = 'Pink',    rgb = { 165, 55, 115 } },
+    { name = 'Brown',   rgb = { 110, 75, 45 } },
+    { name = 'Gray',    rgb = { 95, 100, 110 } },
+    { name = 'Black',   rgb = { 20, 20, 25 } },
+    { name = 'White',   rgb = { 215, 215, 220 } },
+}
+local TEXT_PALETTE = {
+    { name = 'Default', rgb = nil },
+    { name = 'White',   rgb = { 255, 255, 255 } },
+    { name = 'Black',   rgb = { 0, 0, 0 } },
+    { name = 'Gray',    rgb = { 170, 175, 185 } },
+    { name = 'Red',     rgb = { 255, 90, 90 } },
+    { name = 'Orange',  rgb = { 255, 165, 60 } },
+    { name = 'Yellow',  rgb = { 255, 225, 80 } },
+    { name = 'Green',   rgb = { 100, 230, 120 } },
+    { name = 'Teal',    rgb = { 90, 220, 220 } },
+    { name = 'Blue',    rgb = { 110, 170, 255 } },
+    { name = 'Purple',  rgb = { 190, 130, 255 } },
+    { name = 'Pink',    rgb = { 255, 130, 200 } },
+}
 
 -- Alphabetic groups for long "assign" / "delete" menus.
 local ALPHA_GROUPS = {
@@ -513,6 +550,10 @@ local function normalizeButton(b)
     for _, t in ipairs(TIMER_TYPES) do if t.id == b.timerType then valid = true end end
     if not valid then b.timerType = 'None' end
     if b.updateRate ~= nil then b.updateRate = tonumber(b.updateRate) end
+    if b.fontScale ~= nil then
+        b.fontScale = tonumber(b.fontScale)
+        if b.fontScale then b.fontScale = math.max(0.4, math.min(3.0, b.fontScale)) end
+    end
     return b
 end
 
@@ -671,6 +712,7 @@ local function buttonFromBm(bm)
         iconLua       = (type(bm.IconLua) == 'string' and bm.IconLua ~= '') and bm.IconLua or nil,
         timerType     = timerFromBm(bm.TimerType),
         updateRate    = tonumber(bm.UpdateRate),
+        fontScale     = tonumber(bm.FontScale),   -- Triune extension; Button Master ignores it
     }
     if b.timerType == 'Lua' then
         b.timerLua = type(bm.Timer) == 'string' and bm.Timer or ''
@@ -697,6 +739,7 @@ local function buttonToBm(b)
         IconLua        = (b.iconLua and b.iconLua ~= '') and b.iconLua or nil,
         TimerType      = timerToBm(b.timerType),
         UpdateRate     = b.updateRate or 0,
+        FontScale      = b.fontScale,
     }
     if b.timerType == 'Lua' then
         bm.Timer = b.timerLua or ''
@@ -1443,14 +1486,28 @@ local function scanAbilities()
     return out
 end
 
+-- Me.CombatAbilityCount is not available on every client, so the disc list
+-- probes Me.CombatAbility(i) slot by slot and stops after a long run of
+-- empty slots (the list is dense on live and emu alike).
+local DISC_MAX_SLOTS   = 400
+local DISC_EMPTY_LIMIT = 60
+
 local function scanDiscs()
     local out, seen = {}, {}
     local count = tonumber(tlo(function() return mq.TLO.Me.CombatAbilityCount() end)) or 0
-    for i = 1, count do
+    local limit = (count > 0) and count or DISC_MAX_SLOTS
+    local emptyRun = 0
+    for i = 1, limit do
+        local found = false
         pcall(function()
             local ca = mq.TLO.Me.CombatAbility(i)
-            local name = ca and ca.Name and ca.Name()
-            if not name or name == '' or seen[name] then return end
+            if not ca then return end
+            local name = ca.Name and ca.Name()
+            if (name == nil or name == '' or tostring(name):upper() == 'NULL') and type(ca) == 'function' then name = ca() end
+            if not name or name == '' or tostring(name):upper() == 'NULL' then return end
+            name = tostring(name)
+            found = true
+            if seen[name] then return end
             seen[name] = true
             local level = tonumber(ca.Level and ca.Level() or 0) or 0
             local icon = tonumber(ca.SpellIcon and ca.SpellIcon() or 0) or 0
@@ -1461,6 +1518,12 @@ local function scanDiscs()
                 button = { label = tostring(name), cmd = string.format('/disc %s', name), icon = icon > 0 and icon or nil, iconType = 'Spell', timerType = 'Disc', timerKey = tostring(name) },
             }
         end)
+        if found then
+            emptyRun = 0
+        else
+            emptyRun = emptyRun + 1
+            if count <= 0 and emptyRun >= DISC_EMPTY_LIMIT then break end
+        end
     end
     table.sort(out, function(a, b) return a.name:lower() < b.name:lower() end)
     return out
@@ -1564,7 +1627,7 @@ local function pickBrowserEntry(entry)
     getSet(target.setName)[index] = key
     saveDb()
     setStatus('Added %s to %s slot %d.', b.label, target.setName, index)
-    -- Placing into a chosen slot is a one-shot; the gear-menu flow keeps going.
+    -- Placing into a chosen slot is a one-shot; the right-click-menu flow keeps going.
     if target.index then
         browser.open = false
     else
@@ -1624,19 +1687,9 @@ local function popStyleVarsSafe(n)
     if n and n > 0 then pcall(ImGui.PopStyleVar, n) end
 end
 
-local ICON_GEAR, ICON_LOCK, ICON_UNLOCK = nil, nil, nil
-local function loadIcons()
-    if ICON_GEAR then return end
-    local ok, Icons = pcall(require, 'mq.ICONS')
-    if ok and type(Icons) == 'table' then
-        ICON_GEAR = Icons.MD_SETTINGS or Icons.FA_COG
-        ICON_LOCK = Icons.FA_LOCK
-        ICON_UNLOCK = Icons.FA_UNLOCK
-    end
-    ICON_GEAR = ICON_GEAR or '='
-    ICON_LOCK = ICON_LOCK or 'L'
-    ICON_UNLOCK = ICON_UNLOCK or 'U'
-end
+-- Defined after the grid (it needs the slot renderer's neighbours); the slot
+-- context menu embeds it as a submenu.
+local drawHotbarMenu
 
 -- Grid geometry for one set inside the current content region.
 local function gridLayout(hb, setName, availW, availH)
@@ -1729,7 +1782,7 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
         end
 
         -- Label (words stacked as lines, centred) or slot number
-        pcall(ImGui.SetWindowFontScale, hb.fontScale or 1.0)
+        pcall(ImGui.SetWindowFontScale, (b and b.fontScale) or hb.fontScale or 1.0)
         if b then
             if b.showLabel ~= false and c.label and c.label ~= '' and not (c.total > 0 and c.remaining > 0.05) then
                 local tr, tg, tb = rgbTo01(b.textColor, { 1, 1, 1 })
@@ -1784,7 +1837,7 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
             end
             core.setTooltip(tip)
         else
-            core.setTooltip(string.format('Slot %d (empty)\nLeft-click: create a button (captures what is on your cursor)\nRight-click: assign an existing button', index))
+            core.setTooltip(string.format('Slot %d (empty)\nLeft-click: create a button (captures what is on your cursor)\nRight-click: assign an existing button, add from game, hotbar options', index))
         end
     end
 
@@ -1886,6 +1939,11 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
                 end
             end
         end
+        ImGui.Separator()
+        if ImGui.BeginMenu('Hotbar Options') then
+            drawHotbarMenu(hb, hbId)
+            ImGui.EndMenu()
+        end
         ImGui.EndPopup()
     end
     ImGui.PopID()
@@ -1920,7 +1978,7 @@ local function drawGrid(hb, hbId, setName, searchText)
     popStyleVarsSafe(pushed)
 end
 
--- Hotbar gear menu ------------------------------------------------------------
+-- Hotbar options menu (window right-click / "Hotbar Options" submenu) ------------------------------------------------------------
 local function drawSetSubmenus(hb, hbId)
     -- Add Set
     local addable = {}
@@ -1985,8 +2043,22 @@ local function drawSetSubmenus(hb, hbId)
     end
 end
 
-local function drawHotbarMenu(hb, hbId)
+drawHotbarMenu = function(hb, hbId)
     core.accent(GOLD, hb.title or ('Hotbar ' .. hbId))
+    ImGui.Separator()
+    local lockVal = ImGui.Checkbox('Lock Window Position & Size##hbLock_' .. hbId, hb.locked == true)
+    if lockVal ~= (hb.locked == true) then
+        hb.locked = lockVal
+        saveDb({ silent = true })
+    end
+    if hb.compact and #hb.sets > 1 and ImGui.BeginMenu('Active Set') then
+        for i, name in ipairs(hb.sets) do
+            if ImGui.MenuItem(name .. '##active_' .. i, nil, (state.activeSet[hbId] or 1) == i) then
+                state.activeSet[hbId] = i
+            end
+        end
+        ImGui.EndMenu()
+    end
     ImGui.Separator()
     drawSetSubmenus(hb, hbId)
     ImGui.Separator()
@@ -2133,15 +2205,15 @@ end
 
 local function drawHotbar(hb, hbId)
     if not hb.visible then return end
-    loadIcons()
     local winKey = (hbId == 1) and 'buttons' or ('buttons_' .. hbId)
     local title = (hb.title or ('Hot Buttons ' .. hbId)) .. '###triuneHotbar_' .. hbId
     if hb.perCharPos then title = title .. '_' .. charKey() end
 
     core.pushTheme()
     if hb.alpha and hb.alpha < 1 then pcall(ImGui.SetNextWindowBgAlpha, hb.alpha) end
-    pcall(ImGui.SetNextWindowSize, 320, 120, ImGuiCond and ImGuiCond.FirstUseEver or 4)
-    local pushed = pushStyleVarSafe('WindowPadding', 4, 4)
+    pcall(ImGui.SetNextWindowSize, 300, 90, ImGuiCond and ImGuiCond.FirstUseEver or 4)
+    -- Same tight chrome as the Spell Gem bar: 2px padding, 1px frames.
+    local pushed = pushStyleVarSafe('WindowPadding', 2, 2) + pushStyleVarSafe('ItemSpacing', 2, 2) + pushStyleVarSafe('FramePadding', 1, 1)
     core.preBeginWindow(winKey)
     local open, show = ImGui.Begin(title, true, windowFlags(hb))
     if open == false then
@@ -2152,70 +2224,33 @@ local function drawHotbar(hb, hbId)
     if show then
         core.postBeginWindow(winKey)
         ImGui.PushID('hotbar_' .. hbId)
-        local size = (hb.buttonSize or 6) * 10
-        local lockLabel = (hb.locked and ICON_LOCK or ICON_UNLOCK) .. '##lock'
+
+        -- Options live on the window background's right-click menu (and under
+        -- "Hotbar Options" in every slot's menu), like the other popouts.
+        -- Declared before the slots so a slot's own menu wins when both open.
+        if ImGui.BeginPopupContextWindow('##hbWinMenu') then
+            drawHotbarMenu(hb, hbId)
+            ImGui.EndPopup()
+        end
 
         if hb.compact then
-            -- Tiny lock + gear stacked at the left, one set, no tabs.
-            local iconSz = math.max(12, math.floor(size / 2) - 2)
-            local cpushed = pushStyleVarSafe('ItemSpacing', 0, 2) + pushStyleVarSafe('FramePadding', 0, 0)
-            ImGui.BeginGroup()
-            if ImGui.Button(lockLabel, iconSz, iconSz) then
-                hb.locked = not hb.locked
-                saveDb({ silent = true })
-            end
-            if ImGui.IsItemHovered() then core.setTooltip(hb.locked and 'Unlock window' or 'Lock window position and size') end
-            if ImGui.Button(ICON_GEAR .. '##gear', iconSz, iconSz) then ImGui.OpenPopup('##hbMenu') end
-            if ImGui.IsItemHovered() then core.setTooltip('Hotbar menu') end
-            ImGui.EndGroup()
-            popStyleVarsSafe(cpushed)
-            if ImGui.BeginPopup('##hbMenu') then
-                if #hb.sets > 1 and ImGui.BeginMenu('Active Set') then
-                    for i, name in ipairs(hb.sets) do
-                        if ImGui.MenuItem(name .. '##active_' .. i, nil, (state.activeSet[hbId] or 1) == i) then
-                            state.activeSet[hbId] = i
-                        end
-                    end
-                    ImGui.EndMenu()
-                end
-                drawHotbarMenu(hb, hbId)
-                ImGui.EndPopup()
-            end
-            ImGui.SameLine(0, GRID_SPACING)
             local activeIdx = state.activeSet[hbId] or 1
             if activeIdx > #hb.sets then activeIdx = 1 end
             local setName = hb.sets[activeIdx]
             if setName and db.sets[setName] then
-                if ImGui.BeginChild('##compactGrid', 0, 0, false) then
-                    drawGrid(hb, hbId, setName, '')
-                end
-                ImGui.EndChild()
+                drawGrid(hb, hbId, setName, '')
             else
-                ImGui.TextDisabled('No set. Add one from the menu.')
+                ImGui.TextDisabled('No set. Right-click for options.')
             end
         else
-            if ImGui.Button(lockLabel, 22, 22) then
-                hb.locked = not hb.locked
-                saveDb({ silent = true })
-            end
-            if ImGui.IsItemHovered() then core.setTooltip(hb.locked and 'Unlock window' or 'Lock window position and size') end
-            ImGui.SameLine()
-            if ImGui.Button(ICON_GEAR .. '##gear', 22, 22) then ImGui.OpenPopup('##hbMenu') end
-            if ImGui.IsItemHovered() then core.setTooltip('Hotbar menu: sets, size, display, share, import') end
-            if ImGui.BeginPopup('##hbMenu') then
-                drawHotbarMenu(hb, hbId)
-                ImGui.EndPopup()
-            end
             if hb.showSearch then
-                ImGui.SameLine()
-                ImGui.SetNextItemWidth(140)
+                ImGui.SetNextItemWidth(-1)
                 local txt = ImGui.InputText('##search', state.search[hbId] or '')
                 if type(txt) == 'string' then state.search[hbId] = txt end
                 if ImGui.IsItemHovered() then core.setTooltip('Filter buttons by label or command') end
             end
-
             if #hb.sets == 0 then
-                ImGui.TextDisabled('No sets on this hotbar. Click ' .. ICON_GEAR .. ' -> Add Set / Create New Set.')
+                ImGui.TextDisabled('No sets. Right-click for options -> Add Set / Create New Set.')
             elseif ImGui.BeginTabBar('##hbTabs') then
                 for i, setName in ipairs(hb.sets) do
                     if db.sets[setName] and ImGui.BeginTabItem(setName .. '##tab_' .. i) then
@@ -2227,11 +2262,16 @@ local function drawHotbar(hb, hbId)
                             if i < #hb.sets and ImGui.MenuItem('Move Right') then moveSetInHotbar(hb, i, 1) end
                             if ImGui.MenuItem('Remove From Hotbar') then removeSetFromHotbar(hb, setName) end
                             if ImGui.MenuItem('Copy Share String') then
-                                local s = shareSet(setName)
-                                if s then
-                                    pcall(ImGui.SetClipboardText, s)
+                                local str = shareSet(setName)
+                                if str then
+                                    pcall(ImGui.SetClipboardText, str)
                                     setStatus('Set [%s] copied to the clipboard.', setName)
                                 end
+                            end
+                            ImGui.Separator()
+                            if ImGui.BeginMenu('Hotbar Options') then
+                                drawHotbarMenu(hb, hbId)
+                                ImGui.EndMenu()
                             end
                             ImGui.EndPopup()
                         end
@@ -2282,20 +2322,56 @@ local function drawHotbar(hb, hbId)
 end
 
 -- Edit Button window ----------------------------------------------------------
-local function drawColorEdit(label, t, fallback)
-    local r, g, b = rgbTo01(t, fallback)
-    local ok, res, changed = pcall(ImGui.ColorEdit3, label, { r, g, b }, (_G.ImGuiColorEditFlags and _G.ImGuiColorEditFlags.NoInputs) or 0)
-    if ok and type(res) == 'table' and (changed or res[1] ~= r or res[2] ~= g or res[3] ~= b) then
-        return { math.floor((res[1] or 0) * 255 + 0.5), math.floor((res[2] or 0) * 255 + 0.5), math.floor((res[3] or 0) * 255 + 0.5) }, true
+local function sameRgb(a, b)
+    if a == nil or b == nil then return a == b end
+    return math.floor(a[1] or -1) == math.floor(b[1] or -2) and math.floor(a[2] or -1) == math.floor(b[2] or -2) and math.floor(a[3] or -1) == math.floor(b[3] or -2)
+end
+
+-- A row of colour swatches. Returns the picked {r,g,b} (or nil for Default)
+-- and true when one was clicked.
+local function drawSwatches(idPrefix, palette, current, fallback)
+    local picked, changed = current, false
+    local Col = ImGuiCol
+    local toV, col32 = core.toVec, core.col32
+    for i, sw in ipairs(palette) do
+        if i > 1 then ImGui.SameLine(0, 3) end
+        local r, g, b = rgbTo01(sw.rgb, fallback)
+        local pushed = 0
+        if Col then
+            if pcall(ImGui.PushStyleColor, Col.Button, r, g, b, 1.0) then pushed = pushed + 1 end
+            if pcall(ImGui.PushStyleColor, Col.ButtonHovered, math.min(1, r + 0.12), math.min(1, g + 0.12), math.min(1, b + 0.12), 1.0) then pushed = pushed + 1 end
+            if pcall(ImGui.PushStyleColor, Col.ButtonActive, math.min(1, r + 0.2), math.min(1, g + 0.2), math.min(1, b + 0.2), 1.0) then pushed = pushed + 1 end
+        end
+        if ImGui.Button('##' .. idPrefix .. '_' .. sw.name, 20, 20) then
+            picked, changed = sw.rgb and deepcopy(sw.rgb) or nil, true
+        end
+        if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
+        if ImGui.IsItemHovered() then core.setTooltip(sw.name) end
+        local isCur = sameRgb(sw.rgb, current)
+        local dl = ImGui.GetWindowDrawList()
+        if dl then
+            local mnX, mnY = xy(ImGui.GetItemRectMin())
+            local mxX, mxY = xy(ImGui.GetItemRectMax())
+            local p1, p2 = toV(mnX, mnY), toV(mxX, mxY)
+            if p1 and p2 then
+                if isCur then
+                    if not pcall(function() dl:AddRect(p1, p2, col32(1.0, 0.85, 0.3, 1), 3, 0, 2) end) then dl:AddRect(p1, p2, col32(1.0, 0.85, 0.3, 1), 3) end
+                elseif sw.rgb == nil then
+                    -- "Default" swatch: a diagonal so it reads as "no colour"
+                    local q1, q2 = toV(mnX + 3, mxY - 3), toV(mxX - 3, mnY + 3)
+                    if q1 and q2 and dl.AddLine then pcall(function() dl:AddLine(q1, q2, col32(0.9, 0.9, 0.9, 0.8), 1) end) end
+                end
+            end
+        end
     end
-    return t, false
+    return picked, changed
 end
 
 local function drawEditor()
     if not edit.open or not edit.tmp then return end
     local t = edit.tmp
     core.pushTheme()
-    pcall(ImGui.SetNextWindowSize, 520, 520, ImGuiCond and ImGuiCond.FirstUseEver or 4)
+    pcall(ImGui.SetNextWindowSize, 580, 540, ImGuiCond and ImGuiCond.FirstUseEver or 4)
     local flags = 0
     if edit.dirty and ImGuiWindowFlags and ImGuiWindowFlags.UnsavedDocument then flags = ImGuiWindowFlags.UnsavedDocument end
     local open, show = ImGui.Begin('Edit Hot Button###triuneBtnEdit', true, flags)
@@ -2330,12 +2406,14 @@ local function drawEditor()
         if ImGui.IsItemClicked and ImGui.IsItemClicked() then picker.open = true end
         ImGui.SameLine()
         ImGui.BeginGroup()
-        local newBC, chB = drawColorEdit('Button##btnColor', t.buttonColor, { 0.13, 0.18, 0.25 })
+        ImGui.Text('Button:')
+        ImGui.SameLine(0, 6)
+        local newBC, chB = drawSwatches('bc', BUTTON_PALETTE, t.buttonColor, { 0.13, 0.18, 0.25 })
         if chB then t.buttonColor = newBC; edit.dirty = true end
-        ImGui.SameLine()
-        local newTC, chT = drawColorEdit('Text##txtColor', t.textColor, { 1, 1, 1 })
+        ImGui.Text('Text:  ')
+        ImGui.SameLine(0, 6)
+        local newTC, chT = drawSwatches('tc', TEXT_PALETTE, t.textColor, { 1, 1, 1 })
         if chT then t.textColor = newTC; edit.dirty = true end
-        ImGui.SameLine()
         if ImGui.Button('Pick Icon##pickIcon') then picker.open = true end
         if t.icon then
             ImGui.SameLine()
@@ -2370,7 +2448,7 @@ local function drawEditor()
         if ImGui.IsItemHovered() then core.setTooltip('Pick an AA, spell gem, ability, discipline, or item clicky to fill in this button.') end
         ImGui.SameLine()
         if ImGui.Button('Reset Style##resetStyle') then
-            t.buttonColor, t.textColor, t.icon, t.iconType, t.iconLua, t.evaluateLabel = nil, nil, nil, 'Spell', nil, nil
+            t.buttonColor, t.textColor, t.icon, t.iconType, t.iconLua, t.evaluateLabel, t.fontScale = nil, nil, nil, 'Spell', nil, nil, nil
             edit.dirty = true
         end
         ImGui.EndGroup()
@@ -2388,6 +2466,17 @@ local function drawEditor()
             t.showLabel = sl
             edit.dirty = true
         end
+        local curFont = 1
+        for i, fs in ipairs(BUTTON_FONT_SCALES) do
+            if t.fontScale and math.abs(t.fontScale - fs) < 0.001 then curFont = i + 1 end
+        end
+        ImGui.SetNextItemWidth(-150)
+        local nf = ImGui.Combo('Font Size##btnFont', curFont, BUTTON_FONT_LABELS)
+        if type(nf) == 'number' and nf ~= curFont then
+            t.fontScale = (nf > 1) and BUTTON_FONT_SCALES[nf - 1] or nil
+            edit.dirty = true
+        end
+        if ImGui.IsItemHovered() then core.setTooltip('Label size for this button only. "Hotbar default" follows the hotbar\'s Font Scale menu.') end
 
         local adv = ImGui.Checkbox('Advanced##advToggle', edit.advanced)
         if adv ~= edit.advanced then edit.advanced = adv end
@@ -2653,7 +2742,7 @@ local function drawBrowser()
                 or string.format('the first free slot of %s', browser.target.setName)
             ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Click an entry to add it to ' .. where .. '.')
         else
-            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'No set selected - open this from a hotbar slot or gear menu.')
+            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'No set selected - open this from a hotbar slot or the hotbar right-click menu.')
         end
         ImGui.SetNextItemWidth(-90)
         local txt = ImGui.InputText('##browserSearch', browser.search)
@@ -2982,7 +3071,7 @@ function plugin.onDrawSettings()
     if state.bmImportResult then
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], state.bmImportResult)
     end
-    ImGui.TextDisabled('Hotbar options (sets, size, font, title bar, compact mode, search, share) live in each hotbar\'s gear menu.')
+    ImGui.TextDisabled('Hotbar options (sets, size, font, title bar, compact mode, search, share) live in each hotbar\'s right-click menu (window background, a slot, or a tab).')
     ImGui.TextDisabled('Commands: /ac btn, /btn [n], /btnexec "<set>" <index>, /btncopy <server> <char>')
     if state.statusMsg ~= '' and (os.clock() - state.statusAt) < 6 then
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], state.statusMsg)
@@ -3048,7 +3137,8 @@ plugin._ = {
     gridLayout = gridLayout, alphaGroupFor = alphaGroupFor, fmtTime = fmtTime, split = split, lines = lines,
     openEditor = openEditor, saveEditor = saveEditor, closeEditor = closeEditor, slotClicked = slotClicked,
     handleCommand = handleCommand, splitArgs = splitArgs, setAllVisible = setAllVisible, toggleHotbar = toggleHotbar,
-    TIMER_TYPES = TIMER_TYPES, MAX_SLOTS = MAX_SLOTS,
+    TIMER_TYPES = TIMER_TYPES, MAX_SLOTS = MAX_SLOTS, BUTTON_PALETTE = BUTTON_PALETTE, TEXT_PALETTE = TEXT_PALETTE,
+    BUTTON_FONT_SCALES = BUTTON_FONT_SCALES, sameRgb = sameRgb,
 }
 
 return plugin

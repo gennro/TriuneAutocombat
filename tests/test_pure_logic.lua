@@ -11745,6 +11745,43 @@ do
     assert_eq(pm.isScriptRunning(S.entry), true, 'Suite 92: script reported running')
     assert_eq(pm.toggleScript(S.entry), 'stopped', 'Suite 92: Stop stops a running script')
     assert_eq(S.cmds[#S.cmds], '/lua stop triune_junk_plugins/standalone_script', 'Suite 92: Stop issues /lua stop')
+    -- Header button + button name for a standalone script (ctrl.scripts[file]); the header draws it
+    S.saves = 0
+    rt.saveLoadout = function() S.saves = S.saves + 1 end
+    assert_eq(pm.scriptHeaderButtonEnabled(S.entry), false, 'Suite 92: standalone script has no header button by default')
+    assert_eq(#pm.headerScripts(), 0, 'Suite 92: no header scripts until one is enabled')
+    assert_eq(pm.scriptButtonLabel(S.entry), 'standalone_script', 'Suite 92: header button label falls back to the file name')
+    pm.setScriptHeaderButton(S.entry, true)
+    assert_eq(env.ctrl.scripts['standalone_script.lua'].headerButton, true, 'Suite 92: header button saved under ctrl.scripts[file]')
+    assert_eq(S.saves, 1, 'Suite 92: enabling the header button saves the loadout')
+    assert_eq(#pm.headerScripts(), 1, 'Suite 92: enabled script is listed for the header')
+    pm.setScriptButtonName(S.entry, 'Junk', false)
+    assert_eq(S.saves, 1, 'Suite 92: typing a name does not save per keystroke')
+    assert_eq(pm.scriptButtonName(S.entry), 'Junk', 'Suite 92: raw button name kept')
+    assert_eq(pm.scriptButtonLabel(S.entry), 'Junk', 'Suite 92: header button shows the custom name')
+    pm.setScriptButtonName(S.entry, '')
+    assert_eq(S.saves, 2, 'Suite 92: committing the name saves the loadout')
+    assert_eq(env.ctrl.scripts['standalone_script.lua'].label, nil, 'Suite 92: blank name clears the override')
+    assert_eq(pm.scriptButtonLabel(S.entry), 'standalone_script', 'Suite 92: blank name falls back to the file name')
+    pm.setScriptButtonName(S.entry, 'Junk')
+    S.buttons = {}
+    S.pressed = nil
+    env.ImGui.Button = function(label) S.buttons[#S.buttons + 1] = label return label == S.pressed end
+    S.running = false
+    S.pluginBtns = #pm.windowPlugins(true)
+    assert_eq(pm.drawHeaderButtons(1), S.pluginBtns + 1, 'Suite 92: header draws the script button after the plugin window buttons')
+    assert_eq(S.buttons[#S.buttons], 'Junk##hdrScr_standalone_script.lua', 'Suite 92: header button carries the custom name and a per-file id')
+    S.pressed = 'Junk##hdrScr_standalone_script.lua'
+    pm.drawHeaderButtons(1)
+    assert_eq(S.cmds[#S.cmds], '/lua run triune_junk_plugins/standalone_script', 'Suite 92: pressing the header button runs the script')
+    S.running = true
+    pm.drawHeaderButtons(1)
+    assert_eq(S.cmds[#S.cmds], '/lua stop triune_junk_plugins/standalone_script', 'Suite 92: pressing it while running stops the script')
+    S.pressed = nil
+    env.ImGui.Button = function() return false end
+    pm.setScriptHeaderButton(S.entry, false)
+    assert_eq(pm.drawHeaderButtons(1), S.pluginBtns, 'Suite 92: header drops the script button once it is disabled')
+    rt.saveLoadout = noop
     mockMq.cmd = noop
     -- run names resolve relative to mq.luaDir when the folder lives under it
     mockMq.luaDir = '/mq/lua'
@@ -11781,7 +11818,8 @@ do
     assert_eq(S.imguiInits, 0, 'Suite 92: rescan does not re-run a known standalone script chunk')
     assert_true(pm.scripts['standalone_script.lua'] ~= nil, 'Suite 92: known script entry survives a rescan')
     assert_true(src:find("'| Standalone scripts: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the standalone script count')
-    assert_true(src:find("ImGui.BeginTable('TriuneScriptsTable', 4, sFlags)", 1, true) ~= nil, 'Suite 92: Plugins page has the Standalone Scripts table')
+    assert_true(src:find("ImGui.BeginTable('TriuneScriptsTable', 5, sFlags)", 1, true) ~= nil, 'Suite 92: Plugins page has the Standalone Scripts table (with Header Btn / Button Name)')
+    assert_true(src:find("ImGui.TableSetupColumn('Header Btn'", 1, true) ~= nil and src:find("ImGui.TableSetupColumn('Button Name'", 1, true) ~= nil, 'Suite 92: Standalone Scripts table has the header button and name columns')
     assert_true(src:find("'| Failed to load: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the failed-file count')
     assert_true(src:find('Files in the plugin folder that could not be loaded:', 1, true) ~= nil, 'Suite 92: Plugins page lists failed files')
     pm.dirPath = nil
