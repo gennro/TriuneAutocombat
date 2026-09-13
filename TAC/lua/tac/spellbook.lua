@@ -24,6 +24,7 @@ local plugin = {
     tickInterval       = 0.1,
     runOutOfCombatOnly = false, -- queue processing has its own combat / casting gates
     hasThread          = false,
+    uses               = { gamedb = 'Effect lines and scroll sources in spell tooltips, middle-click spell cards' },
     -- Window owned by this plugin (drives the main-window header button)
     window             = { label = 'Open Spellbook', tooltip = 'Toggles the Spellbook Browser window (spellbook plugin).', flag = 'show_spellbook', desc = 'Per-class spell database browser & mem queue', headerButton = true, order = 10 },
 }
@@ -592,12 +593,20 @@ end
 -- ============================================================================
 -- Window
 -- ============================================================================
+-- The Game Database plugin (tac/gamedb.lua) when it is loaded and enabled.
+local function gamedbPlugin()
+    local pm = core and core.runtime and core.runtime.pluginManager
+    local p = pm and pm.plugins and pm.plugins.gamedb
+    if p and p.enabled and p.instance and p.instance.popout then return p.instance end
+    return nil
+end
+
 local function drawWindow()
     if not ctrl.show_spellbook then return end
 
     core.pushTheme()
 
-    ImGui.SetNextWindowSize(880, 580, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(880), core.px(580), ImGuiCond.FirstUseEver)
     local windowFlags = 0
     if ImGuiWindowFlags then
         windowFlags = bit.bor(
@@ -639,7 +648,7 @@ local function drawWindow()
             ImGui.PushStyleColor(ImGuiCol.Button, 0.15, 0.18, 0.22, 1.0)
         end
 
-        if ImGui.Button(clsName .. "##Tab_" .. i, 110, 26) then
+        if ImGui.Button(clsName .. "##Tab_" .. i, core.px(110), core.px(26)) then
             state.activeClassTab = i
             state.selectedSpell = nil
         end
@@ -671,7 +680,7 @@ local function drawWindow()
             local isCat = (state.selectedCategory == c)
             if isCat then ImGui.PushStyleColor(ImGuiCol.Button, 0.3, 0.6, 0.9, 1.0) end
 
-            if ImGui.Button((KIND_LABELS[c] or c:upper()) .. "##cat_" .. c, 56, 22) then
+            if ImGui.Button((KIND_LABELS[c] or c:upper()) .. "##cat_" .. c, core.px(56), core.px(22)) then
                 state.selectedCategory = c
             end
 
@@ -681,11 +690,11 @@ local function drawWindow()
 
         ImGui.Spacing()
 
-        ImGui.SetNextItemWidth(65)
+        ImGui.SetNextItemWidth(core.px(65))
         state.lvlMin = ImGui.SliderInt("Min##Lvl", state.lvlMin or 1, 1, 125)
         ImGui.SameLine()
 
-        ImGui.SetNextItemWidth(65)
+        ImGui.SetNextItemWidth(core.px(65))
         state.lvlMax = ImGui.SliderInt("Max##Lvl", state.lvlMax or 125, 1, 125)
         ImGui.SameLine()
 
@@ -699,10 +708,10 @@ local function drawWindow()
 
         local tableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.ScrollY)
         if ImGui.BeginTable("SpellTable", 4, tableFlags, 0, 0) then
-            ImGui.TableSetupColumn("Level", ImGuiTableColumnFlags.WidthFixed, 45)
-            ImGui.TableSetupColumn("Type", ImGuiTableColumnFlags.WidthFixed, 55)
+            ImGui.TableSetupColumn("Level", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+            ImGui.TableSetupColumn("Type", ImGuiTableColumnFlags.WidthFixed, core.px(55))
             ImGui.TableSetupColumn("Spell Name", ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 85)
+            ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, core.px(85))
             ImGui.TableHeadersRow()
 
             local activeClass = state.casterClasses[state.activeClassTab]
@@ -745,8 +754,16 @@ local function drawWindow()
                         showSpellInfo(name)
                     end
                     if ImGui.IsItemHovered() then
-                        local tip = string.format("%s (Level %s %s)\n- Left-click: Select for memorizing\n- Right-click: Show spell info in EQ",
-                            name, tostring(lvl), KIND_LABELS[kind] or (kind and kind ~= '' and kind:upper()) or 'Spell')
+                        local db = gamedbPlugin()
+                        local dbId = db and db.spellIdByName and db.spellIdByName(name, lvl) or nil
+                        if dbId and ImGui.IsItemClicked(2) then db.popout('spells', dbId) end
+                        local tip = string.format("%s (Level %s %s)\n- Left-click: Select for memorizing\n- Right-click: Show spell info in EQ%s",
+                            name, tostring(lvl), KIND_LABELS[kind] or (kind and kind ~= '' and kind:upper()) or 'Spell',
+                            dbId and '\n- Middle-click: Database card' or '')
+                        local dbLines = dbId and db.spellSummary and db.spellSummary(dbId) or nil
+                        if dbLines and #dbLines > 0 then
+                            tip = tip .. '\n\n' .. table.concat(dbLines, '\n')
+                        end
                         ImGui.SetTooltip('%s', tip)
                     end
 
@@ -763,7 +780,7 @@ local function drawWindow()
     end
     ImGui.EndChild()
 
-    ImGui.SameLine(0, 8)
+    ImGui.SameLine(0, core.px(8))
 
     -- Right Pane: Current Gem Loadout
     if ImGui.BeginChild('##SpellGemsPane', rightW, contentH, true, ImGuiWindowFlags and ImGuiWindowFlags.HorizontalScrollbar or 0) then
@@ -909,7 +926,7 @@ function plugin.onDrawSettings()
     local GOLD = (core.colors and core.colors.GOLD) or { 1.0, 0.70, 0.54, 1 }
     core.accent(GOLD, 'Spellbook Browser')
     local isWinOpen = (ctrl.show_spellbook == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##sbToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##sbToggleWin', core.px(250), core.px(24)) then
         ctrl.show_spellbook = not isWinOpen
         core.saveLoadout(true)
     end

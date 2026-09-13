@@ -553,7 +553,7 @@ local function drawPanel()
     accent(GOLD, 'Whitelisted Players:')
     ImGui.TextDisabled('Specific character names and player IDs allowed to trigger auto-accept (case-insensitive):')
 
-    ImGui.SetNextItemWidth(170)
+    ImGui.SetNextItemWidth(core.px(170))
     local enteredText, enterPressed = ImGui.InputTextWithHint('##autoAcceptAddInput', 'Player Name or ID', inputName,
         (ImGuiInputTextFlags and ImGuiInputTextFlags.EnterReturnsTrue) or 0)
     if enteredText ~= nil then inputName = enteredText end
@@ -626,8 +626,8 @@ local function drawPanel()
     )
     if ImGui.BeginTable('autoAcceptWhitelistTable', 3, tableFlags, 0, 180) then
         ImGui.TableSetupColumn('Player Name', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthStretch) or 0)
-        ImGui.TableSetupColumn('Player ID', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, 95)
-        ImGui.TableSetupColumn('Action', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, 75)
+        ImGui.TableSetupColumn('Player ID', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, core.px(95))
+        ImGui.TableSetupColumn('Action', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, core.px(75))
         ImGui.TableHeadersRow()
 
         local toRemove = nil
@@ -652,7 +652,7 @@ local function drawPanel()
 
             ImGui.TableSetColumnIndex(2)
             ImGui.PushID('aa_btn_remove_' .. i)
-            if ImGui.Button('Remove', 60, 20) then
+            if ImGui.Button('Remove', core.px(60), core.px(20)) then
                 toRemove = entry
             end
             if ImGui.IsItemHovered() then
@@ -684,7 +684,7 @@ function plugin.onDrawUI()
     if not core or not core.ImGui or not c or not c.show_auto_accept then return end
     local ImGui = core.ImGui
     core.pushTheme()
-    ImGui.SetNextWindowSize(620, 520, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(620), core.px(520), ImGuiCond.FirstUseEver)
     core.preBeginWindow('auto_accept')
     local open, show = ImGui.Begin('Triune Auto-Accept v' .. (core.VERSION or '') .. '###triuneAutoAccept', c.show_auto_accept)
     if not open then
@@ -711,7 +711,7 @@ function plugin.onDrawSettings()
     local GOLD = colors.GOLD or { 1.0, 0.70, 0.54, 1 }
     core.accent(GOLD, 'Auto-Accept Invites')
     local isWinOpen = (c.show_auto_accept == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##aaAccToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##aaAccToggleWin', core.px(250), core.px(24)) then
         c.show_auto_accept = not isWinOpen
         saveLoadout()
     end

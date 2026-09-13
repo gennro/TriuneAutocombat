@@ -1,0 +1,7 @@
+built=2026-09-13
+source=release-peq.sql
+items=281490
+item_index=153944
+npcs=68205
+spells=40914
+format=1

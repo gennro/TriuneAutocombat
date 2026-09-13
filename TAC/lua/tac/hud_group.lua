@@ -48,6 +48,83 @@ end
 function plugin.onDestroy()
 end
 
+-- ----------------------------------------------------------------------------
+-- "Come to me" (Box Network)
+-- ----------------------------------------------------------------------------
+-- A group row for one of your boxes gets a small [Come] button: it sends
+-- `/ac net <Name> cometo <me>` and the receiving box runs `/ac cometo <me>`
+-- below, navigating to that player with MQ2Nav.
+local function myCleanName()
+    local mq = core and core.mq
+    local ok, n = pcall(function() return mq.TLO.Me.CleanName() end)
+    if ok and n and tostring(n) ~= '' then return tostring(n) end
+    return nil
+end
+
+-- The Box Network peer record for a group member, or nil when that member is
+-- not one of this computer's Triune boxes.
+local function boxPeerFor(name)
+    if not core or not core.boxnet or type(core.boxnet.peer) ~= 'function' or not name then return nil end
+    local ok, p = pcall(core.boxnet.peer, name)
+    if ok and type(p) == 'table' then return p end
+    return nil
+end
+
+local function sendComeToMe(name)
+    if not core or not core.boxnet or type(core.boxnet.command) ~= 'function' then return false, 'Box Network unavailable' end
+    local me = myCleanName()
+    if not me then return false, 'own name unknown' end
+    local ok, sent, why = pcall(core.boxnet.command, name, 'cometo ' .. me)
+    if not ok then return false, tostring(sent) end
+    if not sent then return false, tostring(why or 'not sent') end
+    return true
+end
+
+-- /ac cometo <Name>  -> navigate to that player (MQ2Nav); /ac cometo stop halts.
+local function comeTo(name)
+    local mq = core.mq
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if name == '' then
+        print('\ay[Triune]\ax usage: /ac cometo <PlayerName> | stop')
+        return true
+    end
+    if name:lower() == 'stop' then
+        pcall(function() mq.cmd('/nav stop') end)
+        print('\ag[Triune]\ax Stopped navigating.')
+        return true
+    end
+    local navOk = false
+    pcall(function() navOk = mq.TLO.Navigation and mq.TLO.Navigation.MeshLoaded() == true end)
+    if not navOk then
+        print('\ar[Triune]\ax Cannot come to ' .. name .. ': MQ2Nav is not loaded or has no mesh for this zone.')
+        return true
+    end
+    local id, dist = 0, 0
+    pcall(function()
+        local sp = mq.TLO.Spawn('pc =' .. name)
+        if sp and sp() and (sp.ID() or 0) > 0 then
+            id = sp.ID() or 0
+            dist = sp.Distance() or 0
+        end
+    end)
+    if id <= 0 then
+        print('\ay[Triune]\ax Cannot come to ' .. name .. ': not in this zone.')
+        return true
+    end
+    mq.cmdf('/nav id %d distance=10', id)
+    print(string.format('\ag[Triune]\ax Coming to %s (%.0fft).', name, dist))
+    return true
+end
+
+function plugin.onCommand(cmd, args)
+    if cmd ~= 'cometo' and cmd ~= 'come' and cmd ~= 'moveto' then return false end
+    return comeTo(args and args[2])
+end
+
+plugin.help = {
+    '  \ag/ac cometo <Name> | stop\ax - Navigate to a player in this zone (what a box runs when you click [Come] on the Group window)',
+}
+
 -- Settings popup renderer (right-click anywhere in window, and Plugins tab)
 local function renderGwSettingsContent()
     if not core or not core.ImGui or not core.ctrl then return end
@@ -59,7 +136,7 @@ local function renderGwSettingsContent()
     accent(GOLD, 'Group Window Settings')
     ImGui.Separator()
     local isWinOpen = (ctrl.show_group_window == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##gwToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##gwToggleWin', core.px(250), core.px(24)) then
         ctrl.show_group_window = not isWinOpen
         core.saveLoadout(true)
     end
@@ -99,13 +176,14 @@ local function renderGwSettingsContent()
         ctrl.gw_show_roles = roleVal
         core.saveLoadout(true)
     end
-    ImGui.SetNextItemWidth(120)
+    if core.drawWindowScaleControl then core.drawWindowScaleControl('group', 'Scale', 120) end
+    ImGui.SetNextItemWidth(core.px(120))
     local newAlpha = ImGui.SliderFloat('Opacity##gwAlpha', ctrl.gw_alpha or 0.85, 0.20, 1.0, '%.2f')
     if newAlpha ~= (ctrl.gw_alpha or 0.85) then
         ctrl.gw_alpha = newAlpha
         core.saveLoadout(true)
     end
-    ImGui.SetNextItemWidth(120)
+    ImGui.SetNextItemWidth(core.px(120))
     local newH = ImGui.SliderInt('Bar Height##gwHeight', ctrl.gw_bar_height or 14, 10, 24)
     if newH ~= (ctrl.gw_bar_height or 14) then
         ctrl.gw_bar_height = newH
@@ -130,18 +208,18 @@ function plugin.onDrawUI()
     if ctrl.gw_alpha then
         ImGui.SetNextWindowBgAlpha(ctrl.gw_alpha)
     end
-    ImGui.SetNextWindowSize(280, 320, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(280), core.px(320), ImGuiCond.FirstUseEver)
 
     local winFlags = 0
     if ctrl.gw_lock then
         winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
     end
 
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
-    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
-
     core.preBeginWindow('group')
+    -- Pushed after preBeginWindow so this tight chrome wins over the scaled theme padding.
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, core.px(4), core.px(4))
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
     local show
     ctrl.show_group_window, show = ImGui.Begin('Triune Group v' .. (core.VERSION or '') .. '###triuneGroupWindow', ctrl.show_group_window, winFlags)
     if not ctrl.show_group_window then
@@ -153,10 +231,11 @@ function plugin.onDrawUI()
 
     if show then
         core.postBeginWindow('group')
-        local barH = ctrl.gw_bar_height or 14
+        local barH = core.px(ctrl.gw_bar_height or 14)
 
         -- Right-click anywhere in window for options
         if ImGui.BeginPopupContextWindow('##gwContextMenu') then
+            if core.applyWindowScale then core.applyWindowScale('group') end
             renderGwSettingsContent()
             ImGui.EndPopup()
         end
@@ -582,6 +661,17 @@ function plugin.onDrawUI()
                 if not mem.isSelf and not mem.offline and not mem.otherZone then
                     ImGui.SameLine()
                     accent(ARC, string.format('%.0fft', mem.distance or 0))
+                    -- [Come]: only for members that are one of this computer's boxes
+                    if boxPeerFor(mem.name) then
+                        ImGui.SameLine()
+                        if ImGui.SmallButton('Come##gwCome' .. idx) then
+                            local okSend, why = sendComeToMe(mem.name)
+                            if not okSend then print('\ay[Triune]\ax Come request to ' .. tostring(mem.name) .. ' not sent: ' .. tostring(why)) end
+                        end
+                        if ImGui.IsItemHovered() then
+                            core.setTooltip('%s', string.format('Tell %s to navigate to you\n(/ac net %s cometo %s)', mem.name, mem.name, myCleanName() or 'me'))
+                        end
+                    end
                 elseif mem.offline then
                     ImGui.SameLine()
                     accent(ERR, '[OFFLINE]')
@@ -674,5 +764,8 @@ function plugin.onDrawUI()
     ImGui.PopStyleVar(3)
     core.popTheme()
 end
+
+-- Exposed for tests
+plugin._ = { comeTo = comeTo, sendComeToMe = sendComeToMe, boxPeerFor = boxPeerFor }
 
 return plugin

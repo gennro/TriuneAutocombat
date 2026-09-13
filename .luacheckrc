@@ -22,6 +22,7 @@ globals = {
     "ImGuiTreeNodeFlags",
     "ImGuiTabBarFlags",
     "ImGuiTabItemFlags",
+    "ImGuiMouseCursor",
     "ImGuiInputTextFlags",
     "ImGuiMod",
     "ImGuiKey",

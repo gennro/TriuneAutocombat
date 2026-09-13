@@ -234,7 +234,7 @@ local function renderUfSettingsContent()
 
     local isWinOpen = (ctrl.show_unit_frames == true)
     local btnText = isWinOpen and 'HUD Window: Visible (Click to Hide)' or 'HUD Window: Hidden (Click to Show)'
-    if ImGui.Button(btnText .. '##ufToggleWin', 250, 24) then
+    if ImGui.Button(btnText .. '##ufToggleWin', core.px(250), core.px(24)) then
         ctrl.show_unit_frames = not isWinOpen
         if core.saveLoadout then core.saveLoadout(true) end
     end
@@ -260,19 +260,20 @@ local function renderUfSettingsContent()
         ctrl.uf_show_xp = showXpVal
         if core.saveLoadout then core.saveLoadout(true) end
     end
-    ImGui.SetNextItemWidth(120)
+    if core.drawWindowScaleControl then core.drawWindowScaleControl('unit_frames', 'Scale', 120) end
+    ImGui.SetNextItemWidth(core.px(120))
     local newAlpha = ImGui.SliderFloat('Opacity##ufAlpha', ctrl.uf_alpha or 0.85, 0.20, 1.0, '%.2f')
     if newAlpha ~= (ctrl.uf_alpha or 0.85) then
         ctrl.uf_alpha = newAlpha
         if core.saveLoadout then core.saveLoadout(true) end
     end
-    ImGui.SetNextItemWidth(120)
+    ImGui.SetNextItemWidth(core.px(120))
     local newH = ImGui.SliderInt('Bar Height##ufHeight', ctrl.uf_bar_height or 14, 10, 24)
     if newH ~= (ctrl.uf_bar_height or 14) then
         ctrl.uf_bar_height = newH
         if core.saveLoadout then core.saveLoadout(true) end
     end
-    ImGui.SetNextItemWidth(120)
+    ImGui.SetNextItemWidth(core.px(120))
     local newMaxB = ImGui.SliderInt('Max Buffs##ufMaxB', ctrl.uf_buff_max or 30, 5, 50)
     if newMaxB ~= (ctrl.uf_buff_max or 30) then
         ctrl.uf_buff_max = newMaxB
@@ -299,18 +300,18 @@ function plugin.onDrawUI()
     if ctrl.uf_alpha then
         ImGui.SetNextWindowBgAlpha(ctrl.uf_alpha)
     end
-    ImGui.SetNextWindowSize(320, 360, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(320), core.px(360), ImGuiCond.FirstUseEver)
 
     local winFlags = 0
     if ctrl.uf_lock then
         winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
     end
 
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
-    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
-
     if core.preBeginWindow then core.preBeginWindow('unit_frames') end
+    -- Pushed after preBeginWindow so this tight chrome wins over the scaled theme padding.
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, core.px(4), core.px(4))
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
 
     local show
     local winTitle = 'Triune Target & Player v' .. (core.VERSION or '2.15') .. '###triuneUnitFrames'
@@ -329,10 +330,11 @@ function plugin.onDrawUI()
         refreshVitals(false)
         if snap then
             local availW = ImGui.GetContentRegionAvail()
-            local barH = ctrl.uf_bar_height or 14
+            local barH = core.px(ctrl.uf_bar_height or 14)
 
         -- Context Menu
         if ImGui.BeginPopupContextWindow('##ufContextMenu') then
+            if core.applyWindowScale then core.applyWindowScale('unit_frames') end
             renderUfSettingsContent()
             ImGui.EndPopup()
         end

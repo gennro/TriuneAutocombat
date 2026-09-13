@@ -129,11 +129,17 @@ local state = {
     scanIntervalMs      = 500,
     lastZoneCheckTime   = 0,
 
-    -- Per-tick cached gameplay fields (refreshed once per main-loop pass to
-    -- cut per-frame TLO marshal churn in the render callback). prev/interpAt
-    -- drive the smooth player-marker interpolation between cache writes.
-    lastPlayer          = { x = 0, y = 0, z = 0, heading = 0, updatedAt = 0, prevX = 0, prevY = 0, prevZ = 0, interpAt = 0, interpSeeded = false },
+    -- Per-tick cached gameplay fields (refreshed once per main-loop pass).
+    -- lastPlayer is the fallback for the draw callback and the footer; the
+    -- callback itself samples the live position every frame (see
+    -- state.smoothPlayer) because the host loop only ticks at ~5-7Hz.
+    lastPlayer          = { x = 0, y = 0, z = 0, heading = 0, updatedAt = 0 },
     lastTargetId        = 0,
+
+    -- Per-frame smoothed player sample owned by the draw callback. Live TLO
+    -- reads are filtered with a frame-time-based exponential lerp so the marker,
+    -- camera-follow and heading arrow glide at render rate instead of stepping.
+    smoothPlayer        = { x = 0, y = 0, z = 0, heading = 0, seeded = false },
 
     -- Throttled Line-of-Sight cache for NPCs, [id] = { los = bool, ts = time }
     losCache            = {},
@@ -1791,11 +1797,67 @@ local SCAN_FETCH_CHUNK = 12
 local SCAN_LOS_CHUNK   = 4
 local SCAN_LOS_BUDGET  = 16
 
--- Player marker interpolation window. The main loop rewrites lastPlayer once per
--- pass (~40ms cadence); the draw callback lerps the marker/pan toward the new
--- position over this window so movement stays fluid even though the cache writes
--- at 25Hz.
-local PLAYER_INTERP_MS = 40
+-- Player marker smoothing. The draw callback samples Me.X/Y/Z/Heading live every
+-- frame (the host main loop only reaches the plugin tick every ~150ms, far too
+-- slow to drive movement) and runs the sample through a frame-time-based
+-- exponential filter. PLAYER_SMOOTH_TAU is the filter time constant in seconds:
+-- small enough that the marker tracks the live position with no visible lag,
+-- large enough to hide the client's per-frame position quantisation.
+-- PLAYER_SNAP_DIST is the world-unit jump (zone / gate / succor) beyond which the
+-- filter snaps instead of sliding the marker across the map.
+local PLAYER_SMOOTH_TAU  = 0.06
+local PLAYER_SNAP_DIST   = 150.0
+
+-- Frame-rate-independent exponential approach: returns the blend factor to move
+-- a smoothed value toward its target for a frame of dt seconds.
+local function smoothAlpha(dt, tau)
+    if dt <= 0 then return 1 end
+    return 1 - math.exp(-dt / tau)
+end
+
+-- Shortest-arc lerp between two headings in degrees (handles the 359 -> 0 wrap).
+local function lerpHeading(from, to, alpha)
+    local delta = (to - from + 540) % 360 - 180
+    return (from + delta * alpha) % 360
+end
+
+-- Samples the live player position/heading and advances the smoothed sample by
+-- one frame. Falls back to the per-tick cache when a live read fails so the
+-- marker never drops to world origin. Returns x, y, z, heading.
+local function samplePlayerSmoothed(dt)
+    local sp = state.smoothPlayer
+    local lp = state.lastPlayer
+
+    local tx, ty, tz, th = lp.x, lp.y, lp.z, lp.heading
+    local okPX, vX = pcall(function() return mq.TLO.Me.X() end)
+    if okPX and vX then tx = vX end
+    local okPY, vY = pcall(function() return mq.TLO.Me.Y() end)
+    if okPY and vY then ty = vY end
+    local okPZ, vZ = pcall(function() return mq.TLO.Me.Z() end)
+    if okPZ and vZ then tz = vZ end
+    local okH, vH = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
+    if okH and vH then th = vH end
+
+    if not sp.seeded then
+        sp.x, sp.y, sp.z, sp.heading = tx, ty, tz, th
+        sp.seeded = true
+        return sp.x, sp.y, sp.z, sp.heading
+    end
+
+    local dx, dy = tx - sp.x, ty - sp.y
+    if (dx * dx + dy * dy) > (PLAYER_SNAP_DIST * PLAYER_SNAP_DIST) then
+        -- Zone / teleport: snap rather than glide across the whole map.
+        sp.x, sp.y, sp.z, sp.heading = tx, ty, tz, th
+        return sp.x, sp.y, sp.z, sp.heading
+    end
+
+    local a = smoothAlpha(dt, PLAYER_SMOOTH_TAU)
+    sp.x = sp.x + dx * a
+    sp.y = sp.y + dy * a
+    sp.z = sp.z + (tz - sp.z) * a
+    sp.heading = lerpHeading(sp.heading, th, a)
+    return sp.x, sp.y, sp.z, sp.heading
+end
 
 -- Incremental spawn scanner. Processes a bounded slice of the (up to 120-mob)
 -- fetch plus a slice of the throttled LoS refresh per call, returning nonzero
@@ -2386,33 +2448,17 @@ local function DrawMapCanvas(availW, availH)
     end
 
     -- Player position for Z-filtering, Smart Auto-Z, camera follow & the player
-    -- marker. Reads the per-pass cache and interpolates between the previous
-    -- and current cached positions so the marker and camera-pan stay fluid
-    -- between the ~25Hz cache writes. Falling back to live TLO reads before the
-    -- first refresh completes.
-    local playerX, playerY, playerZ = 0, 0, 0
-    local lp = state.lastPlayer
-    if lp.updatedAt > 0 then
-        local frac = 1
-        if lp.interpSeeded and lp.interpAt > 0 then
-            frac = (mq.gettime() - lp.interpAt) / PLAYER_INTERP_MS
-            if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
-        end
-        if frac >= 1 then
-            playerX, playerY, playerZ = lp.x, lp.y, lp.z
-        else
-            playerX = lp.prevX + (lp.x - lp.prevX) * frac
-            playerY = lp.prevY + (lp.y - lp.prevY) * frac
-            playerZ = lp.prevZ + (lp.z - lp.prevZ) * frac
-        end
-    else
-        local okPX, pXVal = pcall(function() return mq.TLO.Me.X() end)
-        local okPY, pYVal = pcall(function() return mq.TLO.Me.Y() end)
-        local okPZ, pZVal = pcall(function() return mq.TLO.Me.Z() end)
-        if okPX and pXVal then playerX = pXVal end
-        if okPY and pYVal then playerY = pYVal end
-        if okPZ and pZVal then playerZ = pZVal end
+    -- marker. Sampled live every frame and smoothed with the frame delta so the
+    -- marker and camera-pan move at render rate; the per-tick cache is only the
+    -- fallback inside samplePlayerSmoothed when a live read fails.
+    local frameDt = 1 / 60
+    if okIO and io then
+        pcall(function()
+            local d = io.DeltaTime
+            if d and d > 0 and d < 0.5 then frameDt = d end
+        end)
     end
+    local playerX, playerY, playerZ, playerHeading = samplePlayerSmoothed(frameDt)
 
     updateSmartFloorBounds(playerX, playerY, playerZ)
     sf = state.smartFloor
@@ -2681,7 +2727,7 @@ local now = mq.gettime()
 
         if shouldDrawNav then
             local meX, meY = playerX, playerY
-            if lp.updatedAt > 0 then
+            if state.smoothPlayer.seeded then
                 local pSx, pSy = worldToScreen(meX, meY, cX, cY, availW, availH)
                 local destX, destY = nil, nil
 
@@ -2737,9 +2783,9 @@ local now = mq.gettime()
 
         -- Draw Player Marker (Arrow pointing in Heading direction)
         local meX, meY = playerX, playerY
-        local meHeading = lp.heading
+        local meHeading = playerHeading
 
-        if lp.updatedAt > 0 then
+        if state.smoothPlayer.seeded then
             local psx, psy = worldToScreen(meX, meY, cX, cY, availW, availH)
 
             -- Auto-follow player
@@ -3162,8 +3208,8 @@ local function DrawPoiDrawer(availW, availH)
                 local tableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0)
                 if ImGui.BeginTable('##PoiDrawerTable', 3, tableFlags) then
                     ImGui.TableSetupColumn('Landmark / Label', ImGuiTableColumnFlags.WidthStretch or 0)
-                    ImGui.TableSetupColumn('Location (Y, X)', ImGuiTableColumnFlags.WidthFixed or 0, 125)
-                    ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, 56)
+                    ImGui.TableSetupColumn('Location (Y, X)', ImGuiTableColumnFlags.WidthFixed or 0, core.px(125))
+                    ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, core.px(56))
                     ImGui.TableHeadersRow()
 
                     for idx, poi in ipairs(matching) do
@@ -3277,8 +3323,8 @@ local function DrawAtlasTab()
             local tableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0, ImGuiTableFlags.SelectionHighlight or 0)
             if ImGui.BeginTable('##AtlasZoneListTable', 3, tableFlags) then
                 ImGui.TableSetupColumn('Zone Name', ImGuiTableColumnFlags.WidthStretch or 0)
-                ImGui.TableSetupColumn('Era / Type', ImGuiTableColumnFlags.WidthFixed or 0, 100)
-                ImGui.TableSetupColumn('Map', ImGuiTableColumnFlags.WidthFixed or 0, 42)
+                ImGui.TableSetupColumn('Era / Type', ImGuiTableColumnFlags.WidthFixed or 0, core.px(100))
+                ImGui.TableSetupColumn('Map', ImGuiTableColumnFlags.WidthFixed or 0, core.px(42))
                 ImGui.TableHeadersRow()
 
                 for _, z in ipairs(state.atlasZoneList) do
@@ -3394,10 +3440,10 @@ local function DrawAtlasTab()
                     -- Visual Step-by-Step Pathway Table
                     local routeTableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0)
                     if ImGui.BeginTable('##AtlasRouteStepsTable', 4, routeTableFlags) then
-                        ImGui.TableSetupColumn('Step', ImGuiTableColumnFlags.WidthFixed or 0, 52)
+                        ImGui.TableSetupColumn('Step', ImGuiTableColumnFlags.WidthFixed or 0, core.px(52))
                         ImGui.TableSetupColumn('Zone Name', ImGuiTableColumnFlags.WidthStretch or 0)
-                        ImGui.TableSetupColumn('Era / Type', ImGuiTableColumnFlags.WidthFixed or 0, 120)
-                        ImGui.TableSetupColumn('Map View', ImGuiTableColumnFlags.WidthFixed or 0, 65)
+                        ImGui.TableSetupColumn('Era / Type', ImGuiTableColumnFlags.WidthFixed or 0, core.px(120))
+                        ImGui.TableSetupColumn('Map View', ImGuiTableColumnFlags.WidthFixed or 0, core.px(65))
                         ImGui.TableHeadersRow()
 
                         for stepIdx, stepZone in ipairs(path) do
@@ -3538,8 +3584,8 @@ local function DrawAtlasTab()
                         local pTableFlags = bit.bor(ImGuiTableFlags.RowBg or 0, ImGuiTableFlags.BordersOuter or 0, ImGuiTableFlags.ScrollY or 0)
                         if ImGui.BeginTable('##AtlasPoiTable', 3, pTableFlags) then
                             ImGui.TableSetupColumn('Landmark / Label', ImGuiTableColumnFlags.WidthStretch or 0)
-                            ImGui.TableSetupColumn('Location (Y, X, Z)', ImGuiTableColumnFlags.WidthFixed or 0, 160)
-                            ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, 56)
+                            ImGui.TableSetupColumn('Location (Y, X, Z)', ImGuiTableColumnFlags.WidthFixed or 0, core.px(160))
+                            ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed or 0, core.px(56))
                             ImGui.TableHeadersRow()
 
                             for pIdx, poi in ipairs(matching) do
@@ -3639,13 +3685,13 @@ local function DrawNPCTrackerTab()
 
     if ImGui.BeginTable('##TriuneMapTrackerTable', 8, tableFlags, availW, tableHeight) then
         ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthStretch, 2.2)
-        ImGui.TableSetupColumn('Lvl', ImGuiTableColumnFlags.WidthFixed, 38)
-        ImGui.TableSetupColumn('Con', ImGuiTableColumnFlags.WidthFixed, 55)
-        ImGui.TableSetupColumn('Dist', ImGuiTableColumnFlags.WidthFixed, 65)
-        ImGui.TableSetupColumn('Nav Path', ImGuiTableColumnFlags.WidthFixed, 90)
-        ImGui.TableSetupColumn('LoS', ImGuiTableColumnFlags.WidthFixed, 40)
-        ImGui.TableSetupColumn('ID', ImGuiTableColumnFlags.WidthFixed, 55)
-        ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 140)
+        ImGui.TableSetupColumn('Lvl', ImGuiTableColumnFlags.WidthFixed, core.px(38))
+        ImGui.TableSetupColumn('Con', ImGuiTableColumnFlags.WidthFixed, core.px(55))
+        ImGui.TableSetupColumn('Dist', ImGuiTableColumnFlags.WidthFixed, core.px(65))
+        ImGui.TableSetupColumn('Nav Path', ImGuiTableColumnFlags.WidthFixed, core.px(90))
+        ImGui.TableSetupColumn('LoS', ImGuiTableColumnFlags.WidthFixed, core.px(40))
+        ImGui.TableSetupColumn('ID', ImGuiTableColumnFlags.WidthFixed, core.px(55))
+        ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, core.px(140))
         ImGui.TableHeadersRow()
 
         local currentTargetId = state.lastTargetId
@@ -4243,13 +4289,13 @@ local function tick()
         state.dirtySettings = false
     end
 
-    -- Player movement cache: refreshed every main-loop pass (~40ms / ~25Hz) so
-    -- the player marker and camera-follow stay fluid, independent of the slower
-    -- NPC scan cadence. Target ID rides a slower 100ms gate since it needs no
-    -- per-loop freshness. Interpolation bookkeeping (prev + interpAt) is for
-    -- the draw callback's smooth marker/pan between cache writes.
+    -- Player cache: refreshed every main-loop pass. The host loop only reaches
+    -- this tick every ~150ms (see the mq.delay at the bottom of triune.lua's
+    -- main loop), so this is NOT what drives the marker -- the draw callback
+    -- samples the live position per frame. This cache is the footer's source
+    -- and the fallback for samplePlayerSmoothed when a live read fails. Target
+    -- ID rides a slower 100ms gate since it needs no per-loop freshness.
     local lp = state.lastPlayer
-    local prevX, prevY, prevZ = lp.x, lp.y, lp.z
     local okX, vX = pcall(function() return mq.TLO.Me.X() end)
     if okX and vX then lp.x = vX end
     local okY, vY = pcall(function() return mq.TLO.Me.Y() end)
@@ -4261,16 +4307,6 @@ local function tick()
     if (now - lp.updatedAt) >= 100 then
         local okT, vT = pcall(function() return mq.TLO.Target.ID() end)
         if okT and vT then state.lastTargetId = vT end
-    end
-    if lp.interpSeeded then
-        lp.prevX, lp.prevY, lp.prevZ = prevX, prevY, prevZ
-        lp.interpAt = now
-    else
-        -- First write: seed prev to the live values so the draw callback never
-        -- lerps the marker across the map from world origin.
-        lp.prevX, lp.prevY, lp.prevZ = lp.x, lp.y, lp.z
-        lp.interpAt = 0
-        lp.interpSeeded = true
     end
     lp.updatedAt = now
 
@@ -4397,7 +4433,7 @@ function plugin.onDrawSettings()
     local GOLD = (core.colors and core.colors.GOLD) or { 1.0, 0.70, 0.54, 1 }
     core.accent(GOLD, 'Map & NPC Tracker')
     local isWinOpen = (ctrl.show_map == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##mapToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##mapToggleWin', core.px(250), core.px(24)) then
         ctrl.show_map = not isWinOpen
         core.saveLoadout(true)
     end
@@ -4425,6 +4461,18 @@ end
 plugin.help = {
     '  \ag/ac map | track | zone\ax - Toggle the 2D Map, Zone Atlas & NPC Tracker window',
 }
+
+-- Opens the map window on the Zone Atlas showing `zoneShort` (used by the
+-- Game Database plugin's NPC cards: "where does this spawn").
+function plugin.showZone(zoneShort)
+    if not core or not zoneShort or zoneShort == '' then return false end
+    refresh()
+    if not initialized then initialize() end
+    ctrl.show_map = true
+    navigateToAtlasZone(zoneShort, true)
+    switchToTab(2)
+    return true
+end
 
 -- Exposed for tests
 plugin.state = state

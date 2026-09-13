@@ -4192,12 +4192,12 @@ do
     assert_true(clickieTabBody ~= nil, 'drawClickieTab body extracted')
     assert_true(clickieTabBody:find("ImGuiStyleVar%.ItemSpacing,%s*4,%s*3") ~= nil, 'drawClickieTab uses compact ItemSpacing (4, 3)')
     assert_true(clickieTabBody:find("ImGuiStyleVar%.FramePadding,%s*4,%s*3") ~= nil, 'drawClickieTab uses compact FramePadding (4, 3)')
-    assert_true(clickieTabBody:find("InvisibleButton%('##upDummy',%s*17,%s*19%)") ~= nil, 'drawClickieTab uses InvisibleButton upDummy for slot 1 alignment')
-    assert_true(clickieTabBody:find("InvisibleButton%('##dnDummy',%s*17,%s*19%)") ~= nil, 'drawClickieTab uses InvisibleButton dnDummy for last slot alignment')
-    assert_true(clickieTabBody:find("SetNextItemWidth%(133%)") ~= nil, 'drawClickieTab uses compact 133px Target combo')
-    assert_true(clickieTabBody:find("SetNextItemWidth%(116%)") ~= nil, 'drawClickieTab uses compact 116px When combo')
-    assert_true(clickieTabBody:find("SetNextItemWidth%(57%)") ~= nil, 'drawClickieTab uses compact 57px Threshold slider')
-    assert_true(clickieTabBody:find("SetNextItemWidth%(35%)") ~= nil, 'drawClickieTab uses compact 35px Min XT combo')
+    assert_true(clickieTabBody:find("InvisibleButton%('##upDummy',%s*UI%.px%(17%),%s*UI%.px%(19%)%)") ~= nil, 'drawClickieTab uses InvisibleButton upDummy for slot 1 alignment')
+    assert_true(clickieTabBody:find("InvisibleButton%('##dnDummy',%s*UI%.px%(17%),%s*UI%.px%(19%)%)") ~= nil, 'drawClickieTab uses InvisibleButton dnDummy for last slot alignment')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(UI%.px%(133%)%)") ~= nil, 'drawClickieTab uses compact 133px Target combo')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(UI%.px%(116%)%)") ~= nil, 'drawClickieTab uses compact 116px When combo')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(UI%.px%(57%)%)") ~= nil, 'drawClickieTab uses compact 57px Threshold slider')
+    assert_true(clickieTabBody:find("SetNextItemWidth%(UI%.px%(35%)%)") ~= nil, 'drawClickieTab uses compact 35px Min XT combo')
     assert_true(clickieTabBody:find("isDis and 'Off' or '%%d%%%%'") ~= nil, 'drawClickieTab uses Off label for 0% disabled threshold')
 
     -- createCastTracker scoping check
@@ -5419,6 +5419,7 @@ do
         'TAC/lua/tac/dps.lua',
         'TAC/lua/tac/inventory.lua',
         'TAC/lua/tac/map.lua',
+        'TAC/lua/tac/gamedb.lua',
     }
 
     for _, filePath in ipairs(files) do
@@ -8864,8 +8865,8 @@ do
         'Suite 75: /ac hud and /ac uf slash commands are registered')
     assert_true(readFile('TAC/lua/tac/hud_unitframes.lua'):find("label = 'Target & Player HUD'", 1, true) ~= nil,
         'Suite 75: hud_unitframes declares its header window button (drawn by pm.drawHeaderButtons)')
-    assert_true(triuneContent:find("HUD##miniHud") ~= nil,
-        'Suite 75: Mini GUI toolbar contains HUD button')
+    assert_true(triuneContent:find("HUD##miniHud") == nil and triuneContent:find("pcall(pm.drawHeaderButtons, 0)", 1, true) ~= nil,
+        'Suite 75: Mini GUI HUD button comes from pm.drawHeaderButtons, not a hardcoded button')
 
     -- 4. Verify version consistency
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
@@ -8936,8 +8937,8 @@ do
         'Suite 76: /ac group and /ac gw slash commands are registered')
     assert_true(readFile('TAC/lua/tac/hud_group.lua'):find("flag = 'show_group_window'", 1, true) ~= nil,
         'Suite 76: hud_group declares its header window button (drawn by pm.drawHeaderButtons)')
-    assert_true(triuneContent:find("Grp##miniGroup") ~= nil,
-        'Suite 76: Mini GUI toolbar contains Grp button')
+    assert_true(triuneContent:find("Grp##miniGroup") == nil and triuneContent:find("pcall(pm.drawHeaderButtons, 0)", 1, true) ~= nil,
+        'Suite 76: Mini GUI Grp button comes from pm.drawHeaderButtons, not a hardcoded button')
 
     -- 4. Verify context menu and target clicks
     assert_true(gwContent:find("ImGui%.BeginPopupContextWindow%('##gwContextMenu'%)") ~= nil,
@@ -9026,8 +9027,8 @@ do
         'Suite 77: /ac eff and /ac effects slash commands are registered')
     assert_true(readFile('TAC/lua/tac/hud_effects.lua'):find("flag = 'show_effects_window'", 1, true) ~= nil,
         'Suite 77: hud_effects declares its header window button (drawn by pm.drawHeaderButtons)')
-    assert_true(triuneContent:find("Buffs##miniEffects") ~= nil,
-        'Suite 77: Mini GUI toolbar contains Buffs button')
+    assert_true(triuneContent:find("Buffs##miniEffects") == nil and triuneContent:find("pcall(pm.drawHeaderButtons, 0)", 1, true) ~= nil,
+        'Suite 77: Mini GUI Buffs button comes from pm.drawHeaderButtons, not a hardcoded button')
 
     -- 5. Verify context menus and actions
     assert_true(effContent:find("ImGui%.BeginPopupContextWindow%('##effWinContextMenu'%)") ~= nil,
@@ -9203,12 +9204,12 @@ do
     -- 3. Verify two-line header toolbar and compact button height
     assert_true(triuneContent:find("ImGuiStyleVar%.FramePadding,%s*5,%s*2") ~= nil,
         'Suite 78: Header toolbar buttons have compact FramePadding (5, 2)')
-    assert_true(triuneContent:find("runtime.pluginManager.drawHeaderButtons(1)", 1, true) ~= nil,
+    assert_true(triuneContent:find("pcall(pm.drawHeaderButtons, 1)", 1, true) ~= nil,
         'Suite 78: Toolbar draws plugin window buttons through the plugin manager')
     assert_true(readFile('TAC/lua/tac/hud_xtarget.lua'):find("flag = 'show_xtarget_window'", 1, true) ~= nil,
         'Suite 78: hud_xtarget declares its header window button (drawn by pm.drawHeaderButtons)')
-    assert_true(triuneContent:find("XT##miniXTarget") ~= nil,
-        'Suite 78: Mini GUI toolbar contains XT button')
+    assert_true(triuneContent:find("XT##miniXTarget") == nil and triuneContent:find("pcall(pm.drawHeaderButtons, 0)", 1, true) ~= nil,
+        'Suite 78: Mini GUI XT button comes from pm.drawHeaderButtons, not a hardcoded button')
 
     -- 4. Verify slash command handler
     assert_true(triuneContent:find("cmd == 'xtar' or cmd == 'xt' or cmd == 'xtarget'") ~= nil,
@@ -9277,8 +9278,8 @@ do
     -- 3. Verify toolbar buttons
     assert_true(readFile('TAC/lua/tac/hud_spellgems.lua'):find("flag = 'show_spell_gems'", 1, true) ~= nil,
         'Suite 79: hud_spellgems declares its header window button (drawn by pm.drawHeaderButtons)')
-    assert_true(triuneContent:find("Gems##miniGems") ~= nil,
-        'Suite 79: Mini GUI toolbar contains Gems button')
+    assert_true(triuneContent:find("Gems##miniGems") == nil and triuneContent:find("pcall(pm.drawHeaderButtons, 0)", 1, true) ~= nil,
+        'Suite 79: Mini GUI Gems button comes from pm.drawHeaderButtons, not a hardcoded button')
 
     -- 4. Verify slash command handler
     assert_true(triuneContent:find("cmd == 'gems' or cmd == 'gembar' or cmd == 'spellbar'") ~= nil,
@@ -10388,7 +10389,7 @@ do
     }, { __index = function() return function() end end })
     local noop = function() end
     local mockUI = {
-        accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop,
+        px = function(n) return n end, accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop,
         preBeginWindow = noop, postBeginWindow = noop, drawStatusProgressBar = noop,
         drawSpellIcon = function() return false end,
         getConColorRgb = function() return { 1, 1, 1, 1 } end,
@@ -10424,7 +10425,7 @@ do
     initPM()
     local pm = rt.pluginManager
     assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
-    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'cursor', 'dps', 'floating_damage', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
+    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
     for _, id in ipairs(expected) do
         local p = pm.plugins[id]
         assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
@@ -10672,7 +10673,7 @@ do
         local core = {
             VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
-            pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+            px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
             saveLoadout = function() rec.saves = rec.saves + 1 end,
             delay = function(ms) rec.delays[#rec.delays + 1] = ms return false end,
@@ -10693,7 +10694,7 @@ do
     local origPrint = print
 
     -- 1. No plugin blocks the core: mq.delay / mq.doevents / mq.imgui / own theme are gone
-    for _, f in ipairs({ 'cursor', 'dps', 'inventory', 'buffbot', 'map' }) do
+    for _, f in ipairs({ 'cursor', 'dps', 'inventory', 'buffbot', 'map', 'chat' }) do
         local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
         for _, bad in ipairs({ 'mq.delay(', 'mq.doevents()', 'mq.imgui.init', 'mq.exit(', 'local function pushTheme', 'local function popTheme', 'require(' }) do
             assert_true(psrc:find(bad, 1, true) == nil, 'Suite 89: ' .. f .. '.lua does not use ' .. bad)
@@ -10988,22 +10989,22 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 16, 'Suite 89: sixteen shipped plugins own a window')
+        assert_eq(#W.all, 18, 'Suite 89: eighteen shipped plugins own a window')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
         W.hdr = pm.windowPlugins(true)
-        assert_eq(#W.hdr, 15, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net + Buttons (buffbot off)')
+        assert_eq(#W.hdr, 17, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net + Buttons + Chat + Database (buffbot off)')
         assert_eq(pm.headerButtonEnabled('buffbot'), false, 'Suite 89: buffbot header button off by default')
         assert_eq(pm.headerButtonEnabled('hud_group'), true, 'Suite 89: hud_group header button on by default')
         assert_eq(pm.headerButtonEnabled('floating_damage'), false, 'Suite 89: no header button for plugins without a window')
         pm.setHeaderButton('buffbot', true)
         assert_eq(W.ctrl.plugins.buffbot.headerButton, true, 'Suite 89: header button preference persisted to ctrl.plugins')
-        assert_eq(#pm.windowPlugins(true), 16, 'Suite 89: enabling the preference adds the button')
+        assert_eq(#pm.windowPlugins(true), 18, 'Suite 89: enabling the preference adds the button')
         assert_true(W.saves >= 1, 'Suite 89: header button preference triggers a loadout save')
         pm.setHeaderButton('hud_group', false)
         assert_eq(pm.headerButtonEnabled('hud_group'), false, 'Suite 89: saved preference overrides the plugin default')
-        assert_eq(#pm.windowPlugins(true), 15, 'Suite 89: disabling the preference removes the button')
+        assert_eq(#pm.windowPlugins(true), 17, 'Suite 89: disabling the preference removes the button')
 
         -- open / close through the manager writes the ctrl flag
         assert_eq(pm.isWindowOpen('map'), false, 'Suite 89: map window closed initially')
@@ -11024,7 +11025,7 @@ do
 
         -- header renderer: one button per enabled header plugin, clicks toggle
         mockImGui.Button = function(label) return W.clickLabel ~= nil and label:find(W.clickLabel, 1, true) ~= nil end
-        assert_eq(pm.drawHeaderButtons(), 15, 'Suite 89: drawHeaderButtons draws one button per header plugin')
+        assert_eq(pm.drawHeaderButtons(), 17, 'Suite 89: drawHeaderButtons draws one button per header plugin')
         W.clickLabel = 'Map##hdrPlg_map'
         pm.drawHeaderButtons()
         assert_eq(W.ctrl.show_map, true, 'Suite 89: clicking the header button opens the plugin window')
@@ -11058,10 +11059,10 @@ do
         pm.HEADER_BUTTONS_PER_ROW = 8
         mockImGui.SameLine = nil
         pm.disablePlugin('map')
-        assert_eq(pm.drawHeaderButtons(), 14, 'Suite 89: disabled plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 16, 'Suite 89: disabled plugins get no header button')
         pm.enablePlugin('map')
         pm.plugins.map.status = 'Error'
-        assert_eq(pm.drawHeaderButtons(), 14, 'Suite 89: errored plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 16, 'Suite 89: errored plugins get no header button')
         pm.plugins.map.status = 'Active'
 
         -- collectSettings persists the effective header preference for window plugins
@@ -11070,13 +11071,13 @@ do
         assert_eq(W.ctrl.plugins.floating_damage.headerButton, nil, 'Suite 89: collectSettings leaves non-window plugins alone')
 
         -- core header bar is driven by the manager now
-        assert_true(src:find('runtime.pluginManager.drawHeaderButtons(1)', 1, true) ~= nil, 'Suite 89: header bar calls pm.drawHeaderButtons')
+        assert_true(src:find('pcall(pm.drawHeaderButtons, 1)', 1, true) ~= nil, 'Suite 89: header bar calls pm.drawHeaderButtons')
         for _, gone in ipairs({ "'Map##hdrMap'", "'DPS Parser##hdrDPS'", "'Cursor Manager##hdrCursor'", "'Inv Manager##hdrInv'", "'Open Spellbook##hdrBook'", "'Gems##hdrGems'", "'XTarget##hdrXTarget'" }) do
             assert_true(src:find(gone, 1, true) == nil, 'Suite 89: hardcoded header button removed: ' .. gone)
         end
         assert_true(src:find("ImGui.BeginTable('TriunePluginsTable', 8, tblFlags)", 1, true) ~= nil, 'Suite 89: Plugins table has the compact 8-column layout')
-        assert_true(src:find("ImGui.TableSetupColumn('Uses', ImGuiTableColumnFlags.WidthFixed, 105)", 1, true) ~= nil, 'Suite 89: Uses column declared')
-        assert_true(src:find("ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, 30)", 1, true) ~= nil, 'Suite 89: Header button column declared')
+        assert_true(src:find("ImGui.TableSetupColumn('Uses', ImGuiTableColumnFlags.WidthFixed, UI.px(105))", 1, true) ~= nil, 'Suite 89: Uses column declared')
+        assert_true(src:find("ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, UI.px(30))", 1, true) ~= nil, 'Suite 89: Header button column declared')
 
         -- 10. Settings -> Windows registry is built from the plugin window declarations
         W.getManaged = loadFunc(src, 'getManagedWindows', { runtime = rt, ctrl = W.ctrl })
@@ -11761,7 +11762,7 @@ do
     initPM()
     local pm = rt.pluginManager
     S.shipped = #pm.pluginOrder
-    assert_eq(S.shipped, 17, 'Suite 92: all shipped plugins still load under the load-time guards')
+    assert_eq(S.shipped, 19, 'Suite 92: all shipped plugins still load under the load-time guards')
 
     -- Soft plugin dependencies (`uses`): normalised at registration, reverse-listed, state-tracked
     assert_eq(#pm.normalizeUses(nil), 0, 'Suite 92: no uses -> empty list')
@@ -11965,7 +11966,7 @@ do
     assert_true(pm.scripts['standalone_script.lua'] ~= nil, 'Suite 92: known script entry survives a rescan')
     assert_true(src:find("'| Standalone scripts: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the standalone script count')
     assert_true(src:find("ImGui.BeginTable('TriuneScriptsTable', 5, tblFlags)", 1, true) ~= nil, 'Suite 92: Plugins page has the Standalone Scripts table (with Hdr / Button Name)')
-    assert_true(src:find("ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, 30)", 1, true) ~= nil and src:find("ImGui.TableSetupColumn('Button Name'", 1, true) ~= nil, 'Suite 92: Standalone Scripts table has the header button and name columns')
+    assert_true(src:find("ImGui.TableSetupColumn('Hdr', ImGuiTableColumnFlags.WidthFixed, UI.px(30))", 1, true) ~= nil and src:find("ImGui.TableSetupColumn('Button Name'", 1, true) ~= nil, 'Suite 92: Standalone Scripts table has the header button and name columns')
     assert_true(src:find("'| Failed to load: %d'", 1, true) ~= nil, 'Suite 92: Plugins page shows the failed-file count')
     assert_true(src:find('Files in the plugin folder that could not be loaded:', 1, true) ~= nil, 'Suite 92: Plugins page lists failed files')
     pm.dirPath = nil
@@ -12159,7 +12160,7 @@ end
         local core = setmetatable({
             mq = mq, ImGui = mockImGui, runtime = { pullState = 'IDLE' }, VERSION = '2.15',
             colors = {}, saveLoadout = function() box.saves = box.saves + 1 end,
-            pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+            px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
         }, { __index = function(_, k)
             if k == 'ctrl' then return box.ctrl end
@@ -12186,6 +12187,8 @@ end
             if b.inst.net.actor then b.inst.tick() end
         end
     end
+    -- Ends on a tick: RPC responses delivered by flush() are queued and only
+    -- applied by the next tick, like received messages.
     local function pump(n)
         for _ = 1, (n or 1) do
             tickAll()
@@ -12193,6 +12196,7 @@ end
             tickAll()
             bus.flush()
         end
+        tickAll()
     end
     local function peerNames(box)
         local out = {}
@@ -12316,6 +12320,17 @@ end
     pump(1)
     assert_eq(A.inst.api.peer('Bob').pingMs, 12, 'Suite 95: ping round-trip recorded on the peer')
     assert_true(lastLog(A, 'Bob pong') ~= nil, 'Suite 95: pong logged')
+
+    -- 6b. RPC responses are queued by the callback and applied by tick(), so a
+    -- response can never mutate plugin state in the middle of a tick.
+    A.inst.api.peer('Bob').pingMs = nil
+    A.inst.sendPing('bob')
+    tickAll(); bus.flush(); tickAll(); bus.flush()
+    assert_eq(#A.inst.net.rpcInbox, 1, 'Suite 95: RPC response waits in rpcInbox until the next tick')
+    assert_nil(A.inst.api.peer('Bob').pingMs, 'Suite 95: response callback has not run before the tick')
+    tickAll()
+    assert_eq(#A.inst.net.rpcInbox, 0, 'Suite 95: tick drains rpcInbox')
+    assert_true(type(A.inst.api.peer('Bob').pingMs) == 'number', 'Suite 95: queued response applied on tick')
 
     -- 7. Zone scope: same-zone boxes only
     nB, nC = #B.cmds, #C.cmds
@@ -12602,6 +12617,20 @@ end
     assert_eq(ft and ft.name, 'a_rat', 'Suite 95: peerTarget reports the name')
     assert_eq(ft and ft.type, 'NPC', 'Suite 95: peerTarget reports the spawn type')
     assert_eq(ft and ft.engaged, false, 'Suite 95: full-HP target with no combat is not engaged')
+    assert_eq(ft and ft.since, clock.t, 'Suite 95: target carries since = when the box acquired it')
+    assert_eq(B.inst.api.myTargetSince(), clock.t, 'Suite 95: myTargetSince matches what the heartbeat carries')
+    assert_nil(C.inst.api.myTargetSince(), 'Suite 95: myTargetSince is nil without a target')
+    local sinceRat = ft.since
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(A.inst.api.peerTarget('bob').since, sinceRat, 'Suite 95: since does not move while the target is unchanged')
+    B.targetId, B.targetName = 778, 'a_bat'
+    clock.t = clock.t + 0.3
+    pump(1)
+    assert_eq(A.inst.api.peerTarget('bob').since, clock.t, 'Suite 95: retargeting restamps since')
+    B.targetId, B.targetName = 777, 'a_rat'
+    clock.t = clock.t + 0.3
+    pump(1)
     local sentB = B.inst.net.sent
     B.targetHp = 80
     clock.t = clock.t + 0.3
@@ -12737,7 +12766,7 @@ end)()
     local core = setmetatable({
         mq = mq, ImGui = mockImGui, runtime = {}, VERSION = '2.15', colors = {},
         saveLoadout = function() saves = saves + 1 end,
-        pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+        px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
         preBeginWindow = noop, postBeginWindow = noop,
         col32 = function() return 0 end, toVec = function(x, y) return { x = x, y = y } end,
         getSpellIconAnimation = function() return nil end,
@@ -12758,7 +12787,7 @@ end)()
 
     -- 1. Contract
     assert_eq(inst.id, 'buttons', 'Suite 96: plugin id')
-    assert_eq(inst.hasThread, true, 'Suite 96: buttons run on the plugin fiber')
+    assert_eq(inst.hasThread, false, 'Suite 96: no fiber - buttons fire on click, scripts are pumped per frame')
     assert_eq(inst.window.flag, 'show_buttons', 'Suite 96: window flag is show_buttons')
     assert_type(inst.window.isOpen, 'function', 'Suite 96: window declares isOpen')
     assert_type(inst.window.setOpen, 'function', 'Suite 96: window declares setOpen')
@@ -12845,20 +12874,16 @@ end)()
     local _, _, count3 = T.gridLayout({ buttonSize = 3 }, 'Primary', 2000, 2000)
     assert_eq(count3, 100, 'Suite 96: never more than 100 slots')
 
-    -- 6. Execution: queued from the UI, run on the fiber, one button per tick
-    T.queueButton('Primary', 2)
-    T.queueButton('Primary', 3)
-    assert_eq(#T.state.execQueue, 2, 'Suite 96: clicks queue buttons')
-    T.tick()
-    assert_eq(cmds[#cmds], '/ac pause', 'Suite 96: tick runs the first queued button')
-    assert_eq(#T.state.execQueue, 1, 'Suite 96: one button per tick')
-    T.tick()
-    assert_eq(cmds[#cmds], '/ac burn', 'Suite 96: next tick runs the next button')
+    -- 6. Execution: command buttons fire the instant they are clicked (no tick involved)
+    assert_eq(T.fireButton('Primary', 2), true, 'Suite 96: fireButton runs an assigned slot')
+    assert_eq(cmds[#cmds], '/ac pause', 'Suite 96: the command is issued immediately, without waiting for a tick')
+    T.fireButton('Primary', 3)
+    assert_eq(cmds[#cmds], '/ac burn', 'Suite 96: the next click fires immediately too')
+    assert_eq(T.fireButton('Primary', 50), false, 'Suite 96: fireButton on an empty slot does nothing')
     cmds = {}
     local multi = T.addButton({ label = 'Multi', cmd = '/one\n# comment\n\n/two\nnot a command\n/three', timerType = 'Seconds', timerKey = '10' }, false)
     T.assignButton('Primary', 4, multi)
     T.execBySetIndex('Primary', 4)
-    T.tick()
     assert_eq(table.concat(cmds, ','), '/one,/two,/three', 'Suite 96: multi-line buttons run each slash line and skip comments / blanks')
     assert_true(printedFind('Invalid command on line 5'), 'Suite 96: non-slash lines are reported')
     local c = T.cacheFor(multi)
@@ -12869,13 +12894,26 @@ end)()
     rem = T.readCooldown(db.buttons[multi], c)
     assert_eq(rem, 0, 'Suite 96: manual timer expires')
 
-    -- 7. Lua buttons run in a sandbox with a cooperative delay
+    -- 7. Lua buttons start immediately as coroutines; delay() yields to the per-frame pump
     _G.__btnTestFlag = nil
-    local luaKey = T.addButton({ label = 'Lua', cmd = '--lua\ndelay(50)\n_G.__btnTestFlag = mq.TLO.Me.CleanName()', timerType = 'None' }, false)
+    _G.__btnTestStep = 0
+    local luaKey = T.addButton({ label = 'Lua', cmd = '--lua\n_G.__btnTestStep = 1\ndelay(30)\n_G.__btnTestStep = 2\n_G.__btnTestFlag = mq.TLO.Me.CleanName()', timerType = 'None' }, false)
     T.runButton(db.buttons[luaKey], luaKey)
-    assert_eq(_G.__btnTestFlag, 'Alice', 'Suite 96: --lua buttons execute Lua with mq in scope')
-    assert_true(delays >= 1, 'Suite 96: delay() inside a Lua button goes through core.delay (cooperative)')
+    assert_eq(_G.__btnTestStep, 1, 'Suite 96: a --lua button starts running the moment it is clicked')
+    assert_eq(#T.state.scripts, 1, 'Suite 96: the script is parked while delay() waits')
+    assert_nil(_G.__btnTestFlag, 'Suite 96: code after delay() has not run yet')
+    T.pumpScripts()
+    assert_eq(_G.__btnTestStep, 1, 'Suite 96: pumping before the delay elapses keeps waiting')
+    local deadline = os.clock() + 0.5
+    while #T.state.scripts > 0 and os.clock() < deadline do T.pumpScripts() end
+    assert_eq(_G.__btnTestFlag, 'Alice', 'Suite 96: the script resumes after the delay with mq in scope')
+    assert_eq(#T.state.scripts, 0, 'Suite 96: finished scripts are removed')
+    assert_eq(delays, 0, 'Suite 96: script delays never block through core.delay / mq.delay')
+    local badKey = T.addButton({ label = 'Bad', cmd = '--lua\nerror("boom")', timerType = 'None' }, false)
+    T.runButton(db.buttons[badKey], badKey)
+    assert_true(#T.state.scripts == 0 and printedFind('Lua error: '), 'Suite 96: a failing script is reported and dropped')
     _G.__btnTestFlag = nil
+    _G.__btnTestStep = nil
     assert_eq(T.isLuaButton('-- lua\nreturn 1'), true, 'Suite 96: "-- lua" header accepted')
     assert_eq(T.isLuaButton('/cast 1'), false, 'Suite 96: slash commands are not Lua')
 
@@ -13007,9 +13045,7 @@ end)()
     cmds = {}
     T.getDb().sets.Primary = { [1] = 'Ok' }
     binds['/btnexec']('Primary', '1')
-    assert_eq(#T.state.execQueue, 1, 'Suite 96: /btnexec queues the button')
-    T.tick()
-    assert_eq(cmds[1], '/x', 'Suite 96: /btnexec runs it')
+    assert_eq(cmds[1], '/x', 'Suite 96: /btnexec fires the button immediately')
     inst.onCommand('btn', { 'btn', 'exec', 'Primary', '9' })
     assert_true(printedFind('has no button at slot 9'), 'Suite 96: /ac btn exec reports an empty slot')
     inst.onCommand('btn', { 'btn', 'exec', 'Nope', '1' })
@@ -13022,6 +13058,7 @@ end)()
     assert_true(printedFind('usage: /ac btn'), 'Suite 96: unknown subcommand prints usage')
 
     -- 14. Box Network sync: a remote save marks a reload, the next tick reloads
+    T.tick()
     assert_type(boxnetSubs.buttons_saved, 'function', 'Suite 96: subscribed to buttons_saved after the first tick')
     T.saveDb({ silent = true })
     local before = #T.hotbars()
@@ -13079,9 +13116,9 @@ end)()
     assert_eq(T.buttonAt('Primary', 5).label, 'Renamed', 'Suite 96: second save updates the same button')
     T.closeEditor()
     assert_eq(T.edit.open, false, 'Suite 96: closeEditor closes')
+    cmds = {}
     T.slotClicked(1, 'Primary', 5)
-    assert_eq(#T.state.execQueue, 1, 'Suite 96: clicking an assigned slot queues it')
-    T.state.execQueue = {}
+    assert_eq(cmds[#cmds], '/say new', 'Suite 96: clicking an assigned slot fires it at once')
     T.slotClicked(1, 'Primary', 6)
     assert_true(T.edit.open == true and T.edit.index == 6, 'Suite 96: clicking an empty slot opens the editor')
     T.closeEditor()
@@ -13211,6 +13248,76 @@ end)()
     assert_true(items[1].name == 'Circlet of Shadow' and items[1].button.cmd == '/useitem "Circlet of Shadow"' and items[1].button.icon == 1000 and items[1].button.iconType == 'Item' and items[1].button.timerType == 'Item', 'Suite 96: clicky entry -> /useitem with the item timer and item icon (Icon - 500)')
     assert_eq(items[2].sub, 'Haste - Pack 1', 'Suite 96: clicky shows its spell and location')
 
+    -- Box Control presets (Box Net quick actions as buttons)
+    local box = T.scanBoxControl()
+    assert_eq(#box, #T.BOX_PRESETS, 'Suite 96: Box Control tab lists every preset')
+    assert_eq(box[1].button.cmd, '/ac net all run', 'Suite 96: Run preset -> /ac net all run')
+    assert_eq(box[1].button.label, 'Run (all)', 'Suite 96: preset label carries the scope')
+    local follow = nil
+    for _, e in ipairs(box) do if e.name == 'Follow Me' then follow = e end end
+    assert_eq(follow.button.cmd, '/ac net all ma ${Me.CleanName}\n/ac net all assist chase', 'Suite 96: Follow Me is ma <me> + assist chase (name expanded per box)')
+    local camp = T.boxPresetButton(T.BOX_PRESETS[#T.BOX_PRESETS], 'zone')
+    assert_true(camp.cmd == '/ac net camp zone' and camp.label == 'Camp Here (zone)', 'Suite 96: Camp Here preset uses /ac net camp <scope>')
+    local grp = T.boxPresetButton(T.BOX_PRESETS[2], 'group')
+    assert_true(grp.cmd == '/ac net group pause' and grp.label == 'Pause (grp)' and grp.buttonColor[1] == 150, 'Suite 96: group scope + preset colour')
+    T.browser.boxScope = 'group'
+    assert_eq(T.scanBoxControl()[1].button.cmd, '/ac net group run', 'Suite 96: scope picker changes the generated commands')
+    T.browser.boxScope = 'all'
+    cmds = {}
+    T.runButton(follow.button, nil)
+    assert_eq(table.concat(cmds, ','), '/ac net all ma ${Me.CleanName},/ac net all assist chase', 'Suite 96: a two-line preset runs both /ac net lines')
+    local hbBox = T.hotbars()[1]
+    local boxSet = T.addBoxControlSet('all', hbBox)
+    assert_eq(boxSet, 'Box Control', 'Suite 96: Add All creates a Box Control set')
+    assert_eq(T.lastAssignedIndex('Box Control'), #T.BOX_PRESETS, 'Suite 96: the set holds every preset')
+    assert_eq(hbBox.sets[#hbBox.sets], 'Box Control', 'Suite 96: the set is added to the hotbar as a tab')
+    assert_eq(T.addBoxControlSet('zone', nil), 'Box Control (zone)', 'Suite 96: scoped set names stay unique')
+
+    -- Triune slash commands pick list (curated core list + live plugin help lines)
+    core.runtime.pluginManager = { helpLines = function()
+        return {
+            '  \ag/ac cursorui | cursorwin | cursormgr\ax - Toggle the Cursor Item Manager window',
+            '  \ag/ac btn <n>\ax - Show / hide hotbar n     \ag/ac btn new\ax - Create a hotbar',
+            '  \ag/ac run\ax - duplicate of a core command (must be skipped)',
+            'not a help line',
+        }
+    end }
+    local parsed = T.parseHelpLine('  \ag/ac btn <n>\ax - Show / hide hotbar n     \ag/ac btn new\ax - Create a hotbar')
+    assert_eq(#parsed, 2, 'Suite 96: a help line with two cmd - desc pairs yields two entries')
+    assert_true(parsed[1].button.cmd == '/ac btn <n>' and parsed[1].needsEdit == true and parsed[1].sub:find('Show / hide hotbar n', 1, true) ~= nil, 'Suite 96: placeholder commands are flagged for the editor')
+    assert_true(parsed[2].button.cmd == '/ac btn new' and parsed[2].needsEdit == false, 'Suite 96: plain commands become buttons as-is')
+    assert_eq(T.parseHelpLine('  \ag/ac cursorui | cursorwin | cursormgr\ax - Toggle the Cursor Item Manager window')[1].button.cmd, '/ac cursorui', 'Suite 96: alternatives keep the first form')
+    local cmdList = T.scanCommands()
+    assert_eq(#cmdList, #T.CORE_COMMANDS + 2, 'Suite 96: scanCommands lists the core commands plus the new plugin help commands (cursorui and run already in the core list)')
+    local seenCmd = {}
+    local dupes = 0
+    for _, e in ipairs(cmdList) do
+        if seenCmd[e.button.cmd] then dupes = dupes + 1 end
+        seenCmd[e.button.cmd] = true
+    end
+    assert_eq(dupes, 0, 'Suite 96: command list has no duplicate commands (plugin lines de-duplicated against the core list)')
+    assert_true(seenCmd['/ac burn on'] and seenCmd['/ac puller camp'] and seenCmd['/ac assist backline'] and seenCmd['/ac ma target'], 'Suite 96: fixed variants (burn on, modes, MA target) are present')
+    assert_true(seenCmd['/ac cursorui'] and seenCmd['/ac btn new'], 'Suite 96: plugin help commands are present')
+    assert_true(T.commandNeedsEdit('/ac range <dist>') and not T.commandNeedsEdit('/ac run'), 'Suite 96: commandNeedsEdit spots placeholders')
+    local grpCount = 0
+    for _, c in ipairs(T.CORE_COMMANDS) do if c.cmd:sub(1, 1) ~= '/' then grpCount = grpCount + 1 end end
+    assert_eq(grpCount, 0, 'Suite 96: every curated command is a slash command')
+    -- A placeholder entry opens the editor instead of placing a button
+    T.getDb().sets.Primary = { [1] = 'Ok' }
+    T.openBrowser('Cmd', 'assign', { hbId = 1, setName = 'Primary', index = 8 })
+    local rangeEntry = nil
+    for _, e in ipairs(cmdList) do if e.button.cmd == '/ac range <dist>' then rangeEntry = e end end
+    assert_eq(T.pickBrowserEntry(rangeEntry), true, 'Suite 96: picking a placeholder command succeeds')
+    assert_true(T.edit.open and T.edit.index == 8 and T.edit.tmp.cmd == '/ac range <dist>' and T.edit.tmp.label == 'Range', 'Suite 96: ...by opening the editor pre-filled at the target slot')
+    assert_nil(T.buttonAt('Primary', 8), 'Suite 96: nothing is placed until the editor saves')
+    T.closeEditor()
+    local runEntry = nil
+    for _, e in ipairs(cmdList) do if e.button.cmd == '/ac burn on' then runEntry = e end end
+    T.openBrowser('Cmd', 'assign', { hbId = 1, setName = 'Primary', index = 8 })
+    T.pickBrowserEntry(runEntry)
+    assert_true(T.buttonAt('Primary', 8) ~= nil and T.buttonAt('Primary', 8).cmd == '/ac burn on' and T.buttonAt('Primary', 8).label == 'Burn On', 'Suite 96: a plain command is placed directly')
+    core.runtime.pluginManager = nil
+
     -- Picking: into a chosen slot (one-shot) and into the first free slot (stays open)
     T.getDb().sets.Primary = { [1] = 'Ok' }
     T.openBrowser('AA', 'assign', { hbId = 1, setName = 'Primary', index = 4 })
@@ -13239,10 +13346,12 @@ end)()
     T.closeEditor()
     T.browser.open = false
 
-    -- /ac btn add <what> (hotbar 1 has no sets after the /btncopy above; hotbar 2 gets one)
-    T.hotbars()[2].sets = { 'Primary' }
+    -- /ac btn add <what> (hotbar 1's only set is the Box Control set added above)
+    T.state.activeSet = {}
     inst.onCommand('btn', { 'btn', 'add', 'discs' })
-    assert_true(T.browser.open and T.browser.tab == 'Disc' and T.browser.target and T.browser.target.hbId == 2 and T.browser.target.setName == 'Primary', 'Suite 96: /ac btn add discs opens the browser on the Discs tab targeting the first hotbar with a set')
+    assert_true(T.browser.open and T.browser.tab == 'Disc' and T.browser.target and T.browser.target.hbId == 1 and T.browser.target.setName == 'Box Control', 'Suite 96: /ac btn add discs opens the browser on the Discs tab targeting the first hotbar with a set')
+    inst.onCommand('btn', { 'btn', 'add', 'box' })
+    assert_eq(T.browser.tab, 'Box', 'Suite 96: /ac btn add box opens the Box Control tab')
     T.browser.open = false
     ctrl.show_buttons = true
     local okDraw2, errDraw2 = pcall(inst.onDrawUI)
@@ -13624,7 +13733,7 @@ end)()
     local dpsSrc = readFile('TAC/lua/tac/dps.lua')
     assert_true(dpsSrc:find("shareFight(rt.history[1])", 1, true) ~= nil, 'Suite 97: fight end broadcasts the summary')
     assert_true(dpsSrc:find("shareLive()", 1, true) ~= nil, 'Suite 97: live line shared from the tick')
-    assert_true(dpsSrc:find('BeginTabItem("Boxes##MainBoxesTab")', 1, true) ~= nil, 'Suite 97: DPS window has a Boxes tab')
+    assert_true(dpsSrc:find('BeginTabItem("Group##MainGroupTab")', 1, true) ~= nil, 'Suite 97: DPS window has a Group tab (Box Network meter)')
     assert_true(dpsSrc:find("'dps:share'", 1, true) ~= nil, 'Suite 97: DPS uses the dps:share message kind')
     -- sharing: a finished fight broadcasts its summary
     dpsInst.shareFight({ targetName = 'a_rat', totalDmg = 1200, duration = 8, peakDps = 150, playerDmg = 1000, petDmg = 200 })
@@ -13634,6 +13743,2361 @@ end)()
     dpsInst.onDestroy()
     assert_nil(subs['dps:share'], 'Suite 97: dps unsubscribes on destroy')
 end)()
+
+
+-- ============================================================================
+-- Suite 98: Box Network pull coordination (pullers stay off each other's mobs)
+-- ============================================================================
+;(function()
+    print('--- Suite 98: Box Network pull coordination ---')
+    local S = { peers = {}, mySince = nil, myName = 'Alice', combat = false, xtar = {} }
+    local fakeApi = {
+        available    = function() return true end,
+        peersInZone  = function(maxAge) S.lastMaxAge = maxAge return S.peers end,
+        myTargetSince = function() return S.mySince end,
+        myName       = function() return S.myName end,
+    }
+    local mockMq = {
+        cmd = function() end, cmdf = function() end, delay = function() end,
+        TLO = {
+            Me = { Combat = function() return S.combat end },
+            Target = setmetatable({ CleanName = function() return 'a_rat' end }, { __call = function() return 'target' end }),
+        },
+    }
+    local ctrl98 = { mode = 'Puller', submode = 'Hunt', box_pull_coordination = true }
+    local clock = { t = 100 }
+    local env = {
+        ctrl = ctrl98, mq = mockMq, print = function(msg) S.lastPrint = msg end,
+        pluginManager = { coreApi = setmetatable({ boxnet = fakeApi }, { __index = function() return nil end }) },
+        isXTargetId = function(id) return S.xtar[id] == true end,
+        stopMoving = function() S.stopped = (S.stopped or 0) + 1 end,
+        clearTarget = function() S.cleared = (S.cleared or 0) + 1 end,
+        pursuit = { id = 5, lastNavTargetId = 5 },
+        BOXNET_FRESH_SEC = 3.0, BOXNET_YIELD_SEC = 8.0, boxYieldedIds = {},
+    }
+    env.os = setmetatable({ clock = function() return clock.t end }, { __index = os })
+    env.boxnetApi = loadFunc(src, 'boxnetApi', env)
+    env.boxPullCoordinationOn = loadFunc(src, 'boxPullCoordinationOn', env)
+    env.boxnetClaimedTargets = loadFunc(src, 'boxnetClaimedTargets', env)
+    env.isBoxClaimedTarget = loadFunc(src, 'isBoxClaimedTarget', env)
+    env.boxnetYieldTarget = loadFunc(src, 'boxnetYieldTarget', env)
+    env.boxnetYieldNow = loadFunc(src, 'boxnetYieldNow', env)
+    local claimed, isClaimed, yieldTo, yieldNow = env.boxnetClaimedTargets, env.isBoxClaimedTarget, env.boxnetYieldTarget, env.boxnetYieldNow
+
+    local function peer(name, mode, target, extra)
+        local hb = { mode = mode, target = target }
+        for k, v in pairs(extra or {}) do hb[k] = v end
+        return { name = name, hb = hb }
+    end
+    local function count(t) local n = 0 for _ in pairs(t) do n = n + 1 end return n end
+
+    -- 1. Who claims what
+    S.peers = { peer('Bob', 'Puller', { id = 777, name = 'a_rat', type = 'NPC', engaged = false, since = 50 }) }
+    local c = claimed()
+    assert_eq(S.lastMaxAge, 3.0, 'Suite 98: peers are read with the 3s freshness window')
+    assert_eq(c[777] and c[777].name, 'Bob', 'Suite 98: a Puller peer claims the NPC it targets even before engaging')
+    assert_eq(c[777].since, 50, 'Suite 98: claim carries the peer since stamp')
+    assert_eq(c[777].puller, true, 'Suite 98: claim notes the peer is a puller')
+    S.peers = { peer('Bob', 'Assist', { id = 777, type = 'NPC', engaged = false }) }
+    assert_eq(count(claimed()), 0, 'Suite 98: an Assist peer merely targeting a mob does not claim it')
+    S.peers = { peer('Bob', 'Assist', { id = 777, type = 'NPC', engaged = true }) }
+    assert_eq(claimed()[777] and claimed()[777].engaged, true, 'Suite 98: any peer fighting a mob claims it')
+    S.peers = { peer('Bob', 'Puller', { id = 50, type = 'PC', engaged = false }) }
+    assert_eq(count(claimed()), 0, 'Suite 98: PC targets are never claims')
+    S.peers = { peer('Bob', 'Puller', nil) }
+    assert_eq(count(claimed()), 0, 'Suite 98: peer without a target claims nothing')
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC', since = 60 }), peer('Carol', 'Puller', { id = 777, type = 'NPC', since = 40 }) }
+    assert_eq(claimed()[777].name, 'Carol', 'Suite 98: earliest acquirer owns a doubly-claimed mob')
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC', since = 60, engaged = true }), peer('Carol', 'Puller', { id = 777, type = 'NPC', since = 40 }) }
+    assert_eq(claimed()[777].name, 'Bob', 'Suite 98: an engaged peer outranks an earlier but idle claim')
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC' }) }
+    ctrl98.mode = 'Assist'
+    assert_eq(count(claimed()), 0, 'Suite 98: coordination is Puller-only (Assist boxes follow the MA onto shared mobs)')
+    ctrl98.mode = 'Manual'
+    assert_eq(count(claimed()), 0, 'Suite 98: Manual mode ignores claims')
+    ctrl98.mode = 'Puller'
+    ctrl98.box_pull_coordination = false
+    assert_eq(count(claimed()), 0, 'Suite 98: the setting turns coordination off')
+    ctrl98.box_pull_coordination = true
+    local savedAvail = fakeApi.available
+    fakeApi.available = function() return false end
+    assert_eq(count(claimed()), 0, 'Suite 98: no Box Network -> nothing claimed, scans behave as before')
+    fakeApi.available = savedAvail
+
+    -- 2. Scan filter: claimed mobs and recently yielded mobs are skipped
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC' }) }
+    assert_eq(isClaimed(777), true, 'Suite 98: scan skips a peer-claimed spawn')
+    assert_eq(isClaimed(778), false, 'Suite 98: scan keeps an unclaimed spawn')
+    assert_eq(isClaimed(778, {}), false, 'Suite 98: a precomputed claim set is honoured')
+    assert_eq(isClaimed(778, { [778] = { name = 'Bob' } }), true, 'Suite 98: precomputed claim set marks the spawn taken')
+    env.boxYieldedIds[900] = clock.t
+    assert_eq(isClaimed(900), true, 'Suite 98: a mob we just yielded stays skipped')
+    clock.t = clock.t + 7.9
+    assert_eq(isClaimed(900), true, 'Suite 98: ... for the yield window')
+    clock.t = clock.t + 0.2
+    assert_eq(isClaimed(900), false, 'Suite 98: ... then it is fair game again')
+    assert_nil(env.boxYieldedIds[900], 'Suite 98: the expired yield entry is dropped')
+
+    -- 3. Yielding a pull target
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC', since = 50, engaged = false }) }
+    S.mySince = 40
+    assert_nil(yieldTo(777), 'Suite 98: we acquired first -> keep it')
+    S.mySince = 60
+    assert_eq(yieldTo(777), 'Bob', 'Suite 98: the peer acquired first -> we let go')
+    S.mySince = 50
+    assert_nil(yieldTo(777), 'Suite 98: same instant: the name that sorts first keeps it (Alice vs Bob -> Alice keeps)')
+    S.myName = 'Carol'
+    assert_eq(yieldTo(777), 'Bob', 'Suite 98: same instant, other side: Carol yields to Bob - exactly one side backs off')
+    S.myName = 'Alice'
+    S.mySince = nil
+    assert_eq(yieldTo(777), 'Bob', 'Suite 98: our own stamp unknown yet -> assume the peer was first')
+    S.mySince = 40
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC', since = 50, engaged = true }) }
+    assert_eq(yieldTo(777), 'Bob', 'Suite 98: a peer already fighting it wins regardless of timing')
+    S.xtar[777] = true
+    assert_nil(yieldTo(777), 'Suite 98: never yield a mob that is on our XTarget (it is coming for us)')
+    S.xtar[777] = nil
+    S.combat = true
+    assert_nil(yieldTo(777), 'Suite 98: never yield while we are in combat')
+    S.combat = false
+    S.peers = { peer('Bob', 'Assist', { id = 777, type = 'NPC', since = 50, engaged = false }) }
+    assert_nil(yieldTo(777), 'Suite 98: an Assist peer that only targets our mob does not push us off it')
+    assert_nil(yieldTo(0), 'Suite 98: no target -> nothing to yield')
+    ctrl98.mode = 'Assist'
+    S.peers = { peer('Bob', 'Puller', { id = 777, type = 'NPC', since = 50, engaged = true }) }
+    assert_nil(yieldTo(777), 'Suite 98: Assist mode never yields')
+    ctrl98.mode = 'Puller'
+
+    -- 4. Letting go: clears the target, halts movement, resets pursuit, blacklists the id
+    S.stopped, S.cleared, S.lastPrint = 0, 0, nil
+    clock.t = 500
+    yieldNow(777, 'Bob', 'Puller (Hunt)')
+    assert_eq(S.stopped, 1, 'Suite 98: yielding stops movement')
+    assert_eq(S.cleared, 1, 'Suite 98: yielding clears the target')
+    assert_eq(env.pursuit.id, 0, 'Suite 98: yielding resets pursuit')
+    assert_eq(env.boxYieldedIds[777], 500, 'Suite 98: yielded id is remembered')
+    assert_true(S.lastPrint:find("Puller (Hunt): #777 (a_rat) is Bob's pull", 1, true) ~= nil, 'Suite 98: chat line names the peer: ' .. tostring(S.lastPrint))
+    assert_eq(isClaimed(777, {}), true, 'Suite 98: the yielded mob is skipped by the next scan even before the peer heartbeat shows it')
+
+    -- 5. Wiring in the core
+    assert_true(src:find('local claimed = runtime.boxnetClaimedTargets()', 1, true) ~= nil, 'Suite 98: findRoamTarget builds the claim set once per scan')
+    assert_true(src:find('if sid > 0 and not runtime.isBoxClaimedTarget(sid, claimed) then', 1, true) ~= nil, 'Suite 98: findRoamTarget skips claimed spawns')
+    assert_true(src:find("local yieldTo = runtime.boxnetYieldTarget(runtime.pullTargetId)", 1, true) ~= nil, 'Suite 98: Puller (Camp) checks for a yield while heading to the mob')
+    assert_true(src:find("runtime.boxnetYieldNow(runtime.pullTargetId, yieldTo, 'Puller')", 1, true) ~= nil, 'Suite 98: Puller (Camp) lets go and returns to IDLE')
+    assert_true(src:find("runtime.boxnetYieldNow(tid, yieldTo, 'Puller (Hunt)')", 1, true) ~= nil, 'Suite 98: Puller (Hunt) lets go while travelling')
+    assert_true(src:find("if c.box_pull_coordination == nil then c.box_pull_coordination = true end", 1, true) ~= nil, 'Suite 98: setting defaults on for existing loadouts')
+    assert_true(src:find("box_pull_coordination    = true,", 1, true) ~= nil, 'Suite 98: setting defaults on for new loadouts')
+    assert_true(src:find("Stay Off Other Boxes\\' Pulls (Box Network)", 1, true) ~= nil, 'Suite 98: settings checkbox exists')
+    local bnSrc = readFile('TAC/lua/tac/boxnet.lua')
+    assert_true(bnSrc:find('since   = net.targetSince,', 1, true) ~= nil, 'Suite 98: heartbeat target carries since')
+    assert_true(bnSrc:find('function api.myTargetSince()', 1, true) ~= nil, 'Suite 98: boxnet exposes myTargetSince')
+end)()
+
+
+-- ============================================================================
+-- Suite 97: Group window "Come" button + /ac cometo (Box Network)
+-- ============================================================================
+;(function()
+    print('--- Suite 97: Group window Come button + /ac cometo ---')
+    local realPrint = print
+    local printed = {}
+    print = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end ---@diagnostic disable-line: lowercase-global
+    local function printedFind(needle)
+        for _, l in ipairs(printed) do if l:find(needle, 1, true) then return true end end
+        return false
+    end
+    local cmds, sent = {}, {}
+    local meshLoaded, spawns = true, { Bob = { id = 77, dist = 140 } }
+    local peers = { bob = { name = 'Bob', hb = {} } }
+    local mq = {
+        cmd = function(c) cmds[#cmds + 1] = c end,
+        cmdf = function(f, ...) cmds[#cmds + 1] = string.format(f, ...) end,
+        TLO = {
+            Me = { CleanName = function() return 'Alice' end },
+            Navigation = { MeshLoaded = function() return meshLoaded end },
+            Spawn = function(q)
+                local name = q:match('^pc =(.+)$')
+                local sp = spawns[name]
+                return setmetatable({ ID = function() return sp and sp.id or 0 end, Distance = function() return sp and sp.dist or 0 end },
+                    { __call = function() return sp ~= nil end })
+            end,
+        },
+    }
+    local core = { mq = mq, ImGui = {}, ctrl = {}, colors = {}, boxnet = {
+        peer = function(n) return peers[tostring(n):lower()] end,
+        command = function(scope, lines) sent[#sent + 1] = { scope = scope, lines = lines } return true end,
+    } }
+    local inst = assert(loadfile('TAC/lua/tac/hud_group.lua'))()
+    inst.onInit(core)
+    local G = inst._
+
+    assert_true(G.boxPeerFor('Bob') ~= nil, 'Suite 97: a Box Network peer is recognised')
+    assert_nil(G.boxPeerFor('Stranger'), 'Suite 97: non-box group members get no Come button')
+    assert_eq(G.sendComeToMe('Bob'), true, 'Suite 97: Come sends through core.boxnet.command')
+    assert_true(sent[1].scope == 'Bob' and sent[1].lines == 'cometo Alice', 'Suite 97: Come sends "cometo <me>" to that box only')
+    core.boxnet.command = function() return false, 'NoConnection' end
+    local okS, why = G.sendComeToMe('Bob')
+    assert_true(okS == false and why == 'NoConnection', 'Suite 97: send failures are reported')
+
+    assert_eq(inst.onCommand('cursorui', { 'cursorui' }), false, 'Suite 97: unrelated commands fall through')
+    assert_eq(inst.onCommand('cometo', { 'cometo', 'Bob' }), true, 'Suite 97: /ac cometo handled')
+    assert_eq(cmds[#cmds], '/nav id 77 distance=10', 'Suite 97: /ac cometo navigates to the player spawn')
+    assert_true(printedFind('Coming to Bob'), 'Suite 97: acknowledges in chat')
+    inst.onCommand('come', { 'come', 'Nobody' })
+    assert_true(printedFind('not in this zone'), 'Suite 97: unknown player reported')
+    inst.onCommand('cometo', { 'cometo', 'stop' })
+    assert_eq(cmds[#cmds], '/nav stop', 'Suite 97: /ac cometo stop halts navigation')
+    inst.onCommand('cometo', { 'cometo' })
+    assert_true(printedFind('usage: /ac cometo'), 'Suite 97: no name prints usage')
+    meshLoaded = false
+    local before = #cmds
+    inst.onCommand('cometo', { 'cometo', 'Bob' })
+    assert_true(#cmds == before and printedFind('MQ2Nav is not loaded'), 'Suite 97: no nav mesh -> no command, clear message')
+    assert_true(#inst.help >= 1, 'Suite 97: help line contributed')
+    print = realPrint ---@diagnostic disable-line: lowercase-global
+end)()
+
+-- ============================================================================
+-- Suite 99: DPS plugin group meter (Box Network) + compact window render
+-- ============================================================================
+;(function()
+    print('--- Suite 99: DPS group meter & compact window ---')
+    local S = { nowMs = 100000, cmds = {}, shares = {}, group = { bob = true }, imgui = {} }
+    local subs = {}
+    local function callable(ret, fields)
+        return setmetatable(fields or {}, { __call = function() return ret end })
+    end
+    local mq = {
+        configDir = './tests/__nonexistent_cfg__',
+        event = function() end, unevent = function() end, bind = function() end, unbind = function() end,
+        cmd = function(c) S.cmds[#S.cmds + 1] = c end,
+        cmdf = function(f, ...) S.cmds[#S.cmds + 1] = string.format(f, ...) end,
+        gettime = function() return S.nowMs end,
+        delay = function() end,
+        TLO = {
+            Me = { CleanName = function() return 'Alice' end, Combat = function() return false end, ID = function() return 1 end },
+            EverQuest = { Server = function() return 'Test' end },
+            Target = { ID = function() return 0 end, Dead = function() return false end, Type = function() return 'NPC' end },
+            MacroQuest = { GameState = function() return 'INGAME' end },
+            Group = {
+                Member = function(n)
+                    if S.group[tostring(n):lower()] then return callable('member', { ID = function() return 7 end }) end
+                    return callable(nil, { ID = function() return 0 end })
+                end,
+            },
+        },
+    }
+    -- ImGui stub that enters every window / table / tab so the bodies run,
+    -- and records the strings it was asked to draw.
+    local texts = {}
+    local function rec(...)
+        local args = { ... }
+        texts[#texts + 1] = tostring(args[#args])
+    end
+    local mockImGui = setmetatable({
+        Begin = function() return true, true end, End = function() end,
+        BeginTable = function() return true end, EndTable = function() end,
+        BeginTabBar = function() return true end, EndTabBar = function() end,
+        BeginTabItem = function() return true end, EndTabItem = function() end,
+        BeginChild = function() return true end, EndChild = function() end,
+        BeginCombo = function() return false end, BeginPopupModal = function() return false, false end,
+        Checkbox = function(_, v) return v, false end, SliderFloat = function(_, v) return v, false end,
+        Button = function() return false end, SmallButton = function(label) S.imgui.buttons = (S.imgui.buttons or 0) + 1 return S.clickLabel ~= nil and label:find(S.clickLabel, 1, true) ~= nil end,
+        IsItemHovered = function() return false end,
+        Text = rec, TextColored = rec, TextDisabled = rec,
+        ProgressBar = function(frac, w, h, label) S.imgui.bars = (S.imgui.bars or 0) + 1 texts[#texts + 1] = tostring(label) end,
+        CalcTextSize = function(t) return #tostring(t) * 7, 14 end,
+        SameLine = function(x) if x then S.imgui.lastSameLineX = x end end,
+    }, { __index = function() return function() end end })
+    local core = setmetatable({
+        VERSION = '2.15', ctrl = { plugins = {}, show_dps = true }, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+        px = function(n) return n end, colors = {}, pushTheme = function() end, popTheme = function() end, accent = function() end, setTooltip = function() end,
+        preBeginWindow = function() end, postBeginWindow = function() end, saveLoadout = function() end,
+        drawStatusProgressBar = function(frac, w, h, label, r, g, b) S.imgui.bars = (S.imgui.bars or 0) + 1 S.lastBar = { frac = frac, label = label, r = r, g = g, b = b } texts[#texts + 1] = tostring(label) end,
+        boxnet = { available = function() return S.bnAvail ~= false end,
+            subscribe = function(kind, fn) subs[kind] = fn return function() subs[kind] = nil end end,
+            broadcast = function(kind, data) S.shares[#S.shares + 1] = { kind = kind, data = data } return true end },
+    }, { __index = function() return nil end })
+    local enumNames = { 'ImGuiCond', 'ImGuiWindowFlags', 'ImGuiTableFlags', 'ImGuiTableColumnFlags', 'ImGuiCol', 'ImGuiTreeNodeFlags' }
+    local savedEnums = {}
+    for _, n in ipairs(enumNames) do
+        savedEnums[n] = rawget(_G, n)
+        rawset(_G, n, setmetatable({}, { __index = function() return 0 end }))
+    end
+    local savedBit = rawget(_G, 'bit')
+    if not savedBit then rawset(_G, 'bit', { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end }) end
+
+    local inst = assert(loadfile('TAC/lua/tac/dps.lua'))()
+    local realPrint = print
+    print = function() end ---@diagnostic disable-line: lowercase-global
+    local okInit, errInit = pcall(inst.onInit, core)
+    print = realPrint ---@diagnostic disable-line: lowercase-global
+    assert_true(okInit, 'Suite 99: dps plugin initialises: ' .. tostring(errInit))
+    inst.ensureBoxSubscription()
+    assert_true(subs['dps:share'] ~= nil, 'Suite 99: subscribed to dps:share')
+    local rt, cfg = inst.rt, inst.cfg
+
+    -- 1. fmtNum
+    assert_eq(inst.fmtNum(0), '0', 'Suite 99: fmtNum 0')
+    assert_eq(inst.fmtNum(999), '999', 'Suite 99: fmtNum 999')
+    assert_eq(inst.fmtNum(1234), '1,234', 'Suite 99: fmtNum thousands')
+    assert_eq(inst.fmtNum(1234567.8), '1,234,567', 'Suite 99: fmtNum millions, floors')
+    assert_eq(inst.fmtNum(-1500), '-1,500', 'Suite 99: fmtNum negative')
+    assert_eq(inst.fmtNum(nil), '0', 'Suite 99: fmtNum nil')
+
+    -- 2. Live share carries the player / pet split; receiver keeps it
+    rt.inFight, rt.fightStartTime, rt.totalDamage, rt.playerDamage, rt.petDamage = true, S.nowMs - 4000, 1000, 700, 300
+    rt.currentTargetName = 'a_rat'
+    rt.lastLiveShareAt = 0
+    inst.shareLive()
+    local sh = S.shares[#S.shares]
+    assert_eq(sh and sh.data.playerDmg, 700, 'Suite 99: live share carries player damage')
+    assert_eq(sh and sh.data.petDmg, 300, 'Suite 99: live share carries pet damage')
+    assert_eq(sh and sh.data.dps, 250, 'Suite 99: live share dps = 1000 / 4s')
+    inst.onBoxDps({ live = true, target = 'a_rat', dmg = 2000, dps = 500, dur = 4, playerDmg = 1500, petDmg = 500 }, { character = 'Bob' })
+    inst.onBoxDps({ live = true, target = 'a_bat', dmg = 400, dps = 100, dur = 4 }, { character = 'Carol' })
+    local list = inst.boxList()
+    assert_eq(#list, 2, 'Suite 99: two boxes kept')
+    assert_eq(list[1].live.playerDmg, 1500, 'Suite 99: receiver keeps the live player split')
+    assert_eq(list[1].live.petDmg, 500, 'Suite 99: receiver keeps the live pet split')
+
+    -- 3. Meter rows: group scope = me + boxes in my group, sorted by dps
+    cfg.meterScope = 'group'
+    local rows, sum = inst.meterRows()
+    assert_eq(#rows, 2, 'Suite 99: group scope: me + Bob (Carol is not in the group)')
+    assert_eq(rows[1].name, 'Bob', 'Suite 99: top dps first')
+    assert_eq(rows[1].dps, 500, 'Suite 99: Bob 500 dps')
+    assert_eq(rows[2].name, 'Alice', 'Suite 99: me second')
+    assert_eq(rows[2].me, true, 'Suite 99: my row is flagged')
+    assert_eq(rows[2].dps, 250, 'Suite 99: my live dps')
+    assert_eq(sum.live, true, 'Suite 99: meter is live while someone fights')
+    assert_eq(sum.dps, 750, 'Suite 99: party dps sums the rows')
+    assert_eq(sum.dmg, 3000, 'Suite 99: party damage sums the rows')
+    assert_eq(sum.topDps, 500, 'Suite 99: top dps recorded for bar scaling')
+    assert_eq(sum.fighting, 2, 'Suite 99: both fighting')
+    assert_true(math.abs(rows[1].pct - 2000 / 3000) < 1e-9, 'Suite 99: pct is the share of combined damage')
+    cfg.meterScope = 'all'
+    rows, sum = inst.meterRows()
+    assert_eq(#rows, 3, 'Suite 99: all scope includes Carol')
+    assert_eq(rows[3].name, 'Carol', 'Suite 99: lowest dps last')
+    assert_eq(sum.count, 3, 'Suite 99: count = rows')
+
+    -- 4. Idle member while live -> 0 row; nobody live -> last fights
+    rt.inFight = false
+    rows, sum = inst.meterRows()
+    assert_eq(sum.live, true, 'Suite 99: still live while a box fights')
+    local mine
+    for _, r in ipairs(rows) do if r.me then mine = r end end
+    assert_eq(mine and mine.dps, 0, 'Suite 99: idle me shows 0 while the meter is live')
+    assert_eq(mine and mine.live, false, 'Suite 99: idle me is not live')
+    inst.onBoxDps({ live = false, target = 'a_rat', dmg = 2400, dps = 400, dur = 6, playerDmg = 2000, petDmg = 400 }, { character = 'Bob' })
+    inst.onBoxDps({ live = false, target = 'a_bat', dmg = 600, dps = 120, dur = 5 }, { character = 'Carol' })
+    rt.history = { { targetName = 'a_rat', duration = 5, totalDmg = 1500, playerDmg = 1200, petDmg = 300, peakDps = 300, timestamp = '12:00:00' } }
+    rows, sum = inst.meterRows()
+    assert_eq(sum.live, false, 'Suite 99: nobody fighting -> last-fight meter')
+    assert_eq(rows[1].name .. '/' .. rows[1].dps, 'Bob/400', 'Suite 99: last fight: Bob first')
+    assert_eq(rows[2].name .. '/' .. rows[2].dps, 'Alice/300', 'Suite 99: last fight: my archived fight')
+    assert_eq(rows[2].at, '12:00:00', 'Suite 99: my row carries the archive timestamp')
+    assert_eq(rows[2].playerDmg, 1200, 'Suite 99: my row carries the player split')
+    assert_eq(sum.dps, 820, 'Suite 99: last-fight party dps')
+    rt.history = {}
+    rows = inst.meterRows()
+    for _, r in ipairs(rows) do if r.me then mine = r end end
+    assert_eq(mine.dps, 0, 'Suite 99: no history -> my row is 0, still listed')
+    assert_eq(#rows, 3, 'Suite 99: my row is always present')
+    local sortedNames = {}
+    for _, r in ipairs(rows) do sortedNames[#sortedNames + 1] = r.name end
+    assert_eq(table.concat(sortedNames, ','), 'Bob,Carol,Alice', 'Suite 99: ties and zeros sort by dps then name')
+
+    -- 5. Group report
+    S.cmds = {}
+    inst.reportGroupDPS()
+    assert_true(S.cmds[1]:find('^/group %[Triune DPS%] Group %(last fight%) 520 dps: Bob 400 %(80%%%) | Carol 120 %(20%%%) | Alice 0 %(0%%%)$') ~= nil, 'Suite 99: group report line: ' .. tostring(S.cmds[1]))
+    inst.reportGroupDPS('raid')
+    assert_true(S.cmds[2]:find('^/raid ', 1) ~= nil, 'Suite 99: report channel override')
+    inst.dpsCommandHandler('group', 'say')
+    assert_true(S.cmds[3]:find('^/say ', 1) ~= nil, 'Suite 99: /dps group <channel>')
+
+    -- 6. Config round trip keeps the meter keys
+    local dsrc = readFile('TAC/lua/tac/dps.lua')
+    assert_true(dsrc:find('meterScope = %q', 1, true) ~= nil, 'Suite 99: meterScope persisted')
+    assert_true(dsrc:find('compactGroup = %s', 1, true) ~= nil, 'Suite 99: compactGroup persisted')
+    assert_true(dsrc:find("if data.meterScope == 'group' or data.meterScope == 'all' then", 1, true) ~= nil, 'Suite 99: meterScope loaded with validation')
+    assert_true(dsrc:find('Show Group Meter in Compact Window', 1, true) ~= nil, 'Suite 99: compact meter toggle in Settings tab')
+    assert_true(dsrc:find('"Meter Scope"', 1, true) ~= nil, 'Suite 99: scope combo in Settings tab')
+    assert_true(dsrc:find("'Report Group##MainGroupRpt'", 1, true) ~= nil, 'Suite 99: Group tab has a Report Group button')
+    assert_true(dsrc:find('Triune DPS###TriuneDPSMiniWindow', 1, true) ~= nil, 'Suite 99: compact window keeps its ImGui id')
+    assert_true(dsrc:find('ImGui.SameLine(180)', 1, true) == nil and dsrc:find('ImGui.SameLine(150)', 1, true) == nil, 'Suite 99: compact window has no hard-coded x offsets')
+    assert_true(dsrc:find('group DPS meter fed by the other boxes', 1, true) ~= nil, 'Suite 99: uses text names the meter')
+
+    -- 7. Render: compact window with the meter, then the full window
+    cfg.compact, cfg.compactGroup, cfg.meterScope = true, true, 'all'
+    core.ctrl.show_dps = true
+    rt.inFight, rt.fightStartTime, rt.totalDamage, rt.playerDamage, rt.petDamage, rt.petHits = true, S.nowMs - 4000, 1000, 700, 300, 3
+    inst.onBoxDps({ live = true, target = 'a_rat', dmg = 2000, dps = 500, dur = 4 }, { character = 'Bob' })
+    texts, S.imgui = {}, {}
+    local okDraw, errDraw = pcall(inst.onDrawUI)
+    assert_true(okDraw, 'Suite 99: compact window renders: ' .. tostring(errDraw))
+    local joined = table.concat(texts, '\n')
+    assert_true(joined:find('LIVE', 1, true) ~= nil, 'Suite 99: compact shows the LIVE tag')
+    assert_true(joined:find('a_rat', 1, true) ~= nil, 'Suite 99: compact shows the target')
+    assert_true(joined:find('1,000 dmg', 1, true) ~= nil, 'Suite 99: compact shows total damage with separators')
+    assert_true(joined:find('You 175 (70%)   Pet 75 (30%)', 1, true) ~= nil, 'Suite 99: compact split bar text')
+    assert_true(joined:find('Group (live)', 1, true) ~= nil, 'Suite 99: compact shows the group meter header')
+    assert_true(joined:find('750 dps', 1, true) ~= nil, 'Suite 99: compact shows the party dps')
+    assert_true(joined:find('500 dps  (67%)', 1, true) ~= nil, 'Suite 99: meter bar label: dps and share')
+    assert_true(joined:find('250 dps  (33%)', 1, true) ~= nil, 'Suite 99: my meter bar label')
+    assert_true((S.imgui.bars or 0) >= 3, 'Suite 99: split bar + two meter bars drawn')
+    assert_true(S.imgui.lastSameLineX ~= nil and S.imgui.lastSameLineX > 0, 'Suite 99: right-aligned text uses CalcTextSize')
+    cfg.compactGroup = false
+    texts = {}
+    assert_true(pcall(inst.onDrawUI), 'Suite 99: compact renders without the meter')
+    assert_true(table.concat(texts, '\n'):find('Group (live)', 1, true) == nil, 'Suite 99: meter hidden when disabled')
+    rt.petDamage, rt.petHits = 0, 0
+    texts = {}
+    assert_true(pcall(inst.onDrawUI), 'Suite 99: compact renders without a pet')
+    assert_true(table.concat(texts, '\n'):find('Pet ', 1, true) == nil, 'Suite 99: no split bar without pet damage')
+    cfg.compact = false
+    texts = {}
+    okDraw, errDraw = pcall(inst.onDrawUI)
+    assert_true(okDraw, 'Suite 99: full window renders with the Group tab: ' .. tostring(errDraw))
+    joined = table.concat(texts, '\n')
+    assert_true(joined:find('Group DPS (live)', 1, true) ~= nil, 'Suite 99: Group tab header')
+    assert_true(joined:find('2 of 3 fighting', 1, true) ~= nil, 'Suite 99: Group tab fighting count (Carol idle with a last fight)')
+    assert_true(joined:find('2,000', 1, true) ~= nil, 'Suite 99: Group tab damage column')
+    S.bnAvail = false
+    texts = {}
+    assert_true(pcall(inst.onDrawUI), 'Suite 99: full window renders without the Box Network')
+    assert_true(table.concat(texts, '\n'):find('Box Network plugin not connected', 1, true) ~= nil, 'Suite 99: Group tab explains the missing plugin')
+    S.bnAvail = nil
+    -- compact "Group" button reports the meter
+    cfg.compact, cfg.compactGroup = true, true
+    S.cmds, S.clickLabel = {}, 'Group##MiniGroupRptBtn'
+    assert_true(pcall(inst.onDrawUI), 'Suite 99: compact renders with a click')
+    S.clickLabel = nil
+    assert_true(S.cmds[1] ~= nil and S.cmds[1]:find('Group (live)', 1, true) ~= nil, 'Suite 99: compact Group button reports the live meter: ' .. tostring(S.cmds[1]))
+
+    inst.onDestroy()
+    assert_nil(subs['dps:share'], 'Suite 99: unsubscribed on destroy')
+    for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
+    if not savedBit then rawset(_G, 'bit', nil) end
+end)()
+
+
+-- ============================================================================
+-- Suite 100: Compact window rework (shared START / PAUSE / BURN buttons and
+-- mode combos, the activity line, every row, the options menu, defaults)
+-- ============================================================================
+;(function()
+    print('--- Suite 100: Compact window ---')
+    local S = { cmds = {}, saves = 0, texts = {}, buttons = {}, bars = {}, comboRet = {}, checkRet = {}, popups = {} }
+    local function callable(ret, fields) return setmetatable(fields or {}, { __call = function() return ret end }) end
+    local T = { id = 0 }
+    local ME = { hp = 100, mana = 80, en = 90, maxMana = 1000, combat = false, casting = nil, x = 0, y = 0, z = 0 }
+    local NAV = { loaded = true, mesh = true, active = false, stick = true }
+    local spawns = {}
+    local mq = {
+        cmd = function(c) S.cmds[#S.cmds + 1] = c end,
+        cmdf = function(f, ...) S.cmds[#S.cmds + 1] = string.format(f, ...) end,
+        TLO = {
+            Me = {
+                PctHPs = function() return ME.hp end, PctMana = function() return ME.mana end,
+                PctEndurance = function() return ME.en end, MaxMana = function() return ME.maxMana end,
+                Combat = function() return ME.combat end, Casting = { Name = function() return ME.casting end },
+                X = function() return ME.x end, Y = function() return ME.y end, Z = function() return ME.z end,
+                CleanName = function() return 'Alice' end,
+            },
+            Target = setmetatable({
+                ID = function() return T.id end, CleanName = function() return T.name end, Level = function() return T.lvl end,
+                Class = { ShortName = function() return T.class end }, ConColor = function() return T.con end,
+                PctHPs = function() return T.hp end, Distance = function() return T.dist end,
+                Type = function() return T.type or 'NPC' end, LineOfSight = function() return T.los ~= false end,
+                PctAggro = function() return T.aggro or 0 end,
+            }, { __call = function() return T.id > 0 end }),
+            Spawn = function(id) local sp = spawns[id] return callable(sp ~= nil, { CleanName = function() return sp and sp.name end }) end,
+            Navigation = { Active = function() return NAV.active end },
+            Zone = { ShortName = function() return 'gfaydark' end },
+        },
+    }
+    local function rec(...) local a = { ... } S.texts[#S.texts + 1] = tostring(a[#a]) end
+    local function btn(label) S.buttons[#S.buttons + 1] = label return S.clickLabel ~= nil and label:find(S.clickLabel, 1, true) ~= nil end
+    local mockImGui = setmetatable({
+        Begin = function() return S.openRet ~= false, true end, End = function() end,
+        Button = btn, SmallButton = btn,
+        Combo = function(label, idx) return S.comboRet[label] or idx end,
+        Checkbox = function(label, v) local r = S.checkRet[label] if r == nil then return v end return r end,
+        SliderFloat = function(_, v) return S.sliderRet or v end,
+        MenuItem = function(label) return S.clickLabel ~= nil and label:find(S.clickLabel, 1, true) ~= nil end,
+        BeginPopupContextWindow = function(id) S.popups[#S.popups + 1] = id return S.popupOpen == true end,
+        EndPopup = function() end, OpenPopup = function(id) S.opened = id end,
+        IsItemHovered = function() return false end,
+        Text = rec, TextColored = rec, TextDisabled = rec,
+        ProgressBar = function(frac, w, h, label) S.bars[#S.bars + 1] = { frac = frac, w = w, h = h, label = label } S.texts[#S.texts + 1] = tostring(label) end,
+        GetCursorScreenPos = function() return 10, 10 end, GetItemRectMax = function() S.rectCalls = (S.rectCalls or 0) + 1 return S.rectMax or 410, 32 end,
+        GetFontSize = function() return S.fontSize or 13 end,
+        SetNextWindowBgAlpha = function(a) S.alpha = a end,
+        PushStyleVar = function() S.styleVars = (S.styleVars or 0) + 1 end, PopStyleVar = function() S.styleVars = S.styleVars - 1 end,
+        PushStyleColor = function() S.styleCols = (S.styleCols or 0) + 1 end, PopStyleColor = function(n) S.styleCols = S.styleCols - (n or 1) end,
+        SetTooltip = function() end,
+    }, { __index = function() return function() end end })
+    local ctrl = { mode = 'Puller', submode = 'Camp', running = false, burn = false, compact = true, camp_radius = 100, plugins = {}, pull_min_hp_pct = 60, use_waypoints = false }
+    local runtime = {
+        pullState = 'IDLE', pullTargetId = 0, medBreakActive = false, pullHpRest = false, wasRunning = false,
+        saveLoadout = function() S.saves = S.saves + 1 end,
+        fullStop = function() S.fullStops = (S.fullStops or 0) + 1 end,
+        setNearestWaypoint = function() end, isCombat = function() return false end,
+        getMaTargetInfo = function() return S.maInfo end,
+        pluginManager = { drawHeaderButtons = function(n) S.hdrBtnArg = n return S.hdrBtnCount or 3 end },
+        initPluginManager = function() end,
+        clearMapRadiusVisuals = function() S.mapClears = (S.mapClears or 0) + 1 end,
+        updateMapRadiusVisuals = function() S.mapUpdates = (S.mapUpdates or 0) + 1 end,
+        trackStartTime = os.time() - 3600, startAA = 10, currentAA = 14.5, startPlat = 100, currentPlat = 400,
+    }
+    local UI = {}
+    local env = setmetatable({
+        ctrl = ctrl, runtime = runtime, mq = mq, ImGui = mockImGui, UI = UI, VERSION = '2.15', open = true,
+        GOLD = { 1, 0.7, 0.54, 1 }, ARC = { 0.3, 0.7, 1, 1 }, MUTED = { 0.49, 0.56, 0.65, 1 }, GOOD = { 0.37, 0.88, 0.64, 1 }, WARN = { 1, 0.72, 0.3, 1 },
+        accent = function(c, txt) mockImGui.TextColored(c[1], c[2], c[3], c[4], txt) end,
+        idxOf = loadFunc(src, 'idxOf', {}),
+        setManualHunterPetHold = function(on) S.petHold = on end,
+        isHostileTarget = function(id) return S.hostile ~= false end,
+        hasActualNPCXtarget = function() return S.xtar == true end,
+        navLoaded = function() return NAV.loaded end, navMeshLoaded = function() return NAV.mesh end, stickLoaded = function() return NAV.stick end,
+        print = function() end,
+        ImGuiWindowFlags = { AlwaysAutoResize = 64, NoMove = 4, NoTitleBar = 1 }, ImGuiStyleVar = { FramePadding = 0 }, ImGuiCol = { Button = 1, ButtonHovered = 2, ButtonActive = 3, Text = 4 },
+        bit = rawget(_G, 'bit') or { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end },
+    }, { __index = _G })
+    UI.setTooltip = function() end
+    UI.updateTracker = function() end
+    UI.resetTracker = function() S.resets = (S.resets or 0) + 1 end
+    UI.getConColorRgb = function() return { 1, 1, 1, 1 } end
+    UI.drawStatusProgressBar = function(frac, w, h, text) mockImGui.ProgressBar(frac, w, h, text) end
+    UI.pushTheme, UI.popTheme, UI.preBeginWindow, UI.postBeginWindow = function() end, function() end, function() end, function() end
+
+    -- MODES table straight from the source, plus the two code blocks under test
+    local function slice(startMarker, endMarker)
+        local a = assert(src:find(startMarker, 1, true), 'Suite 100: source marker ' .. startMarker)
+        local b = assert(src:find(endMarker, a, true), 'Suite 100: source marker ' .. endMarker)
+        return src:sub(a, b - 1)
+    end
+    local code = slice('local MODES = {', '\nlocal ctrl ') .. '\nMODES = MODES\n'
+        .. slice('UI.SCALE_MIN, UI.SCALE_MAX = 0.75, 2.0', '\n-- UI: theme and style helpers')
+        .. '\n' .. slice('-- Engine start / pause behind the START / PAUSE buttons', 'function UI.drawActionControls()')
+        .. '\n' .. slice('UI.MINI_SECTIONS = {', 'function UI.drawFullGui()')
+    local chunk = assert((loadstring or load)(code, 'mini'))
+    setfenv(chunk, env)
+    chunk()
+    local function texts() return table.concat(S.texts, '\n') end
+    local function draw()
+        S.texts, S.buttons, S.bars, S.popups = {}, {}, {}, {}
+        local ok, err = pcall(UI.drawMiniGui)
+        assert_true(ok, 'Suite 100: compact window renders: ' .. tostring(err))
+        return texts()
+    end
+
+    -- 1. Defaults in the core
+    for _, k in ipairs({ 'mini_lock', 'mini_titlebar', 'mini_alpha', 'mini_show_activity', 'mini_show_target', 'mini_show_vitals', 'mini_show_camp', 'mini_show_tracker', 'mini_show_buttons' }) do
+        assert_true(src:find('        ' .. k .. ' ', 1, true) ~= nil, 'Suite 100: defaultCtrl seeds ' .. k)
+    end
+    assert_true(src:find("if c.mini_lock == nil then c.mini_lock = false end", 1, true) ~= nil, 'Suite 100: sanitize seeds mini_lock')
+    assert_true(src:find("if type(c.mini_alpha) ~= 'number' then c.mini_alpha = 0.92 end", 1, true) ~= nil, 'Suite 100: sanitize seeds mini_alpha')
+    assert_eq(#UI.MINI_SECTIONS, 6, 'Suite 100: six toggleable rows')
+    assert_true(src:find("UI.drawStartPauseButton('##btnRun', 130, 24)", 1, true) ~= nil, 'Suite 100: full window action bar uses the shared START / PAUSE button')
+    assert_true(src:find("UI.drawBurnButton('##btnBurn', 130, 24)", 1, true) ~= nil, 'Suite 100: full window action bar uses the shared BURN button')
+    assert_true(src:find("UI.drawModeCombos('CtrlTab', 160, 140)", 1, true) ~= nil, 'Suite 100: Control tab uses the shared mode combos')
+    assert_true(src:find("ImGui.Button('START##miniStartBtn'", 1, true) == nil and src:find("ImGui.Button('CDs##miniCooldowns'", 1, true) == nil, 'Suite 100: old hardcoded compact buttons are gone')
+
+    -- 2. Shared engine buttons
+    S.clickLabel = 'START##miniRun'
+    local out = draw()
+    S.clickLabel = nil
+    assert_eq(ctrl.running, true, 'Suite 100: START starts the engine')
+    assert_eq(runtime.wasRunning, true, 'Suite 100: START marks wasRunning')
+    assert_eq(#S.cmds, 0, 'Suite 100: no warnings popped with nav / mesh / moveutils loaded')
+    assert_true(out:find('• RUNNING', 1, true) ~= nil, 'Suite 100: activity line shows RUNNING')
+    NAV.loaded = false
+    ctrl.running = false
+    S.clickLabel = 'START##miniRun'
+    draw()
+    S.clickLabel = nil
+    assert_true(S.cmds[1] ~= nil and S.cmds[1]:find('MQ2Nav is NOT loaded', 1, true) ~= nil, 'Suite 100: START warns when MQ2Nav is missing')
+    NAV.loaded = true
+    S.cmds = {}
+    S.clickLabel = 'PAUSE##miniRun'
+    draw()
+    S.clickLabel = nil
+    assert_eq(ctrl.running, false, 'Suite 100: PAUSE stops the engine')
+    assert_eq(S.fullStops, 1, 'Suite 100: PAUSE calls runtime.fullStop')
+    assert_eq(S.petHold, false, 'Suite 100: PAUSE in Puller releases the manual pet hold')
+    assert_eq(S.styleCols, 0, 'Suite 100: every pushed button colour is popped')
+    S.clickLabel = 'Burn##miniBurn'
+    draw()
+    S.clickLabel = nil
+    assert_eq(ctrl.burn, true, 'Suite 100: Burn button turns burn on')
+    out = draw()
+    assert_true(out:find('BURN', 1, true) ~= nil, 'Suite 100: activity line flags burn')
+    S.clickLabel = 'BURN!##miniBurn'
+    draw()
+    S.clickLabel = nil
+    assert_eq(ctrl.burn, false, 'Suite 100: BURN! button turns burn off')
+    assert_eq(S.styleCols, 0, 'Suite 100: burn button colours popped')
+
+    -- 3. Mode combos
+    S.comboRet['##primaryMiniMode'] = 3
+    draw()
+    S.comboRet['##primaryMiniMode'] = nil
+    assert_eq(ctrl.mode, 'Assist', 'Suite 100: primary combo switches the mode')
+    assert_eq(ctrl.submode, 'Chase', 'Suite 100: switching mode resets the submode to its first entry')
+    assert_true((S.mapClears or 0) >= 1, 'Suite 100: mode change clears the map radius visuals')
+    S.comboRet['##subMiniMode'] = 3
+    draw()
+    S.comboRet['##subMiniMode'] = nil
+    assert_eq(ctrl.submode, 'Backline', 'Suite 100: submode combo switches the submode')
+    S.comboRet['##primaryMiniMode'] = 1
+    draw()
+    S.comboRet['##primaryMiniMode'] = nil
+    assert_eq(ctrl.mode, 'Manual', 'Suite 100: back to Manual')
+    assert_eq(S.petHold, true, 'Suite 100: switching to Manual while paused holds the pet')
+    assert_eq(UI.applyPrimaryMode('Manual'), false, 'Suite 100: applyPrimaryMode is a no-op for the current mode')
+    UI.applyPrimaryMode('Puller'); UI.applySubmode('Camp')
+    assert_true(UI.modeUsesCamp(), 'Suite 100: Puller / Camp uses the camp anchor')
+    UI.applySubmode('Hunt')
+    assert_eq(UI.modeUsesCamp(), false, 'Suite 100: Puller / Hunt does not')
+    UI.applySubmode('Camp')
+
+    -- 4. Activity line
+    local function activity() local t = UI.miniActivity() return t end
+    ctrl.running = false
+    assert_eq(activity(), 'Paused', 'Suite 100: activity - paused')
+    ctrl.running = true
+    assert_eq(activity(), 'Looking for a pull', 'Suite 100: activity - puller idle')
+    runtime.medBreakActive = true
+    assert_eq(activity(), 'Med break - resting', 'Suite 100: activity - med break wins')
+    runtime.medBreakActive = false
+    runtime.pullHpRest = true
+    assert_eq(activity(), 'Resting - HP below 60%', 'Suite 100: activity - HP rest names the threshold')
+    runtime.pullHpRest = false
+    spawns[42] = { name = 'a gnoll scout' }
+    runtime.pullState, runtime.pullTargetId = 'TO_MOB', 42
+    assert_eq(activity(), 'Pulling a gnoll scout', 'Suite 100: activity - pulling names the mob')
+    runtime.pullState = 'TO_CAMP'
+    assert_eq(activity(), 'Bringing a gnoll scout to camp', 'Suite 100: activity - dragging to camp')
+    runtime.pullTargetId = 999
+    assert_eq(activity(), 'Bringing the pull to camp', 'Suite 100: activity - unknown spawn falls back')
+    runtime.pullState, runtime.pullTargetId = 'FIGHTING', 0
+    T.id, T.name = 42, 'a gnoll scout'
+    assert_eq(activity(), 'Fighting a gnoll scout', 'Suite 100: activity - fighting the target')
+    runtime.pullState = 'IDLE'
+    ME.combat = true
+    assert_eq(activity(), 'Fighting a gnoll scout', 'Suite 100: activity - auto-attack counts as fighting')
+    S.hostile = false
+    S.xtar = true
+    assert_eq(activity(), 'In combat', 'Suite 100: activity - hostile XTarget without a hostile target')
+    S.xtar, ME.combat, S.hostile = false, false, nil
+    ME.casting = 'Minor Healing'
+    assert_eq(activity(), 'Casting Minor Healing', 'Suite 100: activity - casting')
+    ME.casting = nil
+    NAV.active = true
+    assert_eq(activity(), 'Moving', 'Suite 100: activity - moving (Puller / Camp without a camp)')
+    ctrl.camp_loc = { x = 0, y = 0, z = 0 }
+    assert_eq(activity(), 'Returning to camp', 'Suite 100: activity - returning to camp')
+    ctrl.camp_loc = nil
+    UI.applySubmode('Hunt')
+    assert_eq(activity(), 'Roaming for a target', 'Suite 100: activity - hunt roaming')
+    UI.applyPrimaryMode('Assist')
+    assert_eq(activity(), 'Following the Main Assist', 'Suite 100: activity - assist chase')
+    NAV.active = false
+    assert_eq(activity(), 'Waiting on the Main Assist', 'Suite 100: activity - assist idle')
+    UI.applyPrimaryMode('Manual')
+    assert_eq(activity(), 'Idle - waiting for a target', 'Suite 100: activity - manual idle')
+    T.id = 0
+
+    -- 5. Target row (own target and the MA's)
+    UI.applyPrimaryMode('Puller'); UI.applySubmode('Camp')
+    out = draw()
+    assert_true(out:find('No target', 1, true) ~= nil, 'Suite 100: target row - no target')
+    T.id, T.name, T.lvl, T.class, T.con, T.hp, T.dist, T.aggro, T.los = 42, 'a gnoll scout', 12, 'WAR', 'Blue', 45, 8.4, 100, false
+    out = draw()
+    assert_true(out:find('a gnoll scout', 1, true) ~= nil, 'Suite 100: target row - name')
+    assert_true(out:find('L12 WAR  8ft', 1, true) ~= nil, 'Suite 100: target row - level / class / distance')
+    assert_true(out:find('tanking', 1, true) ~= nil, 'Suite 100: target row - 100% aggro reads tanking')
+    assert_true(out:find('no LoS', 1, true) ~= nil, 'Suite 100: target row - line of sight warning')
+    local hpBar
+    for _, b in ipairs(S.bars) do if b.label == '45%' then hpBar = b end end
+    assert_true(hpBar ~= nil and math.abs(hpBar.frac - 0.45) < 0.001, 'Suite 100: target row - HP bar at 45%')
+    T.aggro, T.los = 60, true
+    out = draw()
+    assert_true(out:find('aggro 60%', 1, true) ~= nil, 'Suite 100: target row - partial aggro')
+    assert_true(out:find('no LoS', 1, true) == nil, 'Suite 100: target row - no LoS warning with line of sight')
+    S.maInfo = { hasMA = true, maName = 'Bob', maId = 7, hasTarget = true, targetName = 'a gnoll pup', targetId = 43, targetHp = 80, targetDist = 20, targetCon = 'Green' }
+    ctrl.ma_name = 'Bob'
+    S.clickLabel = 'Target##miniTargMA'
+    out = draw()
+    S.clickLabel = nil
+    assert_true(out:find('Bob', 1, true) ~= nil and out:find('a gnoll pup (80%)', 1, true) ~= nil, 'Suite 100: target row - MA and MA target')
+    assert_eq(S.cmds[#S.cmds], '/target id 43', 'Suite 100: target row - Target button acquires the MA target')
+    S.maInfo = { hasMA = false }
+    out = draw()
+    assert_true(out:find('none set', 1, true) ~= nil, 'Suite 100: target row - MA none set')
+    ctrl.ma_name = nil
+    S.maInfo = nil
+    ctrl.mini_show_target = false
+    out = draw()
+    assert_true(out:find('a gnoll scout', 1, true) == nil, 'Suite 100: target row hidden by its toggle')
+    ctrl.mini_show_target = nil
+
+    -- 6. Vitals row
+    out = draw()
+    assert_true(out:find('HP 100%', 1, true) ~= nil and out:find('Mana 80%', 1, true) ~= nil and out:find('End 90%', 1, true) ~= nil, 'Suite 100: vitals - three bars')
+    local vitalsW = {}
+    for _, b in ipairs(S.bars) do if b.label:find('^HP ') or b.label:find('^Mana ') or b.label:find('^End ') then vitalsW[#vitalsW + 1] = b.w end end
+    assert_eq(#vitalsW, 3, 'Suite 100: vitals - three bars sized')
+    assert_true(vitalsW[1] == vitalsW[2] and vitalsW[1] * 3 + 12 <= 400, 'Suite 100: vitals - bars share the header row width')
+    assert_eq(runtime.miniRowWidth, 400, 'Suite 100: row width measured from the widest row')
+    assert_true(hpBar ~= nil and hpBar.w == 400, 'Suite 100: target HP bar sized to the widest row')
+    assert_true(hpBar.h == 18, 'Suite 100: bar height follows the font size (13 + 5)')
+    S.fontSize = 20
+    draw()
+    assert_eq(S.bars[#S.bars].h, 25, 'Suite 100: larger font gives taller bars')
+    S.fontSize = nil
+    -- rows grow the measured width; the bars themselves never do (no latch)
+    S.rectMax = 610
+    draw()
+    assert_eq(runtime.miniRowWidth, 600, 'Suite 100: a wider row widens the bars next frame')
+    S.rectMax = nil
+    draw()
+    assert_eq(runtime.miniRowWidth, 400, 'Suite 100: width shrinks back once the wide row is gone')
+    ME.maxMana = 0
+    out = draw()
+    assert_true(out:find('Mana', 1, true) == nil and out:find('End 90%', 1, true) ~= nil, 'Suite 100: vitals - no mana bar for a manaless class')
+    ME.maxMana = 1000
+    ctrl.mini_show_vitals = false
+    out = draw()
+    assert_true(out:find('HP 100%', 1, true) == nil, 'Suite 100: vitals row hidden by its toggle')
+    ctrl.mini_show_vitals = nil
+
+    -- 7. Camp row
+    out = draw()
+    assert_true(out:find('not set - the puller needs one', 1, true) ~= nil, 'Suite 100: camp row - puller without a camp warns')
+    ME.x, ME.y, ME.z = 30, 40, 0
+    S.clickLabel = 'Set Here##miniCampSet'
+    draw()
+    S.clickLabel = nil
+    assert_true(ctrl.camp_loc ~= nil and ctrl.camp_loc.x == 30 and ctrl.camp_loc.y == 40, 'Suite 100: camp row - Set Here uses my position')
+    assert_true((S.mapUpdates or 0) >= 1, 'Suite 100: camp row - Set Here refreshes the map visuals')
+    ME.x, ME.y = 0, 0
+    out = draw()
+    assert_true(out:find('50ft away', 1, true) ~= nil, 'Suite 100: camp row - distance to camp')
+    runtime.pullState, runtime.pullTargetId = 'TO_MOB', 42
+    S.clickLabel = 'Clear##miniCampClear'
+    draw()
+    S.clickLabel = nil
+    assert_nil(ctrl.camp_loc, 'Suite 100: camp row - Clear forgets the camp')
+    assert_eq(runtime.pullState, 'IDLE', 'Suite 100: camp row - clearing the puller camp resets the pull state')
+    UI.applySubmode('Hunt')
+    out = draw()
+    assert_true(out:find('Camp', 1, true) == nil, 'Suite 100: camp row only in camp modes')
+    UI.applySubmode('Camp')
+
+    -- 8. Tracker row
+    out = draw()
+    assert_true(out:find('4.5 AA/hr', 1, true) ~= nil, 'Suite 100: tracker - AA/hr')
+    assert_true(out:find('300 plat/hr', 1, true) ~= nil, 'Suite 100: tracker - plat/hr')
+    assert_true(out:find('1h 00m', 1, true) ~= nil, 'Suite 100: tracker - session time')
+    S.clickLabel = 'Reset##miniResetTrack'
+    draw()
+    S.clickLabel = nil
+    assert_eq(S.resets, 1, 'Suite 100: tracker - Reset restarts the session')
+
+    -- 9. Plugin buttons from the manager, warnings, Full / Menu
+    draw()
+    assert_eq(S.hdrBtnArg, 0, 'Suite 100: plugin buttons drawn by pm.drawHeaderButtons from an empty row')
+    S.hdrBtnCount = 0
+    out = draw()
+    assert_true(out:find('no plugin buttons', 1, true) ~= nil, 'Suite 100: hint when no plugin buttons are enabled')
+    S.hdrBtnCount = nil
+    runtime.pluginManager.drawHeaderButtons = function() error('boom') end
+    out = draw()
+    assert_true(out:find('no plugin buttons', 1, true) ~= nil, 'Suite 100: a failing button renderer is contained')
+    runtime.pluginManager.drawHeaderButtons = function(n) S.hdrBtnArg = n return 3 end
+    ctrl.mini_show_buttons = false
+    S.hdrBtnArg = nil
+    draw()
+    assert_nil(S.hdrBtnArg, 'Suite 100: plugin buttons hidden by their toggle')
+    ctrl.mini_show_buttons = nil
+    NAV.loaded, NAV.stick = false, false
+    out = draw()
+    assert_true(out:find('MQ2Nav not loaded', 1, true) ~= nil and out:find('MQ2MoveUtils not loaded', 1, true) ~= nil, 'Suite 100: plugin warnings')
+    S.clickLabel = 'Load##miniLoadNav'
+    draw()
+    S.clickLabel = nil
+    assert_eq(S.cmds[#S.cmds], '/plugin mq2nav', 'Suite 100: Load button loads MQ2Nav')
+    NAV.loaded = true
+    NAV.mesh = false
+    out = draw()
+    assert_true(out:find('No navmesh for gfaydark', 1, true) ~= nil, 'Suite 100: navmesh warning names the zone')
+    NAV.mesh, NAV.stick = true, true
+    S.clickLabel = 'Menu##miniMenuBtn'
+    draw()
+    S.clickLabel = nil
+    assert_eq(S.opened, '##miniMenu', 'Suite 100: Menu button opens the options popup')
+    assert_eq(S.popups[1], '##miniMenu', 'Suite 100: the same popup answers a right-click on the window')
+    S.clickLabel = 'Full##miniFull'
+    draw()
+    S.clickLabel = nil
+    assert_eq(ctrl.compact, false, 'Suite 100: Full returns to the full window')
+    ctrl.compact = true
+
+    -- 10. Options menu
+    S.popupOpen = true
+    S.checkRet['Target bar##mini_show_target'] = false
+    S.saves = 0
+    draw()
+    S.checkRet['Target bar##mini_show_target'] = nil
+    assert_eq(ctrl.mini_show_target, false, 'Suite 100: menu - row toggle persisted')
+    assert_true(S.saves >= 1, 'Suite 100: menu - row toggle saves the loadout')
+    ctrl.mini_show_target = nil
+    S.checkRet['Lock position##miniLock'] = true
+    draw()
+    S.checkRet['Lock position##miniLock'] = nil
+    assert_eq(ctrl.mini_lock, true, 'Suite 100: menu - lock persisted')
+    S.checkRet['Title bar##miniTitle'] = false
+    draw()
+    S.checkRet['Title bar##miniTitle'] = nil
+    assert_eq(ctrl.mini_titlebar, false, 'Suite 100: menu - title bar toggle persisted')
+    S.sliderRet = 0.5
+    draw()
+    S.sliderRet = nil
+    assert_eq(ctrl.mini_alpha, 0.5, 'Suite 100: menu - opacity persisted')
+    draw()
+    assert_eq(S.alpha, 0.5, 'Suite 100: next frame uses the saved opacity')
+    S.clickLabel = 'Full Window'
+    draw()
+    S.clickLabel = nil
+    assert_eq(ctrl.compact, false, 'Suite 100: menu - Full Window item')
+    ctrl.compact = true
+    S.popupOpen = false
+
+    -- 11. Closing the window drops compact mode (as before)
+    S.openRet = false
+    draw()
+    assert_eq(ctrl.compact, false, 'Suite 100: closing the compact window leaves compact mode')
+    S.openRet = nil
+    assert_eq(S.styleVars, 0, 'Suite 100: style vars balanced across all renders')
+end)()
+
+
+-- ============================================================================
+-- Suite 101: UI scale (global factor + per-window override) riding on the
+-- theme / preBeginWindow / postBeginWindow hooks, UI.px, scaled tooltips,
+-- the scale picker, defaults and the plugin sweep
+-- ============================================================================
+;(function()
+    print('--- Suite 101: UI scale ---')
+    do
+        local tsrc = readFile('TAC/lua/triune.lua')
+        local fn = tsrc:match('function runtime%.restartScript%(%)(.-)\nend')
+        assert_true(fn ~= nil, 'Suite 101: runtime.restartScript exists')
+        local runAt, stopAt = fn:find("mq.cmd('/timed 15 /lua run ", 1, true), fn:find("mq.cmd('/lua stop ", 1, true)
+        assert_true(runAt and stopAt and runAt < stopAt, 'Suite 101: restart queues the run through /timed before stopping itself')
+        assert_true(fn:find('runtime.saveLoadout(true)', 1, true) ~= nil, 'Suite 101: restart saves the loadout first')
+        assert_true(tsrc:find("Restart Triune##btnRestartScript', UI.px(", 1, true) ~= nil, 'Suite 101: Restart Triune button is scaled and lives in settings')
+        assert_true(tsrc:find("cmd == 'restart' or cmd == 'reload'", 1, true) ~= nil, 'Suite 101: /ac restart command')
+    end
+    local S = { vars = 0, cols = 0, fontScale = {}, tooltips = {}, comboRet = {}, saves = 0 }
+    local mockImGui = setmetatable({
+        PushStyleVar = function(id, a, b) S.vars = S.vars + 1 S.lastVar = { id = id, a = a, b = b } end,
+        PopStyleVar = function(n) S.vars = S.vars - (n or 1) end,
+        PushStyleColor = function() S.cols = S.cols + 1 end,
+        PopStyleColor = function(n) S.cols = S.cols - (n or 1) end,
+        SetWindowFontScale = function(v) S.fontScale[#S.fontScale + 1] = v end,
+        BeginTooltip = function() S.tooltipBegun = (S.tooltipBegun or 0) + 1 end,
+        EndTooltip = function() end,
+        Text = function(t) S.tooltips[#S.tooltips + 1] = t end,
+        SetTooltip = function(_, t) S.tooltips[#S.tooltips + 1] = 'plain:' .. tostring(t) end,
+        Combo = function(label, idx) return S.comboRet[label] or idx end,
+        IsItemHovered = function() return false end,
+        SetNextItemWidth = function(w) S.lastItemW = w end,
+    }, { __index = function() return function() end end })
+    local ctrl = { ui_scale = 1.0, window_scale = {} }
+    local runtime = { saveLoadout = function() S.saves = S.saves + 1 end, checkDisplaySizeChange = function() end }
+    local UI = {}
+    local env = setmetatable({
+        ctrl = ctrl, runtime = runtime, ImGui = mockImGui, UI = UI, mq = {},
+        ImGuiCol = setmetatable({}, { __index = function(_, k) return k end }),
+        ImGuiStyleVar = setmetatable({}, { __index = function(_, k) return k end }),
+    }, { __index = _G })
+    local function slice(startMarker, endMarker)
+        local a = assert(src:find(startMarker, 1, true), 'Suite 101: source marker ' .. startMarker)
+        local b = assert(src:find(endMarker, a, true), 'Suite 101: source marker ' .. endMarker)
+        return src:sub(a, b - 1)
+    end
+    local code = slice('function UI.setTooltip(fmt, ...)', '\n-- UI: theme and style helpers')
+        .. '\n' .. slice('function UI.pushTheme()', 'function UI.pushDisabledSliderStyle()')
+        .. '\n' .. slice('function UI.preBeginWindow(winKey)', 'function runtime.saveWindowPositions(silent)')
+    local chunk = assert((loadstring or load)(code, 'scale'))
+    setfenv(chunk, env)
+    chunk()
+
+    -- 1. Defaults / sanitize in the core
+    assert_true(src:find('        ui_scale                 = 1.0,', 1, true) ~= nil, 'Suite 101: defaultCtrl seeds ui_scale')
+    assert_true(src:find('        window_scale             = {},', 1, true) ~= nil, 'Suite 101: defaultCtrl seeds window_scale')
+    assert_true(src:find("c.ui_scale = math.max(0.75, math.min(2.0, c.ui_scale))", 1, true) ~= nil, 'Suite 101: sanitize clamps ui_scale')
+    assert_true(src:find("if type(c.window_scale) ~= 'table' then c.window_scale = {} end", 1, true) ~= nil, 'Suite 101: sanitize seeds window_scale')
+
+    -- 2. Scale resolution and px
+    assert_eq(UI.windowScale('group'), 1.0, 'Suite 101: default scale is 1.0')
+    assert_eq(UI.clampScale(5), 2.0, 'Suite 101: clampScale caps at 2.0')
+    assert_eq(UI.clampScale(0.1), 0.75, 'Suite 101: clampScale floors at 0.75')
+    assert_nil(UI.clampScale('x'), 'Suite 101: clampScale rejects junk')
+    UI.setUiScale(1.5)
+    assert_eq(ctrl.ui_scale, 1.5, 'Suite 101: setUiScale stores the factor')
+    assert_eq(S.saves, 1, 'Suite 101: setUiScale saves the loadout')
+    UI.setUiScale(1.5)
+    assert_eq(S.saves, 1, 'Suite 101: unchanged factor does not save again')
+    assert_eq(UI.windowScale('group'), 1.5, 'Suite 101: windows follow the global factor')
+    UI.setWindowScale('group', 0.9)
+    assert_eq(UI.windowScale('group'), 0.9, 'Suite 101: per-window override wins')
+    assert_eq(UI.windowScale('map'), 1.5, 'Suite 101: other windows still follow the global factor')
+    assert_eq(UI.windowScale(nil), 1.5, 'Suite 101: keyless windows follow the global factor')
+    UI.setWindowScale('group', nil)
+    assert_nil(ctrl.window_scale.group, 'Suite 101: nil clears the override')
+    runtime.curWindowScale = 1.5
+    assert_eq(UI.px(100), 150, 'Suite 101: px scales positive sizes')
+    assert_eq(UI.px(17), 26, 'Suite 101: px rounds to whole pixels')
+    assert_eq(UI.px(-1), -1, 'Suite 101: px passes -1 (fill) through')
+    assert_eq(UI.px(0), 0, 'Suite 101: px passes 0 (auto) through')
+    runtime.curWindowScale = 1.0
+    assert_eq(UI.px(133), 133, 'Suite 101: px is identity at 1.0')
+
+    -- 3. The hooks: pushTheme -> preBeginWindow -> postBeginWindow -> popTheme
+    UI.setUiScale(1.0)
+    UI.setWindowScale('group', 1.5)
+    S.vars, S.cols, S.fontScale = 0, 0, {}
+    local _, themeVars = UI.pushTheme()
+    assert_eq(runtime.curWindowScale, 1.0, 'Suite 101: pushTheme starts from the global factor')
+    UI.preBeginWindow('group')
+    assert_eq(runtime.curWindowScale, 1.5, 'Suite 101: preBeginWindow sets the current scale before Begin')
+    assert_eq(S.vars, themeVars + 3, 'Suite 101: preBeginWindow pushes scaled padding / spacing / window padding')
+    assert_eq(S.lastVar.a, 18, 'Suite 101: window padding scaled (12 * 1.5)')
+    assert_eq(runtime.themeVarStack[#runtime.themeVarStack], themeVars + 3, 'Suite 101: the extra vars ride on the theme var stack')
+    UI.postBeginWindow('group')
+    assert_eq(S.fontScale[#S.fontScale], 1.5, 'Suite 101: postBeginWindow sets the window font scale')
+    assert_eq(UI.px(14), 21, 'Suite 101: px inside the window uses its scale')
+    UI.popTheme()
+    assert_eq(S.vars, 0, 'Suite 101: popTheme pops the theme and the scale vars')
+    assert_eq(S.cols, 0, 'Suite 101: popTheme pops the theme colours')
+    assert_eq(runtime.curWindowScale, 1.0, 'Suite 101: popTheme restores the scale')
+    -- unscaled window: no extra vars, font scale still asserted (reset after a change)
+    UI.pushTheme()
+    UI.preBeginWindow('map')
+    assert_eq(S.vars, themeVars, 'Suite 101: no extra vars at 1.0')
+    UI.postBeginWindow('map')
+    assert_eq(S.fontScale[#S.fontScale], 1.0, 'Suite 101: font scale asserted at 1.0 too')
+    UI.popTheme()
+    assert_eq(S.vars, 0, 'Suite 101: balanced at 1.0')
+    -- nested theme pushes (a plugin drawing inside the main window) keep the outer scale
+    UI.setWindowScale('main', 1.25)
+    UI.pushTheme(); UI.preBeginWindow('main'); UI.postBeginWindow('main')
+    UI.pushTheme()
+    assert_eq(runtime.curWindowScale, 1.0, 'Suite 101: inner pushTheme starts from the global factor')
+    UI.popTheme()
+    assert_eq(runtime.curWindowScale, 1.25, 'Suite 101: popping the inner theme restores the outer window scale')
+    UI.popTheme()
+    assert_eq(S.vars, 0, 'Suite 101: nested pushes balanced')
+    UI.setWindowScale('main', nil)
+    UI.setUiScale(2.0)
+    UI.pushTheme()
+    assert_eq(UI.px(830), 1660, 'Suite 101: px before preBeginWindow already uses the global factor (first-use window sizes)')
+    UI.popTheme()
+    UI.setUiScale(1.0)
+
+    -- 4. Tooltips follow the window scale
+    runtime.curWindowScale = 1.0
+    UI.setTooltip('hello %d', 1)
+    assert_eq(S.tooltips[#S.tooltips], 'plain:hello 1', 'Suite 101: plain SetTooltip at 1.0')
+    runtime.curWindowScale = 1.5
+    UI.setTooltip('big')
+    assert_eq(S.tooltipBegun, 1, 'Suite 101: scaled window uses BeginTooltip')
+    assert_eq(S.fontScale[#S.fontScale], 1.5, 'Suite 101: tooltip gets the window font scale')
+    assert_eq(S.tooltips[#S.tooltips], 'big', 'Suite 101: tooltip text drawn')
+    runtime.curWindowScale = 1.0
+
+    -- 5. Scale picker
+    UI.setUiScale(1.0)
+    S.comboRet['Scale##winScale_group'] = 6      -- Global + presets: 6 -> 1.25
+    assert_true(UI.drawWindowScaleControl('group', 'Scale', 120), 'Suite 101: picking a preset reports a change')
+    S.comboRet['Scale##winScale_group'] = nil
+    assert_eq(ctrl.window_scale.group, 1.25, 'Suite 101: preset stored as the override')
+    assert_eq(UI.drawWindowScaleControl('group', 'Scale', 120), false, 'Suite 101: no change when the combo is untouched')
+    S.comboRet['Scale##winScale_group'] = 1
+    UI.drawWindowScaleControl('group', 'Scale', 120)
+    S.comboRet['Scale##winScale_group'] = nil
+    assert_nil(ctrl.window_scale.group, 'Suite 101: Global clears the override')
+    assert_eq(UI.drawWindowScaleControl(nil), false, 'Suite 101: picker needs a key')
+
+    -- 6. Wiring: settings slider, layout column, command, exports, plugins
+    assert_true(src:find("ImGui.SliderFloat('##uiScale', curScale, UI.SCALE_MIN, UI.SCALE_MAX, '%.2fx')", 1, true) ~= nil, 'Suite 101: UI Scale slider on the Window Layout page')
+    assert_true(src:find("ImGui.BeginTable('ManagedWinTable', 7, tblFlags)", 1, true) ~= nil and src:find("UI.drawWindowScaleControl(def.key, '', 110)", 1, true) ~= nil, 'Suite 101: Scale column in the managed windows table')
+    assert_true(src:find("cmd == 'scale' or cmd == 'uiscale'", 1, true) ~= nil, 'Suite 101: /ac scale command')
+    assert_true(src:find("UI.drawWindowScaleControl('mini', 'Scale', 130)", 1, true) ~= nil, 'Suite 101: Mini HUD menu has the picker')
+    for _, k in ipairs({ 'px', 'windowScale', 'pushWindowScale', 'applyWindowScale', 'drawWindowScaleControl', 'currentWindowScale' }) do
+        assert_true(src:find('            ' .. k .. ' ', 1, true) ~= nil, 'Suite 101: core API exports ' .. k)
+    end
+    -- every plugin window is hooked (preBeginWindow or pushWindowScale before each Begin); the
+    -- full-screen floating_damage overlay is the one exception
+    local pluginFiles = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
+    local function count(str, needle)
+        local n, pos = 0, 1
+        while true do
+            local a, b = str:find(needle, pos, true)
+            if not a then return n end
+            n, pos = n + 1, b + 1
+        end
+    end
+    for _, f in ipairs(pluginFiles) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        assert_eq(count(psrc, 'ImGui.Begin('), count(psrc, 'core.preBeginWindow(') + count(psrc, 'core.pushWindowScale('), 'Suite 101: every window in ' .. f .. ' goes through a scale hook')
+    end
+    for _, f in ipairs({ 'hud_group', 'hud_unitframes', 'hud_effects', 'hud_xtarget', 'hud_spellgems', 'hud_cooldowns' }) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        assert_true(psrc:find('core.drawWindowScaleControl(', 1, true) ~= nil, 'Suite 101: ' .. f .. ' settings carry the scale picker')
+        -- tight chrome pushed after the hook (so it wins over the scaled theme padding) and scaled
+        local hook = psrc:find('core.preBeginWindow(', 1, true)
+        local pad = psrc:find('ImGui.PushStyleVar(ImGuiStyleVar.', 1, true)
+        assert_true(hook and pad and pad > hook, 'Suite 101: ' .. f .. ' pushes its chrome after preBeginWindow')
+        assert_true(psrc:find('ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(', 1, true) ~= nil, 'Suite 101: ' .. f .. ' chrome is scaled')
+    end
+    for _, f in ipairs({ 'hud_group', 'hud_unitframes', 'hud_effects', 'hud_xtarget' }) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        assert_true(psrc:find('local barH = core.px(ctrl.', 1, true) ~= nil, 'Suite 101: ' .. f .. ' bar height is scaled')
+    end
+    local bsrc = readFile('TAC/lua/tac/buttons.lua')
+    assert_true(bsrc:find('local size = core.px((hb.buttonSize or 6) * 10)', 1, true) ~= nil, 'Suite 101: hotbar slot size follows the window scale')
+    assert_true(bsrc:find('((b and b.fontScale) or hb.fontScale or 1.0) * winScale', 1, true) ~= nil, 'Suite 101: hotbar font scale multiplies the window scale')
+    -- the sweep left no bare pixel literals on the common widgets
+    local function unscaledLines(text)
+        local bad = {}
+        for ln in text:gmatch('[^\n]+') do
+            if not ln:match('^%s*%-%-') and (ln:find('ImGui.SetNextItemWidth(%d') or ln:find("ImGui.Button%(.-,%s*%d+,%s*%d+%s*%)")) then
+                bad[#bad + 1] = ln
+            end
+        end
+        return bad
+    end
+    for _, f in ipairs(pluginFiles) do
+        local bad = unscaledLines(readFile('TAC/lua/tac/' .. f .. '.lua'))
+        assert_eq(#bad, 0, 'Suite 101: ' .. f .. ' has no unscaled SetNextItemWidth / sized Button: ' .. (bad[1] or ''))
+    end
+    local coreBad = unscaledLines(src)
+    assert_eq(#coreBad, 0, 'Suite 101: core has no unscaled SetNextItemWidth / sized Button: ' .. (coreBad[1] or ''))
+end)()
+
+-- ============================================================================
+-- Suite 102: tac/chat.lua (Chat Windows plugin) — classifier fixture from a
+-- live capture, link resolution, ring buffer, tab filters, config sanitize /
+-- roundtrip, send routing and the plugin lifecycle under a mock core
+-- ============================================================================
+;(function()
+    print('--- Suite 102: chat windows ---')
+    local L = string.char(18)
+    local ESC = string.char(127)
+    local IT = L .. '0000FBFA400000000000000000000000000000000000000000000000000000000000000000000Earthen Bracer of Fortitude (Enchanted)' .. L
+    local IT2 = L .. '00000F23C00000000000000000000000000000000000000000000000000000000000000000000Paradisal Tunic of Faith' .. L
+    local function P(n) return L .. '1' .. n .. L end
+    local printed = {}
+    local quiet = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local origPrint = print
+    print = quiet
+    local okLoad, plugin = pcall(function() return assert(loadfile('TAC/lua/tac/chat.lua'))() end)
+    print = origPrint
+    assert_true(okLoad and type(plugin) == 'table', 'Suite 102: chat.lua loads: ' .. tostring(plugin))
+    if not okLoad then return end
+    assert_eq(plugin.id, 'chat', 'Suite 102: plugin id')
+    assert_eq(plugin.window and plugin.window.flag, 'show_chat', 'Suite 102: declares the show_chat window flag')
+    assert_true(type(plugin.window.getLock) == 'function' and type(plugin.window.setLock) == 'function', 'Suite 102: window lock hooks')
+    assert_true(src:find('if c.show_chat == nil then c.show_chat = false end', 1, true) ~= nil, 'Suite 102: core sanitize seeds show_chat')
+    assert_true(src:find("            'chat.lua',", 1, true) ~= nil, 'Suite 102: discover() probe list includes chat.lua')
+
+    -- 1. Classifier: lines captured on the Triune server (player names replaced)
+    local ctx = { me = 'Genro', pets = { Spinevenom = true } }
+    local fixture = {
+        { '[Triune Chat] loaded', 'triune' },
+        { ESC .. '300000[Triune DPS]' .. ESC .. '777777 v4.3 loaded!', 'triune' },
+        { '[Triune] AA fired: Distant Strike', 'triune' },
+        { '[Nav] Navigating to spawn: a_warlord_of_hate005 (271)', 'mq' },
+        { 'Cannot bind /chat, already bound in MQ.', 'mq' },
+        { '[NMS] Words of Obliteration sold for 3 platinum, 3 gold.', 'loot' },
+        { 'miss', 'melee_num' }, { '249', 'melee_num' }, { '1056', 'melee_num' },
+        { 'Spinevenom was burned.', 'ds', 'Spinevenom' }, { 'YOU are burned!', 'ds' }, { 'Gennro was burned.', 'ds', 'Gennro' },
+        { 'Spinevenom begins to cast a spell.', 'pet', 'Spinevenom' },
+        { 'Tenekis begins to cast a spell.', 'cast', 'Tenekis' },
+        { 'Spinevenom executes a FLURRY of attacks on a sorcerer of hate!', 'pet', 'Spinevenom' },
+        { 'Tenekis executes a FLURRY of attacks on a sorcerer of hate!', 'flurry', 'Tenekis' },
+        { 'Tenekis goes on a RAMPAGE!', 'flurry', 'Tenekis' },
+        { 'Spinevenom (Owner: Genro) hit a sorcerer of hate for 606 points of non-melee damage. (Hand of Retribution)', 'pet', 'Spinevenom' },
+        { 'Tenekis (Owner: Gennro) hit a sorcerer of hate for 1012 points of non-melee damage. (Elemental Mastery Blast)', 'spell_others', 'Tenekis' },
+        { 'Spinevenom000 performs an exceptional heal! (1162)', 'pet', 'Spinevenom000' },
+        { 'Grimrorik000 performs an exceptional heal! (1102)', 'heal', 'Grimrorik000' },
+        { 'Spinevenom (Owner: Genro) has healed herself for 30 points of damage. (Hand of Retribution Recourse)', 'pet', 'Spinevenom' },
+        { 'Glidequill (Owner: Gennro) has healed Genro for 138 points of damage. (Hand of Retribution Recourse)', 'heal', 'Glidequill' },
+        { 'Spinevenom scores a critical hit! (349)', 'pet', 'Spinevenom' },
+        { 'Genro scores a critical hit! (835)', 'crit', 'Genro' },
+        { 'Gennro scores a critical hit! (1917)', 'crit', 'Gennro' },
+        { 'You deliver a critical blast! (3580) (Press the Attack)', 'crit', 'Genro' },
+        { 'Spinevenom delivers a critical blast! (1423) (Spirit of Vermin Strike)', 'pet', 'Spinevenom' },
+        { 'Genro hit a sorcerer of hate for 616 points of non-melee damage. (Distant Strike)', 'spell_you', 'Genro' },
+        { 'Gennro hit a sorcerer of hate for 616 points of non-melee damage. (Distant Strike)', 'spell_others', 'Gennro' },
+        { 'A sorcerer of hate is struck by an unseen enemy.', 'spell_land' },
+        { "A warlord of hate's body is torn in a time lapse.", 'spell_land' },
+        { 'A sorcerer of hate staggers as an ice shard slams against them.', 'spell_land' },
+        { 'A warlock of hate is covered in a thin layer of ice.', 'spell_land' },
+        { 'A sorcerer of hate was chilled to the bone.', 'spell_land' },
+        { 'Your [' .. IT .. '] absorbs energy, emitting a very faint shimmer. (04.82%)', 'item' },
+        { 'Luck is with you! [' .. IT2 .. '] has become [' .. IT .. '].', 'item' },
+        { 'Your Bracer of Precision (Legendary) feels alive with power.', 'item' },
+        { 'You gain party experience!!', 'exp' }, { 'You gain experience!!', 'exp' },
+        { 'You have gained an ability point!  You now have 6 ability points.', 'exp' },
+        { 'You receive 1 gold, 9 silver, 4 copper.', 'loot' }, { 'You receive no coin.', 'loot' }, { 'You receive 5 gold.', 'loot' },
+        { "You say, '#petcmd attack all'", 'servercmd', 'Genro' },
+        { "You say, 'hello there'", 'say', 'Genro' },
+        { "Spinevenom tells you, 'Attacking a sorcerer of hate Master.'", 'petchat', 'Spinevenom' },
+        { "Spinevenom tells you, 'Waiting for your order to attack, Master.", 'petchat', 'Spinevenom' },
+        { "Otherpet tells you, 'Attacking a sorcerer of hate Master.'", 'petchat', 'Otherpet' },
+        { P('Playerone') .. " tells you, 'can i get a buff'", 'tell_in', 'Playerone' },
+        { 'babykaikes is not online at this time.', 'system' },
+        { 'Your fever has broken.', 'buff_worn' },
+        { "You told Playerone, 'sure'", 'tell_out', 'Playerone' },
+        { P('Playertwo') .. " says out of character, 'people only use them for their AAs'", 'ooc', 'Playertwo' },
+        { "You say out of character, 'hi'", 'ooc', 'Genro' },
+        { P('Playerfour') .. " tells the guild, 'heya all'", 'guild', 'Playerfour' },
+        { "You say to your guild, 'hey'", 'guild', 'Genro' },
+        { P('Playerthree') .. " tells the group, 'inc'", 'group', 'Playerthree' },
+        { "You tell your party, 'ok'", 'group', 'Genro' },
+        { P('Playerfive') .. " auctions, 'WTS stuff'", 'auction', 'Playerfive' },
+        { P('Playersix') .. " shouts, 'train'", 'shout', 'Playersix' },
+        { P('Playerseven') .. " tells General:1, 'hello'", 'channel', 'Playerseven' },
+        { P('Playerone') .. " says, 'hi there'", 'say', 'Playerone' },
+        { "a sorcerer of hate says 'One day I shall lure you to your doom, but not this day, it seems.'", 'npc_say', 'a sorcerer of hate' },
+        { 'You have slain a sorcerer of hate!', 'death', 'Genro' },
+        { 'a gravelord of hate has been slain by Spinevenom!', 'death', 'a gravelord of hate' },
+        { 'Your faction standing with Inhabitants of Hate could not possibly get any worse.', 'faction' },
+        { 'a warlord of hate scowls at you, ready to attack -- looks like he would wipe the floor with you!', 'consider' },
+        { 'This creature would take an army to defeat!', 'consider' },
+        { 'Your song ends.', 'buff_worn' }, { 'Your rage subsides.', 'buff_worn' }, { 'The tingling fades.', 'buff_worn' },
+        { 'Your blood cools.', 'buff_worn' }, { 'Your bloodlust cools.', 'buff_worn' }, { 'The feeling of rage fades away.', 'buff_worn' },
+        { 'Your Hobble of Spirits Effect spell has worn off of a sorcerer of hate.', 'buff_worn' },
+        { 'You taunt a sorcerer of hate to ignore others and attack you!', 'combat_msg' },
+        { 'You have failed to taunt your target.', 'combat_msg' },
+        { 'Your attempt to disarm failed.', 'combat_msg' }, { 'Your attempt at begging was unsuccessful.', 'combat_msg' },
+        { 'Your target is too far away, get closer!', 'combat_msg' }, { 'You cannot see your target.', 'combat_msg' },
+        { 'You must first click on the being you wish to attack!', 'combat_msg' }, { 'Target cleared.', 'combat_msg' },
+        { 'Could not find valid target for /face', 'combat_msg' }, { 'The Spellshield absorbed 750 of 2155 points of damage', 'combat_msg' },
+        { 'a high priest of hate regains concentration and continues casting.', 'combat_msg' },
+        { 'You regain your concentration and continue your casting.', 'combat_msg' },
+        { 'You twincast Ice Shard!', 'combat_msg' },
+        { 'You avoid the stunning blow.', 'resist' }, { 'You resist the Root spell!', 'resist' },
+        { "You strike through your opponent's defenses!", 'flurry', 'Genro' },
+        { 'The spirit of Master Wu fills you! You gain 2 additional attacks.', 'flurry', 'Genro' },
+        { 'You unleash a flurry of attacks.', 'flurry', 'Genro' },
+        { 'You begin casting Ice Shard.', 'cast', 'Genro' }, { 'Your spell did not take hold.', 'cast', 'Genro' },
+        { 'You have entered The Plane of Hate.', 'zone' },
+        { 'You have become better at Flying Kick! (200)', 'skill' },
+        { 'You crush a sorcerer of hate for 120 points of damage.', 'melee_you', 'Genro' },
+        { 'A sorcerer of hate hits YOU for 300 points of damage.', 'melee_taken', 'A sorcerer of hate' },
+        { 'Tenekis kicks a sorcerer of hate for 88 points of damage.', 'melee_others', 'Tenekis' },
+        { 'Spinevenom bites a sorcerer of hate for 88 points of damage.', 'pet', 'Spinevenom' },
+        { 'You try to kick a sorcerer of hate, but miss!', 'melee_you', 'Genro' },
+        { 'A sorcerer of hate tries to hit YOU, but misses!', 'melee_taken', 'A sorcerer of hate' },
+        { 'Some completely new server message nobody has seen.', 'unknown' },
+    }
+    local misses = {}
+    for _, f in ipairs(fixture) do
+        local r = plugin.classify(f[1], ctx)
+        if r.channel ~= f[2] or (f[3] ~= nil and r.sender ~= f[3]) then
+            misses[#misses + 1] = string.format('%s -> %s/%s (want %s/%s)', plugin.escapeLine(f[1]), r.channel, tostring(r.sender), f[2], tostring(f[3]))
+        end
+    end
+    assert_eq(#misses, 0, 'Suite 102: classifier fixture (' .. #fixture .. ' lines): ' .. (misses[1] or ''))
+    local outgoing = plugin.classify("You say, 'hi'", ctx)
+    assert_true(outgoing.outgoing == true and outgoing.sender == 'Genro', 'Suite 102: outgoing lines carry the player as sender')
+    local selfEcho = plugin.classify("Genro tells you, 'did it work?'", ctx)
+    assert_true(selfEcho.channel == 'tell_out' and selfEcho.outgoing and selfEcho.sender == nil and selfEcho.selfEcho, 'Suite 102: my own name as the tells-you sender is an echoed outgoing tell')
+    assert_eq(plugin.classify(P('Genro') .. " tells you, 'linked'", ctx).channel, 'tell_out', 'Suite 102: echoed self tell with a player link')
+    local linked = plugin.classify(P('Playerone') .. " tells you, 'hi'", ctx)
+    assert_true(linked.isPlayer == true, 'Suite 102: link-wrapped sender flagged as a player')
+    assert_true(plugin.classify("Spinevenom tells you, 'Attacking X Master.'", ctx).isPlayer == false, 'Suite 102: bare pet sender is not a player')
+    for _, c in ipairs(plugin.CHANNELS) do
+        assert_true(type(c.id) == 'string' and c.color:match('^%x%x%x%x%x%x$') ~= nil, 'Suite 102: channel ' .. tostring(c.id) .. ' has a hex color')
+    end
+    for name, list in pairs(plugin.PRESETS) do
+        for _, id in ipairs(list or {}) do
+            local found = false
+            for _, c in ipairs(plugin.CHANNELS) do if c.id == id then found = true end end
+            assert_true(found, 'Suite 102: preset ' .. name .. ' references known channel ' .. id)
+        end
+    end
+
+    -- 2. Links & colors
+    local text, players = plugin.resolveLinks('Your [' .. IT .. '] and ' .. P('Bob') .. " says, 'hi'")
+    assert_eq(text, "Your [Earthen Bracer of Fortitude (Enchanted)] and Bob says, 'hi'", 'Suite 102: item link -> name, player link -> name')
+    assert_eq(players.Bob, true, 'Suite 102: player links recorded')
+    assert_eq(plugin.stripColors(ESC .. '300000[X]' .. ESC .. '777777 y'), '[X] y', 'Suite 102: \\x7F color codes stripped')
+    assert_eq(plugin.convertColors(ESC .. '300000[X]'), '\a#300000[X]', 'Suite 102: \\x7F color codes converted to \\a#')
+    assert_eq(plugin.escapeLine('a' .. L .. 'b' .. string.char(7)), 'a<LINK>b\\x07', 'Suite 102: capture escaping')
+
+    -- 3. Ring buffer
+    local ring = plugin.newRing(3)
+    for i = 1, 5 do plugin.ringPush(ring, { n = i }) end
+    assert_true(ring.first == 3 and ring.last == 5 and plugin.ringCount(ring) == 3 and ring.items[2] == nil and ring.items[5].id == 5, 'Suite 102: ring evicts oldest and stamps ids')
+
+    -- 4. Config sanitize
+    local c = plugin.sanitizeConfig(nil)
+    assert_true(#c.windows == 1 and #c.windows[1].tabs == 6 and c.windows[1].tabs[1].channels == nil, 'Suite 102: default layout: one window, six tabs, All tab unfiltered')
+    assert_eq(c.windows[1].tabs[5].send, 'tell', 'Suite 102: Tells tab sends tells')
+    assert_true(c.windows[1].tabs[5].channels.tell_in and c.windows[1].tabs[5].channels.tell_out and c.windows[1].tabs[5].channels.petchat == nil, 'Suite 102: Tells preset is player tells only')
+    local old = plugin.sanitizeConfig({ version = 1, windows = { { id = 'w', tabs = { { id = 'tells', channels = { tell_in = true, tell_out = true, petchat = true } }, { id = 'mine', channels = { tell_in = true, petchat = true, say = true } } } } } })
+    assert_true(old.windows[1].tabs[1].channels.petchat == nil and old.windows[1].tabs[1].channels.tell_in, 'Suite 102: v1 Tells preset migrates pet chat out')
+    assert_true(old.windows[1].tabs[2].channels.petchat == true, 'Suite 102: migration leaves custom tabs alone')
+    assert_true(plugin.sanitizeConfig({ version = 2, windows = { { id = 'w', tabs = { { id = 'tells', channels = { tell_in = true, tell_out = true, petchat = true } } } } } }).windows[1].tabs[1].channels.petchat == true, 'Suite 102: v2 configs are not migrated')
+    c = plugin.sanitizeConfig({ maxLines = 'x', opacity = 7, appendMode = 'weird', colors = { say = 'ZZZ', group = 'FF00FF', bogus = 'FFFFFF' },
+        windows = { { id = 'a', tabs = { { channels = { bogus = true, say = true }, send = 'nope', exclude = { 'WTS', 7, '' } } } }, { id = 'a', tabs = {} } } })
+    assert_eq(c.maxLines, 2000, 'Suite 102: bad maxLines falls back')
+    assert_eq(c.opacity, 1.0, 'Suite 102: opacity clamped')
+    assert_eq(c.appendMode, 'text', 'Suite 102: append mode falls back')
+    assert_true(c.colors.say == nil and c.colors.group == 'FF00FF' and c.colors.bogus == nil, 'Suite 102: color overrides validated')
+    local hc = plugin.sanitizeConfig({ highlights = { { text = 'x', color = 'zz' }, { text = '' }, 'junk', { text = 'y', color = '00FF00', beep = true, flash = false } }, muted = { Bob = true, Eve = false, [1] = true } })
+    assert_true(#hc.highlights == 2 and hc.highlights[1].color == 'FFD700' and hc.highlights[1].flash == true and hc.highlights[2].beep == true and hc.highlights[2].flash == false, 'Suite 102: highlights sanitized with defaults')
+    assert_true(hc.muted.bob == true and hc.muted.eve == nil and next(hc.muted, 'bob') == nil, 'Suite 102: mute list lowercased and filtered')
+    local t1 = c.windows[1].tabs[1]
+    assert_true(t1.channels.bogus == nil and t1.channels.say == true and t1.send == 'say', 'Suite 102: tab channels / send sanitized')
+    assert_eq(#t1.exclude, 1, 'Suite 102: keyword lists keep only non-empty strings')
+    assert_eq(t1.exclude[1], 'wts', 'Suite 102: keywords lowercased')
+    assert_true(c.windows[2].id ~= c.windows[1].id and #c.windows[2].tabs == 1, 'Suite 102: duplicate window ids disambiguated, empty tab list seeded')
+    local ser = plugin.serialize({ a = 1, b = 'x', c = { true, false }, ['d e'] = { z = 2 } })
+    local back = assert(loadstring('return ' .. ser))()
+    assert_true(back.a == 1 and back.b == 'x' and back.c[2] == false and back['d e'].z == 2, 'Suite 102: serializer roundtrips nested tables')
+
+    -- 4b. Inline renderer: tokens and word-wrapped layout (fake measurer: 7 px per char)
+    local ie = { raw = 'Your [' .. IT .. '] absorbs energy. (04.82%)', hms = '10:00:00' }
+    local toks = plugin.tokenize(ie)
+    assert_true(#ie.links == 1 and ie.links[1].name == 'Earthen Bracer of Fortitude (Enchanted)', 'Suite 102: tokenize collects the item link')
+    assert_true(toks[2].t == '[' and toks[3].t == 'Earthen' and toks[3].link == 1 and toks[3].sp == false, 'Suite 102: bracket hugs the link words')
+    assert_true(toks[7].t == '(Enchanted)' and toks[7].link == 1 and toks[8].t == ']' and toks[8].sp == false, 'Suite 102: closing bracket hugs the last link word')
+    local measure = function(t) return #t * 7 end
+    local runs = {}
+    local nl = plugin.layoutEntry(ie, 10000, 7, true, measure, 13, function(line, text, link, ts, gap) runs[#runs + 1] = { line = line, text = text, link = link, ts = ts, gap = gap } end)
+    assert_eq(nl, 1, 'Suite 102: wide layout is one line')
+    assert_true(runs[1].text == '[10:00:00]' and runs[1].ts == true, 'Suite 102: timestamp run first')
+    assert_true(runs[2].text == 'Your [' and runs[2].gap == 7, 'Suite 102: plain run after the timestamp with a space gap')
+    assert_true(runs[3].text == 'Earthen Bracer of Fortitude (Enchanted)' and runs[3].link == 1 and runs[3].gap == 0, 'Suite 102: link words coalesce into one run hugging the bracket')
+    assert_true(runs[4].text == '] absorbs energy. (04.82%)' and runs[4].gap == 0, 'Suite 102: trailing plain run')
+    runs = {}
+    nl = plugin.layoutEntry(ie, 120, 7, false, measure, 13, function(line, text, link, ts, gap) runs[#runs + 1] = { line = line, text = text } end)
+    assert_true(nl > 1, 'Suite 102: narrow layout wraps')
+    local tooWide = nil
+    for _, r in ipairs(runs) do if #r.text * 7 > 120 and r.text:find(' ') then tooWide = r.text end end
+    assert_true(tooWide == nil, 'Suite 102: no multi-word run exceeds the wrap width: ' .. tostring(tooWide))
+    assert_true(plugin.layoutEntry(ie, 120, 20, false, function(t) return #t * 20 end, 20, nil) > nl, 'Suite 102: a larger font re-measures and wraps more')
+    local pe = { raw = P('Bob') .. " tells you, 'hi'", hms = '10:00:00' }
+    local ptoks = plugin.tokenize(pe)
+    assert_true(ptoks[1].t == 'Bob' and ptoks[1].link == nil and #pe.links == 0, 'Suite 102: player links tokenize as plain names')
+    assert_eq(plugin.sanitizeConfig({ renderer = 'weird' }).renderer, 'inline', 'Suite 102: renderer defaults to inline')
+    local fw = plugin.sanitizeConfig({ windows = { { id = 'a', fontScale = 9, font = 0 }, { id = 'b', fontScale = 'x', font = 2.7 } } }).windows
+    assert_true(fw[1].fontScale == 2.5 and fw[1].font == nil and fw[2].fontScale == 1.0 and fw[2].font == nil, 'Suite 102: per-window font scale clamped, saved font selections dropped')
+    assert_eq(plugin.sanitizeConfig({ renderer = 'console' }).renderer, 'console', 'Suite 102: classic renderer selectable')
+
+    -- 5. Tab filters
+    local tab = { channels = { say = true }, include = {}, exclude = { 'wts' } }
+    assert_eq(plugin.tabAccepts(tab, { channel = 'say', text = 'hello' }), true, 'Suite 102: channel match accepted')
+    assert_eq(plugin.tabAccepts(tab, { channel = 'ooc', text = 'hello' }), false, 'Suite 102: other channel rejected')
+    assert_eq(plugin.tabAccepts(tab, { channel = 'say', text = 'WTS sword' }), false, 'Suite 102: exclude keyword (case-insensitive)')
+    tab.include = { 'buff' }
+    assert_eq(plugin.tabAccepts(tab, { channel = 'say', text = 'hello' }), false, 'Suite 102: include keyword required when set')
+    assert_eq(plugin.tabAccepts(tab, { channel = 'say', text = 'need a Buff' }), true, 'Suite 102: include keyword matched')
+    assert_eq(plugin.tabAccepts({ channels = nil, include = {}, exclude = {} }, { channel = 'unknown', text = '' }), true, 'Suite 102: unfiltered tab takes everything')
+
+    -- 6. Lifecycle under a mock core
+    local S = { events = {}, binds = {}, cmds = {}, saves = 0 }
+    local cfgDir = os.getenv('TMPDIR') or '/tmp'
+    local mockMq = {
+        configDir = cfgDir,
+        gettime = function() return os.clock() * 1000 end,
+        event = function(name, pat, fn, opts) S.events[name] = { pat = pat, fn = fn, opts = opts } end,
+        unevent = function(name) S.events[name] = nil end,
+        -- doevents(name): deliver the lines MQ has queued for that event only
+        doevents = function(...)
+            S.doeventsArgs = { ... }
+            local ev = S.events.TACChatAll
+            if not ev then return end
+            local lines = S.pendingLines or {}
+            S.pendingLines = {}
+            for _, l in ipairs(lines) do ev.fn(l) end
+        end,
+        bind = function(cmd, fn) S.binds[cmd] = fn end,
+        unbind = function(cmd) S.binds[cmd] = nil end,
+        cmd = function(s) S.cmds[#S.cmds + 1] = s end,
+        cmdf = function(f, ...) S.cmds[#S.cmds + 1] = string.format(f, ...) end,
+        TLO = { MacroQuest = { Path = function() return function() return cfgDir end end },
+                Me = { CleanName = function() return 'Genro' end },
+                Pet = { CleanName = function() return 'Spinevenom' end } },
+    }
+    local ctrl = {}
+    local noop = function() end
+    local mockImGui = setmetatable({
+        Button = function() return false end, SmallButton = function() return false end,
+        Checkbox = function(_, v) return v end, SliderInt = function(_, v) return v, false end, SliderFloat = function(_, v) return v, false end,
+        CollapsingHeader = function() return false end, BeginTable = function() return false end,
+    }, { __index = function() return noop end })
+    local core = setmetatable({ mq = mockMq, ImGui = mockImGui, saveLoadout = function() S.saves = S.saves + 1 end, accent = noop, px = function(v) return v end,
+        pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop },
+        { __index = function(_, k) if k == 'ctrl' then return ctrl end end })
+    os.remove(cfgDir .. '/triune_chat_Genro.lua')
+    print = quiet
+    plugin.onInit(core)
+    plugin.onInit(core) -- the manager may re-init without onDestroy
+    print = origPrint
+    assert_true(S.events.TACChatAll ~= nil and S.events.TACChatAll.pat == '#*#' and S.events.TACChatAll.opts.keepLinks == true, 'Suite 102: catch-all event with keepLinks')
+    assert_true(S.binds['/tacchat'] ~= nil, 'Suite 102: /tacchat bound (not /chat, which EQ owns)')
+    assert_eq(ctrl.show_chat, false, 'Suite 102: show_chat seeded off')
+    local cfg = plugin.cfg
+    for _, f in ipairs(fixture) do S.events.TACChatAll.fn(f[1]) end
+    plugin.onTick()
+    local rt = plugin.rt
+    assert_eq(rt.stats.total, #fixture, 'Suite 102: every queued line ingested on tick')
+    assert_eq(rt.stats.unknown, 1, 'Suite 102: unclassified counter')
+    assert_eq(rt.unknownRecent[1], 'Some completely new server message nobody has seen.', 'Suite 102: unclassified lines kept for review')
+    local win = cfg.windows[1]
+    local tells = rt.tabs[win.id .. '/' .. win.tabs[5].id]
+    assert_eq(tells and tells.unread, 2, 'Suite 102: hidden Tells tab counts unread player tells only (pet chat is not a tell)')
+    assert_true(tells.rebuild == true and tells.pendingLast == 0 and tells.last == 0, 'Suite 102: undrawn tab defers to a ring rebuild')
+    local sample = rt.ring.items[rt.ring.first]
+    assert_true(plugin.renderLine(sample, true):find('^%[%d%d:%d%d:%d%d%] \a#%x%x%x%x%x%x') ~= nil, 'Suite 102: rendered line = timestamp + channel color')
+    assert_true(plugin.renderLine(sample, false):find('^\a#') ~= nil, 'Suite 102: timestamps optional')
+    local linkEntry
+    for i = rt.ring.first, rt.ring.last do
+        local e = rt.ring.items[i]
+        if e and e.raw:find(L, 1, true) and e.channel == 'item' then linkEntry = e break end
+    end
+    assert_true(linkEntry ~= nil and plugin.renderLine(linkEntry, false):find(L, 1, true) == nil, 'Suite 102: rendered lines carry no raw link payload')
+    assert_true(plugin.renderLine(linkEntry, false):find('[Earthen Bracer of Fortitude (Enchanted)]', 1, true) ~= nil, 'Suite 102: rendered lines show the item name')
+    assert_true(#rt.recentLinks >= 3 and rt.recentLinks[#rt.recentLinks].name == 'Earthen Bracer of Fortitude (Enchanted)', 'Suite 102: item links collected for the Links menu')
+    assert_eq(#plugin.extractItemLinks('Luck! [' .. IT2 .. '] became [' .. IT .. '] said ' .. P('Bob')), 2, 'Suite 102: extractItemLinks skips player links')
+    local rl = rt.recentLinks[#rt.recentLinks]
+    mockMq.ExecuteTextLink = function() error('must never be called: native exception on this server') end
+    mockMq.ExtractLinks = function() error('must never be called') end
+    rt.echo = nil
+    mockMq.TLO.FindItem = function() return setmetatable({}, { __call = function() return false end }) end
+    assert_eq(plugin.openItemLink(rl), true, 'Suite 102: UI click queues the link')
+    assert_true(rt.pendingLink ~= nil, 'Suite 102: nothing executes on the render thread')
+    plugin.onTick()
+    assert_true(rt.pendingLink == nil and rt.echo:find('not in your inventory or bank', 1, true) ~= nil, 'Suite 102: an item you do not carry is reported, never sent to ExecuteTextLink')
+    local inspected = false
+    mockMq.TLO.FindItem = function(name) return setmetatable({ Inspect = function() inspected = (name == '=Earthen Bracer of Fortitude (Enchanted)') end }, { __call = function() return true end }) end
+    assert_eq(plugin.executeLink(rl), true, 'Suite 102: Inspect() opens a carried item')
+    assert_true(inspected and rt.echo:find('^Opened Earthen') ~= nil, 'Suite 102: Inspect path reported')
+    mockMq.TLO.FindItem = nil
+    mockMq.ExtractLinks, mockMq.ExecuteTextLink = nil, nil
+    cfg.appendMode = 'unformatted'
+    assert_eq(plugin.renderLine(sample, false), sample.text, 'Suite 102: plain mode renders resolved text')
+    cfg.appendMode = 'text'
+    assert_eq(plugin.channelColor('tell_in'), 'FF66FF', 'Suite 102: default channel color')
+    cfg.colors.tell_in = '123456'
+    assert_eq(plugin.channelColor('tell_in'), '123456', 'Suite 102: color override wins')
+
+    plugin.sendText(win.tabs[2], 'hello')
+    assert_eq(S.cmds[#S.cmds], '/g hello', 'Suite 102: Social tab sends to /g')
+    plugin.sendText(win.tabs[2], '/ac status')
+    assert_eq(S.cmds[#S.cmds], '/ac status', 'Suite 102: slash commands pass through')
+    plugin.sendText(win.tabs[5], 'hi')
+    assert_true(S.cmds[#S.cmds] == '/ac status' and rt.echo ~= nil, 'Suite 102: tell without a target is refused with a hint')
+    win.tabs[5].tellTarget = 'Bob'
+    plugin.sendText(win.tabs[5], 'hi bob')
+    assert_eq(S.cmds[#S.cmds], '/tell Bob hi bob', 'Suite 102: tell routed to the tab target')
+    assert_eq(#rt.history, 4, 'Suite 102: input history recorded')
+
+    print = quiet
+    S.binds['/tacchat']('toggle')
+    assert_true(ctrl.show_chat == true and S.saves >= 1, 'Suite 102: /tacchat toggle opens and saves the loadout')
+    S.binds['/tacchat']('tab', 'Tells')
+    assert_eq(win.activeTab, 5, 'Suite 102: /tacchat tab <name> activates the tab')
+    S.binds['/tacchat']('capture', 'on')
+    assert_true(cfg.capture == true and rt.captureFile ~= nil, 'Suite 102: capture on opens the file')
+    S.events.TACChatAll.fn('You gain party experience!!')
+    plugin.onTick()
+    S.binds['/tacchat']('capture', 'off')
+    print = origPrint
+    local capf = io.open(rt.capturePath, 'r')
+    local capText = capf and capf:read('*a') or ''
+    if capf then capf:close() end
+    assert_true(capText:find('exp          | You gain party experience!!', 1, true) ~= nil, 'Suite 102: capture writes channel | line')
+    os.remove(rt.capturePath)
+
+    cfg.timestamps = false
+    rt.dirty = true
+    rt.lastSave = 0
+    plugin.onTick()
+    assert_eq(rt.dirty, false, 'Suite 102: dirty config autosaves on tick')
+
+    -- 7. Highlights, mutes, per-tab logging
+    cfg.highlights = { { text = 'buff', color = 'FFD700', beep = true, flash = true } }
+    cfg.muted = { playertwo = true }
+    local beeps = 0
+    local origCmd = mockMq.cmd
+    mockMq.cmd = function(c) if c == '/beep' then beeps = beeps + 1 else S.cmds[#S.cmds + 1] = c end end
+    rt.lastBeepAt = 0
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'need a BUFF please'")
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'buff again'")
+    S.events.TACChatAll.fn(P('Playertwo') .. " says out of character, 'spam'")
+    plugin.onTick()
+    local hlEntry, mutedEntry = rt.ring.items[rt.ring.last - 2], rt.ring.items[rt.ring.last]
+    assert_true(hlEntry.hl == 'FFD700' and hlEntry.flash == true, 'Suite 102: highlight colours and flags the line (case-insensitive)')
+    assert_eq(beeps, 1, 'Suite 102: beep throttled to once a second')
+    assert_true(mutedEntry.muted == true and plugin.tabAccepts(win.tabs[1], mutedEntry) == false, 'Suite 102: muted sender hidden in every tab')
+    local tellsSt = rt.tabs[win.id .. '/' .. win.tabs[5].id]
+    local socialSt = rt.tabs[win.id .. '/' .. win.tabs[2].id]
+    assert_true(socialSt.flashAt > 0 and tellsSt.flashAt == 0, 'Suite 102: hidden tab flashes on a highlighted line, the active one does not')
+    mockMq.cmd = origCmd
+    win.tabs[5].logToFile = true
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'log me'")
+    plugin.onTick()
+    assert_true(tellsSt.logFile ~= nil, 'Suite 102: tab log file opened on demand')
+    local logPath = string.format('%s/tac_chat_Genro_Tells_%s.txt', cfgDir, os.date('%Y%m%d'))
+    local lf = io.open(logPath, 'r')
+    local logText = lf and lf:read('*a') or ''
+    if lf then lf:close() end
+    assert_true(logText:find("Playerone tells you, 'log me'", 1, true) ~= nil, 'Suite 102: tab log line written and flushed')
+    win.tabs[5].logToFile = false
+
+    -- 8. Tab / window management
+    local w2 = plugin.newWindow('Second')
+    assert_true(#cfg.windows == 2 and w2.title == 'Second' and #w2.tabs == 1 and w2.tabs[1].channels == nil, 'Suite 102: new window seeded with an All tab')
+    local t = plugin.addTab(win, 'Extra', 'loot')
+    assert_true(#win.tabs == 7 and win.activeTab == 7 and t.channels.loot == true and t.id ~= win.tabs[1].id, 'Suite 102: addTab appends, activates, unique id')
+    assert_true(plugin.moveTab(win, 7, -1) and win.tabs[6] == t and win.activeTab == 6, 'Suite 102: moveTab swaps and follows')
+    assert_eq(plugin.moveTab(win, 1, -1), false, 'Suite 102: moveTab refuses to leave the list')
+    assert_true(plugin.moveTabToWindow(win, 6, w2) and #win.tabs == 6 and w2.tabs[2] == t and w2.activeTab == 2, 'Suite 102: tab moved to another window')
+    assert_eq(plugin.moveTabToWindow(w2, 1, w2), false, 'Suite 102: no move onto itself')
+    assert_true(plugin.removeTab(w2, 2) and #w2.tabs == 1, 'Suite 102: removeTab')
+    assert_eq(plugin.removeTab(w2, 1), false, 'Suite 102: last tab cannot be removed')
+    assert_true(plugin.findWindow('second') == w2 and plugin.findWindow('nope') == nil, 'Suite 102: findWindow by title')
+    -- panes
+    assert_eq(plugin.moveTabToPane(win, 1, 2, 'h'), true, 'Suite 102: split moves the All tab into a new pane')
+    assert_true(win.panes == 2 and win.tabs[1].pane == 2 and win.splitDir == 'h' and math.abs(win.paneSizes[1] + win.paneSizes[2] - 1) < 0.001, 'Suite 102: two panes, sizes normalised')
+    assert_true(win.activeByPane[2] == win.tabs[1].id and plugin.isTabActive(win, 1), 'Suite 102: the moved tab is active in its pane')
+    assert_eq(plugin.moveTabToPane(win, 1, 1), false, 'Suite 102: the only tab of a pane cannot leave it')
+    assert_eq(plugin.moveTabToPane(win, 2, 3, 'v'), true, 'Suite 102: a third pane, stacked')
+    assert_true(win.panes == 3 and win.splitDir == 'v' and win.tabs[2].pane == 3, 'Suite 102: third pane created')
+    assert_true(plugin.moveTab(win, 3, 1) and win.tabs[4].pane == 1, 'Suite 102: moveTab swaps within the same pane only')
+    local moved = win.tabs[4]
+    plugin.setActiveTab(win, 4)
+    assert_true(plugin.isTabActive(win, 4) and win.activeTab == 4, 'Suite 102: setActiveTab keeps pane-1 activeTab in sync')
+    plugin.moveTabToPane(win, 3, 3)
+    assert_true(win.tabs[3].pane == 3, 'Suite 102: move to an existing pane')
+    plugin.unsplit(win)
+    assert_true(win.panes == 1 and win.tabs[1].pane == 1 and win.tabs[2].pane == 1, 'Suite 102: unsplit collapses to one pane')
+    local pc = plugin.sanitizeConfig({ windows = { { id = 'p', panes = 4, splitDir = 'x', paneSizes = { 3, 0, 'z' }, activeByPane = { [2] = 'b' },
+        tabs = { { id = 'a', pane = 1 }, { id = 'b', pane = 3 }, { id = 'c', pane = 9 }, { id = 'd', pane = 3 } } } } }).windows[1]
+    assert_true(pc.panes == 3 and pc.splitDir == 'h', 'Suite 102: sanitize collapses the empty pane (2 of 4) and defaults the direction')
+    assert_true(pc.tabs[1].pane == 1 and pc.tabs[2].pane == 2 and pc.tabs[3].pane == 3 and pc.tabs[4].pane == 2, 'Suite 102: out-of-range pane clamps to the last pane, gaps renumber')
+    assert_true(math.abs(pc.paneSizes[1] + pc.paneSizes[2] + pc.paneSizes[3] - 1) < 0.001 and pc.paneSizes[1] > pc.paneSizes[2], 'Suite 102: pane sizes normalised, bad values replaced')
+    assert_true(pc.activeByPane[1] == 'a' and pc.activeByPane[2] == 'b', 'Suite 102: active tab per pane kept or seeded')
+    plugin.closeWindow(w2)
+    assert_true(#cfg.windows == 1 and cfg.windows[1] == win, 'Suite 102: closeWindow removes an extra window')
+    plugin.closeWindow(win)
+    assert_true(#cfg.windows == 1 and win.open == false and ctrl.show_chat == false, 'Suite 102: closing the last window hides the plugin instead of deleting it')
+    win.open = true
+    print = quiet
+    S.binds['/tacchat']('window', 'new', 'Cmd')
+    assert_true(#cfg.windows == 2 and cfg.windows[2].title == 'Cmd' and ctrl.show_chat == true, 'Suite 102: /tacchat window new')
+    S.binds['/tacchat']('window', 'close', 'Cmd')
+    assert_eq(#cfg.windows, 1, 'Suite 102: /tacchat window close')
+    S.binds['/tacchat']('mute', 'Spammer')
+    assert_eq(cfg.muted.spammer, true, 'Suite 102: /tacchat mute lowercases')
+    S.binds['/tacchat']('unmute', 'SPAMMER')
+    assert_eq(cfg.muted.spammer, nil, 'Suite 102: /tacchat unmute')
+    S.binds['/tacchat']('settings')
+    assert_true(rt.editor ~= nil and rt.editor.winId == win.id, 'Suite 102: /tacchat settings opens the editor on the active tab')
+    print = origPrint
+
+    -- 9. Full draw pass under a permissive ImGui mock (window, toolbar menu, inline log, editor)
+    local drawMock = setmetatable({
+        Begin = function() return true, true end,
+        BeginChild = function() return true end,
+        BeginTabBar = function() return true end,
+        BeginTabItem = function() return true end,
+        BeginPopup = function() return true end,
+        BeginMenu = function() return true end,
+        BeginCombo = function() return true end,
+        BeginTable = function() return true end,
+        Button = function() return false end, SmallButton = function() return false end,
+        MenuItem = function() return false end, Selectable = function() return false end,
+        Checkbox = function(_, v) return v end,
+        InputText = function(_, v) return v, false end, InputTextWithHint = function(_, _, v) return v, false end,
+        SliderInt = function(_, v) return v end, SliderFloat = function(_, v) return v end,
+        CalcTextSize = function(t) return #t * 7 end,
+        GetContentRegionAvail = function() return 400, 300 end,
+        GetScrollY = function() return 0 end, GetScrollMaxY = function() return 0 end,
+        GetTextLineHeightWithSpacing = function() return 16 end, GetFontSize = function() return 13 end,
+        IsItemHovered = function() return false end, IsItemClicked = function() return false end, IsMouseClicked = function() return false end,
+        CollapsingHeader = function() return false end,
+        ColorEdit3 = function(_, col) return col, false end,
+    }, { __index = function() return noop end })
+    core.ImGui = drawMock
+    ctrl.show_chat = true
+    cfg.renderer = 'inline'
+    cfg.timestamps = true
+    win.fontScale = 1.3
+    rt.tabMenuTarget = { win = win, ti = 1 }
+    plugin.echo('status line')
+    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    local okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 102: inline renderer + tab menu + editor draw without error: ' .. tostring(errDraw))
+    -- a config with no windows at draw time is reported and reloaded instead of crashing the draw
+    local savedWindows = cfg.windows
+    cfg.windows = nil
+    local repairPrints = {}
+    print = function(...) repairPrints[#repairPrints + 1] = table.concat({ ... }, ' ') end
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    print = origPrint
+    assert_true(okDraw and type(cfg.windows) == 'table' and #cfg.windows >= 1, 'Suite 102: missing windows table repaired at draw time: ' .. tostring(errDraw))
+    assert_true(repairPrints[1] ~= nil and repairPrints[1]:find('config had no windows', 1, true) ~= nil and repairPrints[1]:find('init ran: 2', 1, true) ~= nil, 'Suite 102: repair diagnostic names the state: ' .. tostring(repairPrints[1]))
+    win = cfg.windows[1]
+    -- line context menu: "Show link in MQ window" echoes the raw line (link intact) through print
+    local printedRaw = {}
+    print = function(...) printedRaw[#printedRaw + 1] = table.concat({ ... }, ' ') end
+    drawMock.MenuItem = function(label) return label == 'Show link in MQ window (clickable there)' end
+    rt.ctxEntry = linkEntry
+    rt.tabMenuTarget = nil
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    print = origPrint
+    drawMock.MenuItem = function() return false end
+    assert_true(okDraw, 'Suite 102: line context menu draws: ' .. tostring(errDraw))
+    local echoed = false
+    for _, l in ipairs(printedRaw) do if l:find(L, 1, true) and l:find('link: ', 1, true) then echoed = true end end
+    assert_true(echoed, 'Suite 102: Show link in MQ window echoes the line with its \\x12 tags intact')
+    local fonts = plugin.probeFonts()
+    assert_true(fonts.err ~= nil and #fonts.list == 0, 'Suite 102: font probe reports an unsupported binding instead of failing')
+    rt.tabMenuReq = { win = win, ti = 2 }
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and rt.tabMenuReq == nil and rt.tabMenuTarget.ti == 2, 'Suite 102: a tab right-click request opens the menu at window scope: ' .. tostring(errDraw))
+    plugin.moveTabToPane(win, 1, 2, 'h')
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and win.panes == 2, 'Suite 102: two side-by-side panes draw: ' .. tostring(errDraw))
+    win.splitDir = 'v'
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 102: stacked panes draw: ' .. tostring(errDraw))
+    plugin.unsplit(win)
+    -- ImGui scope balance under an injected error: counts of Begin*/End* must match and the error must be captured
+    local bal = { child = 0, win = 0, tab = 0, popup = 0, tabbar = 0 }
+    local origBeginChild, origEndChild, origBegin, origEnd = drawMock.BeginChild, drawMock.EndChild, drawMock.Begin, drawMock.End
+    drawMock.BeginChild = function() bal.child = bal.child + 1 return true end
+    drawMock.EndChild = function() bal.child = bal.child - 1 end
+    drawMock.Begin = function() bal.win = bal.win + 1 return true, true end
+    drawMock.End = function() bal.win = bal.win - 1 end
+    drawMock.BeginTabItem = function() bal.tab = bal.tab + 1 return true end
+    drawMock.EndTabItem = function() bal.tab = bal.tab - 1 end
+    drawMock.BeginTabBar = function() bal.tabbar = bal.tabbar + 1 return true end
+    drawMock.EndTabBar = function() bal.tabbar = bal.tabbar - 1 end
+    drawMock.BeginPopup = function() bal.popup = bal.popup + 1 return true end
+    drawMock.EndPopup = function() bal.popup = bal.popup - 1 end
+    drawMock.InputText = function() error('binding exploded') end
+    plugin.moveTabToPane(win, 1, 2, 'h')
+    rt.stats.drawErr, rt.stats.drawErrShown = nil, nil
+    rt.tabMenuTarget = { win = win, ti = 1 }
+    rt.editor = { kind = 'tab', winId = win.id, tabId = win.tabs[1].id }
+    print = quiet
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    print = origPrint
+    assert_true(okDraw, 'Suite 102: an error inside a tab never escapes onDrawUI: ' .. tostring(errDraw))
+    assert_true(rt.stats.drawErr ~= nil and rt.stats.drawErr:find('binding exploded', 1, true) ~= nil, 'Suite 102: the underlying error is captured for stats')
+    assert_true(rt.stats.diagErr == nil, 'Suite 102: the error diagnostics themselves do not fail: ' .. tostring(rt.stats.diagErr))
+    assert_true(bal.child == 0 and bal.win == 0 and bal.tab == 0 and bal.popup == 0 and bal.tabbar == 0, string.format('Suite 102: ImGui scopes balanced after the error (child %d win %d tab %d popup %d tabbar %d)', bal.child, bal.win, bal.tab, bal.popup, bal.tabbar))
+    -- the failure flips the next frame into safe mode (one pane, default font), and the trace dumps on error
+    print = quiet
+    S.binds['/tacchat']('trace', 'on')
+    assert_true(rt.trace ~= nil, 'Suite 102: /tacchat trace on')
+    rt.stats.drawErr, rt.stats.drawErrShown = nil, nil
+    rt.frameFailed = false
+    okDraw = pcall(plugin.onDrawUI)          -- still erroring (InputText throws): records steps + dumps
+    print = origPrint
+    local tf = io.open(cfgDir .. '/tac_chat_trace_Genro.txt', 'r')
+    local traceText = tf and tf:read('*a') or ''
+    if tf then tf:close() end
+    assert_true(traceText:find('BeginTabBar pane', 1, true) ~= nil and traceText:find('ERROR', 1, true) ~= nil, 'Suite 102: draw trace dumped with scope steps and the error')
+    os.remove(cfgDir .. '/tac_chat_trace_Genro.txt')
+    print = quiet
+    okDraw = pcall(plugin.onDrawUI)
+    print = origPrint
+    assert_true(rt.safeMode == true, 'Suite 102: safe mode engaged after a failed frame')
+    print = quiet
+    S.binds['/tacchat']('safemode', 'off')
+    S.binds['/tacchat']('trace', 'off')
+    print = origPrint
+    assert_true(rt.safeMode == false and rt.trace == nil, 'Suite 102: safe mode and trace switched off by command')
+    drawMock.InputText = function(_, v) return v, false end
+    drawMock.BeginChild, drawMock.EndChild, drawMock.Begin, drawMock.End = origBeginChild, origEndChild, origBegin, origEnd
+    drawMock.BeginTabItem = function() return true end
+    drawMock.EndTabItem, drawMock.BeginTabBar, drawMock.EndTabBar, drawMock.BeginPopup, drawMock.EndPopup = noop, function() return true end, noop, function() return true end, noop
+    rt.editor = nil
+    rt.stats.drawErr, rt.stats.drawErrShown = nil, nil
+    rt.frameFailed = false
+    plugin.unsplit(win)
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and rt.stats.drawErr == nil, 'Suite 102: clean draw after the injected error is gone: ' .. tostring(rt.stats.drawErr or errDraw))
+    local allSt = rt.tabs[win.id .. '/' .. win.tabs[1].id]
+    assert_true(allSt.rebuild == false and allSt.last > 0 and allSt.entries[1].nlines ~= nil, 'Suite 102: draw pass rebuilt the tab and laid out entries')
+    -- Regression: a tab must keep showing lines after the ring has evicted its
+    -- oldest entries (the queue is trimmed from the front, so `#` is unusable).
+    cfg.maxLines = 300
+    rt.ring.cap = 300
+    for i = 1, 900 do S.events.TACChatAll.fn('You receive ' .. i .. ' gold.') end
+    plugin.onTick()
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 102: draw after eviction: ' .. tostring(errDraw))
+    assert_true(allSt.first <= allSt.last and allSt.entries[allSt.last] ~= nil and allSt.entries[allSt.last].text == 'You receive 900 gold.', 'Suite 102: newest line still at the end of the tab queue after eviction')
+    assert_true(allSt.entries[allSt.first].id >= rt.ring.first, 'Suite 102: evicted lines trimmed from the front')
+    assert_true(allSt.last - allSt.first + 1 <= 300, 'Suite 102: tab queue bounded by the ring')
+    for i = 1, 600 do S.events.TACChatAll.fn('You receive ' .. (900 + i) .. ' gold.') end
+    plugin.onTick()
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and allSt.entries[allSt.last].text == 'You receive 1500 gold.' and allSt.first == 1, 'Suite 102: queue compacts and keeps rendering the newest lines: ' .. tostring(errDraw))
+    cfg.maxLines = 2000
+    rt.ring.cap = 2000
+    cfg.renderer = 'console'
+    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 102: classic renderer draws without error (no ConsoleWidget in the mock): ' .. tostring(errDraw))
+    cfg.renderer = 'inline'
+    rt.editor = nil
+
+    -- 10. Tells: recent-partner list and per-conversation popout windows
+    core.ImGui = drawMock
+    cfg.recentTells = {}
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'hi'")
+    S.events.TACChatAll.fn("You told " .. P('Playertwo') .. ", 'hello'")
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'again'")
+    S.events.TACChatAll.fn("Spinevenom tells you, 'Attacking a rat Master.'")
+    plugin.onTick()
+    assert_eq(#cfg.recentTells, 2, 'Suite 102: recent tells lists each partner once (pets excluded)')
+    assert_true(cfg.recentTells[1] == 'Playerone' and cfg.recentTells[2] == 'Playertwo', 'Suite 102: recent tells are most recent first, incoming and outgoing')
+    for i = 1, 7 do plugin.noteTeller('Person' .. i) end
+    assert_true(#cfg.recentTells == 5 and cfg.recentTells[1] == 'Person7', 'Suite 102: recent tells capped at five')
+    assert_eq(#cfg.windows, 1, 'Suite 102: no popout while the option is off')
+    cfg.tellPopouts = true
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'pop'")
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'pop2'")
+    plugin.onTick()
+    local pop = plugin.findTellWindow('playerone')
+    assert_true(pop ~= nil and #cfg.windows == 2 and pop.open and pop.title == 'Playerone' and pop.tellWith == 'Playerone', 'Suite 102: a tell opens one popout window for that person')
+    assert_true(#pop.tabs == 1 and pop.tabs[1].send == 'tell' and pop.tabs[1].tellTarget == 'Playerone' and pop.tabs[1].tellWith == 'Playerone', 'Suite 102: popout tab replies to that person')
+    S.events.TACChatAll.fn("You told " .. P('Playerone') .. ", 'back at you'")
+    S.events.TACChatAll.fn(P('Playertwo') .. " tells you, 'other convo'")
+    S.events.TACChatAll.fn('You receive 5 gold.')
+    plugin.onTick()
+    assert_true(plugin.findTellWindow('Playertwo') ~= nil and #cfg.windows == 3, 'Suite 102: a second person gets their own popout')
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and rt.stats.drawErr == nil, 'Suite 102: popout windows draw (no tab bar): ' .. tostring(rt.stats.drawErr or errDraw))
+    local popSt = rt.tabs[pop.id .. '/' .. pop.tabs[1].id]
+    assert_true(popSt ~= nil and popSt.last == 5, 'Suite 102: popout holds that whole conversation (both directions, from the ring): ' .. tostring(popSt and popSt.last))
+    -- closing a popout from its title bar removes it; the next tell brings it back
+    drawMock.Begin = function() return false, true end
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    drawMock.Begin = function() return true, true end
+    assert_true(okDraw and plugin.findTellWindow('Playerone') == nil and #cfg.windows >= 1, 'Suite 102: closing a popout removes it: ' .. tostring(errDraw))
+    assert_true(cfg.windows[1] == win and win.open == false, 'Suite 102: closing the main window still just hides it')
+    win.open = true
+    ctrl.show_chat = true
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'back?'")
+    plugin.onTick()
+    assert_true(plugin.findTellWindow('Playerone') ~= nil, 'Suite 102: the next tell recreates the popout')
+    -- popouts are per-session: sanitize drops them, the main window survives
+    local persisted = plugin.sanitizeConfig({ version = 2, windows = { { id = 'main', tabs = { { id = 'all' } } }, { id = 'tell1', tellWith = 'Someone', tabs = { { id = 'tell', tellWith = 'Someone' } } } } })
+    assert_true(#persisted.windows == 1 and persisted.windows[1].id == 'main', 'Suite 102: tell popouts are not reloaded from disk')
+    local rc = plugin.sanitizeConfig({ recentTells = { 'A', 3, 'B', '', 'C', 'D', 'E', 'F', 'G' } }).recentTells
+    assert_true(#rc == 5 and rc[2] == 'B' and rc[5] == 'E', 'Suite 102: recent tells sanitized and capped')
+    -- the game's tell-window format echoes my own tells as "Genro tells you, '...'":
+    -- they must land in the recipient's conversation, never open a window for me
+    local winCount = #cfg.windows
+    local popTab = plugin.findTellWindow('Playerone').tabs[1]
+    plugin.sendText(popTab, 'sent from the popout')
+    S.events.TACChatAll.fn("Genro tells you, 'sent from the popout'")
+    plugin.sendText(popTab, '/tell Playertwo via slash command')
+    S.events.TACChatAll.fn("Genro tells you, 'via slash command'")
+    S.events.TACChatAll.fn("Genro tells you, 'typed in the game box'")
+    plugin.onTick()
+    assert_true(plugin.findTellWindow('Genro') == nil and #cfg.windows == winCount + 1 and plugin.findTellWindow('Playertwo') ~= nil, 'Suite 102: echoed self tells open the recipient popout, never one for me')
+    local lastTwo = rt.ring.items[rt.ring.last]
+    assert_true(lastTwo.channel == 'tell_out' and lastTwo.outgoing and lastTwo.sender == 'Playertwo', 'Suite 102: an unmatched echo goes to the last recipient: ' .. tostring(lastTwo.sender))
+    assert_eq(rt.ring.items[rt.ring.last - 1].sender, 'Playertwo', 'Suite 102: /tell typed in the input is matched to its echo')
+    assert_eq(rt.ring.items[rt.ring.last - 2].sender, 'Playerone', 'Suite 102: a tell sent from the popout is matched to its echo')
+    assert_eq(cfg.recentTells[1], 'Playertwo', 'Suite 102: echoed tells update the recent list with the recipient')
+    S.events.TACChatAll.fn(P('Playerthree') .. " tells you, 'yo'")
+    plugin.onTick()
+    plugin.sendText(popTab, '/r back at you')
+    S.events.TACChatAll.fn("Genro tells you, 'back at you'")
+    plugin.onTick()
+    assert_eq(rt.ring.items[rt.ring.last].sender, 'Playerthree', 'Suite 102: /r replies resolve to the last person who sent a tell')
+    for _, w in ipairs({ plugin.findTellWindow('Playerone'), plugin.findTellWindow('Playertwo'), plugin.findTellWindow('Playerthree') }) do
+        if w then plugin.closeWindow(w) end
+    end
+    cfg.tellPopouts = false
+    assert_eq(#cfg.windows, 1, 'Suite 102: popouts closed')
+    -- the log height leaves room for the status row and the input frame
+    local chatSrc = readFile('TAC/lua/tac/chat.lua')
+    assert_true(chatSrc:find('GetFrameHeightWithSpacing', 1, true) ~= nil and chatSrc:find('GetTextLineHeightWithSpacing)', 1, true) ~= nil, 'Suite 102: input row height is measured, not guessed')
+    assert_true(chatSrc:find('pv(SV.WindowPadding, core.px(', 1, true) ~= nil and chatSrc:find('PopStyleVar, pushedVars', 1, true) ~= nil, 'Suite 102: compact window chrome is pushed and popped')
+
+    -- 11. Per-frame delivery: the draw asks MQ for just our event and drains the queue
+    S.pendingLines = { 'You receive 77 platinum.' }
+    local ringBefore = rt.ring.last
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 102: draw with the event pump: ' .. tostring(errDraw))
+    assert_true(S.doeventsArgs and S.doeventsArgs[1] == 'TACChatAll' and S.doeventsArgs[2] == nil, 'Suite 102: the draw pump asks for the chat event only')
+    assert_true(rt.ring.last == ringBefore + 1 and rt.ring.items[rt.ring.last].text == 'You receive 77 platinum.' and #rt.queue == 0, 'Suite 102: a queued line is on screen after the draw, without a core tick')
+    assert_true(rt.drawPumped >= 1, 'Suite 102: pumped lines are counted')
+    ctrl.show_chat = false
+    S.pendingLines = { 'You receive 78 platinum.' }
+    pcall(plugin.onDrawUI)
+    assert_true(#S.pendingLines == 1, 'Suite 102: hidden windows leave event delivery to the core')
+    ctrl.show_chat = true
+    local origDoevents = mockMq.doevents
+    mockMq.doevents = function() error('cannot process events here') end
+    print = quiet
+    pcall(plugin.onDrawUI)
+    print = origPrint
+    assert_true(rt.drawEvents == false, 'Suite 102: a binding that refuses turns the pump off (once, with a notice)')
+    mockMq.doevents = origDoevents
+    rt.drawEvents = true
+
+    -- 12. Enter opens the chat input like the game's windows
+    local focusCalls = 0
+    drawMock.SetKeyboardFocusHere = function() focusCalls = focusCalls + 1 end
+    drawMock.GetIO = function() return { WantTextInput = false, MouseDelta = { x = 0, y = 0 } } end
+    drawMock.IsKeyPressed = function() return false end
+    rt.focusRequested, rt.focusKey, rt.lastInputKey = false, nil, nil
+    plugin.pollEnter()
+    assert_true(rt.focusRequested == false, 'Suite 102: no Enter, no focus request')
+    local hadKey = _G.ImGuiKey
+    _G.ImGuiKey = { Enter = 525, KeypadEnter = 615, UpArrow = 515, DownArrow = 516 }
+    drawMock.IsKeyPressed = function(k) return k == ImGuiKey.Enter end
+    plugin.pollEnter()
+    local activeId = win.activeByPane[1]
+    assert_true(rt.focusRequested and rt.focusKey == win.id .. '/' .. activeId, 'Suite 102: Enter targets the active tab of the first pane: ' .. tostring(rt.focusKey))
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and focusCalls == 1 and rt.focusRequested == false and rt.focusKey == nil, 'Suite 102: exactly one input takes the focus: ' .. tostring(errDraw))
+    rt.lastInputKey = win.id .. '/' .. win.tabs[3].id
+    plugin.pollEnter()
+    assert_eq(rt.focusKey, rt.lastInputKey, 'Suite 102: Enter goes back to the input that last had focus')
+    rt.focusRequested, rt.focusKey = false, nil
+    drawMock.GetIO = function() return { WantTextInput = true, MouseDelta = { x = 0, y = 0 } } end
+    plugin.pollEnter()
+    assert_true(rt.focusRequested == false, 'Suite 102: Enter while typing elsewhere is left alone')
+    drawMock.GetIO = function() return { WantTextInput = false, MouseDelta = { x = 0, y = 0 } } end
+    cfg.enterFocus = false
+    plugin.pollEnter()
+    assert_true(rt.focusRequested == false, 'Suite 102: option off: Enter ignored')
+    cfg.enterFocus = true
+    rt.lastInputKey = 'gone/away'
+    plugin.pollEnter()
+    assert_eq(rt.focusKey, win.id .. '/' .. activeId, 'Suite 102: a stale last-input key falls back to the first window')
+    rt.focusRequested, rt.focusKey = false, nil
+    drawMock.IsKeyPressed = function() return false end
+    -- sending: Enter mode hands the keys back, otherwise the input keeps them
+    drawMock.InputText = function(_, v) return 'hello group', true end
+    rt.lastInputKey = nil
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and rt.inputRefocus == 0 and rt.input == '', 'Suite 102: Enter mode: send releases the input')
+    cfg.enterFocus = false
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and rt.inputRefocus > 0, 'Suite 102: classic mode: send keeps the input focused')
+    cfg.enterFocus = true
+    rt.inputRefocus = 0
+    drawMock.InputText = function(_, v) return v, false end
+    assert_eq(plugin.sanitizeConfig({}).enterFocus, true, 'Suite 102: Enter focus defaults on')
+    assert_eq(plugin.sanitizeConfig({ enterFocus = false }).enterFocus, false, 'Suite 102: Enter focus can be turned off')
+    _G.ImGuiKey = hadKey
+
+    core.ImGui = mockImGui
+    assert_true(pcall(plugin.onDrawSettings), 'Suite 102: settings page with the general section renders')
+
+    cfg.timestamps = false
+    win.activeTab = 5
+    rt.dirty = true
+    plugin.onDestroy()
+    assert_true(tellsSt.logFile == nil, 'Suite 102: tab logs closed on destroy')
+    os.remove(logPath)
+    assert_true(next(S.events) == nil and next(S.binds) == nil, 'Suite 102: events and binds released on destroy')
+
+    local plugin2 = assert(loadfile('TAC/lua/tac/chat.lua'))()
+    print = quiet
+    plugin2.onInit(core)
+    print = origPrint
+    assert_eq(plugin2.cfg.timestamps, false, 'Suite 102: timestamps persisted per character')
+    assert_eq(plugin2.cfg.windows[1].activeTab, 5, 'Suite 102: active tab persisted')
+    assert_eq(plugin2.cfg.windows[1].tabs[5].tellTarget, 'Bob', 'Suite 102: tell target persisted')
+    assert_eq(plugin2.cfg.colors.tell_in, '123456', 'Suite 102: color override persisted')
+    local okSettings, errSettings = pcall(plugin2.onDrawSettings)
+    assert_true(okSettings, 'Suite 102: settings page renders under the mock: ' .. tostring(errSettings))
+    plugin2.onDestroy()
+    os.remove(cfgDir .. '/triune_chat_Genro.lua')
+end)()
+
+
+-- ============================================================================
+-- Suite 103: tac/gamedb.lua (Game Database plugin) — encoding, decoders, SPA
+-- text, index loading / search / record reads over a fixture database,
+-- navigation, commands, core wiring and the chat plugin's lookup hook
+-- ============================================================================
+;(function()
+    print('--- Suite 103: game database ---')
+    local printed = {}
+    local quiet = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local origPrint = print
+    local noop = function() end
+    local passthrough = function(_, v) return v end
+    local mockImGui = setmetatable({
+        Checkbox = passthrough, InputTextWithHint = function(_, _, v) return v, false end,
+        InputInt = function(_, v) return v, false end,
+        Button = function() return false end, SmallButton = function() return false end,
+        Selectable = function() return false end, BeginCombo = function() return false end,
+        BeginTable = function() return false end, BeginChild = function() return false end,
+        BeginTabBar = function() return false end, BeginTabItem = function() return false end,
+        IsItemHovered = function() return false end, IsItemClicked = function() return false end,
+        Begin = function(_, open) return open, true end,
+    }, { __index = function() return function() end end })
+
+    print = quiet
+    local plugin = assert(loadfile('TAC/lua/tac/gamedb.lua'))()
+    print = origPrint
+    local ENC, D, DB = plugin.ENC, plugin.D, plugin.DB
+
+    -- 1. encoding
+    assert_eq(ENC.unescape('a\\pb\\sc\\td\\ce\\kf\\\\g\\nh'), 'a|b;c~d,e:f\\g\nh', 'Suite 103: every escape decodes')
+    assert_eq(ENC.unescape('plain'), 'plain', 'Suite 103: unescape leaves plain text alone')
+    local rec = ENC.parseRecord('id=2735|name=Fungus Covered Scale Tunic|ac=21|drops=89153~19.8;12~0.5;+3|lore=a\\pb')
+    assert_eq(ENC.num(rec, 'ac'), 21, 'Suite 103: numeric field')
+    assert_eq(ENC.num(rec, 'missing', 7), 7, 'Suite 103: numeric default')
+    assert_eq(ENC.str(rec, 'lore'), 'a|b', 'Suite 103: string field unescaped')
+    local drops = ENC.list(rec, 'drops')
+    assert_eq(#drops, 2, 'Suite 103: list entries split on ;')
+    assert_eq(drops[1][1] .. '/' .. drops[1][2], '89153/19.8', 'Suite 103: list fields split on ~')
+    assert_eq(drops.more, 3, 'Suite 103: +N overflow marker becomes list.more')
+    local nested = ENC.nested('10:1,11:2')
+    assert_eq(#nested, 2, 'Suite 103: nested list split on ,')
+    assert_eq(nested[2][1] .. '/' .. nested[2][2], '11/2', 'Suite 103: nested fields split on :')
+    assert_eq(#ENC.list(rec, 'none'), 0, 'Suite 103: missing list is empty')
+
+    -- 2. decoders
+    assert_eq(D.classesText(65535), 'ALL', 'Suite 103: all classes')
+    assert_eq(D.classesText(50175), 'WAR CLR PAL RNG SHD DRU MNK BRD ROG SHM BST BER', 'Suite 103: class bitmask (FCST)')
+    assert_eq(D.racesText(65535), 'ALL', 'Suite 103: all races')
+    assert_eq(D.racesText(1 + 256), 'HUM TRL', 'Suite 103: race bitmask')
+    assert_eq(D.slotsText(131072), 'Chest', 'Suite 103: chest slot bit 17')
+    assert_eq(D.slotsText(4 + 512 + 1024), 'Head Wrist', 'Suite 103: duplicate slot names collapse')
+    assert_eq(D.itemTypeName(54), 'Augmentation', 'Suite 103: item type table indexes are explicit')
+    assert_eq(D.itemTypeName(8), 'Shield', 'Suite 103: item type after a gap')
+    assert_eq(D.skillName(61), 'Tailoring', 'Suite 103: skill names')
+    assert_eq(D.skillName(100), 'Quest Combine', 'Suite 103: quest combine skill')
+    assert_eq(D.bodyTypeName(25), 'Plant', 'Suite 103: body types')
+    assert_eq(D.className(41), 'Merchant', 'Suite 103: NPC classes')
+    assert_eq(D.className(2), 'Cleric', 'Suite 103: player classes')
+    assert_eq(D.raceName(28), 'Fungusman', 'Suite 103: races')
+    assert_eq(D.raceName(128), 'Iksar', 'Suite 103: later races')
+    assert_eq(D.moneyText(2600), '2pp 6gp', 'Suite 103: money from copper')
+    assert_eq(D.moneyText(1234), '1pp 2gp 3sp 4cp', 'Suite 103: money all denominations')
+    assert_eq(D.secondsText(640), '10m 40s', 'Suite 103: seconds to minutes')
+    assert_eq(D.secondsText(90000), '1d 1h', 'Suite 103: seconds to days')
+    assert_eq(D.weightText(25), '2.5', 'Suite 103: weight in tenths')
+    local tier, base = D.tierOf(2002735)
+    assert_eq(tier .. base, 'L2735', 'Suite 103: legendary tier offset')
+    tier, base = D.tierOf(1002735)
+    assert_eq(tier .. base, 'E2735', 'Suite 103: enchanted tier offset')
+    tier, base = D.tierOf(2735)
+    assert_eq(tier .. base, 'B2735', 'Suite 103: base tier')
+    assert_eq(table.concat(D.specialAbilitiesText('1,1^10,1^37,25'), ', '), 'Summons, Magical Attack, Flee Percent 25%', 'Suite 103: special abilities decode')
+    assert_eq(D.npcSpellTypes(1 + 8), 'Buff, Nuke', 'Suite 103: NPC spell type bits')
+    assert_eq(D.deityName(1 + 32768), 'Agnostic, Tunare', 'Suite 103: deity bitmask')
+    assert_eq(D.augTypesText(1 + 8), '1, 4', 'Suite 103: aug type bits')
+
+    -- 3. SPA text
+    assert_eq(D.spaText(0, -100, 0, 0), 'Decrease Hitpoints by 100', 'Suite 103: SPA 0 damage')
+    assert_eq(D.spaText(0, 25, 0, 100), 'Increase Hitpoints by 25 (up to 100)', 'Suite 103: SPA 0 heal with max')
+    assert_eq(D.spaText(11, 140, 0, 0), 'Increase Attack Speed by 40%', 'Suite 103: haste')
+    assert_eq(D.spaText(11, 60, 0, 0), 'Decrease Attack Speed by 40%', 'Suite 103: slow')
+    assert_eq(D.spaText(3, -55, 0, 0), 'Decrease Movement Speed by 55%', 'Suite 103: snare')
+    assert_eq(D.spaText(21, 4000, 0, 0), 'Stun (4.0s)', 'Suite 103: stun seconds')
+    assert_eq(D.spaText(58, 28, 0, 0), 'Illusion: Fungusman', 'Suite 103: illusion race')
+    assert_eq(D.spaText(85, 1234, 0, 0), 'Add Proc: [spell 1234]', 'Suite 103: proc spell reference')
+    assert_eq(D.spaText(999, 1, 2, 3), 'SPA 999: base 1, limit 2, max 3', 'Suite 103: unknown SPA prints raw values')
+
+    -- 4. fixture database
+    local root = (os.getenv('TMPDIR') or '/tmp') .. '/tac_gamedb_test_' .. tostring(os.time())
+    local dir = root .. '/gamedb/'
+    os.execute('mkdir -p "' .. dir .. '"')
+    local function writeFile(name, lines)
+        local f = assert(io.open(dir .. name, 'wb'))
+        f:write(table.concat(lines, '\n') .. '\n')
+        f:close()
+    end
+    local itemLines = {
+        'id=1001|name=Cloth Cap|itemtype=10|icon=639|slots=4|classes=65535|races=65535|ac=2|price=200|drops=5~17.3;6~100|quests=6~~qeynos2~R',
+        'id=2735|name=Fungus Covered Scale Tunic|itemtype=10|icon=678|slots=131072|classes=50175|races=65535|ac=21|regen=15|drops=5~19.8|made=10~Fungus Tunic~61~100~135~~~0~~1001:1,3000:2~0:Loom~2735:1',
+        'id=1002735|itemtype=10|ac=42|hp=5',
+        'id=2002735|itemtype=10|ac=42|hp=10|attuneable=1',
+        'id=3000|name=Silk Thread|itemtype=11|usedin=10~61~135~2735',
+        'id=1004000|name=Only Enchanted Thing (Enchanted)|ac=1',
+    }
+    local offsets, pos = {}, 0
+    for _, l in ipairs(itemLines) do
+        local id = tonumber(l:match('^id=(%d+)'))
+        offsets[id] = pos
+        pos = pos + #l + 1
+    end
+    writeFile('items.1.dat', itemLines)
+    writeFile('items.idx', {
+        '#gamedb items v1 count=4',
+        '1001|B|1:' .. offsets[1001] .. '|||Cloth Cap',
+        '2735|BEL|1:' .. offsets[2735] .. '|1:' .. offsets[1002735] .. '|1:' .. offsets[2002735] .. '|Fungus Covered Scale Tunic',
+        '3000|B|1:' .. offsets[3000] .. '|||Silk Thread',
+        '4000|E||1:' .. offsets[1004000] .. '||Only Enchanted Thing (Enchanted)',
+    })
+    local npcLines = {
+        'id=5|name=myconid spore king|level=56|race=28|class=3|bodytype=25|hp=17750|special_abilities=1\\c1^10\\c1|spawns=sebilis~1~640~50|drops=1268~74.7;2735~19.8|casts=13~1|faction=Trakanon',
+        'id=6|name=Crow|level=30|race=1|class=41|quest=1|qrewards=1001|sells=1001;3000',
+        'id=7|name=a gnoll|level=3|race=39|class=1',
+    }
+    local npcOff, npos = {}, 0
+    for _, l in ipairs(npcLines) do npcOff[tonumber(l:match('^id=(%d+)'))] = npos; npos = npos + #l + 1 end
+    writeFile('npcs.1.dat', npcLines)
+    writeFile('npcs.idx', {
+        '#gamedb npcs v1 count=3',
+        '5|1:' .. npcOff[5] .. '|56|sebilis|myconid spore king',
+        '6|1:' .. npcOff[6] .. '|30|qeynos2|Crow',
+        '7|1:' .. npcOff[7] .. '|3|qeytoqrg|a gnoll',
+    })
+    local spellLines = {
+        'id=13|name=Complete Heal|mana=400|cast_time=10000|targettype=5|resisttype=0|skill=5|classes=2:39|effects=1~0~7500~0~0~100|items=click~1001|npcs=5',
+        'id=732|name=Ice Comet|mana=350|cast_time=7000|targettype=5|resisttype=3|basediff=-20|skill=24|classes=12:60|effects=1~0~-2200~0~0~100',
+        'id=15|name=Minor Healing|mana=10|classes=2:1,3:6,6:1,10:1|effects=1~0~10~0~20~100',
+    }
+    local spOff, spos = {}, 0
+    for _, l in ipairs(spellLines) do spOff[tonumber(l:match('^id=(%d+)'))] = spos; spos = spos + #l + 1 end
+    writeFile('spells.1.dat', spellLines)
+    writeFile('spells.idx', {
+        '#gamedb spells v1 count=3',
+        '13|1:' .. spOff[13] .. '|2:39|Complete Heal',
+        '732|1:' .. spOff[732] .. '|12:60|Ice Comet',
+        '15|1:' .. spOff[15] .. '|2:1,3:6,6:1,10:1|Minor Healing',
+    })
+    writeFile('zones.idx', { '#gamedb zones v1 count=2', 'sebilis|The Ruins of Sebilis', 'qeynos2|North Qeynos' })
+    writeFile('manifest.txt', { 'built=2026-09-13', 'items=6', 'item_index=4', 'npcs=3', 'spells=3' })
+
+    -- resolving the data dir from MQ must not wipe a load already queued
+    DB.setDir(nil)
+    local mqStub = { TLO = { MacroQuest = { Path = function() return function() return root end end } } }
+    do
+        local coreStub = { ctrl = {}, mq = mqStub, ImGui = mockImGui, runtime = {}, colors = {}, px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, preBeginWindow = noop, postBeginWindow = noop, saveLoadout = noop }
+        print = quiet
+        plugin.onInit(coreStub)
+        print = origPrint
+        local queued = #DB.loadQueue
+        while DB.stepLoad(1) do end
+        assert_true(queued > 0 and DB.isLoaded('zones') and DB.isLoaded('items'), 'Suite 103: the first background load survives resolving the data dir')
+        assert_eq(DB.dir, dir, 'Suite 103: data dir resolved from MacroQuest.Path(resources)')
+    end
+    DB.setDir(dir)
+    assert_eq(DB.dir, dir, 'Suite 103: data dir set')
+    assert_true(DB.readManifest().present, 'Suite 103: manifest read')
+    assert_eq(DB.readManifest().npcs, '3', 'Suite 103: manifest counts')
+
+    -- sliced loading: a zero budget makes progress in slices of 512 lines
+    DB.ensure('items')
+    DB.ensure('items')
+    assert_eq(#DB.loadQueue, 1, 'Suite 103: ensure() queues an index once')
+    while DB.stepLoad(0) do end
+    assert_true(DB.isLoaded('items'), 'Suite 103: items index loaded through stepLoad')
+    assert_eq(DB.kinds.items.count, 4, 'Suite 103: one index line per base item')
+    assert_true(DB.loadNow('npcs') and DB.loadNow('spells') and DB.loadNow('zones'), 'Suite 103: remaining indexes load')
+    assert_eq(DB.progress(), nil, 'Suite 103: no progress once idle')
+
+    -- search: ranking, multi-word, id, underscores, cap
+    local ix = DB.kinds.items
+    local res = DB.search('items', 'cloth cap')
+    assert_eq(ix.ids[res[1]], 1001, 'Suite 103: exact match first')
+    res = DB.search('items', 'fungus')
+    assert_eq(#res, 1, 'Suite 103: substring match')
+    assert_eq(ix.ids[res[1]], 2735, 'Suite 103: substring match id')
+    res = DB.search('items', 'scale fungus')
+    assert_eq(#res, 1, 'Suite 103: every word must match, in any order')
+    res = DB.search('items', 'enchanted thing')
+    assert_eq(ix.ids[res[1]], 4000, 'Suite 103: enchanted-only item is indexed under its base id')
+    res = DB.search('items', '2735')
+    assert_eq(#res == 1 and ix.ids[res[1]], 2735, 'Suite 103: numeric query is an id lookup')
+    res = DB.search('npcs', 'a_gnoll')
+    assert_eq(#res, 1, 'Suite 103: underscores search as spaces')
+    assert_eq(#DB.search('items', 'zzz'), 0, 'Suite 103: no match is empty')
+    assert_eq(#DB.search('items', ''), 0, 'Suite 103: empty query without filter is empty')
+    res = DB.search('npcs', '', function(_, n) return DB.kinds.npcs.lvl[n] >= 30 end)
+    assert_eq(#res, 2, 'Suite 103: empty query with a filter lists matches')
+    res = DB.search('items', 'c', nil, 1)
+    assert_eq(#res, 1, 'Suite 103: result cap honoured')
+
+    -- records and tiers
+    local base = DB.itemRecord(2735, 'B')
+    assert_eq(ENC.num(base, 'ac'), 21, 'Suite 103: base record read by seek')
+    assert_eq(ENC.num(DB.itemRecord(2735, 'E'), 'ac'), 42, 'Suite 103: enchanted record')
+    assert_eq(ENC.num(DB.itemRecord(2735, 'L'), 'hp'), 10, 'Suite 103: legendary record')
+    assert_eq(DB.itemRecord(1001, 'L'), nil, 'Suite 103: missing tier is nil')
+    assert_eq(DB.itemRecord(4000, 'B'), nil, 'Suite 103: enchanted-only item has no base row')
+    assert_eq(ENC.num(DB.itemRecord(4000, 'E'), 'ac'), 1, 'Suite 103: enchanted-only item row')
+    assert_eq(DB.itemTiers(2735), 'BEL', 'Suite 103: tier letters')
+    assert_eq(DB.itemName(2002735), 'Fungus Covered Scale Tunic (Legendary)', 'Suite 103: legendary name derived from base')
+    assert_eq(DB.itemName(1002735), 'Fungus Covered Scale Tunic (Enchanted)', 'Suite 103: enchanted name derived from base')
+    assert_eq(DB.itemName(99999), 'Item 99999', 'Suite 103: unknown item name')
+    assert_true(DB.record('items', '1:' .. offsets[2735]) == DB.record('items', '1:' .. offsets[2735]), 'Suite 103: record cache returns the same table')
+    local made = ENC.list(base, 'made')
+    assert_eq(#made, 1, 'Suite 103: recipe list')
+    assert_eq(made[1][2] .. '/' .. D.skillName(tonumber(made[1][3])) .. '/' .. made[1][5], 'Fungus Tunic/Tailoring/135', 'Suite 103: recipe name, tradeskill, trivial')
+    local comps = ENC.nested(made[1][10])
+    assert_eq(#comps == 2 and DB.itemName(tonumber(comps[2][1])) .. ' x' .. comps[2][2], 'Silk Thread x2', 'Suite 103: recipe components resolve to item names')
+    assert_eq(ENC.nested(made[1][11])[1][2], 'Loom', 'Suite 103: world container name carried inline')
+    local used = ENC.list(DB.itemRecord(3000, 'B'), 'usedin')
+    assert_eq(DB.itemName(tonumber(used[1][4])), 'Fungus Covered Scale Tunic', 'Suite 103: used-in resolves the result item')
+    local q = ENC.list(DB.itemRecord(1001, 'B'), 'quests')
+    assert_eq(DB.npcName(tonumber(q[1][1])) .. '/' .. DB.zoneName(q[1][3]) .. '/' .. q[1][4], 'Crow/North Qeynos/R', 'Suite 103: quest source resolves NPC and zone')
+
+    local info = DB.npcInfo(5)
+    assert_eq(info.name .. '/' .. info.lvl .. '/' .. DB.zoneName(info.zone), 'myconid spore king/56/The Ruins of Sebilis', 'Suite 103: NPC index info')
+    local nrec = DB.npcRecord(5)
+    assert_eq(D.raceName(ENC.num(nrec, 'race')), 'Fungusman', 'Suite 103: NPC record race')
+    assert_eq(table.concat(D.specialAbilitiesText(ENC.str(nrec, 'special_abilities')), ','), 'Summons,Magical Attack', 'Suite 103: escaped commas in abilities decode')
+    local sp = ENC.list(nrec, 'spawns')
+    assert_eq(DB.zoneName(sp[1][1]) .. '/' .. D.secondsText(tonumber(sp[1][3])), 'The Ruins of Sebilis/10m 40s', 'Suite 103: spawn zone and respawn')
+    assert_eq(DB.spellName(tonumber(ENC.list(nrec, 'casts')[1][1])), 'Complete Heal', 'Suite 103: NPC cast list resolves spell names')
+    assert_eq(DB.npcName(999), 'NPC 999', 'Suite 103: unknown NPC name')
+    assert_eq(DB.zoneName('nowhere'), 'nowhere', 'Suite 103: unknown zone keeps the short name')
+
+    local srec = DB.spellRecord(732)
+    assert_eq(D.resistTypeName(ENC.num(srec, 'resisttype')), 'Cold', 'Suite 103: spell resist type')
+    local eff = ENC.list(srec, 'effects')
+    assert_eq(D.spaText(eff[1][2], eff[1][3], eff[1][4], eff[1][5]), 'Decrease Hitpoints by 2200', 'Suite 103: spell effect line')
+    assert_eq(DB.spellName(13), 'Complete Heal', 'Suite 103: spell name from index')
+    assert_eq(DB.spellName(4242), 'Spell 4242', 'Suite 103: unknown spell name without MQ')
+    res = DB.search('spells', '', function(ixs, n) return (ixs.extra[n] or ''):find('%f[%d]2:') ~= nil end)
+    assert_eq(#res, 2, 'Suite 103: class filter over the index class string')
+
+    -- 5. plugin surface under a mock core
+    -- ImGui.Selectable returns (selected, pressed) in MQ's binding: a mock that
+    -- reports the selected row as "true" every frame must not re-open it.
+    mockImGui.Selectable = function(_, selected) return selected, false end
+    local ctrl = {}
+    local saves = 0
+    local core = {
+        ctrl = ctrl, mq = { TLO = { Cursor = setmetatable({ ID = function() return 2002735 end }, { __call = function() return true end }) } },
+        ImGui = mockImGui, runtime = {}, colors = {}, px = function(n) return n end,
+        pushTheme = noop, popTheme = noop, accent = noop, preBeginWindow = noop, postBeginWindow = noop,
+        saveLoadout = function() saves = saves + 1 end,
+    }
+    print = quiet
+    plugin.onInit(core)
+    assert_eq(ctrl.show_gamedb, false, 'Suite 103: window flag seeded closed')
+    assert_true(plugin.onCommand('db', { 'db' }), 'Suite 103: /ac db handled')
+    assert_eq(ctrl.show_gamedb, true, 'Suite 103: /ac db toggles the window')
+    assert_true(plugin.onCommand('item', { 'item', 'fungus', 'covered' }), 'Suite 103: /ac item handled')
+    assert_eq(plugin.state.items.query, 'fungus covered', 'Suite 103: /ac item joins the words after the command')
+    assert_eq(plugin.state.tab, 'items', 'Suite 103: /ac item selects the items tab')
+    assert_true(plugin.onCommand('npc', { 'npc', 'crow' }) and plugin.state.tab == 'npcs', 'Suite 103: /ac npc selects the NPC tab')
+    assert_true(plugin.onCommand('spell', { 'spell', 'ice' }) and plugin.state.tab == 'spells', 'Suite 103: /ac spell selects the spell tab')
+    assert_true(not plugin.onCommand('run', { 'run' }), 'Suite 103: unrelated commands are not claimed')
+    plugin.runSearch('items')
+    assert_eq(#plugin.state.items.results, 1, 'Suite 103: pending search runs against the index')
+    assert_true(plugin.lookupCursor(), 'Suite 103: cursor lookup opens the cursor item')
+    assert_eq(plugin.state.items.sel .. plugin.state.items.tier, '2735L', 'Suite 103: cursor item opens at its own tier')
+    assert_true(plugin.open('npcs', 5), 'Suite 103: open() by kind and id')
+    assert_eq(plugin.state.npcs.sel, 5, 'Suite 103: open() selects the NPC')
+    assert_true(plugin.open('items', 1002735), 'Suite 103: open() an enchanted id')
+    assert_eq(plugin.state.items.tier, 'E', 'Suite 103: enchanted id selects the enchanted tier')
+    plugin.showEntry('items', 1001)
+    assert_eq(plugin.state.items.tier, 'B', 'Suite 103: an item without that tier falls back to the first tier it has')
+    assert_true(#plugin.state.history >= 4 and plugin.state.histPos == #plugin.state.history, 'Suite 103: history grows with each open')
+    assert_true(not plugin.open('zones', 1), 'Suite 103: open() rejects unknown kinds')
+    -- render passes with enum / vector stubs (as the Box Network suite does)
+    local enumNames = { 'ImGuiCond', 'ImGuiWindowFlags', 'ImGuiTableFlags', 'ImGuiTableColumnFlags', 'ImGuiCol', 'ImGuiTabItemFlags', 'ImGuiSelectableFlags' }
+    local savedEnums = {}
+    for _, n in ipairs(enumNames) do
+        savedEnums[n] = rawget(_G, n)
+        rawset(_G, n, setmetatable({}, { __index = function() return 0 end }))
+    end
+    local savedVec, savedBit = rawget(_G, 'ImVec2'), rawget(_G, 'bit')
+    rawset(_G, 'ImVec2', function(x, y) return { x = x, y = y } end)
+    if not savedBit then rawset(_G, 'bit', { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end }) end
+    local okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 103: window draws under the mock: ' .. tostring(errDraw))
+    -- the card renderers run with the tables / children stubbed open too
+    local openImGui = setmetatable({
+        BeginTable = function() return true end, BeginChild = function() return true end, BeginTabBar = function() return true end,
+        BeginTabItem = function() return true end, BeginCombo = function() return true end, IsItemHovered = function() return false end,
+        IsItemClicked = function() return false end, Begin = function(_, open) return open, true end,
+        InputTextWithHint = function(_, _, v) return v, false end, InputInt = function(_, v) return v, false end,
+        Checkbox = passthrough, Button = function() return false end, SmallButton = function() return false end, Selectable = function() return false end,
+    }, { __index = function() return function() end end })
+    core.ImGui = openImGui
+    openImGui.Selectable = function(_, selected) return selected, false end
+    plugin.showEntry('items', 2002735)
+    plugin.state.items.tier = 'E'
+    plugin.runSearch('items')
+    local histBefore = #plugin.state.history
+    for _, kind in ipairs({ 'items', 'npcs', 'spells' }) do
+        plugin.state.tab = kind
+        local okCard, errCard = pcall(plugin.onDrawUI)
+        assert_true(okCard, 'Suite 103: ' .. kind .. ' card renders with open widgets: ' .. tostring(errCard))
+    end
+    assert_eq(plugin.state.items.tier, 'E', 'Suite 103: drawing the selected result row does not reset the tier (Selectable returns selected, pressed)')
+    assert_eq(#plugin.state.history, histBefore, 'Suite 103: drawing does not push history')
+    core.ImGui = mockImGui
+    for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
+    rawset(_G, 'ImVec2', savedVec)
+    if not savedBit then rawset(_G, 'bit', nil) end
+    assert_true(pcall(plugin.onDrawSettings), 'Suite 103: settings page draws under the mock')
+    plugin.onTick()
+    assert_eq(plugin.onSaveSettings().tab, plugin.state.tab, 'Suite 103: active tab saved')
+    plugin.onLoadSettings({ tab = 'spells' })
+    assert_eq(plugin.state.tab, 'spells', 'Suite 103: active tab restored')
+    plugin.onLoadSettings({ tab = 'bogus' })
+    assert_eq(plugin.state.tab, 'spells', 'Suite 103: bad saved tab ignored')
+    print = origPrint
+
+    -- popout cards: exact tier, no duplicates, pending until the index loads, closable
+    print = quiet
+    assert_true(plugin.popout('items', 2002735), 'Suite 103: popout opens for a legendary id')
+    assert_eq(#plugin.state.popouts, 1, 'Suite 103: one popout')
+    assert_eq(plugin.state.popouts[1].sel .. plugin.state.popouts[1].tier, '2735L', 'Suite 103: popout carries the base id and the linked tier')
+    plugin.popout('items', 1002735)
+    assert_eq(#plugin.state.popouts, 1, 'Suite 103: re-opening the same item reuses its card')
+    assert_eq(plugin.state.popouts[1].tier, 'E', 'Suite 103: re-open switches the card to the new tier')
+    assert_true(plugin.popout('items', 1001), 'Suite 103: second item gets its own card')
+    assert_eq(#plugin.state.popouts, 2, 'Suite 103: two popouts')
+    assert_true(not plugin.popout('items', 999999), 'Suite 103: unknown item gets no card')
+    for _, n in ipairs(enumNames) do rawset(_G, n, setmetatable({}, { __index = function() return 0 end })) end
+    rawset(_G, 'ImVec2', function(x, y) return { x = x, y = y } end)
+    if not savedBit then rawset(_G, 'bit', { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end }) end
+    core.ImGui = openImGui
+    local okPop, errPop = pcall(plugin.onDrawUI)
+    assert_true(okPop, 'Suite 103: popout cards draw: ' .. tostring(errPop))
+    assert_eq(#plugin.state.popouts, 2, 'Suite 103: drawing keeps open cards')
+    openImGui.Begin = function() return false, false end   -- every window closed by its X
+    pcall(plugin.onDrawUI)
+    assert_eq(#plugin.state.popouts, 0, 'Suite 103: closing a card removes it')
+    openImGui.Begin = function(_, open) return open, true end
+    core.ImGui = mockImGui
+    for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
+    rawset(_G, 'ImVec2', savedVec)
+    if not savedBit then rawset(_G, 'bit', nil) end
+    print = origPrint
+
+    -- tooltip summary lines for the Inventory plugin
+    local sum = plugin.itemSummary(2002735)
+    assert_true(sum ~= nil and #sum == 3, 'Suite 103: item summary has tiers, drop and tradeskill lines')
+    assert_eq(sum and sum[1], 'Tiers: Base / Enchanted / Legendary', 'Suite 103: summary tiers line')
+    assert_eq(sum and sum[2], 'Drops from: myconid spore king (The Ruins of Sebilis) 19.8%', 'Suite 103: summary top drop line')
+    assert_eq(sum and sum[3], 'Tradeskill: made by Tailoring (trivial 135)', 'Suite 103: summary tradeskill line')
+    sum = plugin.itemSummary(1001)
+    assert_eq(sum and sum[1], 'Drops from: myconid spore king (The Ruins of Sebilis) 17.3%, +1 more', 'Suite 103: summary counts further droppers')
+    assert_eq(sum and sum[2], 'Quest reward from: Crow (North Qeynos)', 'Suite 103: summary quest line')
+    assert_eq(plugin.itemSummary(3000)[1], 'Tradeskill: used in 1 recipe', 'Suite 103: summary used-in line')
+    assert_eq(plugin.itemSummary(999999), nil, 'Suite 103: unknown item has no summary')
+    assert_true(plugin.itemSummary(1001) == sum, 'Suite 103: summaries are cached')
+
+    -- spellbook helpers: name -> id, summary lines
+    assert_eq(plugin.spellIdByName('complete heal'), 13, 'Suite 103: spell id by name is case-insensitive')
+    assert_eq(plugin.spellIdByName('Minor Healing', 6), 15, 'Suite 103: spell id by name prefers a class level match')
+    assert_eq(plugin.spellIdByName('nothing here'), nil, 'Suite 103: unknown spell name')
+    local ssum = plugin.spellSummary(13)
+    assert_eq(ssum and ssum[1], 'Increase Hitpoints by 7500', 'Suite 103: spell summary effect line')
+    assert_eq(ssum and ssum[2], 'No scroll item teaches this spell', 'Suite 103: spell summary reports missing scrolls')
+    assert_eq(plugin.spellSummary(424242), nil, 'Suite 103: unknown spell has no summary')
+
+    -- immunities: spawn -> NPC resolution and ability -> SPA rules
+    assert_eq(DB.npcIdFor('myconid_spore_king', 'sebilis', 56), 5, 'Suite 103: spawn name with underscores resolves to the database NPC')
+    assert_eq(DB.npcIdFor('#Crow', 'qeynos2', 30), 6, 'Suite 103: leading # ignored')
+    assert_eq(DB.npcIdFor('nobody', 'sebilis', 1), nil, 'Suite 103: unknown spawn name')
+    local abil = DB.npcAbilities(5)
+    assert_true(abil[1] == 1 and abil[10] == 1 and abil[13] == nil, 'Suite 103: ability set from the special_abilities string')
+    local function spas(list) return function(spa) return list[spa] == true end end
+    assert_eq(D.immunityReason({ [13] = 1 }, spas({ [31] = true })), 'Unmezzable', 'Suite 103: unmezzable blocks a mez')
+    assert_eq(D.immunityReason({ [13] = 1 }, spas({ [0] = true })), nil, 'Suite 103: unmezzable does not block a nuke')
+    assert_eq(D.immunityReason({ [12] = 1 }, spas({ [11] = true })), 'Unslowable', 'Suite 103: unslowable blocks a slow')
+    assert_eq(D.immunityReason({ [16] = 1 }, spas({ [3] = true })), 'Unsnareable', 'Suite 103: unsnareable blocks a snare')
+    assert_eq(D.immunityReason({ [20] = 1 }, spas({ [0] = true })), 'Immune to Magic', 'Suite 103: immune to magic blocks everything')
+    assert_eq(D.immunityReason({ [1] = 1, [10] = 1 }, spas({ [31] = true })), nil, 'Suite 103: summons / magical attack are not immunities')
+    assert_eq(D.immunityReason(nil, spas({})), nil, 'Suite 103: no abilities, no reason')
+    print = quiet
+    local spellSpas = { ['Mesmerize'] = { [31] = true }, ['Ice Comet'] = { [0] = true } }
+    core.mq.TLO.Spawn = function(id)
+        return setmetatable({ CleanName = function() return id == 77 and 'myconid_spore_king' or 'a_gnoll' end, Name = function() return 'x' end, Level = function() return id == 77 and 56 or 3 end }, { __call = function() return true end })
+    end
+    core.mq.TLO.Zone = { ShortName = function() return 'sebilis' end }
+    core.mq.TLO.Spell = function(name) return { HasSPA = function(spa) return (spellSpas[name] or {})[spa] == true end } end
+    -- make the fixture spore king unmezzable for the live check
+    DB.cache = {}; DB.cacheN = 0
+    local rec5 = DB.npcRecord(5)
+    rec5.special_abilities = '1\\c1^13\\c1'
+    assert_eq(plugin.npcIdForSpawn(77), 5, 'Suite 103: live spawn resolves through name, zone and level')
+    assert_eq(plugin.immunityReason('Mesmerize', 77), 'Unmezzable', 'Suite 103: cast tracker hook reports the immunity')
+    assert_eq(plugin.immunityReason('Ice Comet', 77), nil, 'Suite 103: cast tracker hook lets other spells through')
+    assert_eq(plugin.immunityReason('Mesmerize', 78), nil, 'Suite 103: a gnoll has no immunities')
+    local tracker = {}
+    core.castTracker = tracker
+    plugin.onInit(core)
+    assert_eq(tracker.knownImmunity, plugin.immunityReason, 'Suite 103: onInit installs the cast tracker hook')
+    assert_true(plugin.lookupTarget() == false, 'Suite 103: target lookup without a target reports and returns false')
+    core.mq.TLO.Target = { ID = function() return 77 end }
+    assert_true(plugin.lookupTarget(), 'Suite 103: target lookup opens an NPC card')
+    assert_eq(plugin.state.popouts[#plugin.state.popouts].kind .. plugin.state.popouts[#plugin.state.popouts].sel, 'npcs5', 'Suite 103: NPC popout for the resolved target')
+    assert_true(plugin.popout('spells', 732), 'Suite 103: spell popout')
+    assert_true(not plugin.popout('spells', 424242), 'Suite 103: unknown spell gets no card')
+    assert_true(plugin.onCommand('dbtarget', { 'dbtarget' }), 'Suite 103: /ac dbtarget handled')
+    print = origPrint
+
+    -- loot advisor: corpse items annotated with this NPC's drop chance and notes
+    print = quiet
+    core.mq.TLO.Window = function() return { Open = function() return true end } end
+    core.mq.TLO.Corpse = {
+        ID = function() return 77 end, Items = function() return 2 end,
+        Item = function(i)
+            local ids = { 2735, 1001 }
+            return setmetatable({ ID = function() return ids[i] end, Name = function() return DB.itemName(ids[i]) end, Value = function() return 2600 end }, { __call = function() return true end })
+        end,
+    }
+    plugin.state.loot.lastScan = 0
+    plugin.scanLoot()
+    local L = plugin.state.loot
+    assert_true(L.open and #L.rows == 2, 'Suite 103: loot advisor lists the corpse items')
+    assert_eq(L.npcName, 'myconid_spore_king', 'Suite 103: loot advisor resolves the corpse NPC')
+    assert_eq(L.npcId, 5, 'Suite 103: loot advisor resolves the NPC id')
+    assert_eq(L.rows[1].chance, '19.8', 'Suite 103: drop chance on this NPC from its loot table')
+    assert_eq(L.rows[2].chance, nil, 'Suite 103: item not in this NPC loot table has no chance')
+    assert_true(#L.rows[1].lines > 0, 'Suite 103: loot rows carry summary lines')
+    for _, n in ipairs(enumNames) do rawset(_G, n, setmetatable({}, { __index = function() return 0 end })) end
+    rawset(_G, 'ImVec2', function(x, y) return { x = x, y = y } end)
+    if not savedBit then rawset(_G, 'bit', { bor = function(...) local r = 0 for _, v in ipairs({ ... }) do r = r + v end return r end }) end
+    core.ImGui = openImGui
+    local okLoot, errLoot = pcall(plugin.onDrawUI)
+    assert_true(okLoot, 'Suite 103: loot advisor window draws: ' .. tostring(errLoot))
+    core.ImGui = mockImGui
+    for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
+    rawset(_G, 'ImVec2', savedVec)
+    if not savedBit then rawset(_G, 'bit', nil) end
+    core.mq.TLO.Window = function() return { Open = function() return false end } end
+    plugin.scanLoot()
+    assert_true(not L.open and #L.rows == 0, 'Suite 103: closing the loot window clears the advisor')
+    assert_true(plugin.onCommand('lootadvisor', { 'lootadvisor' }) and plugin.state.lootAdvisor == false, 'Suite 103: /ac lootadvisor toggles the advisor')
+    assert_eq(plugin.onSaveSettings().lootAdvisor, false, 'Suite 103: loot advisor preference saved')
+    plugin.onLoadSettings({ lootAdvisor = true })
+    assert_true(plugin.state.lootAdvisor, 'Suite 103: loot advisor preference restored')
+    print = origPrint
+
+    -- 6. missing data is reported, not fatal
+    DB.setDir(dir .. 'missing/')
+    assert_true(not DB.readManifest().present, 'Suite 103: missing manifest flagged')
+    DB.ensure('items')
+    while DB.stepLoad(1) do end
+    assert_true(DB.kinds.items.failed == true, 'Suite 103: missing index marks the kind failed')
+    assert_eq(#DB.search('items', 'cloth'), 0, 'Suite 103: search on a missing index is empty')
+    plugin.onDestroy()
+    assert_eq(tracker.knownImmunity, nil, 'Suite 103: onDestroy removes the cast tracker hook')
+    os.execute('rm -rf "' .. root .. '"')
+
+    -- 7. core wiring and the chat hook
+    local src = readFile('TAC/lua/triune.lua')
+    assert_true(src:find('        show_gamedb              = false,', 1, true) ~= nil, 'Suite 103: defaultCtrl seeds show_gamedb')
+    assert_true(src:find('if c.show_gamedb == nil then c.show_gamedb = false end', 1, true) ~= nil, 'Suite 103: sanitize seeds show_gamedb')
+    assert_true(src:find("'gamedb.lua',", 1, true) ~= nil, 'Suite 103: discover() known-plugin probe lists gamedb.lua')
+    assert_true(src:find('pcall(tracker.knownImmunity, spellName, tid, kind)', 1, true) ~= nil, 'Suite 103: cast tracker consults the database immunity hook')
+    assert_true(src:find('dbChecked[tid] = nil', 1, true) ~= nil and src:find('dbChecked        = {}', 1, true) ~= nil, 'Suite 103: cast tracker clear() forgets database checks')
+    -- the real createCastTracker with the hook installed
+    do
+        local body = src:match("local function createCastTracker%(%).-\nend\n") or src:match("local function createCastTracker%(%).-return tracker[%s\r\n]+end")
+        assert_true(body ~= nil, 'Suite 103: createCastTracker body extracted')
+        local calls = {}
+        local env = setmetatable({
+            isDetrimentalSpell = isDetrimentalSpell,
+            mq = { TLO = { Spawn = function() return setmetatable({ CleanName = function() return 'a_mob' end }, { __call = function() return true end }) end } },
+            print = quiet,
+        }, { __index = _G })
+        local chunk = loadstring(body .. '\nreturn createCastTracker()')
+        assert_true(chunk ~= nil, 'Suite 103: createCastTracker body compiles')
+        setfenv(chunk, env)
+        local trk = chunk()
+        trk.knownImmunity = function(spell, tid)
+            calls[#calls + 1] = spell .. '@' .. tid
+            if spell == 'Mesmerize' then return 'Unmezzable' end
+            return nil
+        end
+        local locked, why = trk.isLockedOut('Mesmerize', 55, 'debuff')
+        assert_true(locked == true and why == 'Immune', 'Suite 103: tracker reports the database immunity as Immune')
+        trk.isLockedOut('Mesmerize', 55, 'debuff')
+        assert_eq(#calls, 1, 'Suite 103: the database is consulted once per spawn and spell')
+        assert_eq(trk.isLockedOut('Ice Comet', 55, 'dd'), false, 'Suite 103: non-immune spell is not locked')
+        assert_eq(#calls, 2, 'Suite 103: each spell is checked once')
+        trk.isLockedOut('Ice Comet', 55, 'dd')
+        assert_eq(#calls, 2, 'Suite 103: negative results are cached too')
+        assert_eq(trk.isLockedOut('Mesmerize', 56, 'debuff'), true, 'Suite 103: another spawn is checked on its own')
+        assert_eq(trk.isLockedOut('Complete Heal', 55, 'heal'), false, 'Suite 103: beneficial spells never reach the hook')
+        trk.clear(55)
+        trk.isLockedOut('Mesmerize', 55, 'debuff')
+        assert_eq(#calls, 4, 'Suite 103: clear(spawn) forgets the database check for that spawn')
+        trk.knownImmunity = nil
+        assert_eq(trk.isLockedOut('Mesmerize', 57, 'debuff'), false, 'Suite 103: without the hook the tracker behaves as before')
+    end
+    local gsrc = readFile('TAC/lua/tac/gamedb.lua')
+    for _, bad in ipairs({ 'mq.delay(', 'mq.doevents()', 'require(', 'io.popen', 'os.execute' }) do
+        assert_true(gsrc:find(bad, 1, true) == nil, 'Suite 103: gamedb.lua does not use ' .. bad)
+    end
+    assert_true(gsrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 103: gamedb.lua uses the core theme')
+    assert_true(gsrc:find("flag = 'show_gamedb'", 1, true) ~= nil and gsrc:find('headerButton = true', 1, true) ~= nil, 'Suite 103: window metadata drives the header button')
+    print = quiet
+    local chat = assert(loadfile('TAC/lua/tac/chat.lua'))()
+    print = origPrint
+    assert_eq(chat.linkItemId('0000FBFA4' .. string.rep('0', 68)), 1032100, 'Suite 103: chat link payload carries the item id in hex (Earthen Bracer of Fortitude, Enchanted)')
+    -- clicking a chat link opens a database card when the plugin is available
+    local popped = nil
+    local chatCore = {
+        ctrl = {}, mq = { TLO = {}, event = noop, unevent = noop, bind = noop, unbind = noop, cmd = noop, gettime = function() return 0 end,
+                          configDir = './tests/__nonexistent_cfg__' },
+        ImGui = mockImGui, colors = {}, px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop,
+        preBeginWindow = noop, postBeginWindow = noop, saveLoadout = noop, setTooltip = noop,
+        runtime = { pluginManager = { plugins = { gamedb = { enabled = true, instance = { search = function() return true end, popout = function(kind, id) popped = kind .. ':' .. id; return true end } } } } },
+    }
+    print = quiet
+    chat.onInit(chatCore)
+    chat.openItemLink({ name = 'Earthen Bracer of Fortitude (Enchanted)', payload = '0000FBFA4' .. string.rep('0', 68) })
+    chat.runPendingLink()
+    print = origPrint
+    assert_eq(popped, 'items:1032100', 'Suite 103: a chat item link opens a database card for the exact id')
+    assert_true(chat.lookupInDatabase({ name = 'x', payload = '00000F23C' .. string.rep('0', 68) }), 'Suite 103: Look up in Database resolves by id')
+    print = quiet
+    chat.onDestroy()
+    print = origPrint
+    assert_eq(chat.linkItemId('00000F23C' .. string.rep('0', 68)), 62012, 'Suite 103: base tier link id (Paradisal Tunic of Faith)')
+    assert_eq(chat.linkItemId('000000000'), nil, 'Suite 103: zero id is not a link id')
+    assert_eq(chat.linkItemId('1'), nil, 'Suite 103: short payload has no id')
+    assert_true(chat.uses and chat.uses.gamedb ~= nil, 'Suite 103: chat declares its gamedb use')
+    local csrc = readFile('TAC/lua/tac/chat.lua')
+    assert_true(csrc:find("'Look up in Database'", 1, true) ~= nil, 'Suite 103: chat tab menu offers the database lookup')
+    local isrc = readFile('TAC/lua/tac/inventory.lua')
+    assert_true(isrc:find('db.itemSummary(it.id)', 1, true) ~= nil, 'Suite 103: inventory tooltips show the database summary')
+    assert_true(select(2, isrc:gsub('shiftHeld%(%) and openDatabaseCard%(it%)', '')) == 2, 'Suite 103: bag and bank slots open the card on Shift+Right-click')
+    assert_true(isrc:find('if ImGui.IsItemClicked(1) then openDatabaseCard(it) end', 1, true) ~= nil, 'Suite 103: list rows open the card on right-click')
+    assert_true(isrc:find('uses               = { gamedb =', 1, true) ~= nil, 'Suite 103: inventory declares its gamedb use')
+    local msrc = readFile('TAC/lua/tac/map.lua')
+    assert_true(msrc:find('function plugin.showZone(zoneShort)', 1, true) ~= nil, 'Suite 103: map plugin exposes showZone for NPC spawn rows')
+    assert_true(gsrc:find("map.showZone(s[1])", 1, true) ~= nil, 'Suite 103: NPC spawn rows carry a Map button')
+    local ssrc = readFile('TAC/lua/tac/spellbook.lua')
+    assert_true(ssrc:find('db.spellSummary(dbId)', 1, true) ~= nil and ssrc:find("db.popout('spells', dbId)", 1, true) ~= nil, 'Suite 103: spellbook tooltips use the database summary and middle-click cards')
+end)()
+
 
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

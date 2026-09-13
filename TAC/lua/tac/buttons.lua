@@ -15,9 +15,11 @@
 --                  sets as tabs (or a single set in compact mode) and keeps
 --                  its own size, font, lock, title-bar and search options.
 --
--- Buttons fire from onTick (the plugin fiber), never from the ImGui callback,
--- so multi-line command buttons and `--lua` script buttons can wait with
--- delay() without stalling the combat loop. Share strings use Button Master's
+-- Buttons fire the moment they are clicked: command buttons issue their
+-- `/` lines right away (mq.cmd only queues to the game's command handler),
+-- and `--lua` script buttons run as their own coroutine pumped every frame,
+-- so delay() inside a script yields instead of stalling the combat loop.
+-- Nothing waits for the core's 150 ms main-loop pass. Share strings use Button Master's
 -- format, so buttons and sets can be swapped with Button Master users, and
 -- an existing ButtonMaster.lua config can be imported in one click.
 -- ============================================================================
@@ -32,7 +34,7 @@ local plugin = {
     defaultEnabled     = true,
     tickInterval       = 0.05,
     runOutOfCombatOnly = false,
-    hasThread          = true,
+    hasThread          = false,
 }
 
 local core = nil
@@ -145,8 +147,7 @@ local cache = {}
 local state = {
     charKey        = nil,
     loaded         = false,
-    execQueue      = {},        -- buttons waiting for the fiber
-    running        = nil,       -- button currently executing (multi-tick Lua)
+    scripts        = {},        -- running `--lua` button coroutines
     statusMsg      = '',
     statusAt       = 0,
     dnd            = nil,       -- { hb = id, set = name, index = n }
@@ -192,6 +193,7 @@ local browser = {
     search  = '',
     lists   = {},          -- tab -> { entries }
     scanAt  = {},          -- tab -> os.clock() of the last scan
+    boxScope = 'all',      -- Box Control tab: all | zone | group
 }
 local BROWSER_TABS = {
     { id = 'AA',      label = 'AAs' },
@@ -199,6 +201,102 @@ local BROWSER_TABS = {
     { id = 'Ability', label = 'Abilities' },
     { id = 'Disc',    label = 'Discs' },
     { id = 'Item',    label = 'Items' },
+    { id = 'Box',     label = 'Box Control' },
+    { id = 'Cmd',     label = 'Commands' },
+}
+-- Triune slash commands as a pick list. Entries with a placeholder
+-- (<...> / [...]) open the editor pre-filled so the argument can be typed;
+-- the rest become buttons as-is. Plugin help lines are appended live.
+local CORE_COMMANDS = {
+    -- Control
+    { group = 'Control', name = 'Run',                cmd = '/ac run',              desc = 'Start / unpause auto-combat' },
+    { group = 'Control', name = 'Pause',              cmd = '/ac pause',            desc = 'Pause auto-combat, halt movement, disengage pet' },
+    { group = 'Control', name = 'Run / Pause',        cmd = '/triunerun',           desc = 'Toggle run / pause' },
+    { group = 'Control', name = 'Burn On',            cmd = '/ac burn on',          desc = 'Enable burn mode (Burn Only spells, AAs, discs)' },
+    { group = 'Control', name = 'Burn Off',           cmd = '/ac burn off',         desc = 'Disable burn mode' },
+    { group = 'Control', name = 'Burn Toggle',        cmd = '/ac burn',             desc = 'Toggle burn mode' },
+    { group = 'Control', name = 'Status',             cmd = '/ac status',           desc = 'Print running state and combat mode to chat' },
+    { group = 'Control', name = 'Mem All',            cmd = '/ac memall',           desc = 'Queue all missing / mismatched priority spells for memorization' },
+    { group = 'Control', name = 'Import Bar',         cmd = '/ac importbar',        desc = 'Auto-populate spell lines from the memorized gems' },
+    { group = 'Control', name = 'Clear Lockouts',     cmd = '/ac clear lockouts',   desc = 'Clear spell lockouts, buff backoffs, and mob immunities' },
+    { group = 'Control', name = 'Clear Cursor',       cmd = '/ac clearcursor',      desc = 'Clear the item on the cursor per the cursor rules' },
+    -- Modes
+    { group = 'Mode', name = 'Manual',                cmd = '/ac manual',           desc = 'Manual mode: you drive, Triune fights' },
+    { group = 'Mode', name = 'Puller (Hunt)',         cmd = '/ac puller hunt',      desc = 'Puller mode, roam and hunt' },
+    { group = 'Mode', name = 'Puller (Camp)',         cmd = '/ac puller camp',      desc = 'Puller mode, pull back to camp' },
+    { group = 'Mode', name = 'Assist (Chase)',        cmd = '/ac assist chase',     desc = 'Assist mode, follow the Main Assist' },
+    { group = 'Mode', name = 'Assist (Camp)',         cmd = '/ac assist camp',      desc = 'Assist mode, hold the camp' },
+    { group = 'Mode', name = 'Assist (Backline)',     cmd = '/ac assist backline',  desc = 'Assist mode, stay back from the fight' },
+    { group = 'Mode', name = 'Tank',                  cmd = '/ac tank',             desc = 'Alias of Assist (Camp): hold the camp as the tank' },
+    -- Main Assist
+    { group = 'Main Assist', name = 'MA = Target',    cmd = '/ac ma target',        desc = 'Set the Main Assist from your current PC target' },
+    { group = 'Main Assist', name = 'MA Clear',       cmd = '/ac ma clear',         desc = 'Clear the Main Assist' },
+    { group = 'Main Assist', name = 'MA by Name',     cmd = '/ac ma <name>',        desc = 'Set the Main Assist by name' },
+    -- Combat style & toggles
+    { group = 'Style', name = 'Style: Melee',         cmd = '/ac style melee',      desc = '/attack at melee reach' },
+    { group = 'Style', name = 'Style: Ranged',        cmd = '/ac style ranged',     desc = 'Bow via server #attackmode' },
+    { group = 'Style', name = 'Style: Spell',         cmd = '/ac style spell',      desc = 'Never auto-attack' },
+    { group = 'Toggle', name = 'Self Defense On',     cmd = '/ac selfdefense on',   desc = 'Assist mode: fight back when attacked while the MA has no target' },
+    { group = 'Toggle', name = 'Self Defense Off',    cmd = '/ac selfdefense off',  desc = 'Assist mode: no self-defense' },
+    { group = 'Toggle', name = 'Assist Behind On',    cmd = '/ac assistbehind on',  desc = 'Position behind the NPC in combat' },
+    { group = 'Toggle', name = 'Assist Behind Off',   cmd = '/ac assistbehind off', desc = 'Do not reposition behind the NPC' },
+    { group = 'Toggle', name = 'Manual Stick On',     cmd = '/ac manualstick on',   desc = 'Manual mode: stick to the NPC being fought' },
+    { group = 'Toggle', name = 'Manual Stick Off',    cmd = '/ac manualstick off',  desc = 'Manual mode: you drive' },
+    { group = 'Toggle', name = 'Manual Nav On',       cmd = '/ac manualnav on',     desc = 'Manual mode: auto-navigate to a selected hostile NPC' },
+    { group = 'Toggle', name = 'Manual Nav Off',      cmd = '/ac manualnav off',    desc = 'Manual mode: no auto-navigation' },
+    { group = 'Toggle', name = 'Waypoints On',        cmd = '/ac wp on',            desc = 'Enable the Puller waypoint patrol loop' },
+    { group = 'Toggle', name = 'Waypoints Off',       cmd = '/ac wp off',           desc = 'Disable the waypoint patrol loop' },
+    { group = 'Toggle', name = 'Waypoint Add',        cmd = '/ac wp add',           desc = 'Add your location as a patrol waypoint' },
+    { group = 'Toggle', name = 'Waypoints Clear',     cmd = '/ac wp clear',         desc = 'Remove every patrol waypoint' },
+    -- Windows
+    { group = 'Window', name = 'Compact / Mini HUD',  cmd = '/ac compact',          desc = 'Toggle the Compact Mini-Window mode' },
+    { group = 'Window', name = 'Unit Frames',         cmd = '/ac hud',              desc = 'Toggle the Target & Player HUD' },
+    { group = 'Window', name = 'Cooldowns',           cmd = '/ac cd',               desc = 'Toggle the Cooldown & Ability Monitor' },
+    { group = 'Window', name = 'Spell Gems',          cmd = '/ac gems',             desc = 'Toggle the popout Spell Gem bar' },
+    { group = 'Window', name = 'Spellbook',           cmd = '/ac spellbook',        desc = 'Toggle the Spellbook Browser' },
+    { group = 'Window', name = 'Cursor Manager',      cmd = '/ac cursorui',         desc = 'Toggle the Cursor Item Manager' },
+    { group = 'Window', name = 'Map',                 cmd = '/ac map',              desc = 'Toggle the Map, Zone Atlas & NPC Tracker' },
+    { group = 'Window', name = 'Inventory',           cmd = '/ac inv',              desc = 'Toggle the Inventory & Bank Manager' },
+    { group = 'Window', name = 'DPS Parser',          cmd = '/ac dps',              desc = 'Toggle the DPS Parser' },
+    { group = 'Window', name = 'Box Net',             cmd = '/ac net',              desc = 'Toggle the Box Network window' },
+    { group = 'Window', name = 'Buffbot Window',      cmd = '/ac buffbot',          desc = 'Toggle the Buffbot window' },
+    { group = 'Window', name = 'Buffbot On',          cmd = '/ac buffbot on',       desc = 'Start the buffbot station' },
+    { group = 'Window', name = 'Buffbot Off',         cmd = '/ac buffbot off',      desc = 'Stop the buffbot station' },
+    { group = 'Window', name = 'Auto AA',             cmd = '/ac aawin',            desc = 'Toggle the Auto AA spender window' },
+    { group = 'Window', name = 'Auto-Accept',         cmd = '/ac autoaccept',       desc = 'Toggle the Auto-Accept window' },
+    { group = 'Window', name = 'Hot Buttons',         cmd = '/ac btn',              desc = 'Toggle the hotbars' },
+    { group = 'Window', name = 'Help',                cmd = '/ac help',             desc = 'Print the slash command help to chat' },
+    -- Settings with an argument (open the editor)
+    { group = 'Setting', name = 'Range',              cmd = '/ac range <dist>',         desc = 'Engagement distance for the active style' },
+    { group = 'Setting', name = 'XTarget Distance',   cmd = '/ac xtardist <25-300>',    desc = 'Max XTarget / assist chase distance' },
+    { group = 'Setting', name = 'Chase Distance',     cmd = '/ac chasedist <5-100>',    desc = 'Following distance from the Main Assist' },
+    { group = 'Setting', name = 'Pull Min HP',        cmd = '/ac pullhp <0-95>',        desc = 'Minimum HP % before pulling pauses to rest' },
+    { group = 'Setting', name = 'Hunter Z Plane',     cmd = '/ac zplane <5-100>',       desc = 'Same-floor height threshold' },
+    { group = 'Setting', name = 'Hunter Max Z',       cmd = '/ac huntz <10-300>',       desc = 'Max vertical height difference' },
+    { group = 'Setting', name = 'UI Scale',           cmd = '/ac scale <0.75-2.0>',     desc = 'UI scale for every Triune window' },
+    { group = 'Setting', name = 'Pull Con Preset',    cmd = '/ac pullcon preset <all|hostile|indifferent|none>', desc = 'Puller faction filter preset' },
+    { group = 'Setting', name = 'Load Preset',        cmd = '/ac preset load <name>',   desc = 'Load a saved spell-set preset' },
+    { group = 'Setting', name = 'Save Preset',        cmd = '/ac preset save <name>',   desc = 'Save the current spell set as a preset' },
+}
+-- Box Control presets: the Box Net window's quick actions as buttons. `%s` is
+-- the scope (all | zone | group). ${Me.CleanName} is expanded by the command
+-- parser on the character that presses the button, so the shared library
+-- works for every box.
+local BOX_SCOPES = {
+    { id = 'all',   label = 'All boxes' },
+    { id = 'zone',  label = 'Same zone' },
+    { id = 'group', label = 'My group' },
+}
+local BOX_PRESETS = {
+    { name = 'Run',          desc = 'Start auto-combat on the boxes',                cmd = '/ac net %s run',                                          color = { 40, 125, 55 } },
+    { name = 'Pause',        desc = 'Pause auto-combat on the boxes',                cmd = '/ac net %s pause',                                        color = { 150, 35, 35 } },
+    { name = 'Burn On',      desc = 'Turn burn mode on',                             cmd = '/ac net %s burn on',                                      color = { 175, 90, 25 } },
+    { name = 'Burn Off',     desc = 'Turn burn mode off',                            cmd = '/ac net %s burn off',                                     color = { 110, 75, 45 } },
+    { name = 'Follow Me',    desc = 'Make me their Main Assist and switch them to Assist (Chase)', cmd = '/ac net %s ma ${Me.CleanName}\n/ac net %s assist chase', color = { 35, 80, 160 } },
+    { name = 'Assist Me',    desc = 'Make me their Main Assist and switch them to Assist (Camp)',  cmd = '/ac net %s ma ${Me.CleanName}\n/ac net %s assist camp',  color = { 30, 120, 120 } },
+    { name = 'Set Me as MA', desc = 'Make me their Main Assist (mode unchanged)',    cmd = '/ac net %s ma ${Me.CleanName}',                           color = { 105, 50, 150 } },
+    { name = 'Buff Me',      desc = 'Ask the boxes for the loadout buffs I am missing', cmd = '/ac net buffme %s',                                    color = { 165, 55, 115 } },
+    { name = 'Camp Here',    desc = 'Push my location as their camp anchor',         cmd = '/ac net camp %s',                                         color = { 165, 140, 25 } },
 }
 local AA_ID_RANGES = { { 1, 1500 }, { 4000, 4060 }, { 5000, 5050 }, { 8120, 8140 }, { 17780, 17800 } }
 
@@ -481,14 +579,14 @@ end
 -- ----------------------------------------------------------------------------
 -- Lua evaluation (labels, icons, timers, --lua command buttons)
 -- ----------------------------------------------------------------------------
-local function luaEnv()
+local function luaEnv(delayFn)
     local env = setmetatable({}, { __index = _G })
-    -- mq.delay inside a button script must not block the core; route it
-    -- through the cooperative plugin delay (yields the fiber every tick).
-    env.mq = setmetatable({
-        delay = function(ms, cond) return core.delay(ms, cond) end,
-    }, { __index = mq })
-    env.delay = function(ms, cond) return core.delay(ms, cond) end
+    -- mq.delay inside a button script must not block the core: script buttons
+    -- get a yielding delay (see runLuaButton); everything else (labels, timers)
+    -- runs synchronously and gets the cooperative core delay.
+    delayFn = delayFn or function(ms, cond) return core.delay(ms, cond) end
+    env.mq = setmetatable({ delay = delayFn }, { __index = mq })
+    env.delay = delayFn
     env.ImGui = ImGui
     env.core = core
     env.ctrl = ctrl
@@ -1186,11 +1284,57 @@ local function evaluateButton(b, key, force)
 end
 
 -- ----------------------------------------------------------------------------
--- Execution (queued from the UI, run on the plugin fiber)
+-- Execution (immediate on click; `--lua` buttons run as pumped coroutines)
 -- ----------------------------------------------------------------------------
 local function isLuaButton(cmd)
     local first = lines(cmd)[1]
     return first ~= nil and first:match('^%-%-%s?lua') ~= nil
+end
+
+local MAX_SCRIPTS = 16
+
+-- Inside a script coroutine: wait `ms` (or until cond() is true) by yielding
+-- back to the pump every frame. Returns true when the condition fired.
+local function scriptDelay(ms, cond)
+    local deadline = os.clock() + (tonumber(ms) or 0) / 1000
+    while true do
+        if cond then
+            local ok, res = pcall(cond)
+            if ok and res then return true end
+        end
+        if os.clock() >= deadline then return false end
+        coroutine.yield()
+    end
+end
+
+local function runLuaButton(b, key)
+    if #state.scripts >= MAX_SCRIPTS then
+        log('\arButton [%s] not started: %d scripts are already running.', b.label or key or '?', #state.scripts)
+        return false
+    end
+    local fn, err = compile(b.cmd or '', 'button:' .. (b.label or ''), luaEnv(scriptDelay))
+    if not fn then
+        log('\arButton [%s] Lua error: %s', b.label or '?', tostring(err))
+        return false
+    end
+    state.scripts[#state.scripts + 1] = { co = coroutine.create(fn), label = b.label or key or '?', startedAt = os.clock() }
+    return true
+end
+
+-- Resumes every running script once. Called each frame from onDrawUI and
+-- each core pass from onTick, so scripts keep moving even with no window.
+local function pumpScripts()
+    if #state.scripts == 0 then return end
+    for i = #state.scripts, 1, -1 do
+        local sc = state.scripts[i]
+        local ok, err = coroutine.resume(sc.co)
+        if not ok then
+            log('\arButton [%s] Lua error: %s', sc.label, tostring(err))
+            table.remove(state.scripts, i)
+        elseif coroutine.status(sc.co) == 'dead' then
+            table.remove(state.scripts, i)
+        end
+    end
 end
 
 local function runButton(b, key)
@@ -1198,8 +1342,7 @@ local function runButton(b, key)
     local cmd = b.cmd or ''
     if prefs.announceRun then log('Running \at%s\ax', b.label or key or '?') end
     if isLuaButton(cmd) then
-        local ok, err = evalLua(cmd, 'button:' .. (b.label or ''))
-        if not ok then log('\arButton [%s] Lua error: %s', b.label or '?', tostring(err)) end
+        if runLuaButton(b, key) then pumpScripts() end
     else
         for i, line in ipairs(lines(cmd)) do
             local l = trim(line)
@@ -1219,21 +1362,22 @@ local function runButton(b, key)
     end
 end
 
-local function queueButton(setName, index)
+-- Fires the button in a slot right now. Returns false for an empty slot.
+local function fireButton(setName, index)
     local b, key = buttonAt(setName, index)
     if not b then return false end
-    state.execQueue[#state.execQueue + 1] = { key = key, button = b }
+    runButton(b, key)
     return true
 end
 
 local function execBySetIndex(setName, index)
     index = tonumber(index)
     if not setName or not index or not db.sets[setName] then return false end
-    return queueButton(setName, math.floor(index))
+    return fireButton(setName, math.floor(index))
 end
 
--- Drains one queued button per tick. Runs inside the plugin fiber so a
--- `--lua` button may call delay() and resume next tick.
+-- Per core pass: shared-file reloads, the Box Network subscription, and a
+-- script pump for when no frame is being drawn.
 local function tick()
     if state.reloadPending then
         state.reloadPending = false
@@ -1247,12 +1391,7 @@ local function tick()
         end)
         if ok and type(unsub) == 'function' then state.boxnetUnsub = unsub end
     end
-    local item = table.remove(state.execQueue, 1)
-    if item then
-        state.running = item
-        runButton(item.button, item.key)
-        state.running = nil
-    end
+    pumpScripts()
 end
 
 -- ----------------------------------------------------------------------------
@@ -1402,11 +1541,7 @@ local function saveEditor()
 end
 
 local function slotClicked(hbId, setName, index)
-    local b = buttonAt(setName, index)
-    if b then
-        queueButton(setName, index)
-        return
-    end
+    if fireButton(setName, index) then return end
     local fromCursor = buttonFromCursor()
     openEditor(hbId, setName, index, fromCursor)
     if fromCursor then setStatus('Captured %s from the cursor - review and Save.', fromCursor.label) end
@@ -1568,7 +1703,91 @@ local function scanItems()
     return out
 end
 
-local SCANNERS = { AA = scanAAs, Gem = scanGems, Ability = scanAbilities, Disc = scanDiscs, Item = scanItems }
+local function boxScopeLabel(scope)
+    for _, sc in ipairs(BOX_SCOPES) do
+        if sc.id == scope then return sc.label end
+    end
+    return scope
+end
+
+local function boxPresetButton(preset, scope)
+    local cmd = preset.cmd:gsub('%%s', scope)
+    local suffix = ({ all = 'all', zone = 'zone', group = 'grp' })[scope] or scope
+    return {
+        label = string.format('%s (%s)', preset.name, suffix),
+        cmd = cmd,
+        buttonColor = preset.color and deepcopy(preset.color) or nil,
+        timerType = 'None',
+    }
+end
+
+local function scanBoxControl()
+    local out = {}
+    local scope = browser.boxScope or 'all'
+    for _, preset in ipairs(BOX_PRESETS) do
+        local b = boxPresetButton(preset, scope)
+        out[#out + 1] = { name = preset.name, sub = preset.desc, icon = nil, iconType = 'Spell', button = b }
+    end
+    return out
+end
+
+local function commandNeedsEdit(cmd)
+    return tostring(cmd or ''):find('[<%[]') ~= nil
+end
+
+local function commandEntry(group, name, cmd, desc)
+    return {
+        name = name,
+        sub = string.format('[%s] %s', group, desc or ''),
+        icon = nil, iconType = 'Spell',
+        needsEdit = commandNeedsEdit(cmd),
+        button = { label = name, cmd = cmd, timerType = 'None' },
+    }
+end
+
+-- Plugin help lines ('  \ag/ac cursorui | cursorwin\ax - Toggle ...') -> entries.
+local function parseHelpLine(line)
+    local text = tostring(line or ''):gsub('\a%-?.', ''):gsub('^%s+', ''):gsub('%s+$', '')
+    local out = {}
+    -- Several "cmd - desc" pairs may share one line (separated by 3+ spaces).
+    for part in (text .. '   '):gmatch('(.-)%s%s%s+') do
+        local cmd, desc = part:match('^(/%S.-)%s+%-%s+(.+)$')
+        if cmd then
+            -- "/ac a | b | c" alternatives: keep the first one
+            local first = cmd:match('^(.-)%s*|') or cmd
+            first = first:gsub('%s+$', '')
+            local word = first:match('^/ac%s+(%S+)') or first:match('^/(%S+)') or first
+            local name = word:gsub('^%l', string.upper)
+            out[#out + 1] = commandEntry('Plugin', name, first, desc)
+        end
+    end
+    return out
+end
+
+local function scanCommands()
+    local out, seen = {}, {}
+    for _, c in ipairs(CORE_COMMANDS) do
+        seen[c.cmd] = true
+        out[#out + 1] = commandEntry(c.group, c.name, c.cmd, c.desc)
+    end
+    local pm = core.runtime and core.runtime.pluginManager
+    if pm and type(pm.helpLines) == 'function' then
+        local ok, helpLines = pcall(pm.helpLines)
+        if ok and type(helpLines) == 'table' then
+            for _, hl in ipairs(helpLines) do
+                for _, e in ipairs(parseHelpLine(hl)) do
+                    if not seen[e.button.cmd] then
+                        seen[e.button.cmd] = true
+                        out[#out + 1] = e
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+local SCANNERS = { AA = scanAAs, Gem = scanGems, Ability = scanAbilities, Disc = scanDiscs, Item = scanItems, Box = scanBoxControl, Cmd = scanCommands }
 
 local function browserList(tab, force)
     if force or not browser.lists[tab] then
@@ -1591,6 +1810,7 @@ local function openBrowser(tab, mode, target)
     -- Gems / items change often; always rescan them on open.
     browser.lists.Gem = nil
     browser.lists.Item = nil
+    browser.lists.Cmd = nil
 end
 
 local function firstFreeSlot(setName)
@@ -1604,6 +1824,22 @@ end
 local function pickBrowserEntry(entry)
     if not entry or not entry.button then return false end
     local b = normalizeButton(deepcopy(entry.button))
+    -- A command with a placeholder argument is finished in the editor.
+    if entry.needsEdit and not (browser.mode == 'editor' and edit.open and edit.tmp) then
+        local target = browser.target
+        if not target or not target.setName or not db.sets[target.setName] then
+            setStatus('No set to add to - open the browser from a hotbar.')
+            return false
+        end
+        local index = target.index or firstFreeSlot(target.setName)
+        if not index then
+            setStatus('Set %s is full (%d slots).', target.setName, MAX_SLOTS)
+            return false
+        end
+        openEditor(target.hbId, target.setName, index, b)
+        setStatus('Fill in the <argument> for %s, then Save.', b.label)
+        return true
+    end
     if browser.mode == 'editor' and edit.open and edit.tmp then
         for k, v in pairs(b) do edit.tmp[k] = v end
         edit.tmp.showLabel = (edit.tmp.icon == nil)
@@ -1635,6 +1871,22 @@ local function pickBrowserEntry(entry)
         browser.target = { hbId = target.hbId, setName = target.setName }
     end
     return true
+end
+
+-- Creates a "Box Control" set holding every preset for the chosen scope and
+-- adds it to the target hotbar. Returns the set name.
+local function addBoxControlSet(scope, hb)
+    scope = scope or browser.boxScope or 'all'
+    local name = uniqueSetName('Box Control' .. (scope ~= 'all' and (' (' .. scope .. ')') or ''))
+    local set = {}
+    for i, preset in ipairs(BOX_PRESETS) do
+        set[i] = addButton(boxPresetButton(preset, scope), false)
+    end
+    db.sets[name] = set
+    if hb and not hotbarHasSet(hb, name) then hb.sets[#hb.sets + 1] = name end
+    saveDb()
+    setStatus('Added set %s with %d box-control buttons.', name, #BOX_PRESETS)
+    return name
 end
 
 -- ----------------------------------------------------------------------------
@@ -1694,7 +1946,7 @@ local drawHotbarMenu
 
 -- Grid geometry for one set inside the current content region.
 local function gridLayout(hb, setName, availW, availH)
-    local size = (hb.buttonSize or 6) * 10
+    local size = core.px((hb.buttonSize or 6) * 10)
     local cols = math.max(1, math.floor((availW + GRID_SPACING) / (size + GRID_SPACING)))
     local rows = math.max(1, math.floor((availH + GRID_SPACING) / (size + GRID_SPACING)))
     local count = math.min(MAX_SLOTS, cols * rows)
@@ -1783,7 +2035,8 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
         end
 
         -- Label (words stacked as lines, centred) or slot number
-        pcall(ImGui.SetWindowFontScale, (b and b.fontScale) or hb.fontScale or 1.0)
+        local winScale = core.currentWindowScale and core.currentWindowScale() or 1.0
+        pcall(ImGui.SetWindowFontScale, ((b and b.fontScale) or hb.fontScale or 1.0) * winScale)
         if b then
             if b.showLabel ~= false and c.label and c.label ~= '' and not (c.total > 0 and c.remaining > 0.05) then
                 local tr, tg, tb = rgbTo01(b.textColor, { 1, 1, 1 })
@@ -1816,7 +2069,7 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
             local np = toV(mnX + (size - tw) / 2, mnY + (size - th) / 2)
             if np then dl:AddText(np, col32(0.5, 0.58, 0.68, 0.7 * alphaMul), ns) end
         end
-        pcall(ImGui.SetWindowFontScale, 1.0)
+        pcall(ImGui.SetWindowFontScale, winScale)
     end
 
     -- Tooltip
@@ -2007,7 +2260,7 @@ local function drawSetSubmenus(hb, hbId)
     -- Create New Set
     if ImGui.BeginMenu('Create New Set') then
         local cur = state.newSetName[hbId] or ''
-        ImGui.SetNextItemWidth(160)
+        ImGui.SetNextItemWidth(core.px(160))
         local txt = ImGui.InputText('##newSet_' .. hbId, cur)
         if type(txt) == 'string' then state.newSetName[hbId] = txt end
         ImGui.SameLine()
@@ -2108,7 +2361,7 @@ drawHotbarMenu = function(hb, hbId)
             hb.perCharPos = not hb.perCharPos
             saveDb({ silent = true })
         end
-        ImGui.SetNextItemWidth(140)
+        ImGui.SetNextItemWidth(core.px(140))
         local a = pushSlider('Opacity##hbAlpha_' .. hbId, hb.alpha or 1.0, 0.1, 1.0, '%.2f')
         if math.abs(a - (hb.alpha or 1.0)) > 0.001 then
             hb.alpha = a
@@ -2117,7 +2370,7 @@ drawHotbarMenu = function(hb, hbId)
         ImGui.Separator()
         ImGui.Text('Title:')
         ImGui.SameLine()
-        ImGui.SetNextItemWidth(160)
+        ImGui.SetNextItemWidth(core.px(160))
         local cur = state.titleEdit[hbId]
         if cur == nil then cur = hb.title or '' end
         local txt = ImGui.InputText('##hbTitle_' .. hbId, cur)
@@ -2212,10 +2465,11 @@ local function drawHotbar(hb, hbId)
 
     core.pushTheme()
     if hb.alpha and hb.alpha < 1 then pcall(ImGui.SetNextWindowBgAlpha, hb.alpha) end
-    pcall(ImGui.SetNextWindowSize, 300, 90, ImGuiCond and ImGuiCond.FirstUseEver or 4)
-    -- Same tight chrome as the Spell Gem bar: 2px padding, 1px frames.
-    local pushed = pushStyleVarSafe('WindowPadding', 2, 2) + pushStyleVarSafe('ItemSpacing', 2, 2) + pushStyleVarSafe('FramePadding', 1, 1)
+    pcall(ImGui.SetNextWindowSize, core.px(300), core.px(90), ImGuiCond and ImGuiCond.FirstUseEver or 4)
     core.preBeginWindow(winKey)
+    -- Same tight chrome as the Spell Gem bar: 2px padding, 1px frames (pushed
+    -- after preBeginWindow so it wins over the scaled theme padding).
+    local pushed = pushStyleVarSafe('WindowPadding', core.px(2), core.px(2)) + pushStyleVarSafe('ItemSpacing', core.px(2), core.px(2)) + pushStyleVarSafe('FramePadding', core.px(1), core.px(1))
     local open, show = ImGui.Begin(title, true, windowFlags(hb))
     if open == false then
         hb.visible = false
@@ -2293,7 +2547,7 @@ local function drawHotbar(hb, hbId)
             ImGui.OpenPopup('Rename Set##renameSet')
             if ImGui.BeginPopup('Rename Set##renameSet') then
                 ImGui.Text('Rename set "' .. state.renameSet.from .. '"')
-                ImGui.SetNextItemWidth(200)
+                ImGui.SetNextItemWidth(core.px(200))
                 local txt = ImGui.InputText('##renameSetText', state.renameSet.text)
                 if type(txt) == 'string' then state.renameSet.text = txt end
                 if ImGui.Button('Rename##renameSetOk') then
@@ -2335,7 +2589,7 @@ local function drawSwatches(idPrefix, palette, current, fallback)
     local Col = ImGuiCol
     local toV, col32 = core.toVec, core.col32
     for i, sw in ipairs(palette) do
-        if i > 1 then ImGui.SameLine(0, 3) end
+        if i > 1 then ImGui.SameLine(0, core.px(3)) end
         local r, g, b = rgbTo01(sw.rgb, fallback)
         local pushed = 0
         if Col then
@@ -2343,7 +2597,7 @@ local function drawSwatches(idPrefix, palette, current, fallback)
             if pcall(ImGui.PushStyleColor, Col.ButtonHovered, math.min(1, r + 0.12), math.min(1, g + 0.12), math.min(1, b + 0.12), 1.0) then pushed = pushed + 1 end
             if pcall(ImGui.PushStyleColor, Col.ButtonActive, math.min(1, r + 0.2), math.min(1, g + 0.2), math.min(1, b + 0.2), 1.0) then pushed = pushed + 1 end
         end
-        if ImGui.Button('##' .. idPrefix .. '_' .. sw.name, 20, 20) then
+        if ImGui.Button('##' .. idPrefix .. '_' .. sw.name, core.px(20), core.px(20)) then
             picked, changed = sw.rgb and deepcopy(sw.rgb) or nil, true
         end
         if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
@@ -2372,7 +2626,8 @@ local function drawEditor()
     if not edit.open or not edit.tmp then return end
     local t = edit.tmp
     core.pushTheme()
-    pcall(ImGui.SetNextWindowSize, 580, 540, ImGuiCond and ImGuiCond.FirstUseEver or 4)
+    if core.pushWindowScale then core.pushWindowScale(nil) end
+    pcall(ImGui.SetNextWindowSize, core.px(580), core.px(540), ImGuiCond and ImGuiCond.FirstUseEver or 4)
     local flags = 0
     if edit.dirty and ImGuiWindowFlags and ImGuiWindowFlags.UnsavedDocument then flags = ImGuiWindowFlags.UnsavedDocument end
     local open, show = ImGui.Begin('Edit Hot Button###triuneBtnEdit', true, flags)
@@ -2383,10 +2638,11 @@ local function drawEditor()
         return
     end
     if show then
+        if core.applyWindowScale then core.applyWindowScale(nil) end
         -- Row 1: preview + colours + icon + reset + advanced
         local col32 = core.col32
         local toV = core.toVec
-        ImGui.InvisibleButton('##preview', 40, 40)
+        ImGui.InvisibleButton('##preview', core.px(40), core.px(40))
         do
             local mnX, mnY = xy(ImGui.GetItemRectMin())
             local mxX, mxY = xy(ImGui.GetItemRectMax())
@@ -2408,11 +2664,11 @@ local function drawEditor()
         ImGui.SameLine()
         ImGui.BeginGroup()
         ImGui.Text('Button:')
-        ImGui.SameLine(0, 6)
+        ImGui.SameLine(0, core.px(6))
         local newBC, chB = drawSwatches('bc', BUTTON_PALETTE, t.buttonColor, { 0.13, 0.18, 0.25 })
         if chB then t.buttonColor = newBC; edit.dirty = true end
         ImGui.Text('Text:  ')
-        ImGui.SameLine(0, 6)
+        ImGui.SameLine(0, core.px(6))
         local newTC, chT = drawSwatches('tc', TEXT_PALETTE, t.textColor, { 1, 1, 1 })
         if chT then t.textColor = newTC; edit.dirty = true end
         if ImGui.Button('Pick Icon##pickIcon') then picker.open = true end
@@ -2570,15 +2826,15 @@ local function drawEditor()
             local okK, pressed = pcall(ImGui.IsKeyChordPressed, bit.bor(ImGuiMod.Ctrl, ImGuiKey.S))
             ctrlS = okK and pressed == true
         end
-        if ImGui.Button('Save##btnSave', 90, 24) or ctrlS then
+        if ImGui.Button('Save##btnSave', core.px(90), core.px(24)) or ctrlS then
             if saveEditor() then setStatus('Saved button [%s].', t.label) end
         end
         ImGui.SameLine()
-        if ImGui.Button('Save & Close##btnSaveClose', 110, 24) then
+        if ImGui.Button('Save & Close##btnSaveClose', core.px(110), core.px(24)) then
             if saveEditor() then closeEditor() end
         end
         ImGui.SameLine()
-        if ImGui.Button('Close##btnClose', 90, 24) then closeEditor() end
+        if ImGui.Button('Close##btnClose', core.px(90), core.px(24)) then closeEditor() end
         if ImGui.IsItemHovered() then core.setTooltip('Close without saving') end
         if state.statusMsg ~= '' and (os.clock() - state.statusAt) < 6 then
             ImGui.SameLine()
@@ -2593,7 +2849,8 @@ end
 local function drawPicker()
     if not picker.open then return end
     core.pushTheme()
-    pcall(ImGui.SetNextWindowSize, 560, 420, ImGuiCond and ImGuiCond.FirstUseEver or 4)
+    if core.pushWindowScale then core.pushWindowScale(nil) end
+    pcall(ImGui.SetNextWindowSize, core.px(560), core.px(420), ImGuiCond and ImGuiCond.FirstUseEver or 4)
     local open, show = ImGui.Begin('Icon Picker###triuneBtnIconPicker', true, 0)
     if open == false then
         picker.open = false
@@ -2602,15 +2859,16 @@ local function drawPicker()
         return
     end
     if show then
+        if core.applyWindowScale then core.applyWindowScale(nil) end
         local maxIcon = (picker.tab == 'Item') and picker.maxItem or picker.maxSpell
         local maxPage = math.max(1, math.ceil((maxIcon + 1) / picker.perPage))
-        ImGui.SetNextItemWidth(120)
+        ImGui.SetNextItemWidth(core.px(120))
         local pg = ImGui.InputInt('Page##iconPage', picker.page)
         if type(pg) == 'number' then picker.page = math.max(1, math.min(maxPage, pg)) end
         ImGui.SameLine()
         ImGui.TextDisabled(string.format('of %d', maxPage))
         ImGui.SameLine()
-        ImGui.SetNextItemWidth(120)
+        ImGui.SetNextItemWidth(core.px(120))
         local idIn = ImGui.InputInt('Icon ID##iconId', picker.manual or 0)
         if type(idIn) == 'number' then picker.manual = math.max(0, idIn) end
         ImGui.SameLine()
@@ -2636,7 +2894,7 @@ local function drawPicker()
                         local n = 0
                         local pushedSp = pushStyleVarSafe('ItemSpacing', 4, 4)
                         for id = startId, endId do
-                            if n > 0 and n % cols ~= 0 then ImGui.SameLine(0, 4) end
+                            if n > 0 and n % cols ~= 0 then ImGui.SameLine(0, core.px(4)) end
                             n = n + 1
                             ImGui.PushID(id)
                             local clicked = ImGui.InvisibleButton('##icon', picker.size, picker.size)
@@ -2676,7 +2934,8 @@ end
 local function drawImport()
     if not imp.open then return end
     core.pushTheme()
-    pcall(ImGui.SetNextWindowSize, 520, 140, ImGuiCond and ImGuiCond.FirstUseEver or 4)
+    if core.pushWindowScale then core.pushWindowScale(nil) end
+    pcall(ImGui.SetNextWindowSize, core.px(520), core.px(140), ImGuiCond and ImGuiCond.FirstUseEver or 4)
     local open, show = ImGui.Begin('Import Button or Set###triuneBtnImport', true, 0)
     if open == false then
         imp.open = false
@@ -2684,6 +2943,7 @@ local function drawImport()
         core.popTheme()
         return
     end
+    if show and core.applyWindowScale then core.applyWindowScale(nil) end
     if show then
         ImGui.TextDisabled('Paste a Triune / Button Master share string:')
         if ImGui.Button('Paste From Clipboard##impPaste') then
@@ -2706,7 +2966,7 @@ local function drawImport()
                 and string.format('Set "%s" (%d buttons)', tostring(imp.decoded.Key), tableSize(imp.decoded.Buttons))
                 or string.format('Button "%s"', tostring(imp.decoded.Button and imp.decoded.Button.Label))
             ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], what)
-            if ImGui.Button('Import##impGo', 120, 24) then
+            if ImGui.Button('Import##impGo', core.px(120), core.px(24)) then
                 local hb = hotbars()[imp.hbId]
                 local ok = importShare(imp.decoded, hb)
                 if ok then
@@ -2727,7 +2987,8 @@ end
 local function drawBrowser()
     if not browser.open then return end
     core.pushTheme()
-    pcall(ImGui.SetNextWindowSize, 460, 420, ImGuiCond and ImGuiCond.FirstUseEver or 4)
+    if core.pushWindowScale then core.pushWindowScale(nil) end
+    pcall(ImGui.SetNextWindowSize, core.px(460), core.px(420), ImGuiCond and ImGuiCond.FirstUseEver or 4)
     local open, show = ImGui.Begin('Add From Game###triuneBtnBrowser', true, 0)
     if open == false then
         browser.open = false
@@ -2736,6 +2997,7 @@ local function drawBrowser()
         return
     end
     if show then
+        if core.applyWindowScale then core.applyWindowScale(nil) end
         if browser.mode == 'editor' then
             ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Click an entry to fill the open editor.')
         elseif browser.target and browser.target.setName then
@@ -2749,7 +3011,7 @@ local function drawBrowser()
         local txt = ImGui.InputText('##browserSearch', browser.search)
         if type(txt) == 'string' then browser.search = txt end
         ImGui.SameLine()
-        if ImGui.Button('Refresh##browserRefresh', 80, 0) then browserList(browser.tab, true) end
+        if ImGui.Button('Refresh##browserRefresh', core.px(80), 0) then browserList(browser.tab, true) end
         if ImGui.IsItemHovered() then core.setTooltip('Rescan this tab (AAs are scanned once and cached; gems and items rescan when the window opens).') end
 
         if ImGui.BeginTabBar('##browserTabs') then
@@ -2763,6 +3025,28 @@ local function drawBrowser()
                 if not okTab then tabOpen = ImGui.BeginTabItem(tab.label .. '##btab_' .. tab.id) end
                 if tabOpen then
                     browser.tab = tab.id
+                    if tab.id == 'Box' then
+                        ImGui.TextDisabled('Box Net quick actions as buttons (needs the Box Network plugin).')
+                        ImGui.Text('Scope:')
+                        ImGui.SameLine()
+                        for _, sc in ipairs(BOX_SCOPES) do
+                            if ImGui.RadioButton(sc.label .. '##boxScope_' .. sc.id, browser.boxScope == sc.id) and browser.boxScope ~= sc.id then
+                                browser.boxScope = sc.id
+                                browser.lists.Box = nil
+                            end
+                            ImGui.SameLine()
+                        end
+                        ImGui.NewLine()
+                        if browser.mode == 'assign' and browser.target and browser.target.hbId then
+                            if ImGui.Button('Add All as a Set##boxAddAll', core.px(150), core.px(22)) then
+                                addBoxControlSet(browser.boxScope, hotbars()[browser.target.hbId])
+                            end
+                            if ImGui.IsItemHovered() then core.setTooltip('Creates a "Box Control" set with every preset for ' .. boxScopeLabel(browser.boxScope) .. ' and adds it as a tab on this hotbar.') end
+                        end
+                        ImGui.Separator()
+                    elseif tab.id == 'Cmd' then
+                        ImGui.TextDisabled('Triune slash commands. Entries with an <argument> open the editor to fill it in.')
+                    end
                     local list = browserList(tab.id, false)
                     local needle = trim(browser.search):lower()
                     if ImGui.BeginChild('##browserList', 0, 0, false) then
@@ -2781,7 +3065,7 @@ local function drawBrowser()
                                     if anim and ip and isz then pcall(function() dl:AddTextureAnimation(anim, ip, isz) end) end
                                 end
                                 ImGui.Dummy(rowH - 2, rowH - 2)
-                                ImGui.SameLine(0, 6)
+                                ImGui.SameLine(0, core.px(6))
                                 local label = e.name .. (e.sub and e.sub ~= '' and ('   ' .. e.sub) or '')
                                 if e.empty then
                                     ImGui.TextDisabled(label)
@@ -2883,7 +3167,7 @@ local function handleCommand(args)
     elseif sub == 'add' or sub == 'browse' then
         local want = (args[2] or ''):lower()
         local tab = ({ aa = 'AA', aas = 'AA', gem = 'Gem', gems = 'Gem', spell = 'Gem', spells = 'Gem', ability = 'Ability', abilities = 'Ability', skill = 'Ability',
-            disc = 'Disc', discs = 'Disc', item = 'Item', items = 'Item', clicky = 'Item' })[want] or browser.tab
+            disc = 'Disc', discs = 'Disc', item = 'Item', items = 'Item', clicky = 'Item', box = 'Box', boxes = 'Box', net = 'Box', boxnet = 'Box', cmd = 'Cmd', cmds = 'Cmd', command = 'Cmd', commands = 'Cmd', slash = 'Cmd', triune = 'Cmd' })[want] or browser.tab
         -- Target the active set of the first hotbar that has one.
         local target = nil
         for i, hb in ipairs(hotbars()) do
@@ -2925,7 +3209,7 @@ local function handleCommand(args)
     elseif sub == 'help' then
         for _, h in ipairs(plugin.help) do print(h) end
     else
-        log('usage: /ac btn [toggle|show|hide|<n>|new|add [aa|gem|ability|disc|item]|exec <set> <index>|list|reload|import [bm]|copy <server> <char>]')
+        log('usage: /ac btn [toggle|show|hide|<n>|new|add [aa|gem|ability|disc|item|box|cmd]|exec <set> <index>|list|reload|import [bm]|copy <server> <char>]')
     end
     return true
 end
@@ -2970,7 +3254,7 @@ function plugin.onInit(coreApi)
     ERR = colors.ERR or ERR
     if ctrl and ctrl.show_buttons == nil then ctrl.show_buttons = true end
     state.charKey = nil
-    state.execQueue = {}
+    state.scripts = {}
     state.activeSet = {}
     state.reloadPending = false
     loadDb()
@@ -2992,7 +3276,7 @@ function plugin.onDestroy()
         for _, b in ipairs(state.bindsBound) do pcall(mq.unbind, b) end
     end
     state.bindsBound = {}
-    state.execQueue = {}
+    state.scripts = {}
     closeEditor()
     imp.open = false
     browser.open = false
@@ -3008,6 +3292,7 @@ end
 function plugin.onDrawUI()
     if not core or not state.loaded then return end
     refresh()
+    pumpScripts()
     if ctrl.show_buttons then
         for i, hb in ipairs(hotbars()) do drawHotbar(hb, i) end
     end
@@ -3032,11 +3317,11 @@ function plugin.onDrawSettings()
     refresh()
     core.accent(GOLD, 'Hot Buttons (Button Master-style hotbars)')
     local isOpen = ctrl.show_buttons == true and anyHotbarVisible()
-    if ImGui.Button((isOpen and 'Hotbars: Visible (Click to Hide)' or 'Hotbars: Hidden (Click to Show)') .. '##btnToggleWin', 250, 24) then
+    if ImGui.Button((isOpen and 'Hotbars: Visible (Click to Hide)' or 'Hotbars: Hidden (Click to Show)') .. '##btnToggleWin', core.px(250), core.px(24)) then
         setAllVisible(not isOpen)
     end
     ImGui.SameLine()
-    if ImGui.Button('New Hotbar##btnNewHb', 110, 24) then newHotbarForMe() end
+    if ImGui.Button('New Hotbar##btnNewHb', core.px(110), core.px(24)) then newHotbarForMe() end
     ImGui.TextDisabled(string.format('%d button(s), %d set(s) in the shared library; %d hotbar(s) for this character.',
         tableSize(db and db.buttons), tableSize(db and db.sets), #hotbars()))
     ImGui.TextDisabled('Library file: ' .. plugin.configPath())
@@ -3054,18 +3339,18 @@ function plugin.onDrawSettings()
 
     ImGui.Separator()
     core.accent(GOLD, 'Import')
-    if ImGui.Button('Import Button Master Config##btnImportBm', 220, 24) then
+    if ImGui.Button('Import Button Master Config##btnImportBm', core.px(220), core.px(24)) then
         local ok, msg = importButtonMasterConfig()
         if not ok then state.bmImportResult = tostring(msg) end
     end
     if ImGui.IsItemHovered() then core.setTooltip('Reads ' .. plugin.bmConfigPath() .. ' and adds its buttons, sets, and this character\'s hotbars.') end
     ImGui.SameLine()
-    if ImGui.Button('Import Share String...##btnImportShare', 180, 24) then
+    if ImGui.Button('Import Share String...##btnImportShare', core.px(180), core.px(24)) then
         imp.open = true
         imp.hbId = 1
     end
     ImGui.SameLine()
-    if ImGui.Button('Reload Library##btnReload', 120, 24) then
+    if ImGui.Button('Reload Library##btnReload', core.px(120), core.px(24)) then
         loadDb()
         setStatus('Reloaded.')
     end
@@ -3091,7 +3376,7 @@ end
 plugin.help = {
     '  \ag/ac btn | buttons\ax - Toggle the Hot Buttons hotbars (Button Master-style)',
     '  \ag/ac btn <n>\ax - Show / hide hotbar n     \ag/ac btn new\ax - Create a hotbar',
-    '  \ag/ac btn add [aa|gem|ability|disc|item]\ax - Browse your AAs / gems / abilities / discs / clickies and add one as a button',
+    '  \ag/ac btn add [aa|gem|ability|disc|item|box|cmd]\ax - Browse your AAs / gems / abilities / discs / clickies and add one as a button',
     '  \ag/ac btn exec <set> <index>\ax - Fire a button   \ag/ac btn import bm\ax - Import ButtonMaster.lua',
     '  \ag/btn [n]\ax, \ag/btnexec "<set>" <index>\ax, \ag/btncopy <server> <char>\ax - Button Master-compatible binds',
 }
@@ -3121,6 +3406,8 @@ plugin._ = {
     state = state, edit = edit, imp = imp, prefs = prefs, cacheFor = cacheFor, browser = browser,
     scanAAs = scanAAs, scanGems = scanGems, scanAbilities = scanAbilities, scanDiscs = scanDiscs, scanItems = scanItems,
     browserList = browserList, openBrowser = openBrowser, pickBrowserEntry = pickBrowserEntry, firstFreeSlot = firstFreeSlot,
+    scanCommands = scanCommands, parseHelpLine = parseHelpLine, commandNeedsEdit = commandNeedsEdit, CORE_COMMANDS = CORE_COMMANDS,
+    scanBoxControl = scanBoxControl, boxPresetButton = boxPresetButton, addBoxControlSet = addBoxControlSet, BOX_PRESETS = BOX_PRESETS, BOX_SCOPES = BOX_SCOPES,
     getDb = function() return db end,
     setDb = function(d) db = normalizeDb(d) cache = {} end,
     loadDb = loadDb, saveDb = saveDb, defaultDb = defaultDb, normalizeDb = normalizeDb,
@@ -3134,7 +3421,7 @@ plugin._ = {
     addSetToHotbar = addSetToHotbar, removeSetFromHotbar = removeSetFromHotbar, moveSetInHotbar = moveSetInHotbar,
     newHotbarForMe = newHotbarForMe, deleteHotbar = deleteHotbar, copyHotbarsFrom = copyHotbarsFrom, anyHotbarVisible = anyHotbarVisible,
     readCooldown = readCooldown, evaluateButton = evaluateButton, isLuaButton = isLuaButton, runButton = runButton,
-    queueButton = queueButton, execBySetIndex = execBySetIndex, tick = tick, buttonFromCursor = buttonFromCursor,
+    fireButton = fireButton, execBySetIndex = execBySetIndex, tick = tick, pumpScripts = pumpScripts, buttonFromCursor = buttonFromCursor,
     gridLayout = gridLayout, alphaGroupFor = alphaGroupFor, fmtTime = fmtTime, split = split, lines = lines,
     openEditor = openEditor, saveEditor = saveEditor, closeEditor = closeEditor, slotClicked = slotClicked,
     handleCommand = handleCommand, splitArgs = splitArgs, setAllVisible = setAllVisible, toggleHotbar = toggleHotbar,

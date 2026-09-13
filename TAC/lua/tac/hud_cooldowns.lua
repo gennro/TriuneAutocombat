@@ -653,7 +653,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
     -- Right-aligned Quick Controls
     ImGui.SameLine()
     local isTableView = (ctrl.cooldown_view_mode ~= 'cards')
-    if ImGui.Button((isTableView and 'HUD##cdView' or 'Table##cdView') .. idSuffix, 44, 18) then
+    if ImGui.Button((isTableView and 'HUD##cdView' or 'Table##cdView') .. idSuffix, core.px(44), core.px(18)) then
         ctrl.cooldown_view_mode = isTableView and 'cards' or 'table'
         core.saveLoadout(true)
     end
@@ -688,7 +688,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
 
     -- Header Line 2: Streamlined Filters & Search
     -- Category Dropdown
-    ImGui.SetNextItemWidth(72)
+    ImGui.SetNextItemWidth(core.px(72))
     local CAT_OPTS = { 'All', 'Skills', 'AAs', 'Discs', 'Spells', 'Items' }
     local CAT_MAP = { All = 'All', Skills = 'Abilities', AAs = 'AAs', Discs = 'Disciplines', Spells = 'Spells', Items = 'Items' }
     local REV_CAT = { All = 'All', Abilities = 'Skills', AAs = 'AAs', Disciplines = 'Discs', Spells = 'Spells', Items = 'Items' }
@@ -703,7 +703,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
 
     ImGui.SameLine()
     -- Status Filter Dropdown
-    ImGui.SetNextItemWidth(68)
+    ImGui.SetNextItemWidth(core.px(68))
     local STATUS_OPTS = { 'All', 'Ready', 'CD', 'Active' }
     local STATUS_MAP = { All = 'All', Ready = 'Ready', CD = 'Cooldown', Active = 'Active' }
     local REV_STATUS = { All = 'All', Ready = 'Ready', Cooldown = 'CD', Active = 'Active' }
@@ -718,7 +718,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
 
     ImGui.SameLine()
     -- Sort Selector
-    ImGui.SetNextItemWidth(70)
+    ImGui.SetNextItemWidth(core.px(70))
     local SORT_LABELS = { 'Time', 'Status', 'Pri', 'Cls', 'Type', 'A-Z' }
     local SORT_KEYS = { 'time', 'status', 'priority', 'class', 'type', 'alpha' }
     local curSortIdx = core.idxOf(SORT_KEYS, ctrl.cooldown_sort_by or 'time')
@@ -731,13 +731,13 @@ function M.renderCooldownContent(idSuffix, isPopout)
 
     ImGui.SameLine()
     -- Search Input
-    ImGui.SetNextItemWidth(105)
+    ImGui.SetNextItemWidth(core.px(105))
     M.cooldownSearch = ImGui.InputTextWithHint('##cdSearch' .. idSuffix, 'Search...', M.cooldownSearch or '', 64)
 
     if isPopout then
         ImGui.SameLine()
         -- Transparency Slider
-        ImGui.SetNextItemWidth(55)
+        ImGui.SetNextItemWidth(core.px(55))
         local newAlpha = ImGui.SliderFloat('##cdAlpha' .. idSuffix, ctrl.cooldown_alpha or 0.90, 0.10, 1.00, '%.2f')
         if newAlpha ~= ctrl.cooldown_alpha then
             ctrl.cooldown_alpha = newAlpha
@@ -859,19 +859,19 @@ function M.renderCooldownContent(idSuffix, isPopout)
         if ctrl.cooldown_show_inline_edit then colCount = colCount + 1 end
 
         if ImGui.BeginTable('##TriuneCooldownTable' .. idSuffix, colCount, tableFlags) then
-            ImGui.TableSetupColumn('Cls', ImGuiTableColumnFlags.WidthFixed, 28)
+            ImGui.TableSetupColumn('Cls', ImGuiTableColumnFlags.WidthFixed, core.px(28))
             if not isCompactMode then
-                ImGui.TableSetupColumn('Type', ImGuiTableColumnFlags.WidthFixed, 55)
+                ImGui.TableSetupColumn('Type', ImGuiTableColumnFlags.WidthFixed, core.px(55))
             end
             ImGui.TableSetupColumn('Ability Name', ImGuiTableColumnFlags.WidthStretch, 130)
             if not isCompactMode then
                 ImGui.TableSetupColumn('Trigger / Cond', ImGuiTableColumnFlags.WidthStretch, 110)
             end
-            ImGui.TableSetupColumn('Status & Timer', ImGuiTableColumnFlags.WidthFixed, 115)
+            ImGui.TableSetupColumn('Status & Timer', ImGuiTableColumnFlags.WidthFixed, core.px(115))
             if ctrl.cooldown_show_inline_edit then
-                ImGui.TableSetupColumn('Tuning', ImGuiTableColumnFlags.WidthFixed, 120)
+                ImGui.TableSetupColumn('Tuning', ImGuiTableColumnFlags.WidthFixed, core.px(120))
             end
-            ImGui.TableSetupColumn('Act', ImGuiTableColumnFlags.WidthFixed, 36)
+            ImGui.TableSetupColumn('Act', ImGuiTableColumnFlags.WidthFixed, core.px(36))
             ImGui.TableHeadersRow()
 
             for _, itm in ipairs(filteredItems) do
@@ -930,19 +930,19 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
                     local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 0) / actTotal))
                     local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', core.fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
-                    core.drawStatusProgressBar(frac, 110, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
+                    core.drawStatusProgressBar(frac, core.px(110), core.px(15), tStr, ARC[1], ARC[2], ARC[3], 1.0)
                 elseif itm.ready then
                     if itm.status ~= 'READY' then
                         -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR, BLOCKED)
-                        core.drawStatusProgressBar(1.0, 110, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
+                        core.drawStatusProgressBar(1.0, core.px(110), core.px(15), itm.status, 0.85, 0.55, 0.15, 1.0)
                     else
-                        core.drawStatusProgressBar(1.0, 110, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
+                        core.drawStatusProgressBar(1.0, core.px(110), core.px(15), 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
                     end
                 else
                     local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(itm.timeLeft or 0, 30)
                     local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / cdTotal)))
                     local tStr = core.fmtSec(math.ceil(itm.timeLeft or 0))
-                    core.drawStatusProgressBar(frac, 110, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
+                    core.drawStatusProgressBar(frac, core.px(110), core.px(15), tStr, WARN[1], WARN[2], WARN[3], 1.0)
                 end
                 if itm.reason and itm.reason ~= '' and ImGui.IsItemHovered() then
                     core.setTooltip(itm.reason)
@@ -955,7 +955,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                         local enVal = ImGui.Checkbox('##tblEn', itm.entry.enabled or false)
                         itm.entry.enabled = enVal
                         if itm.entry.pct ~= nil then
-                            ImGui.SameLine(); ImGui.SetNextItemWidth(55)
+                            ImGui.SameLine(); ImGui.SetNextItemWidth(core.px(55))
                             local spVal = ImGui.SliderInt('##tblPct', tonumber(itm.entry.pct) or 100, 0, 100, '%d%%')
                             itm.entry.pct = spVal
                         end
@@ -976,7 +976,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
                     if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.18, 0.70, 0.28, 1.0) then pCount = pCount + 1 end
                     if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
-                    if ImGui.Button('Use##cdBtnUse', 34, 16) then
+                    if ImGui.Button('Use##cdBtnUse', core.px(34), core.px(16)) then
                         if itm.use then itm.use() end
                     end
                     if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
@@ -1006,23 +1006,23 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     accent(ARC, '[' .. itm.timerGroup .. ']')
                 end
 
-                ImGui.SameLine(); ImGui.SetNextItemWidth(105)
+                ImGui.SameLine(); ImGui.SetNextItemWidth(core.px(105))
                 if itm.active then
                     local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
                     local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 0) / actTotal))
                     local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', core.fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
-                    core.drawStatusProgressBar(frac, 105, 15, tStr, ARC[1], ARC[2], ARC[3], 1.0)
+                    core.drawStatusProgressBar(frac, core.px(105), core.px(15), tStr, ARC[1], ARC[2], ARC[3], 1.0)
                 elseif itm.ready then
                     if itm.status ~= 'READY' then
-                        core.drawStatusProgressBar(1.0, 105, 15, itm.status, 0.85, 0.55, 0.15, 1.0)
+                        core.drawStatusProgressBar(1.0, core.px(105), core.px(15), itm.status, 0.85, 0.55, 0.15, 1.0)
                     else
-                        core.drawStatusProgressBar(1.0, 105, 15, 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
+                        core.drawStatusProgressBar(1.0, core.px(105), core.px(15), 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
                     end
                 else
                     local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(itm.timeLeft or 0, 30)
                     local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / cdTotal)))
                     local tStr = core.fmtSec(math.ceil(itm.timeLeft or 0))
-                    core.drawStatusProgressBar(frac, 105, 15, tStr, WARN[1], WARN[2], WARN[3], 1.0)
+                    core.drawStatusProgressBar(frac, core.px(105), core.px(15), tStr, WARN[1], WARN[2], WARN[3], 1.0)
                 end
 
                 if itm.ready and not itm.active then
@@ -1030,7 +1030,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
                     local pCount = 0
                     if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
-                    if ImGui.Button('Use##cardUse', 34, 15) then
+                    if ImGui.Button('Use##cardUse', core.px(34), core.px(15)) then
                         if itm.use then itm.use() end
                     end
                     if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
@@ -1050,18 +1050,18 @@ function M.drawCooldownWindow()
     if ctrl.cooldown_alpha then
         ImGui.SetNextWindowBgAlpha(ctrl.cooldown_alpha)
     end
-    ImGui.SetNextWindowSize(500, 340, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(500), core.px(340), ImGuiCond.FirstUseEver)
 
     local winFlags = 0
     if ctrl.cooldown_locked then
         winFlags = bit.bor(ImGuiWindowFlags.NoTitleBar, ImGuiWindowFlags.NoResize, ImGuiWindowFlags.NoMove)
     end
 
-    ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, 3, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 4, 3)
-    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 3, 2)
-
     core.preBeginWindow('cooldowns')
+    -- Pushed after preBeginWindow so this tight chrome wins over the scaled theme padding.
+    ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, core.px(3), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(4), core.px(3))
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(3), core.px(2))
     local show
     ctrl.show_cooldowns, show = ImGui.Begin('Triune Cooldown Monitor v' .. (core.VERSION or '') .. '###triuneCooldowns', ctrl.show_cooldowns, winFlags)
     if not ctrl.show_cooldowns then
@@ -1093,7 +1093,7 @@ function plugin.onDrawSettings()
     refresh()
     accent(GOLD, 'Cooldown Monitor')
     local isWinOpen = (ctrl.show_cooldowns == true)
-    if ImGui.Button((isWinOpen and 'Popout Window: Visible (Click to Hide)' or 'Popout Window: Hidden (Click to Show)') .. '##cdToggleWin', 280, 24) then
+    if ImGui.Button((isWinOpen and 'Popout Window: Visible (Click to Hide)' or 'Popout Window: Hidden (Click to Show)') .. '##cdToggleWin', core.px(280), core.px(24)) then
         ctrl.show_cooldowns = not isWinOpen
         core.saveLoadout(true)
     end
@@ -1102,7 +1102,8 @@ function plugin.onDrawSettings()
         ctrl.cooldown_locked = lockVal
         core.saveLoadout(true)
     end
-    ImGui.SetNextItemWidth(120)
+    if core.drawWindowScaleControl then core.drawWindowScaleControl('cooldowns', 'Scale', 120) end
+    ImGui.SetNextItemWidth(core.px(120))
     local newAlpha = ImGui.SliderFloat('Popout Opacity##cdAlpha', ctrl.cooldown_alpha or 0.90, 0.20, 1.0, '%.2f')
     if newAlpha ~= (ctrl.cooldown_alpha or 0.90) then
         ctrl.cooldown_alpha = newAlpha

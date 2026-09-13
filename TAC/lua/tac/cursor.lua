@@ -154,7 +154,7 @@ local function drawWindow()
     core.pushTheme()
 
     ImGui.SetNextWindowCollapsed(false, ImGuiCond.Appearing)
-    ImGui.SetNextWindowSize(560, 360, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(560), core.px(360), ImGuiCond.FirstUseEver)
     local windowFlags = 0
     if ImGuiWindowFlags then
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
@@ -179,7 +179,7 @@ local function drawWindow()
     ImGui.SameLine()
     ImGui.TextDisabled('| Live Cursor & Session History')
     ImGui.Separator()
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
 
     -- Current active cursor item inspection
     local item = cursorItem()
@@ -206,11 +206,11 @@ local function drawWindow()
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '(No item on cursor)')
     end
 
-    ImGui.Dummy(0, 6)
+    ImGui.Dummy(0, core.px(6))
 
     -- Action buttons (queued; executed on the plugin tick)
     if not hasItem then ImGui.BeginDisabled() end
-    if ImGui.Button('Auto Inventory Item', 150, 26) then
+    if ImGui.Button('Auto Inventory Item', core.px(150), core.px(26)) then
         state.pendingAction = 'clear'
     end
     if ImGui.IsItemHovered() and hasItem then
@@ -223,7 +223,7 @@ local function drawWindow()
     if not destroyAllowed then ImGui.BeginDisabled() end
     ImGui.PushStyleColor(ImGuiCol.Button, 0.75, 0.20, 0.20, 1.0)
     ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0.90, 0.30, 0.30, 1.0)
-    if ImGui.Button('Destroy Item', 130, 26) then
+    if ImGui.Button('Destroy Item', core.px(130), core.px(26)) then
         state.pendingAction = 'destroy'
     end
     ImGui.PopStyleColor(2)
@@ -240,7 +240,7 @@ local function drawWindow()
     ImGui.SameLine()
     state.confirmDestroy = ImGui.Checkbox('Confirm Destroy', state.confirmDestroy)
 
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
     local autoVal = ImGui.Checkbox('Auto-Clear Items on Pick (Continuous)', state.autoClearOnPick)
     if autoVal ~= state.autoClearOnPick then
         state.autoClearOnPick = autoVal
@@ -255,18 +255,18 @@ local function drawWindow()
         ImGui.TextDisabled('   ' .. state.statusMsg)
     end
 
-    ImGui.Dummy(0, 6)
+    ImGui.Dummy(0, core.px(6))
     ImGui.Separator()
     ImGui.TextDisabled('SESSION ITEM HISTORY (PROCESSED ITEMS)')
-    ImGui.Dummy(0, 2)
+    ImGui.Dummy(0, core.px(2))
 
     local tableFlags = ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingFixedFit + ImGuiTableFlags.Resizable + ImGuiTableFlags.ScrollY
     if ImGui.BeginTable('SessionCursorHistory', 5, tableFlags, ImVec2(0, 140)) then
-        ImGui.TableSetupColumn('#', ImGuiTableColumnFlags.WidthFixed, 25)
-        ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, 65)
+        ImGui.TableSetupColumn('#', ImGuiTableColumnFlags.WidthFixed, core.px(25))
+        ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, core.px(65))
         ImGui.TableSetupColumn('Item Name', ImGuiTableColumnFlags.WidthStretch)
-        ImGui.TableSetupColumn('Qty', ImGuiTableColumnFlags.WidthFixed, 50)
-        ImGui.TableSetupColumn('Action Taken', ImGuiTableColumnFlags.WidthFixed, 130)
+        ImGui.TableSetupColumn('Qty', ImGuiTableColumnFlags.WidthFixed, core.px(50))
+        ImGui.TableSetupColumn('Action Taken', ImGuiTableColumnFlags.WidthFixed, core.px(130))
         ImGui.TableHeadersRow()
 
         if #state.sessionHistory > 0 then
@@ -345,7 +345,7 @@ function plugin.onDrawSettings()
     local GOLD = (core.colors and core.colors.GOLD) or { 1.0, 0.70, 0.54, 1 }
     core.accent(GOLD, 'Cursor Item Manager')
     local isWinOpen = (ctrl.show_cursor == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##curToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##curToggleWin', core.px(250), core.px(24)) then
         ctrl.show_cursor = not isWinOpen
         core.saveLoadout(true)
     end

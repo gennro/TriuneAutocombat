@@ -19,7 +19,7 @@ local plugin = {
     name               = 'DPS Parser',
     version            = '4.3.0',
     author             = 'Triune',
-    uses               = { boxnet = 'shared DPS from the other boxes (Boxes tab)' },
+    uses               = { boxnet = 'group DPS meter fed by the other boxes (Group tab, compact window)' },
     description        = 'Live combat-log DPS parser with per-fight player / pet breakdowns, encounter history, and chat reports.',
     defaultEnabled     = true,
     tickInterval       = 0.05,
@@ -115,6 +115,8 @@ local cfg = {
     reportChannel = 'group', -- default channel: 'group', 'say', 'guild', 'raid'
     autoResetOnZone = true,
     showPetBreakdown = true,
+    meterScope = 'group',  -- group meter rows: 'group' (boxes in our group) | 'all' (every box sharing a parse)
+    compactGroup = true,   -- compact window shows the group meter
 }
 
 local rt = {
@@ -334,6 +336,8 @@ local function saveConfig()
     file:write(string.format("    reportChannel = %q,\n", cfg.reportChannel))
     file:write(string.format("    autoResetOnZone = %s,\n", tostring(cfg.autoResetOnZone)))
     file:write(string.format("    showPetBreakdown = %s,\n", tostring(cfg.showPetBreakdown)))
+    file:write(string.format("    meterScope = %q,\n", cfg.meterScope))
+    file:write(string.format("    compactGroup = %s,\n", tostring(cfg.compactGroup)))
     file:write("}\n")
     file:close()
 end
@@ -349,6 +353,8 @@ local function loadConfig()
             if data.reportChannel then cfg.reportChannel = data.reportChannel end
             if data.autoResetOnZone ~= nil then cfg.autoResetOnZone = data.autoResetOnZone end
             if data.showPetBreakdown ~= nil then cfg.showPetBreakdown = data.showPetBreakdown end
+            if data.meterScope == 'group' or data.meterScope == 'all' then cfg.meterScope = data.meterScope end
+            if data.compactGroup ~= nil then cfg.compactGroup = data.compactGroup end
         end
     end
 end
@@ -561,7 +567,8 @@ local function onBoxDps(data, sender)
     b.name = name
     b.seenAt = mq.gettime()
     if data.live then
-        b.live = { target = data.target, dmg = tonumber(data.dmg) or 0, dps = tonumber(data.dps) or 0, dur = tonumber(data.dur) or 0 }
+        b.live = { target = data.target, dmg = tonumber(data.dmg) or 0, dps = tonumber(data.dps) or 0, dur = tonumber(data.dur) or 0,
+            playerDmg = tonumber(data.playerDmg) or 0, petDmg = tonumber(data.petDmg) or 0 }
     else
         b.live = nil
         b.lastFight = { target = data.target, dmg = tonumber(data.dmg) or 0, dps = tonumber(data.dps) or 0, dur = tonumber(data.dur) or 0,
@@ -585,7 +592,8 @@ local function shareLive()
     if (now - (rt.lastLiveShareAt or 0)) < LIVE_SHARE_SEC * 1000 then return end
     rt.lastLiveShareAt = now
     local dur = getCurrentFightDuration()
-    pcall(bn.broadcast, 'dps:share', { live = true, target = rt.currentTargetName, dmg = rt.totalDamage, dur = dur, dps = getFightDPS(rt.totalDamage, dur) })
+    pcall(bn.broadcast, 'dps:share', { live = true, target = rt.currentTargetName, dmg = rt.totalDamage, dur = dur, dps = getFightDPS(rt.totalDamage, dur),
+        playerDmg = rt.playerDamage, petDmg = rt.petDamage })
 end
 
 local function shareFight(h)
@@ -610,6 +618,153 @@ local function boxList()
         return tostring(a.name):lower() < tostring(b.name):lower()
     end)
     return out
+end
+
+-- ----------------------------------------------------------------------------
+-- Group DPS meter. One row for this character plus one per box in scope
+-- (cfg.meterScope: 'group' = boxes in our group, 'all' = every box that
+-- shares a parse). While anyone is fighting the meter is live - fighters
+-- carry their live numbers, idle members sit at 0 - otherwise it shows
+-- everybody's last fight. Rows are sorted by DPS; pct is the share of the
+-- combined damage.
+-- ----------------------------------------------------------------------------
+local function isGroupMember(name)
+    if not name or name == '' then return false end
+    local ok, isMember = pcall(function()
+        local m = mq.TLO.Group.Member(name)
+        return m ~= nil and m() ~= nil and (m.ID() or 0) > 0
+    end)
+    return ok and isMember == true
+end
+
+local function fmtNum(n)
+    n = math.floor(tonumber(n) or 0)
+    local str = tostring(n)
+    local sign, digits = str:match('^(%-?)(%d+)$')
+    if not digits then return str end
+    local out = digits:reverse():gsub('(%d%d%d)', '%1,'):reverse()
+    if out:sub(1, 1) == ',' then out = out:sub(2) end
+    return sign .. out
+end
+
+local function meterRows()
+    local boxes = {}
+    local anyLive = rt.inFight
+    for _, b in ipairs(boxList()) do
+        if cfg.meterScope == 'all' or isGroupMember(b.name) then
+            boxes[#boxes + 1] = b
+            if b.live then anyLive = true end
+        end
+    end
+
+    local rows = {}
+    local function add(name, f, live, me)
+        rows[#rows + 1] = {
+            name = name, live = live, me = me,
+            dps = f and (tonumber(f.dps) or 0) or 0, dmg = f and (tonumber(f.dmg) or 0) or 0, dur = f and (tonumber(f.dur) or 0) or 0,
+            playerDmg = f and (tonumber(f.playerDmg) or 0) or 0, petDmg = f and (tonumber(f.petDmg) or 0) or 0,
+            target = f and f.target or nil, at = f and f.at or nil,
+        }
+    end
+
+    local okName, myName = pcall(function() return mq.TLO.Me.CleanName() end)
+    myName = (okName and myName and myName ~= '') and myName or 'Me'
+    if anyLive then
+        local dur = getCurrentFightDuration()
+        local mine = rt.inFight and { dps = getFightDPS(rt.totalDamage, dur), dmg = rt.totalDamage, dur = dur,
+            target = rt.currentTargetName, playerDmg = rt.playerDamage, petDmg = rt.petDamage } or nil
+        add(myName, mine, rt.inFight, true)
+        for _, b in ipairs(boxes) do add(b.name, b.live, b.live ~= nil, false) end
+    else
+        local h = rt.history[1]
+        local mine = h and { dps = h.peakDps, dmg = h.totalDmg, dur = h.duration, target = h.targetName,
+            playerDmg = h.playerDmg, petDmg = h.petDmg, at = h.timestamp } or nil
+        add(myName, mine, false, true)
+        for _, b in ipairs(boxes) do add(b.name, b.lastFight, false, false) end
+    end
+
+    local total, partyDps, fighting, topDps = 0, 0, 0, 0
+    for _, r in ipairs(rows) do
+        total = total + r.dmg
+        partyDps = partyDps + r.dps
+        if r.live then fighting = fighting + 1 end
+        if r.dps > topDps then topDps = r.dps end
+    end
+    for _, r in ipairs(rows) do r.pct = total > 0 and (r.dmg / total) or 0 end
+    table.sort(rows, function(a, b)
+        if a.dps ~= b.dps then return a.dps > b.dps end
+        return tostring(a.name):lower() < tostring(b.name):lower()
+    end)
+    return rows, { live = anyLive, dps = partyDps, dmg = total, topDps = topDps, count = #rows, fighting = fighting }
+end
+
+-- One meter row: name, then a bar scaled to the top DPS with "dps (share%)"
+-- on it. Gold for us, blue for the other boxes, grey for anyone idle while
+-- the meter is live.
+local function drawMeterBar(r, summary, h)
+    local frac = (summary.topDps or 0) > 0 and (r.dps / summary.topDps) or 0
+    local c = r.me and GOLD or ARC
+    if summary.live and not r.live then c = MUTED end
+    local label = string.format('%s dps  (%d%%)', fmtNum(r.dps), math.floor((r.pct or 0) * 100 + 0.5))
+    if core.drawStatusProgressBar then
+        core.drawStatusProgressBar(frac, -1, h or 16, label, c[1], c[2], c[3], 0.80)
+    else
+        ImGui.ProgressBar(frac, -1, h or 16, label)
+    end
+end
+
+-- Name | bar table shared by the main window's Group tab and the compact
+-- window. `detailed` adds Damage / Target / Time columns.
+local function drawMeterTable(rows, summary, tableId, detailed, barH)
+    local tflags = bit.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingStretchProp, ImGuiTableFlags.NoPadOuterX)
+    if detailed then tflags = bit.bor(tflags, ImGuiTableFlags.Borders, ImGuiTableFlags.Resizable) end
+    local cols = detailed and 5 or 2
+    if not ImGui.BeginTable(tableId, cols, tflags) then return end
+    ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthFixed, detailed and 110 or 92)
+    ImGui.TableSetupColumn('DPS', ImGuiTableColumnFlags.WidthStretch)
+    if detailed then
+        ImGui.TableSetupColumn('Damage', ImGuiTableColumnFlags.WidthFixed, core.px(80))
+        ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthFixed, core.px(150))
+        ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, core.px(64))
+        ImGui.TableHeadersRow()
+    end
+    for _, r in ipairs(rows) do
+        ImGui.TableNextRow()
+        ImGui.TableSetColumnIndex(0)
+        local nc = r.me and GOLD or (r.live and { 1, 1, 1, 1 } or MUTED)
+        ImGui.TextColored(nc[1], nc[2], nc[3], nc[4], tostring(r.name))
+        if ImGui.IsItemHovered() then
+            local split = (r.petDmg or 0) > 0 and string.format('\nPlayer %s / Pet %s', fmtNum(r.playerDmg), fmtNum(r.petDmg)) or ''
+            local state = r.live and 'fighting' or (summary.live and 'idle' or ('last fight' .. (r.at and (' at ' .. r.at) or '')))
+            ImGui.SetTooltip(string.format('%s - %s\n%s damage over %.0fs%s%s', tostring(r.name), state, fmtNum(r.dmg), r.dur or 0,
+                r.target and ('\nTarget: ' .. tostring(r.target)) or '', split))
+        end
+        ImGui.TableSetColumnIndex(1)
+        drawMeterBar(r, summary, barH)
+        if detailed then
+            ImGui.TableSetColumnIndex(2); ImGui.Text(fmtNum(r.dmg))
+            ImGui.TableSetColumnIndex(3)
+            if r.target then ImGui.Text(tostring(r.target)) else ImGui.TextDisabled('-') end
+            ImGui.TableSetColumnIndex(4)
+            if r.live then ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%.0fs', r.dur or 0))
+            elseif r.at then ImGui.TextDisabled(tostring(r.at))
+            else ImGui.TextDisabled('-') end
+        end
+    end
+    ImGui.EndTable()
+end
+
+-- "/group [Triune DPS] Group: Alice 1,234 (45%) | Bob 900 (33%) ..." for the meter.
+local function reportGroupDPS(channelOverride)
+    local rows, summary = meterRows()
+    if #rows == 0 then return end
+    local channel = channelOverride or cfg.reportChannel or 'group'
+    local parts = {}
+    for _, r in ipairs(rows) do
+        parts[#parts + 1] = string.format('%s %s (%d%%)', tostring(r.name), fmtNum(r.dps), math.floor((r.pct or 0) * 100 + 0.5))
+    end
+    mq.cmd(string.format('/%s [Triune DPS] %s %s dps: %s', channel, summary.live and 'Group (live)' or 'Group (last fight)',
+        fmtNum(summary.dps), table.concat(parts, ' | ')))
 end
 
 local function endFightSession()
@@ -1080,17 +1235,17 @@ local function renderBreakdownTable(breakdownMap, showSourceColumn, tableId)
     end
     
     if showSourceColumn then
-        ImGui.TableSetupColumn("Source", ImGuiTableColumnFlags.WidthFixed, 55)
+        ImGui.TableSetupColumn("Source", ImGuiTableColumnFlags.WidthFixed, core.px(55))
     end
-    ImGui.TableSetupColumn("Category", ImGuiTableColumnFlags.WidthFixed, 65)
+    ImGui.TableSetupColumn("Category", ImGuiTableColumnFlags.WidthFixed, core.px(65))
     ImGui.TableSetupColumn("Attack / Spell Name", ImGuiTableColumnFlags.WidthStretch, 2.0)
-    ImGui.TableSetupColumn("Hits", ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn("Total Dmg", ImGuiTableColumnFlags.WidthFixed, 70)
-    ImGui.TableSetupColumn("Min", ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn("Max", ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn("Avg", ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn("Crits", ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn("Crit %", ImGuiTableColumnFlags.WidthFixed, 50)
+    ImGui.TableSetupColumn("Hits", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn("Total Dmg", ImGuiTableColumnFlags.WidthFixed, core.px(70))
+    ImGui.TableSetupColumn("Min", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn("Max", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn("Avg", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn("Crits", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn("Crit %", ImGuiTableColumnFlags.WidthFixed, core.px(50))
     ImGui.TableHeadersRow()
     
     local sortedKeys = {}
@@ -1249,7 +1404,7 @@ local function renderMultiPetDetails(petMap, tabBarId, tableIdPrefix, fightPetDm
                 local petAcc = petTotalAttacks > 0 and math.floor((pData.hits / petTotalAttacks * 100) + 0.5) or 0
                 
                 ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format("Pet Name: %s", pName))
-                ImGui.SameLine(200)
+                ImGui.SameLine(core.px(200))
                 ImGui.Text(string.format("Hits: %d | Misses: %d | Accuracy: %d%%", pData.hits, pData.misses, petAcc))
                 ImGui.Spacing()
                 
@@ -1270,27 +1425,27 @@ local function renderHistoricalInspector(h, inTabMode)
     
     -- Header Toolbar
     if inTabMode then
-        if ImGui.Button("< Back to Fight List##InspectBackBtn", 140, 24) then
+        if ImGui.Button("< Back to Fight List##InspectBackBtn", core.px(140), core.px(24)) then
             rt.inspectedFight = nil
             rt.inspectorOpen = false
             return
         end
         ImGui.SameLine()
-        if ImGui.Button("Report Fight##InspectReportBtnTab", 100, 24) then
+        if ImGui.Button("Report Fight##InspectReportBtnTab", core.px(100), core.px(24)) then
             reportHistoricalFight(h)
         end
         ImGui.SameLine()
-        if ImGui.Button("Pop Out Window##InspectPopOutBtn", 120, 24) then
+        if ImGui.Button("Pop Out Window##InspectPopOutBtn", core.px(120), core.px(24)) then
             rt.inspectorOpen = true
             rt.shouldOpenModal = true
         end
         ImGui.Spacing()
     else
-        if ImGui.Button("Report Fight##InspectReportBtnModal", 100, 24) then
+        if ImGui.Button("Report Fight##InspectReportBtnModal", core.px(100), core.px(24)) then
             reportHistoricalFight(h)
         end
         ImGui.SameLine()
-        if ImGui.Button("Close Inspector##InspectCloseBtnModal", 110, 24) then
+        if ImGui.Button("Close Inspector##InspectCloseBtnModal", core.px(110), core.px(24)) then
             rt.inspectorOpen = false
             rt.inspectedFight = nil
             ImGui.CloseCurrentPopup()
@@ -1303,11 +1458,11 @@ local function renderHistoricalInspector(h, inTabMode)
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Target:")
     ImGui.SameLine()
     ImGui.TextColored(1, 1, 1, 1, h.targetName)
-    ImGui.SameLine(220)
+    ImGui.SameLine(core.px(220))
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Time:")
     ImGui.SameLine()
     ImGui.Text(h.timestamp)
-    ImGui.SameLine(360)
+    ImGui.SameLine(core.px(360))
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Duration:")
     ImGui.SameLine()
     ImGui.Text(string.format("%.1fs", h.duration))
@@ -1316,7 +1471,7 @@ local function renderHistoricalInspector(h, inTabMode)
     
     -- Key Performance Summary Cards
     local cardChildId = inTabMode and "InspectTabSummaryCards" or "InspectModalSummaryCards"
-    ImGui.BeginChild(cardChildId, 0, 65, true)
+    ImGui.BeginChild(cardChildId, 0, core.px(65), true)
     
     local totalDps = h.peakDps
     local playerDps = getFightDPS(h.playerDmg, h.duration)
@@ -1331,7 +1486,7 @@ local function renderHistoricalInspector(h, inTabMode)
     ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("%d Total Dmg", h.totalDmg))
     ImGui.EndGroup()
     
-    ImGui.SameLine(160)
+    ImGui.SameLine(core.px(160))
     -- Player DPS Card
     ImGui.BeginGroup()
     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "PLAYER DPS")
@@ -1339,7 +1494,7 @@ local function renderHistoricalInspector(h, inTabMode)
     ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("%d Dmg (%d%%)", h.playerDmg, playerPct))
     ImGui.EndGroup()
     
-    ImGui.SameLine(320)
+    ImGui.SameLine(core.px(320))
     -- Pet DPS Card
     ImGui.BeginGroup()
     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "PET DPS")
@@ -1351,7 +1506,7 @@ local function renderHistoricalInspector(h, inTabMode)
     
     -- Contribution Progress Bar
     local pFrac = h.totalDmg > 0 and (h.playerDmg / h.totalDmg) or 0
-    ImGui.ProgressBar(pFrac, -1, 14, string.format("Player %d%%  |  Pet %d%%", playerPct, petPct))
+    ImGui.ProgressBar(pFrac, -1, core.px(14), string.format("Player %d%%  |  Pet %d%%", playerPct, petPct))
     
     ImGui.Spacing()
     
@@ -1403,14 +1558,31 @@ local function renderHistoricalInspector(h, inTabMode)
 end
 
 -- ============================================================================
--- Standalone Compact Mini HUD Window Renderer
+-- Compact Window: status line, the big number, player / pet split, the group
+-- meter and a row of small buttons. Auto-sized; no hard-coded x offsets.
 -- ============================================================================
+local MINI_WIDTH = 300
+
+-- Right-aligns `text` on the current line inside a MINI_WIDTH content area.
+local function miniRightText(text, c)
+    local w = nil
+    pcall(function() w = ImGui.CalcTextSize(text) end)
+    if type(w) == 'number' then
+        ImGui.SameLine(MINI_WIDTH - w)
+    else
+        ImGui.SameLine()
+    end
+    ImGui.TextColored(c[1], c[2], c[3], c[4], text)
+end
+
 local function drawMiniDpsGui()
     if not ctrl.show_dps or not cfg.compact then return end
-    
+
     core.pushTheme()
-    local open, draw = ImGui.Begin("Triune DPS Mini v" .. VERSION .. "###TriuneDPSMiniWindow", ctrl.show_dps, ImGuiWindowFlags.AlwaysAutoResize)
+    if core.pushWindowScale then core.pushWindowScale('dps') end
+    local open, draw = ImGui.Begin("Triune DPS###TriuneDPSMiniWindow", ctrl.show_dps, ImGuiWindowFlags.AlwaysAutoResize)
     ctrl.show_dps = open
+    if open and draw and core.applyWindowScale then core.applyWindowScale('dps') end
     if not open then
         ctrl.show_dps = false
         rt.guiOpen = false
@@ -1420,7 +1592,7 @@ local function drawMiniDpsGui()
         core.saveLoadout(true)
         return
     end
-    
+
     if draw then
         local dur = getCurrentFightDuration()
         local totalDps = getFightDPS(rt.totalDamage, dur)
@@ -1428,69 +1600,75 @@ local function drawMiniDpsGui()
         local petDps = getFightDPS(rt.petDamage, dur)
         local playerPct = rt.totalDamage > 0 and math.floor((rt.playerDamage / rt.totalDamage * 100) + 0.5) or 0
         local petPct = rt.totalDamage > 0 and math.floor((rt.petDamage / rt.totalDamage * 100) + 0.5) or 0
-        
-        -- Header Row: Target & Duration
-        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Target:")
+        local hasPet = rt.petDamage > 0 or rt.petHits > 0
+
+        -- Line 1: state tag, target, duration on the right
+        local tag, tagC = 'IDLE', MUTED
+        if cfg.paused then tag, tagC = 'PAUSED', WARN elseif rt.inFight then tag, tagC = 'LIVE', GOOD end
+        ImGui.TextColored(tagC[1], tagC[2], tagC[3], tagC[4], tag)
         ImGui.SameLine()
-        local targetDisp = (rt.currentTargetName ~= '' and rt.currentTargetName ~= 'None') and rt.currentTargetName or 'Idle'
+        local targetDisp = (rt.currentTargetName ~= '' and rt.currentTargetName ~= 'None') and rt.currentTargetName or 'No target'
         ImGui.TextColored(1, 1, 1, 1, targetDisp)
-        ImGui.SameLine(180)
-        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Time:")
+        miniRightText(string.format('%.1fs', dur), MUTED)
+
+        -- Line 2: the number
+        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], fmtNum(totalDps))
         ImGui.SameLine()
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], string.format("%.1fs", dur))
-        
-        ImGui.Spacing()
-        ImGui.Separator()
-        ImGui.Spacing()
-        
-        -- Row 2: Combined DPS
-        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "Combined:")
-        ImGui.SameLine()
-        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format("%d DPS", totalDps))
-        ImGui.SameLine()
-        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("(%d Dmg)", rt.totalDamage))
-        
-        ImGui.Spacing()
-        
-        -- Row 3: Player / Pet Split
-        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], string.format("Player: %d DPS", playerDps))
-        if rt.petDamage > 0 or rt.petHits > 0 then
-            ImGui.SameLine(150)
-            ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format("Pet: %d DPS", petDps))
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'dps')
+        miniRightText(fmtNum(rt.totalDamage) .. ' dmg', GOOD)
+
+        -- Line 3: player / pet split
+        if hasPet then
+            local pFrac = rt.totalDamage > 0 and (rt.playerDamage / rt.totalDamage) or 0
+            local splitText = string.format('You %s (%d%%)   Pet %s (%d%%)', fmtNum(playerDps), playerPct, fmtNum(petDps), petPct)
+            if core.drawStatusProgressBar then
+                core.drawStatusProgressBar(pFrac, MINI_WIDTH, 15, splitText, GOLD[1], GOLD[2], GOLD[3], 0.75)
+            else
+                ImGui.ProgressBar(pFrac, MINI_WIDTH, 15, splitText)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(string.format('Player %s damage / Pet %s damage', fmtNum(rt.playerDamage), fmtNum(rt.petDamage)))
+            end
         end
-        
-        ImGui.Spacing()
-        
-        -- Row 4: Contribution Bar
-        local pFrac = rt.totalDamage > 0 and (rt.playerDamage / rt.totalDamage) or 0
-        ImGui.ProgressBar(pFrac, 260, 14, string.format("Player %d%% | Pet %d%%", playerPct, petPct))
-        
+
+        -- Group meter (Box Network): only when there is someone besides us
+        if cfg.compactGroup and boxnet() then
+            local rows, summary = meterRows()
+            if #rows > 1 then
+                ImGui.Spacing()
+                ImGui.Separator()
+                ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], summary.live and 'Group (live)' or 'Group (last fight)')
+                miniRightText(fmtNum(summary.dps) .. ' dps', ARC)
+                drawMeterTable(rows, summary, 'MiniGroupMeter', false, 15)
+            end
+        end
+
         ImGui.Spacing()
         ImGui.Separator()
-        ImGui.Spacing()
-        
-        -- Row 5: Action Controls
-        if ImGui.Button(cfg.paused and "Resume##MiniPauseBtn" or "Pause##MiniPauseBtn", 60, 22) then
+
+        -- Buttons
+        if ImGui.SmallButton(cfg.paused and 'Resume##MiniPauseBtn' or 'Pause##MiniPauseBtn') then
             cfg.paused = not cfg.paused
         end
         ImGui.SameLine()
-        if ImGui.Button("Reset##MiniResetBtn", 52, 22) then
-            resetCurrentFight()
+        if ImGui.SmallButton('Reset##MiniResetBtn') then resetCurrentFight() end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Clear the current fight') end
+        ImGui.SameLine()
+        if ImGui.SmallButton('Report##MiniReportBtn') then reportDPS() end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Report your parse to /' .. tostring(cfg.reportChannel or 'group')) end
+        if cfg.compactGroup and boxnet() then
+            ImGui.SameLine()
+            if ImGui.SmallButton('Group##MiniGroupRptBtn') then reportGroupDPS() end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('Report the group meter to /' .. tostring(cfg.reportChannel or 'group')) end
         end
         ImGui.SameLine()
-        if ImGui.Button("Report##MiniReportBtn", 58, 22) then
-            reportDPS()
-        end
-        ImGui.SameLine()
-        if ImGui.Button("Full Window##MiniFullBtn", 80, 22) then
+        if ImGui.SmallButton('Full##MiniFullBtn') then
             cfg.compact = false
             saveConfig()
         end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip("Close mini view and expand into full DPS Parser window")
-        end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Open the full DPS Parser window') end
     end
-    
+
     ImGui.End()
     core.popTheme()
 end
@@ -1527,7 +1705,7 @@ local function drawDpsGui()
         ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Target:")
         ImGui.SameLine()
         ImGui.TextColored(1, 1, 1, 1, rt.currentTargetName)
-        ImGui.SameLine(220)
+        ImGui.SameLine(core.px(220))
         ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Status:")
         ImGui.SameLine()
         if cfg.paused then
@@ -1537,7 +1715,7 @@ local function drawDpsGui()
         else
             ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "IDLE")
         end
-        ImGui.SameLine(360)
+        ImGui.SameLine(core.px(360))
         ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Duration:")
         ImGui.SameLine()
         ImGui.Text(string.format("%.1fs", dur))
@@ -1545,28 +1723,28 @@ local function drawDpsGui()
         ImGui.Separator()
         
         -- Control Action Toolbar (Sequential SameLine without hardcoded offsets to prevent overlaps)
-        if ImGui.Button(cfg.paused and "Resume" or "Pause", 70, 24) then
+        if ImGui.Button(cfg.paused and "Resume" or "Pause", core.px(70), core.px(24)) then
             cfg.paused = not cfg.paused
         end
         ImGui.SameLine()
-        if ImGui.Button("End Fight", 75, 24) then
+        if ImGui.Button("End Fight", core.px(75), core.px(24)) then
             endFightSession()
         end
         ImGui.SameLine()
-        if ImGui.Button("Reset", 65, 24) then
+        if ImGui.Button("Reset", core.px(65), core.px(24)) then
             resetCurrentFight()
         end
         ImGui.SameLine()
-        if ImGui.Button("Report", 70, 24) then
+        if ImGui.Button("Report", core.px(70), core.px(24)) then
             reportDPS()
         end
         ImGui.SameLine()
-        if ImGui.Button("Compact Mode", 95, 24) then
+        if ImGui.Button("Compact Mode", core.px(95), core.px(24)) then
             cfg.compact = true
             saveConfig()
         end
         ImGui.SameLine()
-        if ImGui.Button("Clear History", 95, 24) then
+        if ImGui.Button("Clear History", core.px(95), core.px(24)) then
             rt.history = {}
             rt.inspectorOpen = false
             rt.inspectedFight = nil
@@ -1575,7 +1753,7 @@ local function drawDpsGui()
         ImGui.Separator()
         
         -- Key Performance Metrics Summary Cards
-        ImGui.BeginChild("MainDpsSummaryCards", 0, 65, true)
+        ImGui.BeginChild("MainDpsSummaryCards", 0, core.px(65), true)
         
         -- Combined DPS Card
         ImGui.BeginGroup()
@@ -1584,7 +1762,7 @@ local function drawDpsGui()
         ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("%d Total Dmg", rt.totalDamage))
         ImGui.EndGroup()
         
-        ImGui.SameLine(160)
+        ImGui.SameLine(core.px(160))
         -- Player DPS Card
         ImGui.BeginGroup()
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "PLAYER DPS")
@@ -1592,7 +1770,7 @@ local function drawDpsGui()
         ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format("%d Dmg (%d%%)", rt.playerDamage, playerPct))
         ImGui.EndGroup()
         
-        ImGui.SameLine(320)
+        ImGui.SameLine(core.px(320))
         -- Pet DPS Card
         ImGui.BeginGroup()
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "PET DPS")
@@ -1604,7 +1782,7 @@ local function drawDpsGui()
         
         -- Contribution Progress Bar
         local pFrac = rt.totalDamage > 0 and (rt.playerDamage / rt.totalDamage) or 0
-        ImGui.ProgressBar(pFrac, -1, 14, string.format("Player %d%%  |  Pet %d%%", playerPct, petPct))
+        ImGui.ProgressBar(pFrac, -1, core.px(14), string.format("Player %d%%  |  Pet %d%%", playerPct, petPct))
         
         ImGui.Spacing()
         
@@ -1637,12 +1815,12 @@ local function drawDpsGui()
                 local petAcc = petTotalAttacks > 0 and math.floor((rt.petHits / petTotalAttacks * 100) + 0.5) or 0
                 
                 ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Player Hits:")
-                ImGui.SameLine(100)
+                ImGui.SameLine(core.px(100))
                 ImGui.Text(string.format("%d hits / %d misses (Accuracy: %d%%)", rt.playerHits, rt.playerMisses, playerAcc))
                 
                 if rt.petDamage > 0 or rt.petHits > 0 then
                     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Pet Hits:")
-                    ImGui.SameLine(100)
+                    ImGui.SameLine(core.px(100))
                     ImGui.Text(string.format("%d hits / %d misses (Accuracy: %d%%)", rt.petHits, rt.petMisses, petAcc))
                 end
                 
@@ -1688,16 +1866,16 @@ local function drawDpsGui()
                         ImGui.Spacing()
                         
                         if ImGui.BeginTable("HistoryTable", 10, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)) then
-                            ImGui.TableSetupColumn("Time", ImGuiTableColumnFlags.WidthFixed, 55)
+                            ImGui.TableSetupColumn("Time", ImGuiTableColumnFlags.WidthFixed, core.px(55))
                             ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthStretch, 1.5)
-                            ImGui.TableSetupColumn("Dur", ImGuiTableColumnFlags.WidthFixed, 35)
-                            ImGui.TableSetupColumn("Total Dmg", ImGuiTableColumnFlags.WidthFixed, 65)
-                            ImGui.TableSetupColumn("DPS", ImGuiTableColumnFlags.WidthFixed, 45)
-                            ImGui.TableSetupColumn("Melee Dmg", ImGuiTableColumnFlags.WidthFixed, 65)
-                            ImGui.TableSetupColumn("Skill Dmg", ImGuiTableColumnFlags.WidthFixed, 60)
-                            ImGui.TableSetupColumn("Spell/DoT", ImGuiTableColumnFlags.WidthFixed, 65)
-                            ImGui.TableSetupColumn("Player/Pet", ImGuiTableColumnFlags.WidthFixed, 70)
-                            ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 105)
+                            ImGui.TableSetupColumn("Dur", ImGuiTableColumnFlags.WidthFixed, core.px(35))
+                            ImGui.TableSetupColumn("Total Dmg", ImGuiTableColumnFlags.WidthFixed, core.px(65))
+                            ImGui.TableSetupColumn("DPS", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+                            ImGui.TableSetupColumn("Melee Dmg", ImGuiTableColumnFlags.WidthFixed, core.px(65))
+                            ImGui.TableSetupColumn("Skill Dmg", ImGuiTableColumnFlags.WidthFixed, core.px(60))
+                            ImGui.TableSetupColumn("Spell/DoT", ImGuiTableColumnFlags.WidthFixed, core.px(65))
+                            ImGui.TableSetupColumn("Player/Pet", ImGuiTableColumnFlags.WidthFixed, core.px(70))
+                            ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, core.px(105))
                             ImGui.TableHeadersRow()
                             
                             for _, h in ipairs(rt.history) do
@@ -1734,11 +1912,11 @@ local function drawDpsGui()
                                 
                                 -- Action Buttons
                                 ImGui.TableNextColumn()
-                                if ImGui.Button("Inspect##HistInsp_" .. tostring(h.id), 50, 18) then
+                                if ImGui.Button("Inspect##HistInsp_" .. tostring(h.id), core.px(50), core.px(18)) then
                                     rt.inspectedFight = h
                                 end
                                 ImGui.SameLine()
-                                if ImGui.Button("Report##HistRpt_" .. tostring(h.id), 48, 18) then
+                                if ImGui.Button("Report##HistRpt_" .. tostring(h.id), core.px(48), core.px(18)) then
                                     reportHistoricalFight(h)
                                 end
                             end
@@ -1751,47 +1929,34 @@ local function drawDpsGui()
                 ImGui.EndTabItem()
             end
             
-            -- TAB: Boxes (Box Network)
-            if ImGui.BeginTabItem("Boxes##MainBoxesTab") then
-                local boxes = boxList()
+            -- TAB: Group (Box Network meter)
+            if ImGui.BeginTabItem("Group##MainGroupTab") then
                 local bn = boxnet()
                 if not bn then
-                    ImGui.TextDisabled('Box Network plugin not connected - other boxes cannot share their parses.')
-                elseif #boxes == 0 then
-                    ImGui.TextDisabled('No parses from other boxes yet (they share a live line every 2s while fighting and a summary when the fight ends).')
+                    ImGui.TextDisabled('Box Network plugin not connected - your other boxes cannot share their parses.')
                 else
-                    local partyDps = rt.inFight and getFightDPS(rt.totalDamage, getCurrentFightDuration()) or 0
-                    local partyLive = rt.inFight and 1 or 0
-                    for _, b in ipairs(boxes) do
-                        if b.live then partyDps = partyDps + (b.live.dps or 0); partyLive = partyLive + 1 end
-                    end
-                    if partyLive > 0 then
-                        ImGui.Text(string.format('Live party DPS: %d (%d box%s fighting)', partyDps, partyLive, partyLive == 1 and '' or 'es'))
+                    local rows, summary = meterRows()
+                    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], summary.live and 'Group DPS (live)' or 'Group DPS (last fight)')
+                    ImGui.SameLine()
+                    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], fmtNum(summary.dps) .. ' dps')
+                    ImGui.SameLine()
+                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], fmtNum(summary.dmg) .. ' dmg')
+                    ImGui.SameLine()
+                    if summary.live then
+                        ImGui.TextDisabled(string.format('%d of %d fighting', summary.fighting, summary.count))
                     else
-                        ImGui.TextDisabled('Nobody is fighting right now - showing each box\'s last fight.')
+                        ImGui.TextDisabled(string.format('%d member%s', summary.count, summary.count == 1 and '' or 's'))
                     end
-                    local tflags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit, ImGuiTableFlags.Resizable)
-                    if ImGui.BeginTable('BoxDpsTable', 6, tflags) then
-                        ImGui.TableSetupColumn('Box', ImGuiTableColumnFlags.WidthFixed, 110)
-                        ImGui.TableSetupColumn('State', ImGuiTableColumnFlags.WidthFixed, 60)
-                        ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
-                        ImGui.TableSetupColumn('Damage', ImGuiTableColumnFlags.WidthFixed, 80)
-                        ImGui.TableSetupColumn('DPS', ImGuiTableColumnFlags.WidthFixed, 70)
-                        ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, 60)
-                        ImGui.TableHeadersRow()
-                        for _, b in ipairs(boxes) do
-                            local f = b.live or b.lastFight
-                            ImGui.TableNextRow()
-                            ImGui.TableSetColumnIndex(0); ImGui.Text(tostring(b.name))
-                            ImGui.TableSetColumnIndex(1)
-                            if b.live then ImGui.TextColored(0.40, 0.85, 0.50, 1.0, 'LIVE') else ImGui.TextDisabled(b.lastFight and b.lastFight.at or '-') end
-                            ImGui.TableSetColumnIndex(2); ImGui.Text(tostring(f and f.target or '-'))
-                            ImGui.TableSetColumnIndex(3); ImGui.Text(f and tostring(f.dmg) or '-')
-                            ImGui.TableSetColumnIndex(4); ImGui.Text(f and tostring(f.dps) or '-')
-                            ImGui.TableSetColumnIndex(5); ImGui.Text(f and string.format('%.0fs', f.dur or 0) or '-')
-                        end
-                        ImGui.EndTable()
+                    ImGui.SameLine()
+                    if ImGui.SmallButton('Report Group##MainGroupRpt') then reportGroupDPS() end
+                    if ImGui.IsItemHovered() then ImGui.SetTooltip('Report the meter to /' .. tostring(cfg.reportChannel or 'group')) end
+                    ImGui.Spacing()
+                    if #rows <= 1 then
+                        ImGui.TextDisabled(cfg.meterScope == 'group'
+                            and 'No other boxes in your group have shared a parse yet (they send a live line every 2s while fighting and a summary when the fight ends). Settings tab: Meter Scope -> All Boxes to include boxes outside the group.'
+                            or 'No parses from other boxes yet (they send a live line every 2s while fighting and a summary when the fight ends).')
                     end
+                    drawMeterTable(rows, summary, 'MainGroupMeter', true, 18)
                 end
                 ImGui.EndTabItem()
             end
@@ -1846,6 +2011,23 @@ local function drawDpsGui()
                     cfg.showPetBreakdown = newPetShow
                     changed = true
                 end
+
+                ImGui.Spacing()
+                ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Group Meter (Box Network)")
+                local scopeLabel = cfg.meterScope == 'all' and 'All Boxes' or 'Group Members'
+                if ImGui.BeginCombo("Meter Scope", scopeLabel) then
+                    if ImGui.Selectable('Group Members', cfg.meterScope ~= 'all') then cfg.meterScope = 'group'; changed = true end
+                    if ImGui.Selectable('All Boxes', cfg.meterScope == 'all') then cfg.meterScope = 'all'; changed = true end
+                    ImGui.EndCombo()
+                end
+                if ImGui.IsItemHovered() then
+                    ImGui.SetTooltip("Group Members: only your boxes that are in your group.\nAll Boxes: every box on this computer that shares a parse, grouped or not.")
+                end
+                local newCg, cgChanged = ImGui.Checkbox("Show Group Meter in Compact Window", cfg.compactGroup)
+                if cgChanged then
+                    cfg.compactGroup = newCg
+                    changed = true
+                end
                 
                 if changed then
                     saveConfig()
@@ -1869,7 +2051,7 @@ local function drawDpsGui()
                 renderHistoricalInspector(rt.inspectedFight, false)
             else
                 ImGui.Text("No fight selected.")
-                if ImGui.Button("Close", 80, 22) then
+                if ImGui.Button("Close", core.px(80), core.px(22)) then
                     ImGui.CloseCurrentPopup()
                 end
             end
@@ -1925,8 +2107,12 @@ local function dpsCommandHandler(cmd, arg1, arg2)
     elseif sub == 'report' then
         local channel = (arg1 and arg1 ~= '') and arg1:lower() or nil
         reportDPS(channel)
+    elseif sub == 'group' then
+        -- /dps group [channel]: the group meter (Box Network) to chat
+        local channel = (arg1 and arg1 ~= '') and arg1:lower() or nil
+        reportGroupDPS(channel)
     else
-        print("\127300000[Triune DPS]\127777777 Commands: /dps [show|hide|toggle|compact|reset|pause|resume|report <channel>]")
+        print("\127300000[Triune DPS]\127777777 Commands: /dps [show|hide|toggle|compact|reset|pause|resume|report <channel>|group <channel>]")
     end
     core.saveLoadout(true)
 end
@@ -2002,7 +2188,7 @@ function plugin.onDrawSettings()
     refresh()
     core.accent(GOLD, 'DPS Parser')
     local isWinOpen = (ctrl.show_dps == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##dpsToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##dpsToggleWin', core.px(250), core.px(24)) then
         ctrl.show_dps = not isWinOpen
         core.saveLoadout(true)
     end
@@ -2024,7 +2210,7 @@ function plugin.onCommand(cmd, args)
 end
 
 plugin.help = {
-    '  \ag/ac dps [show|hide|compact|reset|pause|resume|report <chan>]\ax - DPS Parser window & controls (also /dps)',
+    '  \ag/ac dps [show|hide|compact|reset|pause|resume|report <chan>|group <chan>]\ax - DPS Parser window & controls (also /dps); group = Box Network meter to chat',
 }
 
 -- Exposed for tests
@@ -2032,6 +2218,9 @@ plugin.cfg = cfg
 plugin.rt = rt
 plugin.onBoxDps = onBoxDps
 plugin.boxList = boxList
+plugin.meterRows = meterRows
+plugin.reportGroupDPS = reportGroupDPS
+plugin.fmtNum = fmtNum
 plugin.shareFight = shareFight
 plugin.shareLive = shareLive
 plugin.ensureBoxSubscription = ensureBoxSubscription

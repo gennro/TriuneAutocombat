@@ -167,6 +167,27 @@ local function makeParticles(count, c)
     return list
 end
 
+-- Rebuilds the floater list without the expired entries. Walks with pairs
+-- rather than 1..#floaters: under LuaJIT the length operator is unreliable
+-- on a table with a hole in it, and indexing past a hole crashed the fiber
+-- ("attempt to index a nil value"), which took the whole plugin down until
+-- a reload. A rebuild tolerates holes, drops anything that is not a floater
+-- and keeps the draw order (oldest first).
+local function pruneFloaters(now)
+    local live = {}
+    for _, f in pairs(floaters) do
+        if type(f) == 'table' and type(f.spawnedAt) == 'number'
+            and (now - f.spawnedAt) < FX.LIFETIME then
+            live[#live + 1] = f
+        end
+    end
+    table.sort(live, function(a, b) return a.spawnedAt < b.spawnedAt end)
+    while #live > FX.MAX_FLOATERS do
+        table.remove(live, 1)
+    end
+    floaters = live
+end
+
 -- opts: tier (force a tier index), size (fixed font size), xOff / yOff, delay,
 --       callout (no number, no combo/record/tier bookkeeping), kind
 local function spawnFloater(label, critType, dmg, opts)
@@ -245,10 +266,8 @@ local function spawnFloater(label, critType, dmg, opts)
         end
     end
 
-    table.insert(floaters, f)
-    while #floaters > FX.MAX_FLOATERS do
-        table.remove(floaters, 1)
-    end
+    floaters[#floaters + 1] = f
+    if #floaters > FX.MAX_FLOATERS then pruneFloaters(os.clock()) end
     return f
 end
 
@@ -333,14 +352,7 @@ end
 
 function plugin.onTick()
     local now = os.clock()
-    local i = 1
-    while i <= #floaters do
-        if (now - floaters[i].spawnedAt) >= FX.LIFETIME then
-            table.remove(floaters, i)
-        else
-            i = i + 1
-        end
-    end
+    pruneFloaters(now)
     local combo = state.combo
     if combo.count > 0 and (now - combo.lastAt) > FX.COMBO_WINDOW then
         combo.count = 0

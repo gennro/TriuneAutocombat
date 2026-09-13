@@ -99,7 +99,7 @@ local function renderXtSettingsContent()
     ImGui.Separator()
 
     local isWinOpen = (ctrl.show_xtarget_window == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##xtToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##xtToggleWin', core.px(250), core.px(24)) then
         ctrl.show_xtarget_window = not isWinOpen
         core.saveLoadout(true)
     end
@@ -148,14 +148,15 @@ local function renderXtSettingsContent()
     end
     if ImGui.IsItemHovered() then core.setTooltip('Include PC slots (Specific PC, Group Tank/Assist/Puller, Raid Assist) in the list (hidden by default).') end
 
-    ImGui.SetNextItemWidth(120)
+    if core.drawWindowScaleControl then core.drawWindowScaleControl('xtarget', 'Scale', 120) end
+    ImGui.SetNextItemWidth(core.px(120))
     local newAlpha = ImGui.SliderFloat('Opacity##xtAlpha', ctrl.xt_alpha or 0.85, 0.20, 1.0, '%.2f')
     if newAlpha ~= (ctrl.xt_alpha or 0.85) then
         ctrl.xt_alpha = newAlpha
         core.saveLoadout(true)
     end
 
-    ImGui.SetNextItemWidth(120)
+    ImGui.SetNextItemWidth(core.px(120))
     local newH = ImGui.SliderInt('Bar Height##xtHeight', ctrl.xt_bar_height or 16, 10, 24)
     if newH ~= (ctrl.xt_bar_height or 16) then
         ctrl.xt_bar_height = newH
@@ -180,18 +181,18 @@ function plugin.onDrawUI()
     if ctrl.xt_alpha then
         ImGui.SetNextWindowBgAlpha(ctrl.xt_alpha)
     end
-    ImGui.SetNextWindowSize(260, 320, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(260), core.px(320), ImGuiCond.FirstUseEver)
 
     local winFlags = 0
     if ctrl.xt_lock then
         winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
     end
 
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
-    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
-
     core.preBeginWindow('xtarget')
+    -- Pushed after preBeginWindow so this tight chrome wins over the scaled theme padding.
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, core.px(4), core.px(4))
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
     local show
     ctrl.show_xtarget_window, show = ImGui.Begin('Triune Extended Target v' .. (core.VERSION or '') .. '###triuneXTargetWindow', ctrl.show_xtarget_window, winFlags)
     if not ctrl.show_xtarget_window then
@@ -203,9 +204,10 @@ function plugin.onDrawUI()
 
     if show then
         core.postBeginWindow('xtarget')
-        local barH = ctrl.xt_bar_height or 16
+        local barH = core.px(ctrl.xt_bar_height or 16)
 
         if ImGui.BeginPopupContextWindow('##xtWinContextMenu') then
+            if core.applyWindowScale then core.applyWindowScale('xtarget') end
             renderXtSettingsContent()
             ImGui.EndPopup()
         end

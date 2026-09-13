@@ -70,18 +70,18 @@ function M.drawSpellGemBarWindow()
         ImGui.SetNextWindowBgAlpha(ctrl.gem_alpha)
     end
 
-    ImGui.SetNextWindowSize(320, 38, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(320), core.px(38), ImGuiCond.FirstUseEver)
 
     local winFlags = 0
     if ctrl.gem_lock then
         winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
     end
 
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 2, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 2, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 1, 1)
-
     core.preBeginWindow('spell_gems')
+    -- Pushed after preBeginWindow so this tight chrome wins over the scaled theme padding.
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, core.px(2), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(2), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(1), core.px(1))
     local show
     ctrl.show_spell_gems, show = ImGui.Begin('Triune Spell Gems v' .. (core.VERSION or '') .. '###triuneSpellGemsWindow', ctrl.show_spell_gems, winFlags)
     if not ctrl.show_spell_gems then
@@ -134,7 +134,8 @@ function M.drawSpellGemBarWindow()
                 core.saveLoadout(true)
             end
 
-            ImGui.SetNextItemWidth(120)
+            if core.drawWindowScaleControl then core.drawWindowScaleControl('spell_gems', 'Scale', 120) end
+            ImGui.SetNextItemWidth(core.px(120))
             local newAlpha = ImGui.SliderFloat('Opacity##gemAlpha', ctrl.gem_alpha or 0.85, 0.20, 1.0, '%.2f')
             if newAlpha ~= (ctrl.gem_alpha or 0.85) then
                 ctrl.gem_alpha = newAlpha
@@ -148,6 +149,7 @@ function M.drawSpellGemBarWindow()
         end
 
         if ImGui.BeginPopupContextWindow('##gemWinContextMenu') then
+            if core.applyWindowScale then core.applyWindowScale('spell_gems') end
             renderGemSettingsContent()
             ImGui.EndPopup()
         end
@@ -516,7 +518,7 @@ function M.drawSpellGemBarWindow()
             -- Save current spell set
             if ImGui.BeginMenu('Save Current Spell Set...##saveSetMenu') then
                 ImGui.Text('Enter set name:')
-                ImGui.SetNextItemWidth(140)
+                ImGui.SetNextItemWidth(core.px(140))
                 M.newSpellSetName = (type(M.newSpellSetName) == 'string') and M.newSpellSetName or ''
                 local itFlags = (ImGuiInputTextFlags and ImGuiInputTextFlags.EnterReturnsTrue) or 0
                 local newText, changed = ImGui.InputText('##setNameInput', M.newSpellSetName, itFlags)
@@ -606,7 +608,7 @@ function plugin.onDrawSettings()
     refresh()
     accent(GOLD, 'Spell Gem Bar HUD')
     local isWinOpen = (ctrl.show_spell_gems == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##sgToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##sgToggleWin', core.px(250), core.px(24)) then
         ctrl.show_spell_gems = not isWinOpen
         core.saveLoadout(true)
     end

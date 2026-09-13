@@ -1725,13 +1725,13 @@ local function drawControlTab()
     if cfg.enabled then
         ImGui.PushStyleColor(ImGuiCol.Button, 0.15, 0.45, 0.25, 1.0)
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0.20, 0.55, 0.30, 1.0)
-        if ImGui.Button("Buffbot Station: ACTIVE (click to stop)##bbStation", 300, 26) then
+        if ImGui.Button("Buffbot Station: ACTIVE (click to stop)##bbStation", core.px(300), core.px(26)) then
             setEnabled(false)
         end
     else
         ImGui.PushStyleColor(ImGuiCol.Button, 0.45, 0.15, 0.15, 1.0)
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, 0.55, 0.20, 0.20, 1.0)
-        if ImGui.Button("Buffbot Station: STOPPED (click to start)##bbStation", 300, 26) then
+        if ImGui.Button("Buffbot Station: STOPPED (click to start)##bbStation", core.px(300), core.px(26)) then
             setEnabled(true)
         end
     end
@@ -1925,10 +1925,10 @@ local function drawActivityTab()
     ImGui.Text(string.format("Active Request Queue: %d pending", #rt.activeQueue))
     if #rt.activeQueue > 0 then
         if ImGui.BeginTable("##queueTable", 5, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
-            ImGui.TableSetupColumn("Requester", ImGuiTableColumnFlags.WidthFixed, 110)
-            ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, 120)
-            ImGui.TableSetupColumn("Tier", ImGuiTableColumnFlags.WidthFixed, 75)
-            ImGui.TableSetupColumn("Spawn ID", ImGuiTableColumnFlags.WidthFixed, 70)
+            ImGui.TableSetupColumn("Requester", ImGuiTableColumnFlags.WidthFixed, core.px(110))
+            ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, core.px(120))
+            ImGui.TableSetupColumn("Tier", ImGuiTableColumnFlags.WidthFixed, core.px(75))
+            ImGui.TableSetupColumn("Spawn ID", ImGuiTableColumnFlags.WidthFixed, core.px(70))
             ImGui.TableSetupColumn("Spells", ImGuiTableColumnFlags.WidthStretch, 200)
             ImGui.TableHeadersRow()
 
@@ -1965,7 +1965,7 @@ local function drawActivityTab()
 
     ImGui.Spacing()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Activity Log")
-    if ImGui.BeginChild("LogChild", 0, 220, true) then
+    if ImGui.BeginChild("LogChild", 0, core.px(220), true) then
         for _, entry in ipairs(rt.log) do
             if entry.isErr then
                 ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], entry.time .. entry.msg)
@@ -2047,9 +2047,9 @@ local function drawIgnoreTab()
     else
         table.sort(list, function(a, b) return a:lower() < b:lower() end)
         if ImGui.BeginTable("##ignoreTable", 3, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg)) then
-            ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthFixed, 35)
+            ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthFixed, core.px(35))
             ImGui.TableSetupColumn("Player Name", ImGuiTableColumnFlags.WidthStretch, 200)
-            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, core.px(80))
             ImGui.TableHeadersRow()
 
             local toRemove = nil
@@ -2254,7 +2254,7 @@ function plugin.onDrawSettings()
     refresh()
     core.accent(GOLD, 'Buffbot Station')
     local isWinOpen = (ctrl.show_buffbot == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##bbToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##bbToggleWin', core.px(250), core.px(24)) then
         ctrl.show_buffbot = not isWinOpen
         core.saveLoadout(true)
     end

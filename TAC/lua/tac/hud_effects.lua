@@ -64,7 +64,7 @@ local function renderEffSettingsContent()
     ImGui.Separator()
 
     local isWinOpen = (ctrl.show_effects_window == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##effToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##effToggleWin', core.px(250), core.px(24)) then
         ctrl.show_effects_window = not isWinOpen
         core.saveLoadout(true)
     end
@@ -74,7 +74,7 @@ local function renderEffSettingsContent()
     if curSortIdx < 1 then curSortIdx = 1 end
 
     ImGui.Text('Sort Order:')
-    ImGui.SetNextItemWidth(180)
+    ImGui.SetNextItemWidth(core.px(180))
     local newSortIdx = ImGui.Combo('##effSortCombo', curSortIdx, sortModes)
     if newSortIdx ~= curSortIdx and sortModes[newSortIdx] then
         ctrl.eff_sort_by = sortModes[newSortIdx]
@@ -114,14 +114,15 @@ local function renderEffSettingsContent()
         core.saveLoadout(true)
     end
 
-    ImGui.SetNextItemWidth(120)
+    if core.drawWindowScaleControl then core.drawWindowScaleControl('effects', 'Scale', 120) end
+    ImGui.SetNextItemWidth(core.px(120))
     local newAlpha = ImGui.SliderFloat('Opacity##effAlpha', ctrl.eff_alpha or 0.85, 0.20, 1.0, '%.2f')
     if newAlpha ~= (ctrl.eff_alpha or 0.85) then
         ctrl.eff_alpha = newAlpha
         core.saveLoadout(true)
     end
 
-    ImGui.SetNextItemWidth(120)
+    ImGui.SetNextItemWidth(core.px(120))
     local newH = ImGui.SliderInt('Bar Height##effHeight', ctrl.eff_bar_height or 18, 12, 28)
     if newH ~= (ctrl.eff_bar_height or 18) then
         ctrl.eff_bar_height = newH
@@ -146,18 +147,18 @@ function plugin.onDrawUI()
     if ctrl.eff_alpha then
         ImGui.SetNextWindowBgAlpha(ctrl.eff_alpha)
     end
-    ImGui.SetNextWindowSize(280, 420, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(280), core.px(420), ImGuiCond.FirstUseEver)
 
     local winFlags = 0
     if ctrl.eff_lock then
         winFlags = bit.bor(ImGuiWindowFlags.NoMove, ImGuiWindowFlags.NoResize)
     end
 
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
-    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, 3, 2)
-    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 2, 1)
-
     core.preBeginWindow('effects')
+    -- Pushed after preBeginWindow so this tight chrome wins over the scaled theme padding.
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, core.px(4), core.px(4))
+    ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
     local show
     ctrl.show_effects_window, show = ImGui.Begin('Triune Effects & Songs v' .. (core.VERSION or '') .. '###triuneEffectsWindow', ctrl.show_effects_window, winFlags)
     if not ctrl.show_effects_window then
@@ -169,9 +170,10 @@ function plugin.onDrawUI()
 
     if show then
         core.postBeginWindow('effects')
-        local barH = ctrl.eff_bar_height or 18
+        local barH = core.px(ctrl.eff_bar_height or 18)
 
         if ImGui.BeginPopupContextWindow('##effWinContextMenu') then
+            if core.applyWindowScale then core.applyWindowScale('effects') end
             renderEffSettingsContent()
             ImGui.EndPopup()
         end

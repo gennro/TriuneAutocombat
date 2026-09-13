@@ -2255,7 +2255,7 @@ end
 function AA.drawWindow()
     if not ctrl.show_auto_aa then return end
     core.pushTheme()
-    ImGui.SetNextWindowSize(760, 560, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(760), core.px(560), ImGuiCond.FirstUseEver)
     core.preBeginWindow('auto_aa')
     local open, show = ImGui.Begin('Triune Auto AA v' .. (core.VERSION or '') .. '###triuneAutoAA', ctrl.show_auto_aa)
     if not open then
@@ -2361,7 +2361,7 @@ function AA.drawWindow()
     end
 
     ImGui.SameLine()
-    ImGui.SetNextItemWidth(90)
+    ImGui.SetNextItemWidth(core.px(90))
     local curThresh = math.max(5, tonumber(ctrl.auto_spend_aa_threshold) or 25)
     local newThresh = ImGui.SliderInt('##autoAaThresh', curThresh, 5, 100, 'Bank: %d')
     if newThresh ~= curThresh then
@@ -2421,7 +2421,7 @@ function AA.drawWindow()
         end
     end
 
-    ImGui.SetNextItemWidth(130)
+    ImGui.SetNextItemWidth(core.px(130))
     local curSearch = ctrl.auto_aa_search or ''
     local newSearch = ImGui.InputTextWithHint('##autoAaSearchBox', 'Search AAs...', curSearch, 64)
     if newSearch ~= curSearch then
@@ -2442,7 +2442,7 @@ function AA.drawWindow()
     end
 
     ImGui.SameLine()
-    ImGui.SetNextItemWidth(105)
+    ImGui.SetNextItemWidth(core.px(105))
     local sortNames = { 'Name', 'Cost', 'Trained' }
     local sortKeys = { 'name', 'cost', 'trained' }
     local curSortIdx = 1
@@ -2509,12 +2509,12 @@ function AA.drawWindow()
             ImGuiTableFlags.SizingStretchProp
         )
         if ImGui.BeginTable('##AutoAABrowserTable', 6, tableFlags) then
-            ImGui.TableSetupColumn('Prio', ImGuiTableColumnFlags.WidthFixed, 32)
+            ImGui.TableSetupColumn('Prio', ImGuiTableColumnFlags.WidthFixed, core.px(32))
             ImGui.TableSetupColumn('Ability Name', ImGuiTableColumnFlags.WidthStretch, 200)
-            ImGui.TableSetupColumn('Rank', ImGuiTableColumnFlags.WidthFixed, 55)
-            ImGui.TableSetupColumn('Cost', ImGuiTableColumnFlags.WidthFixed, 55)
-            ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, 95)
-            ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed, 55)
+            ImGui.TableSetupColumn('Rank', ImGuiTableColumnFlags.WidthFixed, core.px(55))
+            ImGui.TableSetupColumn('Cost', ImGuiTableColumnFlags.WidthFixed, core.px(55))
+            ImGui.TableSetupColumn('Status', ImGuiTableColumnFlags.WidthFixed, core.px(95))
+            ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed, core.px(55))
             ImGui.TableHeadersRow()
 
             for _, itm in ipairs(allItems) do
@@ -2654,7 +2654,7 @@ function AA.drawWindow()
                 ImGui.SetTooltip('%s', 'Clears any item currently on cursor into your inventory bags.')
             end
 
-            ImGui.SetNextItemWidth(260)
+            ImGui.SetNextItemWidth(core.px(260))
             local newName = ImGui.InputText('Cap Spender AA Name##autoAaCapName', curName, 128)
             if newName and newName ~= curName and newName ~= '' then
                 ctrl.auto_spend_aa_name = newName
@@ -2665,7 +2665,7 @@ function AA.drawWindow()
             end
 
             ImGui.SameLine()
-            ImGui.SetNextItemWidth(120)
+            ImGui.SetNextItemWidth(core.px(120))
             local newId = ImGui.InputInt('Activation ID##autoAaActId', curId)
             if newId ~= curId and newId > 0 then
                 ctrl.auto_spend_aa_id = newId
@@ -2923,7 +2923,7 @@ function plugin.onDrawSettings()
     ctrl = core.ctrl
     accent(GOLD, 'Auto AA Spender')
     local isWinOpen = (ctrl.show_auto_aa == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##aaToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##aaToggleWin', core.px(250), core.px(24)) then
         ctrl.show_auto_aa = not isWinOpen
         core.saveLoadout(true)
     end

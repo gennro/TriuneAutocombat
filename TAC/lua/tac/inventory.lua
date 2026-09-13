@@ -25,6 +25,7 @@ local plugin = {
     tickInterval       = 0.05,
     runOutOfCombatOnly = false,
     hasThread          = true,
+    uses               = { gamedb = 'Database lines in item tooltips, Shift+Right-click / list right-click item cards' },
     -- Window owned by this plugin (drives the main-window header button)
     window             = { label = 'Inv Manager', tooltip = 'Toggles the Inventory & Bank Manager window (inventory plugin).', flag = 'show_inv', desc = 'Inventory / bank search, visualizer & organizer', headerButton = true, order = 110 },
 }
@@ -1289,7 +1290,7 @@ function UI.drawHeader()
     end
 
     ImGui.Separator()
-    ImGui.Dummy(0, 2)
+    ImGui.Dummy(0, core.px(2))
 
     -- Stats summary row
     local freeInv = state.counts.freeInvSlots
@@ -1298,32 +1299,32 @@ function UI.drawHeader()
     ImGui.SameLine()
     ImGui.TextColored(invCol[1], invCol[2], invCol[3], invCol[4], string.format("%d / %d", freeInv, state.counts.totalInvSlots))
 
-    ImGui.SameLine(0, 16)
+    ImGui.SameLine(0, core.px(16))
     ImGui.TextDisabled("Bank Free:")
     ImGui.SameLine()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format("%d / %d", state.counts.freeBankSlots, state.counts.totalBankSlots))
 
-    ImGui.SameLine(0, 16)
+    ImGui.SameLine(0, core.px(16))
     local wtCol = (state.counts.maxWeight > 0 and state.counts.invWeight > state.counts.maxWeight) and ERR or GOOD
     ImGui.TextDisabled("Weight:")
     ImGui.SameLine()
     ImGui.TextColored(wtCol[1], wtCol[2], wtCol[3], wtCol[4], string.format("%d / %d lbs", state.counts.invWeight, state.counts.maxWeight))
 
-    ImGui.SameLine(0, 16)
+    ImGui.SameLine(0, core.px(16))
     ImGui.TextDisabled("Cash:")
     ImGui.SameLine()
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], string.format("%dp (Bank: %dp)", state.counts.invPlat, state.counts.bankPlat))
 
     if state.counts.cursor > 0 then
-        ImGui.SameLine(0, 16)
+        ImGui.SameLine(0, core.px(16))
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "[Item on Cursor!]")
         ImGui.SameLine()
-        if ImGui.Button("Auto-Inv##hdrAutoInv", 70, 20) then
+        if ImGui.Button("Auto-Inv##hdrAutoInv", core.px(70), core.px(20)) then
             state.pendingAction = { type = 'autoinv' }
         end
     end
 
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
 
     -- Search and Filter Controls
     ImGui.PushItemWidth(220)
@@ -1334,12 +1335,12 @@ function UI.drawHeader()
     ImGui.PopItemWidth()
 
     ImGui.SameLine()
-    if ImGui.Button("X##clearSearch", 22, 22) then
+    if ImGui.Button("X##clearSearch", core.px(22), core.px(22)) then
         state.searchFilter = ''
     end
     if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', "Clear search filter") end
 
-    ImGui.SameLine(0, 12)
+    ImGui.SameLine(0, core.px(12))
     -- Location Filter buttons
     local locs = {
         { id = 'ALL', label = string.format("All (%d)", state.counts.total) },
@@ -1377,7 +1378,7 @@ function UI.drawHeader()
     end
     ImGui.PopItemWidth()
 
-    ImGui.SameLine(0, 12)
+    ImGui.SameLine(0, core.px(12))
     state.filterTradeskill = ImGui.Checkbox("Tradeskill##fltTS", state.filterTradeskill)
     ImGui.SameLine()
     state.filterLore = ImGui.Checkbox("Lore##fltLore", state.filterLore)
@@ -1386,12 +1387,34 @@ function UI.drawHeader()
     ImGui.SameLine()
     state.filterClicky = ImGui.Checkbox("Clicky##fltClk", state.filterClicky)
 
-    ImGui.SameLine(0, 16)
-    if ImGui.Button("Refresh Scan##hdrScanBtn", 100, 22) then
+    ImGui.SameLine(0, core.px(16))
+    if ImGui.Button("Refresh Scan##hdrScanBtn", core.px(100), core.px(22)) then
         scanner.scanAll()
     end
 
     ImGui.Separator()
+end
+
+-- The Game Database plugin (tac/gamedb.lua) when it is loaded and enabled.
+local function gamedbPlugin()
+    local pm = core and core.runtime and core.runtime.pluginManager
+    local p = pm and pm.plugins and pm.plugins.gamedb
+    if p and p.enabled and p.instance and p.instance.popout then return p.instance end
+    return nil
+end
+
+-- Opens the database card for an inventory item; false when unavailable.
+local function openDatabaseCard(it)
+    local db = gamedbPlugin()
+    if not db or not it or not it.id or it.id <= 0 then return false end
+    return db.popout('items', it.id) == true
+end
+
+local function shiftHeld()
+    local held = false
+    local okIO, io = pcall(ImGui.GetIO)
+    if okIO and io then pcall(function() if io.KeyShift then held = true end end) end
+    return held
 end
 
 function UI.drawTooltip(it)
@@ -1556,8 +1579,18 @@ function UI.drawTooltip(it)
     if (it.tribute or 0) > 0 then footer = footer .. string.format(' | Tribute: %d', it.tribute) end
     ImGui.TextDisabled(footer)
 
+    -- Game Database: tiers, top drop, quest NPCs, recipes (nil while loading)
+    local db = gamedbPlugin()
+    local dbLines = db and db.itemSummary and db.itemSummary(it.id) or nil
+    if dbLines then
+        ImGui.Separator()
+        for _, line in ipairs(dbLines) do
+            ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], line)
+        end
+    end
+
     -- Interaction hint
-    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Left-Click: Pick up / Place | Right-Click: Inspect | Drag: Move')
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Left-Click: Pick up / Place | Right-Click: Inspect | Drag: Move' .. (db and ' | Shift+Right-Click: Database card' or ''))
     ImGui.EndTooltip()
 end
 
@@ -1620,17 +1653,17 @@ function UI.drawItemsTable()
     local filtered = tc.filtered
 
     ImGui.TextDisabled(string.format("Showing %d matching items", #filtered))
-    ImGui.Dummy(0, 2)
+    ImGui.Dummy(0, core.px(2))
 
     local tableFlags = ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg + ImGuiTableFlags.Resizable + ImGuiTableFlags.ScrollY + ImGuiTableFlags.Sortable
     if ImGui.BeginTable("InvItemsTable", 7, tableFlags, ImVec2(0, 0)) then
-        ImGui.TableSetupColumn("Location##colLoc", ImGuiTableColumnFlags.WidthFixed, 110)
+        ImGui.TableSetupColumn("Location##colLoc", ImGuiTableColumnFlags.WidthFixed, core.px(110))
         ImGui.TableSetupColumn("Item Name##colName", ImGuiTableColumnFlags.WidthStretch)
         ImGui.TableSetupColumn("Augs##colAugs", ImGuiTableColumnFlags.WidthStretch)
-        ImGui.TableSetupColumn("Qty##colQty", ImGuiTableColumnFlags.WidthFixed, 55)
-        ImGui.TableSetupColumn("Wt##colWt", ImGuiTableColumnFlags.WidthFixed, 45)
-        ImGui.TableSetupColumn("Value##colVal", ImGuiTableColumnFlags.WidthFixed, 75)
-        ImGui.TableSetupColumn("Actions##colAct", ImGuiTableColumnFlags.WidthFixed, 140)
+        ImGui.TableSetupColumn("Qty##colQty", ImGuiTableColumnFlags.WidthFixed, core.px(55))
+        ImGui.TableSetupColumn("Wt##colWt", ImGuiTableColumnFlags.WidthFixed, core.px(45))
+        ImGui.TableSetupColumn("Value##colVal", ImGuiTableColumnFlags.WidthFixed, core.px(75))
+        ImGui.TableSetupColumn("Actions##colAct", ImGuiTableColumnFlags.WidthFixed, core.px(140))
         ImGui.TableHeadersRow()
 
         local clipper = nil
@@ -1657,6 +1690,7 @@ function UI.drawItemsTable()
             ImGui.TextColored(nameCol[1], nameCol[2], nameCol[3], nameCol[4], it.name or 'Unknown')
             if ImGui.IsItemHovered() then
                 UI.drawTooltip(it)
+                if ImGui.IsItemClicked(1) then openDatabaseCard(it) end
             end
 
             -- Col 2: Augs
@@ -1798,10 +1832,10 @@ function UI.drawVisualizer()
         end
         ImGui.EndChild()
         ImGui.PopStyleColor(2)
-        ImGui.Dummy(0, 2)
+        ImGui.Dummy(0, core.px(2))
     else
         ImGui.TextDisabled("Visual Container Overview — Left-Click: Pick up / Place | Right-Click: Inspect | Drag & Drop to Move")
-        ImGui.Dummy(0, 4)
+        ImGui.Dummy(0, core.px(4))
     end
 
     local availWidth = ImGui.GetContentRegionAvail()
@@ -1811,7 +1845,7 @@ function UI.drawVisualizer()
     ImGui.BeginChild("InvVisualizerChild", ImVec2(halfWidth, 0), true)
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "PERSONAL INVENTORY BAGS (1..10)")
     ImGui.Separator()
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
 
     for bIdx, bag in ipairs(state.containers.inventory) do
         if bag.capacity > 0 then
@@ -1851,7 +1885,7 @@ function UI.drawVisualizer()
                     local btnId = string.format("##b%ds%d", bag.slot, s)
                     local startX, startY = ImGui.GetCursorScreenPos()
 
-                    local clicked = ImGui.InvisibleButton(btnId, 34, 34)
+                    local clicked = ImGui.InvisibleButton(btnId, core.px(34), core.px(34))
                     local hovered = ImGui.IsItemHovered()
                     local active  = ImGui.IsItemActive()
                     local endX, endY = ImGui.GetCursorScreenPos()
@@ -1949,28 +1983,30 @@ function UI.drawVisualizer()
                             state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                         end
                     elseif rClicked and it and not state.pendingAction then
-                        state.pendingAction = { type = 'inspect', item = it }
+                        if not (shiftHeld() and openDatabaseCard(it)) then
+                            state.pendingAction = { type = 'inspect', item = it }
+                        end
                     end
 
                     if s % cols ~= 0 and s < bag.capacity then
-                        ImGui.SameLine(0, 4)
+                        ImGui.SameLine(0, core.px(4))
                     end
                 end
             end
-            ImGui.Dummy(0, 6)
+            ImGui.Dummy(0, core.px(6))
         end
     end
 
     ImGui.EndChild()
 
-    ImGui.SameLine(0, 16)
+    ImGui.SameLine(0, core.px(16))
 
     -- Right Child: Bank Containers
     ImGui.BeginChild("BankVisualizerChild", ImVec2(halfWidth, 0), true)
     local bankTitle = state.bankLive and "BANK STORAGE (LIVE)" or "BANK STORAGE (CACHED)"
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], bankTitle)
     ImGui.Separator()
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
 
     if #state.containers.bank == 0 then
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "No bank data available.\nVisit a banker in any major city to sync your bank inventory!")
@@ -2010,7 +2046,7 @@ function UI.drawVisualizer()
                         local btnId = string.format("##bk%ds%d", bag.slot, s)
                         local startX, startY = ImGui.GetCursorScreenPos()
 
-                        local clicked = ImGui.InvisibleButton(btnId, 34, 34)
+                        local clicked = ImGui.InvisibleButton(btnId, core.px(34), core.px(34))
                         local hovered = ImGui.IsItemHovered()
                         local active  = ImGui.IsItemActive()
                         local endX, endY = ImGui.GetCursorScreenPos()
@@ -2119,15 +2155,17 @@ function UI.drawVisualizer()
                                 state.pendingAction = { type = 'inspect', item = it }
                             end
                         elseif rClicked and it and not state.pendingAction then
-                            state.pendingAction = { type = 'inspect', item = it }
+                            if not (shiftHeld() and openDatabaseCard(it)) then
+                                state.pendingAction = { type = 'inspect', item = it }
+                            end
                         end
 
                         if s % cols ~= 0 and s < bag.capacity then
-                            ImGui.SameLine(0, 4)
+                            ImGui.SameLine(0, core.px(4))
                         end
                     end
                 end
-                ImGui.Dummy(0, 6)
+                ImGui.Dummy(0, core.px(6))
             end
         end
     end
@@ -2140,26 +2178,26 @@ function UI.drawOrganizer()
     ImGui.SameLine()
     ImGui.TextDisabled("| Stack Consolidation & Weight Analysis")
     ImGui.Separator()
-    ImGui.Dummy(0, 6)
+    ImGui.Dummy(0, core.px(6))
 
     -- Quick Utilities Toolbar
     ImGui.TextDisabled("Quick Bag Controls:")
     ImGui.SameLine()
-    if ImGui.Button("Open All Bags##orgOpenAll", 120, 24) then
+    if ImGui.Button("Open All Bags##orgOpenAll", core.px(120), core.px(24)) then
         state.pendingAction = { type = 'open_all_bags' }
     end
     ImGui.SameLine()
-    if ImGui.Button("Close All Bags##orgCloseAll", 120, 24) then
+    if ImGui.Button("Close All Bags##orgCloseAll", core.px(120), core.px(24)) then
         state.pendingAction = { type = 'close_all_bags' }
     end
     ImGui.SameLine()
-    if ImGui.Button("Auto-Inventory Cursor##orgAutoInv", 160, 24) then
+    if ImGui.Button("Auto-Inventory Cursor##orgAutoInv", core.px(160), core.px(24)) then
         state.pendingAction = { type = 'autoinv' }
     end
     local dups = invLogic.findDuplicateStacks(state.items)
     ImGui.SameLine()
     if #dups == 0 then ImGui.BeginDisabled() end
-    if ImGui.Button("Combine All Stacks##orgCombineAll", 160, 24) then
+    if ImGui.Button("Combine All Stacks##orgCombineAll", core.px(160), core.px(24)) then
         if #dups > 0 then
             state.combineAllActive = true
             state.pendingAction = { type = 'combine_stacks' }
@@ -2167,21 +2205,21 @@ function UI.drawOrganizer()
     end
     if #dups == 0 then ImGui.EndDisabled() end
 
-    ImGui.Dummy(0, 10)
+    ImGui.Dummy(0, core.px(10))
 
     -- Section 1: Fragmented Stacks
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "FRAGMENTED STACKS (STACK CONSOLIDATION OPPORTUNITIES)")
     ImGui.TextDisabled("Items below are stackable and have multiple partial stacks scattered across your bags or bank.")
-    ImGui.Dummy(0, 2)
+    ImGui.Dummy(0, core.px(2))
     if #dups == 0 then
         ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], "✓ All stackable items are fully consolidated! No fragmented stacks found.")
     else
         if ImGui.BeginTable("DupStacksTable", 5, ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg) then
             ImGui.TableSetupColumn("Item Name", ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn("Stacks", ImGuiTableColumnFlags.WidthFixed, 60)
-            ImGui.TableSetupColumn("Total Count", ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn("Stacks", ImGuiTableColumnFlags.WidthFixed, core.px(60))
+            ImGui.TableSetupColumn("Total Count", ImGuiTableColumnFlags.WidthFixed, core.px(90))
             ImGui.TableSetupColumn("Locations & Partial Counts", ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 70)
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, core.px(70))
             ImGui.TableHeadersRow()
 
             for _, d in ipairs(dups) do
@@ -2209,12 +2247,12 @@ function UI.drawOrganizer()
         end
     end
 
-    ImGui.Dummy(0, 14)
+    ImGui.Dummy(0, core.px(14))
 
     -- Section 2: Heaviest Carried Items
     ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "WEIGHT WATCHER (HEAVIEST ITEMS IN BAGS)")
     ImGui.TextDisabled("Items below contribute the most weight to your character. Useful for Monks or managing encumbrance.")
-    ImGui.Dummy(0, 2)
+    ImGui.Dummy(0, core.px(2))
 
     local heavies = invLogic.findHeaviestItems(state.items, 10)
     if #heavies == 0 then
@@ -2222,9 +2260,9 @@ function UI.drawOrganizer()
     else
         if ImGui.BeginTable("HeavyItemsTable", 4, ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg) then
             ImGui.TableSetupColumn("Item Name", ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn("Location", ImGuiTableColumnFlags.WidthFixed, 140)
-            ImGui.TableSetupColumn("Category", ImGuiTableColumnFlags.WidthFixed, 90)
-            ImGui.TableSetupColumn("Total Weight", ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn("Location", ImGuiTableColumnFlags.WidthFixed, core.px(140))
+            ImGui.TableSetupColumn("Category", ImGuiTableColumnFlags.WidthFixed, core.px(90))
+            ImGui.TableSetupColumn("Total Weight", ImGuiTableColumnFlags.WidthFixed, core.px(90))
             ImGui.TableHeadersRow()
 
             for _, h in ipairs(heavies) do
@@ -2242,7 +2280,7 @@ end
 function UI.drawSettings()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "SETTINGS & BANK CACHE MANAGEMENT")
     ImGui.Separator()
-    ImGui.Dummy(0, 6)
+    ImGui.Dummy(0, core.px(6))
 
     ImGui.Text("Bank Cache Status:")
     ImGui.SameLine()
@@ -2252,22 +2290,22 @@ function UI.drawSettings()
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format("Using offline cached bank snapshot (Last updated: %s)", state.bankLastSync))
     end
 
-    ImGui.Dummy(0, 4)
-    if ImGui.Button("Force Full Scan Now##forceScan", 160, 26) then
+    ImGui.Dummy(0, core.px(4))
+    if ImGui.Button("Force Full Scan Now##forceScan", core.px(160), core.px(26)) then
         scanner.scanAll()
         state.statusMsg = "Full scan completed."
     end
     ImGui.SameLine()
-    if ImGui.Button("Clear Offline Bank Cache##clearBank", 180, 26) then
+    if ImGui.Button("Clear Offline Bank Cache##clearBank", core.px(180), core.px(26)) then
         local p = getBankCachePath()
         pcall(os.remove, p)
         scanner.scanAll()
         state.statusMsg = "Bank cache removed."
     end
 
-    ImGui.Dummy(0, 10)
+    ImGui.Dummy(0, core.px(10))
     ImGui.Separator()
-    ImGui.Dummy(0, 6)
+    ImGui.Dummy(0, core.px(6))
 
     state.autoScan = ImGui.Checkbox("Enable Background Auto-Scan##autoScan", state.autoScan)
     if state.autoScan then
@@ -2280,7 +2318,7 @@ function UI.drawSettings()
     end
 
     if state.statusMsg ~= '' then
-        ImGui.Dummy(0, 8)
+        ImGui.Dummy(0, core.px(8))
         ImGui.TextDisabled("Status: " .. state.statusMsg)
     end
 end
@@ -2291,7 +2329,7 @@ local function DrawInventoryManagerUI()
     core.pushTheme()
 
     ImGui.SetNextWindowCollapsed(false, ImGuiCond.Appearing)
-    ImGui.SetNextWindowSize(780, 520, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(780), core.px(520), ImGuiCond.FirstUseEver)
     local windowFlags = 0
     if ImGuiWindowFlags then
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
@@ -2546,11 +2584,11 @@ function plugin.onDrawSettings()
     refresh()
     core.accent(GOLD, 'Inventory & Bank Manager')
     local isWinOpen = (ctrl.show_inv == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##invToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##invToggleWin', core.px(250), core.px(24)) then
         ctrl.show_inv = not isWinOpen
         core.saveLoadout(true)
     end
-    if ImGui.Button('Rescan Now##invRescan', 120, 22) then
+    if ImGui.Button('Rescan Now##invRescan', core.px(120), core.px(22)) then
         scanner.scanAll()
     end
     ImGui.SameLine()

@@ -22,7 +22,11 @@
 --
 -- Rules imposed by the actors API (see docs.macroquest.org/lua/actors):
 --   * The message handler may not call mq.delay - it throws. The handler
---     here only appends to an inbox; onTick drains it.
+--     here only appends to an inbox; onTick drains it. RPC response
+--     callbacks are treated the same way: they run outside the script's
+--     coroutine, so rawSend wraps them to queue the response and tick()
+--     applies it. A response landing mid-tick once nil'd a field between
+--     a nil check and its use (`net.probe.sentAt`), which killed the tick.
 --   * Message content must be plain values (nil/string/number/boolean/
 --     table). MQ datatype objects (mq.TLO.*) cannot be serialized, so the
 --     heartbeat is built from primitives only.
@@ -92,6 +96,7 @@ local net = {
     err            = nil,
     lastRegisterAt = -1e9,
     inbox          = {},
+    rpcInbox       = {},   -- queued RPC responses: { cb, status, reply, at }
     peers          = {},   -- [lowerName] = { name, server, account, pid, seenAt, hb, pingMs, lastReply }
     subscribers    = {},   -- [kind] = { fn, ... }
     lastHeartbeatAt = -1e9,
@@ -103,6 +108,8 @@ local net = {
     lastSendStatus = nil,  -- last negative status reported by a callback
     versionWarned  = {},   -- peers already warned about a protocol mismatch
     trace          = false, -- /ac net trace: log every send / receive
+    targetId       = 0,     -- last target id seen by snapshot()
+    targetSince    = nil,   -- nowSec() when that target was acquired (heartbeat target.since)
     probe          = { state = 'pending', at = -1e9, sentAt = nil, rttMs = nil, status = nil }, -- launcher loopback check
     log            = {},   -- newest first: { time, text, level }
     cmdInput       = '',
@@ -298,11 +305,30 @@ local function envelope(kind, data)
     return { v = PROTOCOL_VERSION, kind = kind, from = myName(), ts = os.time(), data = sanitize(data) or {} }
 end
 
+-- Wraps an RPC callback so the response is queued and applied from tick()
+-- (see header). The callback then runs as cb(status, reply, receivedAt).
+local function queueResponse(cb)
+    return function(status, reply)
+        net.rpcInbox[#net.rpcInbox + 1] = { cb = cb, status = status, reply = reply, at = nowSec() }
+    end
+end
+
+local function drainResponses()
+    if #net.rpcInbox == 0 then return end
+    local batch = net.rpcInbox
+    net.rpcInbox = {}
+    for _, r in ipairs(batch) do
+        local ok, err = pcall(r.cb, r.status, r.reply, r.at)
+        if not ok then logEvent('response error: ' .. tostring(err), 'error') end
+    end
+end
+
 -- Raw send. `address` nil = broadcast to every box with this mailbox.
 -- `cb(status, message)` makes the message an RPC (receiver must reply).
 local function rawSend(address, kind, data, cb)
     if not net.actor then return false end
     local payload = envelope(kind, data)
+    if cb then cb = queueResponse(cb) end
     local ok, err
     if address and cb then
         ok, err = pcall(net.actor.send, net.actor, address, payload, cb)
@@ -464,12 +490,20 @@ local function snapshot()
         for i, c in ipairs(classes) do s.classes[i] = tostring(c) end
     end
     local tid = tlo(function() return mq.TLO.Target.ID() end, 0)
-    if tid and tid > 0 then
+    if not tid or tid <= 0 then
+        net.targetId, net.targetSince = 0, nil
+    else
+        -- When we acquired this target. Pullers in the same zone compare it to
+        -- decide who keeps a mob both of them picked at the same moment.
+        if tid ~= net.targetId then
+            net.targetId, net.targetSince = tid, nowSec()
+        end
         s.target = {
             id      = tid,
             name    = tlo(function() return mq.TLO.Target.CleanName() end, ''),
             hp      = tlo(function() return mq.TLO.Target.PctHPs() end, 0),
             type    = tlo(function() return mq.TLO.Target.Type() end, ''),
+            since   = net.targetSince,
             -- "engaged" = we are fighting it: auto-attack on / in combat, or it is
             -- already hurt. Assist boxes use this instead of guessing from /assist.
             engaged = s.combat or (tlo(function() return mq.TLO.Target.PctHPs() end, 100) < 100),
@@ -617,9 +651,9 @@ local function sendPing(name)
     local target = peer and peer.name or name
     if not target or target == '' then return false, 'no peer named' end
     local t0 = nowSec()
-    rawSend({ character = target }, 'query', { what = 'ping', rpc = true }, function(status, reply)
+    rawSend({ character = target }, 'query', { what = 'ping', rpc = true }, function(status, reply, receivedAt)
         if noteStatus(status, 'ping -> ' .. target) then
-            local ms = math.floor((nowSec() - t0) * 1000 + 0.5)
+            local ms = math.floor(((receivedAt or nowSec()) - t0) * 1000 + 0.5)
             local p = findPeer(target)
             if p then p.pingMs = ms end
             logEvent(string.format('%s pong: %d ms', target, ms))
@@ -689,10 +723,10 @@ local function sendProbe()
     net.probe.sentAt = t0
     net.probe.at = t0
     net.probe.state = 'pending'
-    rawSend({ character = me }, 'query', { what = 'ping', probe = true, rpc = true }, function(status)
+    rawSend({ character = me }, 'query', { what = 'ping', probe = true, rpc = true }, function(status, _, receivedAt)
         net.probe.sentAt = nil
         net.probe.status = status
-        net.probe.rttMs = math.floor((nowSec() - t0) * 1000 + 0.5)
+        net.probe.rttMs = math.floor(((receivedAt or nowSec()) - t0) * 1000 + 0.5)
         if type(status) == 'number' and status < 0 then
             net.probe.state = statusName(status)
             logEvent('Launcher loopback failed: ' .. net.probe.state, 'error')
@@ -707,13 +741,15 @@ end
 local function tickProbe()
     if not net.actor then return end
     local t = nowSec()
-    if net.probe.sentAt and (t - net.probe.sentAt) > PROBE_TIMEOUT_SEC then
+    local sentAt = net.probe.sentAt
+    if sentAt and (t - sentAt) > PROBE_TIMEOUT_SEC then
         net.probe.sentAt = nil
+        sentAt = nil
         net.probe.state = 'no answer'
         logEvent('Launcher loopback: no answer within ' .. PROBE_TIMEOUT_SEC .. 's', 'error')
     end
     -- Keep probing while we see nobody; once peers exist the roster is proof enough.
-    if peerCount() == 0 and not net.probe.sentAt and (t - net.probe.at) >= PROBE_INTERVAL_SEC then
+    if peerCount() == 0 and not sentAt and (t - net.probe.at) >= PROBE_INTERVAL_SEC then
         sendProbe()
     end
 end
@@ -949,6 +985,7 @@ local function tick()
         end
     end
     drainInbox()
+    drainResponses()
     if net.actor then sendHeartbeat(false) end
     pruneExpired()
     tickProbe()
@@ -984,7 +1021,15 @@ function api.peerTarget(name, maxAgeSec)
     if not p then return nil end
     local t = p.hb.target
     if type(t) ~= 'table' or not t.id or t.id <= 0 then return false end
-    return { id = t.id, name = t.name, hp = t.hp, type = t.type, engaged = t.engaged == true, combat = p.hb.combat == true, age = age }
+    return { id = t.id, name = t.name, hp = t.hp, type = t.type, engaged = t.engaged == true, combat = p.hb.combat == true, age = age, since = t.since }
+end
+
+-- When this box acquired its current target, on the same clock the
+-- heartbeat's target.since uses; nil while we have no target (or before
+-- the first snapshot after targeting).
+function api.myTargetSince()
+    if (net.targetId or 0) <= 0 then return nil end
+    return net.targetSince
 end
 
 -- Every fresh peer in our zone (sorted by name).
@@ -1056,7 +1101,7 @@ local function drawQuickButtons(MUTED)
     local scope = cfg.defaultScope or 'all'
     ImGui.TextDisabled('Send to:')
     ImGui.SameLine()
-    ImGui.SetNextItemWidth(120)
+    ImGui.SetNextItemWidth(core.px(120))
     if ImGui.BeginCombo('##bnScope', scopeLabel(scope)) then
         for _, s in ipairs(SCOPES) do
             if ImGui.Selectable(scopeLabel(s), s == scope) then
@@ -1067,36 +1112,36 @@ local function drawQuickButtons(MUTED)
         ImGui.EndCombo()
     end
     ImGui.SameLine()
-    if ImGui.Button('Run##bnRun', 60, 22) then sendCommand(scope, 'run') end
+    if ImGui.Button('Run##bnRun', core.px(60), core.px(22)) then sendCommand(scope, 'run') end
     if ImGui.IsItemHovered() then core.setTooltip('Start auto-combat on the selected boxes (/ac run).') end
     ImGui.SameLine()
-    if ImGui.Button('Pause##bnPause', 60, 22) then sendCommand(scope, 'pause') end
+    if ImGui.Button('Pause##bnPause', core.px(60), core.px(22)) then sendCommand(scope, 'pause') end
     if ImGui.IsItemHovered() then core.setTooltip('Pause auto-combat on the selected boxes (/ac pause).') end
     ImGui.SameLine()
-    if ImGui.Button('Burn On##bnBurnOn', 70, 22) then sendCommand(scope, 'burn on') end
+    if ImGui.Button('Burn On##bnBurnOn', core.px(70), core.px(22)) then sendCommand(scope, 'burn on') end
     ImGui.SameLine()
-    if ImGui.Button('Burn Off##bnBurnOff', 70, 22) then sendCommand(scope, 'burn off') end
+    if ImGui.Button('Burn Off##bnBurnOff', core.px(70), core.px(22)) then sendCommand(scope, 'burn off') end
     ImGui.SameLine()
-    if ImGui.Button('Follow Me##bnFollow', 80, 22) then
+    if ImGui.Button('Follow Me##bnFollow', core.px(80), core.px(22)) then
         sendCommand(scope, { 'ma ' .. myName(), 'assist chase' })
     end
     if ImGui.IsItemHovered() then core.setTooltip('Make the selected boxes set you as Main Assist and switch to Assist (Chase).') end
     ImGui.SameLine()
-    if ImGui.Button('Set Me as MA##bnMA', 100, 22) then sendCommand(scope, 'ma ' .. myName()) end
+    if ImGui.Button('Set Me as MA##bnMA', core.px(100), core.px(22)) then sendCommand(scope, 'ma ' .. myName()) end
     if ImGui.IsItemHovered() then core.setTooltip('Set this character as the Main Assist on the selected boxes (mode unchanged).') end
     ImGui.SameLine()
-    if ImGui.Button('Buff Me##bnBuffMe', 70, 22) then sendBuffRequest(scope) end
+    if ImGui.Button('Buff Me##bnBuffMe', core.px(70), core.px(22)) then sendBuffRequest(scope) end
     if ImGui.IsItemHovered() then core.setTooltip('Ask the selected boxes for the friendly loadout buffs you are missing.') end
     ImGui.SameLine()
-    if ImGui.Button('Camp Here##bnCamp', 80, 22) then sendCampHere(scope) end
+    if ImGui.Button('Camp Here##bnCamp', core.px(80), core.px(22)) then sendCampHere(scope) end
     if ImGui.IsItemHovered() then core.setTooltip('Set the camp anchor of every selected box in this zone to your current location.') end
     ImGui.TextDisabled('/ac')
     ImGui.SameLine()
-    ImGui.SetNextItemWidth(320)
+    ImGui.SetNextItemWidth(core.px(320))
     local txt = ImGui.InputTextWithHint('##bnCmd', 'command to send, e.g. puller camp', net.cmdInput or '')
     if type(txt) == 'string' then net.cmdInput = txt end
     ImGui.SameLine()
-    if ImGui.Button('Send##bnSend', 60, 22) then
+    if ImGui.Button('Send##bnSend', core.px(60), core.px(22)) then
         local ok, why = sendCommand(scope, net.cmdInput)
         if not ok then logEvent('not sent: ' .. tostring(why), 'warn') end
     end
@@ -1108,18 +1153,18 @@ local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
     local peers = peerList()
     local tableFlags = ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingFixedFit + ImGuiTableFlags.Resizable + ImGuiTableFlags.ScrollY
     if not ImGui.BeginTable('BoxNetPeers', 12, tableFlags, ImVec2(0, 200)) then return end
-    ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthFixed, 110)
-    ImGui.TableSetupColumn('Trio', ImGuiTableColumnFlags.WidthFixed, 90)
-    ImGui.TableSetupColumn('Zone', ImGuiTableColumnFlags.WidthFixed, 80)
-    ImGui.TableSetupColumn('Mode', ImGuiTableColumnFlags.WidthFixed, 110)
-    ImGui.TableSetupColumn('State', ImGuiTableColumnFlags.WidthFixed, 70)
-    ImGui.TableSetupColumn('HP', ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn('Mana', ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn('End', ImGuiTableColumnFlags.WidthFixed, 45)
+    ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthFixed, core.px(110))
+    ImGui.TableSetupColumn('Trio', ImGuiTableColumnFlags.WidthFixed, core.px(90))
+    ImGui.TableSetupColumn('Zone', ImGuiTableColumnFlags.WidthFixed, core.px(80))
+    ImGui.TableSetupColumn('Mode', ImGuiTableColumnFlags.WidthFixed, core.px(110))
+    ImGui.TableSetupColumn('State', ImGuiTableColumnFlags.WidthFixed, core.px(70))
+    ImGui.TableSetupColumn('HP', ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn('Mana', ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn('End', ImGuiTableColumnFlags.WidthFixed, core.px(45))
     ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
-    ImGui.TableSetupColumn('Afflict', ImGuiTableColumnFlags.WidthFixed, 70)
-    ImGui.TableSetupColumn('Seen', ImGuiTableColumnFlags.WidthFixed, 45)
-    ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, 250)
+    ImGui.TableSetupColumn('Afflict', ImGuiTableColumnFlags.WidthFixed, core.px(70))
+    ImGui.TableSetupColumn('Seen', ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, core.px(250))
     ImGui.TableHeadersRow()
 
     local t = nowSec()
@@ -1255,7 +1300,7 @@ local function drawWindow()
 
     core.pushTheme()
     ImGui.SetNextWindowCollapsed(false, ImGuiCond.Appearing)
-    ImGui.SetNextWindowSize(900, 420, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(core.px(900), core.px(420), ImGuiCond.FirstUseEver)
     local windowFlags = 0
     if ImGuiWindowFlags then
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
@@ -1281,11 +1326,11 @@ local function drawWindow()
     ImGui.TextDisabled('| Boxed characters on this computer (MacroQuest Actors)')
     ImGui.Separator()
     drawStatusLine(GOOD, WARN, ERR, MUTED)
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
     drawQuickButtons(MUTED)
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
     drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
-    ImGui.Dummy(0, 4)
+    ImGui.Dummy(0, core.px(4))
     drawLog(MUTED, WARN, ERR)
 
     ImGui.End()
@@ -1300,6 +1345,7 @@ function plugin.onInit(coreApi)
     refresh()
     if ctrl and ctrl.show_boxnet == nil then ctrl.show_boxnet = false end
     net.inbox = {}
+    net.rpcInbox = {}
     net.peers = {}
     net.lastRegisterAt = -1e9
     net.lastHeartbeatAt = -1e9
@@ -1321,6 +1367,7 @@ function plugin.onDestroy()
     if net.actor then rawSend(nil, 'bye', {}) end
     detachActor()
     net.inbox = {}
+    net.rpcInbox = {}
     net.peers = {}
     net.subscribers = {}
     if core and rawget(core, 'boxnet') == api then rawset(core, 'boxnet', nil) end
@@ -1390,7 +1437,7 @@ function plugin.onDrawSettings()
     local GOLD = (core.colors and core.colors.GOLD) or { 1.0, 0.70, 0.54, 1 }
     core.accent(GOLD, 'Box Network (MacroQuest Actors)')
     local isWinOpen = (ctrl.show_boxnet == true)
-    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##bnToggleWin', 250, 24) then
+    if ImGui.Button((isWinOpen and 'Window: Visible (Click to Hide)' or 'Window: Hidden (Click to Show)') .. '##bnToggleWin', core.px(250), core.px(24)) then
         ctrl.show_boxnet = not isWinOpen
         core.saveLoadout(true)
     end
@@ -1409,11 +1456,11 @@ function plugin.onDrawSettings()
     end
     if ImGui.IsItemHovered() then core.setTooltip('Default: any box connected to this MacroQuest launcher is trusted. Turn on to restrict to named characters.') end
     if net.allowInput == nil then net.allowInput = table.concat(cfg.allowlist or {}, ', ') end
-    ImGui.SetNextItemWidth(320)
+    ImGui.SetNextItemWidth(core.px(320))
     local txt = ImGui.InputTextWithHint('Allowlist##bnAllow', 'Names, comma separated', net.allowInput or '')
     if type(txt) == 'string' then net.allowInput = txt end
     ImGui.SameLine()
-    if ImGui.Button('Apply##bnAllowApply', 60, 22) then
+    if ImGui.Button('Apply##bnAllowApply', core.px(60), core.px(22)) then
         cfg.allowlist = parseAllowlist(net.allowInput)
         core.saveLoadout(true)
     end
@@ -1424,14 +1471,14 @@ function plugin.onDrawSettings()
         core.saveLoadout(true)
     end
 
-    ImGui.SetNextItemWidth(200)
+    ImGui.SetNextItemWidth(core.px(200))
     local hb = ImGui.SliderFloat('Heartbeat interval (s)##bnHb', cfg.heartbeatSec, 0.25, 5.0, '%.2f')
     if type(hb) == 'number' and math.abs(hb - cfg.heartbeatSec) > 0.001 then
         cfg.heartbeatSec = hb
         if cfg.peerTimeoutSec < hb * 3 then cfg.peerTimeoutSec = hb * 3 end
         core.saveLoadout(true)
     end
-    ImGui.SetNextItemWidth(200)
+    ImGui.SetNextItemWidth(core.px(200))
     local to = ImGui.SliderFloat('Peer timeout (s)##bnTimeout', cfg.peerTimeoutSec, 2.0, 60.0, '%.1f')
     if type(to) == 'number' and math.abs(to - cfg.peerTimeoutSec) > 0.001 then
         cfg.peerTimeoutSec = to
