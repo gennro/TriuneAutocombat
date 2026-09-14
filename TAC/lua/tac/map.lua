@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/map.lua — Triune Map, Norrath Atlas & NPC Tracker Plugin
 -- ============================================================================
@@ -35,8 +35,10 @@ local plugin = {
     window             = { label = 'Map', tooltip = 'Toggles the Map, Zone Atlas & NPC Tracker window (map plugin).', flag = 'show_map', desc = '2D zone map, Norrath atlas & NPC tracker', headerButton = true, order = 20 },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 local VERSION = '1.1'
 

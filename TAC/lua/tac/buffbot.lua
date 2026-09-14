@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/buffbot.lua — Triune Buffbot Plugin
 -- ============================================================================
@@ -34,8 +34,10 @@ local plugin = {
     window             = { label = 'Buffbot', tooltip = 'Toggles the Buffbot Station window (buffbot plugin).', flag = 'show_buffbot', desc = 'Tell-driven buffbot controls, ignore list & activity log', headerButton = false, order = 120 },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 local VERSION      = '1.7'
 

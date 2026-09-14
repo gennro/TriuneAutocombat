@@ -797,9 +797,9 @@ local function drawWindow()
     local windowFlags = 0
     if ImGuiWindowFlags then
         windowFlags = bit.bor(
-            ImGuiWindowFlags.AlwaysUseWindowPadding or 0,
+            ImGuiWindowFlags.AlwaysUseWindowPadding or 0, ---@diagnostic disable-line: deprecated
             ImGuiWindowFlags.HorizontalScrollbar or 0
-        ) ---@diagnostic disable-line: deprecated
+        )
     end
     core.preBeginWindow('spellbook')
     local open, show = ImGui.Begin('Triune Spellbook Engine v' .. (core.VERSION or '') .. '###triuneSpellbook', ctrl.show_spellbook, windowFlags)

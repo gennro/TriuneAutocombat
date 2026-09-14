@@ -59,7 +59,7 @@ local plugin = {
 -- Populated by refresh() on every entry point; typed so the language server
 -- does not treat them as permanently nil.
 local core = nil  ---@type table
-local ctrl, ImGui, mq = nil, nil, nil  ---@type table, ImGui, Mq
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 -- ----------------------------------------------------------------------------
 -- Constants

@@ -10483,29 +10483,40 @@ function UI.drawStatusTab()
                 ImGui.TextDisabled('• Nav Status: Idle / Stopped')
             end
 
-            -- Destination Details
+            -- Destination Details. navDest is the same /nav parameter string
+            -- the engine would use for that destination; MQ2Nav's PathLength /
+            -- Distance members only answer for an explicit destination.
+            local navDest = nil
             if pursuit.lastNavTargetId and pursuit.lastNavTargetId ~= 0 then
                 local tSpawnName = nil
                 pcall(function() tSpawnName = mq.TLO.Spawn(pursuit.lastNavTargetId).CleanName() end)
                 ImGui.Text(string.format('• Destination: Mob %s (ID %s)', tSpawnName or '', tostring(pursuit.lastNavTargetId)))
+                navDest = string.format('id %d', pursuit.lastNavTargetId)
             elseif ctrl.mode == 'Puller' and runtime.pullState == 'RETURNING' then
                 accent(ARC, '• Destination: Camp Location')
+                if ctrl.camp_loc and ctrl.camp_loc.x and ctrl.camp_loc.y then
+                    navDest = string.format('loc %.2f %.2f %.2f', ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z or 0)
+                end
             elseif ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 local curWp = ctrl.waypoints[ctrl.current_waypoint_idx or 1]
                 ImGui.Text(string.format('• Destination: WP #%d (%s)', ctrl.current_waypoint_idx or 1, curWp and curWp.name or 'WP'))
+                if curWp and curWp.x and curWp.y then
+                    navDest = string.format('loc %.2f %.2f %.2f', curWp.y, curWp.x, curWp.z or 0)
+                end
             elseif pursuit.wanderLoc then
                 ImGui.Text(string.format('• Destination: Wander (Y:%.0f, X:%.0f, Z:%.0f)',
                     pursuit.wanderLoc.y or 0, pursuit.wanderLoc.x or 0, pursuit.wanderLoc.z or 0))
+                navDest = string.format('loc %.2f %.2f %.2f', pursuit.wanderLoc.y or 0, pursuit.wanderLoc.x or 0, pursuit.wanderLoc.z or 0)
             else
                 ImGui.TextDisabled('• Destination: None (Idle)')
             end
 
-            -- Path Length & Distance
-            if navActive then
+            -- Path Length & Distance to that destination
+            if navActive and navDest then
                 local pathLen, pathDist = 0, 0
                 pcall(function()
-                    pathLen = mq.TLO.Navigation.PathLength() or 0
-                    pathDist = mq.TLO.Navigation.Distance() or 0
+                    pathLen = tonumber(mq.TLO.Navigation.PathLength(navDest)()) or 0
+                    pathDist = tonumber(mq.TLO.Navigation.Distance(navDest)()) or 0
                 end)
                 ImGui.TextDisabled(string.format('• Path Length: %.1f ft (Dist: %.1f ft)', pathLen, pathDist))
             end
@@ -19703,7 +19714,7 @@ function runtime.pullerTick()
                                 end
                             end
                         end
-                        local spellName = ctrl.pull_spell
+                        local spellName = ctrl.pull_spell  ---@type string|nil
                         if not spellName or spellName == '' then
                             pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
                         end
@@ -20158,7 +20169,7 @@ function runtime.processDowntimeBuffing()
         -- 1. Check if we had an interrupted swap to resume
         local resume = runtime.interruptedSwap
         if resume and resume.targetId and isSpawnAlive(resume.targetId) and resume.entry then
-            local g = resume.entry
+            local g = resume.entry  ---@type table
             local pctVal = tonumber(g.pct) or 100
             if pctVal > 0 and runtime.conditionMet(g.when, pctVal, g.spell, resume.targetId, g.cls, g.target, g) then
                 candidate = g
@@ -20942,7 +20953,7 @@ local function combatTick()
                                 end
                             end
                         end
-                        local spellName = ctrl.pull_spell
+                        local spellName = ctrl.pull_spell  ---@type string|nil
                         if not spellName or spellName == '' then
                             pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
                         end

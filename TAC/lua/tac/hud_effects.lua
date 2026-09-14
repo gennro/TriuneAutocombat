@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/hud_effects.lua — Triune Popout Effects & Songs Window Plugin
 -- ============================================================================
@@ -24,7 +24,9 @@ local plugin = {
     window             = { label = 'Effects', tooltip = 'Toggles the popout Effects & Songs window.', flag = 'show_effects_window', key = 'effects', lockFlag = 'eff_lock', desc = 'Popout Effects & Songs with timers', headerButton = true, order = 80 },
 }
 
-local core = nil
+-- Populated from the plugin entry points; typed so the language server
+-- does not treat it as permanently nil.
+local core = nil  ---@type table
 
 local sortModes = {
     'Time Left (Ascending)',
@@ -178,7 +180,7 @@ end
 local function lookupSpellByName(mq, name)
     local hit = spellLookup[name]
     if hit ~= nil then return hit end
-    local res = false
+    local res = false  ---@type table|false
     pcall(function()
         local sp = mq.TLO.Spell(name)
         if sp and sp() then

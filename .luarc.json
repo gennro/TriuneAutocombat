@@ -27,9 +27,9 @@
       "DATA"
     ],
     "disable": [
-      "undefined-field",       -- MQ's type definitions are incomplete (imgui, TLO)
-      "param-type-mismatch",   -- Same as above
-      "cast-local-type"        -- Same as above
+      "undefined-field", // MQ's type definitions are incomplete (imgui, TLO)
+      "param-type-mismatch", // Same as above
+      "cast-local-type" // Same as above
     ]
   }
 }

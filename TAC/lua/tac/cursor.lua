@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/cursor.lua — Triune Cursor Item Manager Plugin
 -- ============================================================================
@@ -27,8 +27,10 @@ local plugin = {
     window             = { label = 'Cursor Manager', tooltip = 'Toggles the Cursor Item Manager window (cursor plugin).', flag = 'show_cursor', desc = 'Inspect / auto-inventory / destroy the cursor item', headerButton = true, order = 40 },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 local MAX_CLEAR_ATTEMPTS = 255
 local MAX_HISTORY = 50

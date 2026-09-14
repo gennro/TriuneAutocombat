@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field, deprecated
+---@diagnostic disable: undefined-global, undefined-field, deprecated, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/buttons.lua — Triune Hot Buttons Plugin (Button Master-style)
 -- ============================================================================
@@ -37,8 +37,10 @@ local plugin = {
     hasThread          = false,
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 -- ----------------------------------------------------------------------------
 -- Constants

@@ -30,8 +30,10 @@ local plugin = {
     window             = { label = 'Inv Manager', tooltip = 'Toggles the Inventory & Bank Manager window (inventory plugin).', flag = 'show_inv', desc = 'Inventory / bank search, visualizer & organizer', headerButton = true, order = 110 },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 -- Version
 local VERSION = '1.0.0'

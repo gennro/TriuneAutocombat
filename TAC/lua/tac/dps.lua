@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/dps.lua — Triune DPS Parser Plugin
 -- ============================================================================
@@ -29,8 +29,10 @@ local plugin = {
     window             = { label = 'DPS Parser', tooltip = 'Toggles the DPS Parser window (dps plugin; also /dps).', flag = 'show_dps', desc = 'Live combat-log DPS parser & encounter history', headerButton = true, order = 30 },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 local VERSION = '4.3'
 local MAX_HISTORY = 25

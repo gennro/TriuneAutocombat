@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/gamedb.lua — Triune Game Database Plugin (items / NPCs / spells)
 -- ============================================================================
@@ -47,8 +47,10 @@ local plugin = {
     uses               = { map = 'Map button on NPC spawn rows (opens the Zone Atlas on that zone)' },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 local function refresh()
     ctrl = core.ctrl

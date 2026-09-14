@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/chat.lua — Triune Chat Windows plugin
 -- ============================================================================
@@ -36,8 +36,10 @@ local plugin = {
     uses               = { gamedb = 'Look up in Database entry in the tab menu (item links by name)' },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
 local function refresh()
     ctrl = core.ctrl
