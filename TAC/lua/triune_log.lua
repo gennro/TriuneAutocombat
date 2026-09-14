@@ -310,9 +310,8 @@ local function emit(level, cat, msg)
         st.pending = st.pending + 1
         if M.LEVELS[level] >= M.LEVELS.warn then M.flush() end
     elseif fileEnabled() then
-        if M.open() then
-            -- open() replayed the ring (which now includes this line)
-        end
+        -- open() replays the ring, which now includes this line.
+        M.open()
     end
 end
 

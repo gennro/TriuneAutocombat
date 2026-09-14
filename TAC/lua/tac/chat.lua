@@ -49,7 +49,6 @@ end
 
 local GOLD  = { 1.00, 0.70, 0.54, 1 }
 local MUTED = { 0.49, 0.56, 0.65, 1 }
-local GOOD  = { 0.37, 0.88, 0.64, 1 }
 local WARN  = { 1.00, 0.72, 0.30, 1 }
 local ERR   = { 0.95, 0.35, 0.35, 1 }
 
@@ -518,7 +517,7 @@ local function classify(raw, ctx)
         end
         return result('tell_in', s, text, false, player(s))
     end
-    s, msg = text:match("^You told (.-), '(.*)$")
+    s = text:match("^You told (.-), '")
     if s then return result('tell_out', s, text, true) end
     if text:find("^You tell your party, '") then return result('group', ctx.me, text, true) end
     s = text:match("^(.-) tells the group, '")
@@ -634,13 +633,14 @@ local function classify(raw, ctx)
     end
 
     -- Long-form melee (your own swings are usually abbreviated on this server)
-    local verb, target, dmg = text:match('^You (%a+) (.-) for (%d+) points? of damage')
+    local verb = text:match('^You (%a+) .- for %d+ points? of damage')
     if verb and MELEE_VERBS[verb] then return result('melee_you', ctx.me, text, true) end
     if text:find('^You try to %a+ .-, but miss!') then return result('melee_you', ctx.me, text, true) end
-    s, verb, target = text:match('^(.-) (%a+) (YOU) for %d+ points? of damage')
+    s, verb = text:match('^(.-) (%a+) YOU for %d+ points? of damage')
     if s and MELEE_VERBS[verb] then return result('melee_taken', s, text) end
     s = text:match('^(.-) tries to %a+ YOU, but misses!')
     if s then return result('melee_taken', s, text) end
+    local target
     s, verb, target = text:match('^(.-) (%a+) (.-) for %d+ points? of damage')
     if s and MELEE_VERBS[verb] then
         if isMyPet(s, ctx) then return result('pet', s, text) end
@@ -2313,7 +2313,8 @@ local function round255(v) return math.floor((tonumber(v) or 0) * 255 + 0.5) end
 -- Returns the new hex when it changed.
 local function drawColorField(id, hex)
     local r, g, b = hexToRgb(hex)
-    local flags = (ImGuiColorEditFlags and ImGuiColorEditFlags.NoInputs) or 0
+    local CEF = _G.ImGuiColorEditFlags
+    local flags = (CEF and CEF.NoInputs) or 0
     if ImGui.ColorEdit3 then
         local ok, col = pcall(ImGui.ColorEdit3, '##col_' .. id, { r, g, b }, flags)
         if ok and type(col) == 'table' then
@@ -2858,7 +2859,7 @@ local function drawSendControls(win, tab)
         if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then core.setTooltip('Who the tell goes to') end
         ImGui.SameLine(0, 0)
         -- Arrow-only dropdown of recent tell partners (most recent first).
-        local CF = ImGuiComboFlags or _G.ImGuiComboFlags
+        local CF = _G.ImGuiComboFlags
         local flags = (CF and CF.NoPreview) or 0
         ImGui.SetNextItemWidth(core.px(20))
         if ImGui.BeginCombo('##tacchatRecent_' .. tabKey(win, tab), '', flags) then

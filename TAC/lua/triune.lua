@@ -119,13 +119,12 @@ end
 -- ============================================================================
 -- Runtime state
 -- ============================================================================
-local NUM_GEMS       = 12
 local function getNumGems()
     local ng = nil
     pcall(function() ng = mq.TLO.Me.NumGems() end)
     local n = tonumber(ng)
     if n and n >= 8 and n <= 12 then return n end
-    return NUM_GEMS
+    return 12
 end
 local lvlMin, lvlMax = 1, 65
 
@@ -707,7 +706,7 @@ local stuckState = {
     cannotSeeAttempts = 0
 }
 
-local function trioHasPetClass()
+function runtime.trioHasPetClass()
     for _, c in ipairs(myClasses) do if petState.PET_CLASSES[c] then return true end end
     return false
 end
@@ -1012,82 +1011,32 @@ local function parseClassLine(text)
     return nil
 end
 
-local function scanOneNode(node, found)
-    if not node or not node() then return end
-    pcall(function()
-        local items = node.Items()
-        if items and items > 0 then
-            for i = 1, items do
-                local ok, text = pcall(function() return node.List(i)() end)
-                if ok and text and text ~= '' and text ~= 'NULL' then
-                    local norm = parseClassLine(text)
-                    if norm then
-                        local dup = false
-                        for _, existing in ipairs(found) do
-                            if existing == norm then
-                                dup = true; break
+local classesFromInventoryWindow
+do
+    local function scanOneNode(node, found)
+        if not node or not node() then return end
+        pcall(function()
+            local items = node.Items()
+            if items and items > 0 then
+                for i = 1, items do
+                    local ok, text = pcall(function() return node.List(i)() end)
+                    if ok and text and text ~= '' and text ~= 'NULL' then
+                        local norm = parseClassLine(text)
+                        if norm then
+                            local dup = false
+                            for _, existing in ipairs(found) do
+                                if existing == norm then
+                                    dup = true; break
+                                end
                             end
+                            if not dup then found[#found + 1] = norm end
                         end
-                        if not dup then found[#found + 1] = norm end
                     end
                 end
             end
-        end
-    end)
-    pcall(function()
-        local text = node.Text()
-        if text and text ~= '' and text ~= 'NULL' then
-            for line in text:gmatch('[^\r\n]+') do
-                local norm = parseClassLine(line)
-                if norm then
-                    local dup = false
-                    for _, existing in ipairs(found) do
-                        if existing == norm then
-                            dup = true; break
-                        end
-                    end
-                    if not dup then found[#found + 1] = norm end
-                end
-            end
-        end
-    end)
-end
-
-local function walkChildTree(parentNode, found, depth)
-    if not parentNode or not parentNode() then return end
-    depth = depth or 0
-    if depth > 15 then return end
-    local okChild, child = pcall(function() return parentNode.FirstChild end)
-    if not okChild or not child or not child() then return end
-    local visited = 0
-    while child and child() and visited < 200 do
-        visited = visited + 1
-        scanOneNode(child, found)
-        walkChildTree(child, found, depth + 1)
-        local okNext, nxt = pcall(function() return child.Next end)
-        if not okNext or not nxt or not nxt() then break end
-        child = nxt
-    end
-end
-
-local function classesFromInventoryWindow(loud, force)
-    local wasOpen = false
-    pcall(function() wasOpen = mq.TLO.Window('InventoryWindow').Open() end)
-
-    if not wasOpen and force then
-        mq.cmd('/windowstate InventoryWindow open')
-        mq.delay(250)
-    end
-
-    local found = {}
-
-    -- 1. Check IW_ClassAbbr ("SHD\nMAG\nBST")
-    pcall(function()
-        local invWin = mq.TLO.Window('InventoryWindow')
-        if not invWin or not invWin() then return end
-        local abbrChild = invWin.Child('IW_ClassAbbr')
-        if abbrChild and abbrChild() then
-            local text = abbrChild.Text()
+        end)
+        pcall(function()
+            local text = node.Text()
             if text and text ~= '' and text ~= 'NULL' then
                 for line in text:gmatch('[^\r\n]+') do
                     local norm = parseClassLine(line)
@@ -1102,17 +1051,44 @@ local function classesFromInventoryWindow(loud, force)
                     end
                 end
             end
-        end
-    end)
+        end)
+    end
 
-    -- 2. Check IW_Class ("DreadLord\nArchConvoker\nFeralLord")
-    if #found == 0 then
+    local function walkChildTree(parentNode, found, depth)
+        if not parentNode or not parentNode() then return end
+        depth = depth or 0
+        if depth > 15 then return end
+        local okChild, child = pcall(function() return parentNode.FirstChild end)
+        if not okChild or not child or not child() then return end
+        local visited = 0
+        while child and child() and visited < 200 do
+            visited = visited + 1
+            scanOneNode(child, found)
+            walkChildTree(child, found, depth + 1)
+            local okNext, nxt = pcall(function() return child.Next end)
+            if not okNext or not nxt or not nxt() then break end
+            child = nxt
+        end
+    end
+
+    function classesFromInventoryWindow(loud, force)
+        local wasOpen = false
+        pcall(function() wasOpen = mq.TLO.Window('InventoryWindow').Open() end)
+
+        if not wasOpen and force then
+            mq.cmd('/windowstate InventoryWindow open')
+            mq.delay(250)
+        end
+
+        local found = {}
+
+        -- 1. Check IW_ClassAbbr ("SHD\nMAG\nBST")
         pcall(function()
             local invWin = mq.TLO.Window('InventoryWindow')
             if not invWin or not invWin() then return end
-            local clsChild = invWin.Child('IW_Class')
-            if clsChild and clsChild() then
-                local text = clsChild.Text()
+            local abbrChild = invWin.Child('IW_ClassAbbr')
+            if abbrChild and abbrChild() then
+                local text = abbrChild.Text()
                 if text and text ~= '' and text ~= 'NULL' then
                     for line in text:gmatch('[^\r\n]+') do
                         local norm = parseClassLine(line)
@@ -1129,34 +1105,17 @@ local function classesFromInventoryWindow(loud, force)
                 end
             end
         end)
-    end
 
-    -- 3. Check IW_ClassList
-    if #found == 0 then
-        pcall(function()
-            local invWin = mq.TLO.Window('InventoryWindow')
-            if not invWin or not invWin() then return end
-            local listChild = invWin.Child('IW_ClassList')
-            if listChild and listChild() then
-                for i = 1, 10 do
-                    local ok, text = pcall(function() return listChild.List(i)() end)
-                    if ok and text and text ~= '' and text ~= 'NULL' then
-                        local norm = parseClassLine(text)
-                        if norm then
-                            local dup = false
-                            for _, existing in ipairs(found) do
-                                if existing == norm then
-                                    dup = true; break
-                                end
-                            end
-                            if not dup then found[#found + 1] = norm end
-                        end
-                    end
-                end
-                if #found == 0 then
-                    local okText, rawText = pcall(function() return listChild.Text() end)
-                    if okText and rawText and rawText ~= '' and rawText ~= 'NULL' then
-                        for line in rawText:gmatch('[^\r\n]+') do
+        -- 2. Check IW_Class ("DreadLord\nArchConvoker\nFeralLord")
+        if #found == 0 then
+            pcall(function()
+                local invWin = mq.TLO.Window('InventoryWindow')
+                if not invWin or not invWin() then return end
+                local clsChild = invWin.Child('IW_Class')
+                if clsChild and clsChild() then
+                    local text = clsChild.Text()
+                    if text and text ~= '' and text ~= 'NULL' then
+                        for line in text:gmatch('[^\r\n]+') do
                             local norm = parseClassLine(line)
                             if norm then
                                 local dup = false
@@ -1170,36 +1129,79 @@ local function classesFromInventoryWindow(loud, force)
                         end
                     end
                 end
-            end
-        end)
-    end
-
-    -- 4. Tree Walk fallback
-    if #found == 0 then
-        pcall(function()
-            local invWin = mq.TLO.Window('InventoryWindow')
-            if invWin and invWin() then
-                walkChildTree(invWin, found, 0)
-            end
-        end)
-    end
-
-    if not wasOpen and force then
-        mq.cmd('/windowstate InventoryWindow close')
-    end
-
-    if #found > 0 then
-        if loud then
-            print(string.format('\ay[Triune]\ax Detected %d class(es) from InventoryWindow: %s', #found,
-                table.concat(found, ', ')))
+            end)
         end
-        return found
-    end
 
-    if loud then
-        print('\ar[Triune]\ax InventoryWindow returned no classes.')
+        -- 3. Check IW_ClassList
+        if #found == 0 then
+            pcall(function()
+                local invWin = mq.TLO.Window('InventoryWindow')
+                if not invWin or not invWin() then return end
+                local listChild = invWin.Child('IW_ClassList')
+                if listChild and listChild() then
+                    for i = 1, 10 do
+                        local ok, text = pcall(function() return listChild.List(i)() end)
+                        if ok and text and text ~= '' and text ~= 'NULL' then
+                            local norm = parseClassLine(text)
+                            if norm then
+                                local dup = false
+                                for _, existing in ipairs(found) do
+                                    if existing == norm then
+                                        dup = true; break
+                                    end
+                                end
+                                if not dup then found[#found + 1] = norm end
+                            end
+                        end
+                    end
+                    if #found == 0 then
+                        local okText, rawText = pcall(function() return listChild.Text() end)
+                        if okText and rawText and rawText ~= '' and rawText ~= 'NULL' then
+                            for line in rawText:gmatch('[^\r\n]+') do
+                                local norm = parseClassLine(line)
+                                if norm then
+                                    local dup = false
+                                    for _, existing in ipairs(found) do
+                                        if existing == norm then
+                                            dup = true; break
+                                        end
+                                    end
+                                    if not dup then found[#found + 1] = norm end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+
+        -- 4. Tree Walk fallback
+        if #found == 0 then
+            pcall(function()
+                local invWin = mq.TLO.Window('InventoryWindow')
+                if invWin and invWin() then
+                    walkChildTree(invWin, found, 0)
+                end
+            end)
+        end
+
+        if not wasOpen and force then
+            mq.cmd('/windowstate InventoryWindow close')
+        end
+
+        if #found > 0 then
+            if loud then
+                print(string.format('\ay[Triune]\ax Detected %d class(es) from InventoryWindow: %s', #found,
+                    table.concat(found, ', ')))
+            end
+            return found
+        end
+
+        if loud then
+            print('\ar[Triune]\ax InventoryWindow returned no classes.')
+        end
+        return nil
     end
-    return nil
 end
 
 local function detectClasses(loud)
@@ -2644,7 +2646,7 @@ do
     end
 end
 
-local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ, isBuffActiveFn)
+function runtime.findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ, isBuffActiveFn)
     maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
     local myZ = mq.TLO.Me.Z() or 0
     local chosenId, lowestHp = nil, 101
@@ -3416,7 +3418,7 @@ function runtime.tryMem(slot, spellName, bypassCheck)
     end
 
     -- 1. Unmemorize duplicate instances of this spell in other gem slots first
-    for s = 1, NUM_GEMS do
+    for s = 1, getNumGems() do
         if s ~= slot and (isGemMatching(s, cleanName) or isGemMatching(s, spellName)) then
             runtime.unmemGem(s)
             break
@@ -3941,7 +3943,7 @@ local CLASS_ACTIONS = {
     universal = { 'Begging', 'Bind Wound', 'Sense Heading' },
 }
 
-local function isActionSkill(name)
+function runtime.isActionSkill(name)
     if not name or type(name) ~= 'string' or name == '' then return false end
     for _, list in pairs(CLASS_ACTIONS) do
         for _, n in ipairs(list) do if n == name then return true end end
@@ -3949,7 +3951,7 @@ local function isActionSkill(name)
     return false
 end
 
-local function isSpecialSkill(name)
+function runtime.isSpecialSkill(name)
     if not name or type(name) ~= 'string' or name == '' then return false end
     for _, list in pairs(CLASS_ACTIONS) do
         for _, n in ipairs(list) do if n == name then return true end end
@@ -3995,61 +3997,64 @@ local function isFeignDeathAbility(name)
         or lower:find("death's effigy", 1, true) ~= nil
 end
 
-local ABILITY_BASE_COOLDOWNS = {
-    ['Kick']          = 6,
-    ['Bash']          = 6,
-    ['Slam']          = 6,
-    ['Round Kick']    = 6,
-    ['Tiger Claw']    = 6,
-    ['Eagle Strike']  = 6,
-    ['Dragon Punch']  = 6,
-    ['Tail Rake']     = 6,
-    ['Flying Kick']   = 6,
-    ['Backstab']      = 10,
-    ['Taunt']         = 6,
-    ['Disarm']        = 10,
-    ['Mend']          = 360,
-    ['Feign Death']   = 8,
-    ['Sneak']         = 6,
-    ['Hide']          = 6,
-    ['Sense Heading'] = 6,
-    ['Forage']        = 10,
-    ['Frenzy']        = 10,
-    ['Intimidation']  = 10,
-    ['Begging']       = 10,
-    ['Pick Pockets']  = 10,
-    ['Bind Wound']    = 10,
-    ['Tracking']      = 10,
-    ['Track']         = 10,
-    ['Safe Fall']     = 6,
-    ['Throw Stone']   = 6,
-}
+local getAbilityBaseCooldown
+do
+    local ABILITY_BASE_COOLDOWNS = {
+        ['Kick']          = 6,
+        ['Bash']          = 6,
+        ['Slam']          = 6,
+        ['Round Kick']    = 6,
+        ['Tiger Claw']    = 6,
+        ['Eagle Strike']  = 6,
+        ['Dragon Punch']  = 6,
+        ['Tail Rake']     = 6,
+        ['Flying Kick']   = 6,
+        ['Backstab']      = 10,
+        ['Taunt']         = 6,
+        ['Disarm']        = 10,
+        ['Mend']          = 360,
+        ['Feign Death']   = 8,
+        ['Sneak']         = 6,
+        ['Hide']          = 6,
+        ['Sense Heading'] = 6,
+        ['Forage']        = 10,
+        ['Frenzy']        = 10,
+        ['Intimidation']  = 10,
+        ['Begging']       = 10,
+        ['Pick Pockets']  = 10,
+        ['Bind Wound']    = 10,
+        ['Tracking']      = 10,
+        ['Track']         = 10,
+        ['Safe Fall']     = 6,
+        ['Throw Stone']   = 6,
+    }
 
-local function getAbilityBaseCooldown(name)
-    if not name or name == '' then return 6 end
-    if ABILITY_BASE_COOLDOWNS[name] then return ABILITY_BASE_COOLDOWNS[name] end
-    local tot = 0
-    pcall(function()
-        local t = mq.TLO.Me.AbilityTimerTotal(name)
-        if not t or not t() then
-            local idx = mq.TLO.Me.Ability(name)()
-            if idx and idx > 0 then t = mq.TLO.Me.AbilityTimerTotal(idx) end
-        end
-        if t and t() then
-            if type(t.TotalSeconds) == 'function' then
-                tot = tonumber(t.TotalSeconds() or 0) or 0
-            elseif type(t.TotalSeconds) == 'number' then
-                tot = tonumber(t.TotalSeconds() or 0) or 0
-            elseif t.Raw and type(t.Raw) == 'function' then
-                tot = (tonumber(t.Raw() or 0) or 0) / 1000.0
-            elseif tonumber(t()) then
-                local n = tonumber(t()) or 0
-                tot = n > 1000 and (n / 1000.0) or n
+    function getAbilityBaseCooldown(name)
+        if not name or name == '' then return 6 end
+        if ABILITY_BASE_COOLDOWNS[name] then return ABILITY_BASE_COOLDOWNS[name] end
+        local tot = 0
+        pcall(function()
+            local t = mq.TLO.Me.AbilityTimerTotal(name)
+            if not t or not t() then
+                local idx = mq.TLO.Me.Ability(name)()
+                if idx and idx > 0 then t = mq.TLO.Me.AbilityTimerTotal(idx) end
             end
-        end
-    end)
-    if tot > 0 then return tot end
-    return 6
+            if t and t() then
+                if type(t.TotalSeconds) == 'function' then
+                    tot = tonumber(t.TotalSeconds() or 0) or 0
+                elseif type(t.TotalSeconds) == 'number' then
+                    tot = tonumber(t.TotalSeconds() or 0) or 0
+                elseif t.Raw and type(t.Raw) == 'function' then
+                    tot = (tonumber(t.Raw() or 0) or 0) / 1000.0
+                elseif tonumber(t()) then
+                    local n = tonumber(t()) or 0
+                    tot = n > 1000 and (n / 1000.0) or n
+                end
+            end
+        end)
+        if tot > 0 then return tot end
+        return 6
+    end
 end
 
 local function parseDurationSec(durObj)
@@ -4207,160 +4212,163 @@ local function parseSpellRecastTime(sp)
     return sec
 end
 
-local DISC_BASE_COOLDOWNS = {
-    ['Defensive Discipline']       = 900,
-    ['Evasive Discipline']         = 900,
-    ['Stonewall Discipline']       = 900,
-    ['Furious Discipline']         = 3600,
-    ['Fortitude Discipline']       = 3600,
-    ['Mighty Strike Discipline']   = 3600,
-    ['Charge Discipline']          = 900,
-    ['Resistant Discipline']       = 600,
-    ['Fearless Discipline']        = 600,
-    ['Precision Discipline']       = 300,
-    ['Aggressive Discipline']      = 300,
-    ['Frenzied Defense Discipline']= 900,
-    ['Fellstrike Discipline']      = 900,
-    ['Bellow of the Mastruq']      = 30,
-    ['Incite']                     = 30,
-    ['Berate']                     = 30,
-    ['Provoke']                    = 30,
-    ['Bellow']                     = 30,
-    ['Ancient: Chaos Cry']         = 30,
-    ['Aura of Runes']              = 30,
-    ['Infused by Rage']            = 30,
-    ['Nimble Discipline']          = 900,
-    ['Deftdance Discipline']       = 900,
-    ['Kinesthetics Discipline']    = 1800,
-    ['Duelist Discipline']         = 900,
-    ['Blinding Speed Discipline']  = 900,
-    ['Twisted Shank']              = 30,
-    ['Kyv Tear']                   = 30,
-    ['Kyv Strike']                 = 30,
-    ['Stonestance Discipline']     = 720,
-    ['Hundred Fists Discipline']   = 1800,
-    ['Inner Flame Discipline']     = 1800,
-    ['Whirlwind Discipline']       = 1800,
-    ['Voiddance Discipline']       = 900,
-    ['Ashenhand Discipline']       = 1800,
-    ['Thunderkick Discipline']     = 900,
-    ['Silentfist Discipline']      = 1800,
-    ["Dreamstrider's Discipline"]  = 1800,
-    ['Holyforge Discipline']       = 1800,
-    ['Sanctification Discipline']  = 1800,
-    ['Unholy Aura Discipline']     = 1800,
-    ['Leechcurse Discipline']      = 1800,
-    ['Bloodthirst Discipline']     = 900,
-    ['Trueshot Discipline']        = 1800,
-    ['Weapon Shield Discipline']   = 1800,
-    ['Fistshot Discipline']        = 900,
-    ["Warder's Protection"]        = 900,
-    ['Puretone Discipline']        = 1800,
-    ['Blind Rage Discipline']      = 900,
-    ['Cleaving Anger Discipline']  = 900,
-    ['Blood Pact Discipline']      = 900,
-    ['Reckless Abandon Discipline']= 900,
-    ['Savage Spirit Discipline']   = 900,
-    ['Cry Havoc']                  = 30,
-    ['Axe of the Destroyer']       = 30,
-    ['Vicious Spiral']             = 30,
-    ['Confusing Strike']           = 30,
-}
-
-local DISC_BASE_DURATIONS = {
-    ['Defensive Discipline']       = 18,
-    ['Evasive Discipline']         = 18,
-    ['Stonewall Discipline']       = 18,
-    ['Furious Discipline']         = 12,
-    ['Fortitude Discipline']       = 12,
-    ['Mighty Strike Discipline']   = 12,
-    ['Charge Discipline']          = 12,
-    ['Resistant Discipline']       = 120,
-    ['Fearless Discipline']        = 120,
-    ['Precision Discipline']       = 18,
-    ['Aggressive Discipline']      = 18,
-    ['Frenzied Defense Discipline']= 18,
-    ['Fellstrike Discipline']      = 18,
-    ['Nimble Discipline']          = 12,
-    ['Deftdance Discipline']       = 12,
-    ['Kinesthetics Discipline']    = 18,
-    ['Duelist Discipline']         = 14,
-    ['Stonestance Discipline']     = 12,
-    ['Hundred Fists Discipline']   = 14,
-    ['Inner Flame Discipline']     = 14,
-    ['Whirlwind Discipline']       = 12,
-    ['Voiddance Discipline']       = 8,
-    ['Ashenhand Discipline']       = 12,
-    ['Thunderkick Discipline']     = 12,
-    ['Holyforge Discipline']       = 300,
-    ['Sanctification Discipline']  = 18,
-    ['Unholy Aura Discipline']     = 300,
-    ['Leechcurse Discipline']      = 18,
-    ['Bloodthirst Discipline']     = 18,
-    ['Trueshot Discipline']        = 120,
-    ['Weapon Shield Discipline']   = 18,
-    ['Puretone Discipline']        = 120,
-    ['Blind Rage Discipline']      = 18,
-    ['Cleaving Anger Discipline']  = 18,
-    ['Blood Pact Discipline']      = 18,
-    ['Reckless Abandon Discipline']= 18,
-    ['Savage Spirit Discipline']   = 18,
-}
-
-local function getDiscCooldownAndDuration(name)
-    local recastSec = 0
-    local durSec = 0
-    local timerGroupId = nil
-    local endCost = 0
-    local discIdx = 0
-
-    if not name or name == '' then
-        return { recastSec = 0, durSec = 0, timerGroupId = nil, endCost = 0, discIdx = 0 }
-    end
-
-    pcall(function()
-        local ca = mq.TLO.Me.CombatAbility(name)
-        if ca and ca() then
-            discIdx = tonumber(ca() or 0) or 0
-        end
-
-        local sp = mq.TLO.Spell(name)
-        if (not sp or not sp()) and discIdx > 0 then
-            sp = mq.TLO.Me.CombatAbility(discIdx)
-        end
-
-        if sp and sp() then
-            endCost = tonumber(sp.EnduranceCost and sp.EnduranceCost() or 0) or 0
-            recastSec = parseSpellRecastTime(sp)
-
-            if sp.Duration then
-                durSec = parseDurationSec(sp.Duration)
-            end
-            if durSec <= 0 and sp.MyDuration then
-                durSec = parseDurationSec(sp.MyDuration)
-            end
-
-            local tid = sp.TimerID and sp.TimerID()
-            if tid and tonumber(tid) and tonumber(tid) > 0 then
-                timerGroupId = 'T' .. tostring(tid)
-            end
-        end
-    end)
-
-    if recastSec <= 0 and DISC_BASE_COOLDOWNS[name] then
-        recastSec = DISC_BASE_COOLDOWNS[name]
-    end
-    if durSec <= 0 and DISC_BASE_DURATIONS[name] then
-        durSec = DISC_BASE_DURATIONS[name]
-    end
-
-    return {
-        recastSec = recastSec,
-        durSec = durSec,
-        timerGroupId = timerGroupId,
-        endCost = endCost,
-        discIdx = discIdx,
+local getDiscCooldownAndDuration
+do
+    local DISC_BASE_COOLDOWNS = {
+        ['Defensive Discipline']       = 900,
+        ['Evasive Discipline']         = 900,
+        ['Stonewall Discipline']       = 900,
+        ['Furious Discipline']         = 3600,
+        ['Fortitude Discipline']       = 3600,
+        ['Mighty Strike Discipline']   = 3600,
+        ['Charge Discipline']          = 900,
+        ['Resistant Discipline']       = 600,
+        ['Fearless Discipline']        = 600,
+        ['Precision Discipline']       = 300,
+        ['Aggressive Discipline']      = 300,
+        ['Frenzied Defense Discipline']= 900,
+        ['Fellstrike Discipline']      = 900,
+        ['Bellow of the Mastruq']      = 30,
+        ['Incite']                     = 30,
+        ['Berate']                     = 30,
+        ['Provoke']                    = 30,
+        ['Bellow']                     = 30,
+        ['Ancient: Chaos Cry']         = 30,
+        ['Aura of Runes']              = 30,
+        ['Infused by Rage']            = 30,
+        ['Nimble Discipline']          = 900,
+        ['Deftdance Discipline']       = 900,
+        ['Kinesthetics Discipline']    = 1800,
+        ['Duelist Discipline']         = 900,
+        ['Blinding Speed Discipline']  = 900,
+        ['Twisted Shank']              = 30,
+        ['Kyv Tear']                   = 30,
+        ['Kyv Strike']                 = 30,
+        ['Stonestance Discipline']     = 720,
+        ['Hundred Fists Discipline']   = 1800,
+        ['Inner Flame Discipline']     = 1800,
+        ['Whirlwind Discipline']       = 1800,
+        ['Voiddance Discipline']       = 900,
+        ['Ashenhand Discipline']       = 1800,
+        ['Thunderkick Discipline']     = 900,
+        ['Silentfist Discipline']      = 1800,
+        ["Dreamstrider's Discipline"]  = 1800,
+        ['Holyforge Discipline']       = 1800,
+        ['Sanctification Discipline']  = 1800,
+        ['Unholy Aura Discipline']     = 1800,
+        ['Leechcurse Discipline']      = 1800,
+        ['Bloodthirst Discipline']     = 900,
+        ['Trueshot Discipline']        = 1800,
+        ['Weapon Shield Discipline']   = 1800,
+        ['Fistshot Discipline']        = 900,
+        ["Warder's Protection"]        = 900,
+        ['Puretone Discipline']        = 1800,
+        ['Blind Rage Discipline']      = 900,
+        ['Cleaving Anger Discipline']  = 900,
+        ['Blood Pact Discipline']      = 900,
+        ['Reckless Abandon Discipline']= 900,
+        ['Savage Spirit Discipline']   = 900,
+        ['Cry Havoc']                  = 30,
+        ['Axe of the Destroyer']       = 30,
+        ['Vicious Spiral']             = 30,
+        ['Confusing Strike']           = 30,
     }
+
+    local DISC_BASE_DURATIONS = {
+        ['Defensive Discipline']       = 18,
+        ['Evasive Discipline']         = 18,
+        ['Stonewall Discipline']       = 18,
+        ['Furious Discipline']         = 12,
+        ['Fortitude Discipline']       = 12,
+        ['Mighty Strike Discipline']   = 12,
+        ['Charge Discipline']          = 12,
+        ['Resistant Discipline']       = 120,
+        ['Fearless Discipline']        = 120,
+        ['Precision Discipline']       = 18,
+        ['Aggressive Discipline']      = 18,
+        ['Frenzied Defense Discipline']= 18,
+        ['Fellstrike Discipline']      = 18,
+        ['Nimble Discipline']          = 12,
+        ['Deftdance Discipline']       = 12,
+        ['Kinesthetics Discipline']    = 18,
+        ['Duelist Discipline']         = 14,
+        ['Stonestance Discipline']     = 12,
+        ['Hundred Fists Discipline']   = 14,
+        ['Inner Flame Discipline']     = 14,
+        ['Whirlwind Discipline']       = 12,
+        ['Voiddance Discipline']       = 8,
+        ['Ashenhand Discipline']       = 12,
+        ['Thunderkick Discipline']     = 12,
+        ['Holyforge Discipline']       = 300,
+        ['Sanctification Discipline']  = 18,
+        ['Unholy Aura Discipline']     = 300,
+        ['Leechcurse Discipline']      = 18,
+        ['Bloodthirst Discipline']     = 18,
+        ['Trueshot Discipline']        = 120,
+        ['Weapon Shield Discipline']   = 18,
+        ['Puretone Discipline']        = 120,
+        ['Blind Rage Discipline']      = 18,
+        ['Cleaving Anger Discipline']  = 18,
+        ['Blood Pact Discipline']      = 18,
+        ['Reckless Abandon Discipline']= 18,
+        ['Savage Spirit Discipline']   = 18,
+    }
+
+    function getDiscCooldownAndDuration(name)
+        local recastSec = 0
+        local durSec = 0
+        local timerGroupId = nil
+        local endCost = 0
+        local discIdx = 0
+
+        if not name or name == '' then
+            return { recastSec = 0, durSec = 0, timerGroupId = nil, endCost = 0, discIdx = 0 }
+        end
+
+        pcall(function()
+            local ca = mq.TLO.Me.CombatAbility(name)
+            if ca and ca() then
+                discIdx = tonumber(ca() or 0) or 0
+            end
+
+            local sp = mq.TLO.Spell(name)
+            if (not sp or not sp()) and discIdx > 0 then
+                sp = mq.TLO.Me.CombatAbility(discIdx)
+            end
+
+            if sp and sp() then
+                endCost = tonumber(sp.EnduranceCost and sp.EnduranceCost() or 0) or 0
+                recastSec = parseSpellRecastTime(sp)
+
+                if sp.Duration then
+                    durSec = parseDurationSec(sp.Duration)
+                end
+                if durSec <= 0 and sp.MyDuration then
+                    durSec = parseDurationSec(sp.MyDuration)
+                end
+
+                local tid = sp.TimerID and sp.TimerID()
+                if tid and tonumber(tid) and tonumber(tid) > 0 then
+                    timerGroupId = 'T' .. tostring(tid)
+                end
+            end
+        end)
+
+        if recastSec <= 0 and DISC_BASE_COOLDOWNS[name] then
+            recastSec = DISC_BASE_COOLDOWNS[name]
+        end
+        if durSec <= 0 and DISC_BASE_DURATIONS[name] then
+            durSec = DISC_BASE_DURATIONS[name]
+        end
+
+        return {
+            recastSec = recastSec,
+            durSec = durSec,
+            timerGroupId = timerGroupId,
+            endCost = endCost,
+            discIdx = discIdx,
+        }
+    end
 end
 
 local function hasActionSkill(name)
@@ -4394,7 +4402,7 @@ local function hasActionSkill(name)
     return false
 end
 
-local function actionClassInfo(name)
+function runtime.actionClassInfo(name)
     if not name or type(name) ~= 'string' or name == '' then return (myClasses and myClasses[1]) or 'War' end
     for _, cls in ipairs(myClasses or {}) do
         local list = CLASS_ACTIONS[cls]
@@ -4516,7 +4524,7 @@ local function getClientAbilities()
                     seen[nm] = true
                     clientList[#clientList + 1] = {
                         name = nm,
-                        cls = actionClassInfo(nm),
+                        cls = runtime.actionClassInfo(nm),
                         skillCap = 0,
                         currentSkill = curVal,
                         isTrained = true,
@@ -4757,7 +4765,7 @@ end
 -- Catches a stale loadout: a gem configured for spell X while the physical
 -- bar actually has something else (or nothing) memmed in that slot -- e.g.
 -- left over from before a re-mem, or the bar changed outside Triune.
-local function checkGemMemSync()
+function runtime.checkGemMemSync()
     local now = os.clock()
     if (now - (runtime.lastGemSyncCheckAt or 0)) < 10.0 then return end
     runtime.lastGemSyncCheckAt = now
@@ -4864,7 +4872,7 @@ function runtime.applyEntry(e)
     -- Migrate legacy special skills (e.g. Mend) saved in e.discs into loadout.actions
     if type(e.discs) == 'table' then
         for k, v in pairs(e.discs) do
-            if isActionSkill(k) and type(v) == 'table' then
+            if runtime.isActionSkill(k) and type(v) == 'table' then
                 if not loadout.actions[k] then
                     loadout.actions[k] = v
                 end
@@ -5121,7 +5129,7 @@ end
 -- Per-character loadout file path (multibox-safe). Each client writes ONLY its
 -- own triune_loadout_<server>_<char>.lua, so different characters never share
 -- (and never overwrite each other's) settings, ignore/pull lists, or zone data.
-local function loadoutFilePath()
+function runtime.loadoutFilePath()
     local serverName = ''
     pcall(function() serverName = mq.TLO.EverQuest.ServerName() or '' end)
     if not serverName or serverName == '' then
@@ -5134,7 +5142,7 @@ end
 function runtime.loadAll()
     local t = nil
     if myName then
-        local fn = loadfile(loadoutFilePath())
+        local fn = loadfile(runtime.loadoutFilePath())
         if fn then
             local ok, t2 = pcall(fn)
             if ok and type(t2) == 'table' then t = t2 end
@@ -5201,7 +5209,7 @@ runtime.saveLoadout = function(silent, force)
     ALLDATA.__zoneWaypointPresets = ctrl.zone_waypoint_presets
     -- Write to a temp file and rename over the real one so a serialize error
     -- or a crash mid-write can never leave a truncated loadout behind.
-    local path = loadoutFilePath()
+    local path = runtime.loadoutFilePath()
     local tmpPath = path .. '.tmp'
     local f = io.open(tmpPath, 'w')
     if not f then return end
@@ -13416,7 +13424,7 @@ function UI.drawSettingsTab()
     end
 
     -- 6. Pet Management & Discipline (conditionally shown if trio has pet class or active pet)
-    if trioHasPetClass() or hasActivePet() then
+    if runtime.trioHasPetClass() or hasActivePet() then
         if ImGui.CollapsingHeader('Pet Management & Discipline', ImGuiTreeNodeFlags.DefaultOpen) then
             ImGui.SetNextItemWidth(UI.px(180))
             local petAssistVal = ImGui.SliderInt('Pet Assist At %##pa', ctrl.pet_assist_at or 100, 1, 100, '%d%%')
@@ -14586,12 +14594,6 @@ end
 -- true if the target already has the effect. Checks BOTH the buff window and the
 -- SONG window (bard song effects live in the song window). Each probe is isolated
 -- in its own pcall so an unsupported TLO on this build can't nuke the whole check.
-local function tloTrue(fn)
-    local hit = false
-    pcall(function() if fn() then hit = true end end)
-    return hit
-end
-
 -- Name-based "Buff(name)" lookups have already proven unreliable on this MQ
 -- build twice this session (CombatAbility(name) for discs, Target.Target for
 -- assist) -- the proven, reliable pattern instead is numeric indexing +
@@ -14928,6 +14930,11 @@ function runtime.isPetBuffActive(petId, name, minSec)
 end
 
 local function buffActive(id, name, minSec)
+    local function tloTrue(fn)
+        local hit = false
+        pcall(function() if fn() then hit = true end end)
+        return hit
+    end
     if not id or id == 0 then return false end
     minSec = tonumber(minSec) or 0
     if id == mq.TLO.Me.ID() then
@@ -15073,7 +15080,7 @@ function runtime.lowestHpAlly(maxDist, includeBoxes)
 end
 
 local function firstNPCXtarget(unmezzedOnly, maxZ, maxDist)
-    return findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, maxDist, maxZ, buffActive)
+    return runtime.findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, maxDist, maxZ, buffActive)
 end
 
 -- Returns count of live, non-ignored NPCs occupying XTarget slots.
@@ -16416,7 +16423,7 @@ end)
 local function reconcileSungBuffs()
     local found = 0
     local function scanGemTable(gemsTable)
-        -- gems is a priority list that can hold more than NUM_GEMS entries
+        -- gems is a priority list that can hold more than getNumGems() entries
         for i = 1, #gemsTable do
             local g = gemsTable[i]
             local gpct = g and tonumber(g.pct)
@@ -20030,7 +20037,6 @@ runtime.isAnyPet = isAnyPet
 runtime.isSpawnPetOrPlayer = isSpawnPetOrPlayer
 runtime.isHostileTarget = isHostileTarget
 runtime.firstNPCXtarget = firstNPCXtarget
-runtime.findFirstNPCXtarget = findFirstNPCXtarget
 runtime.stopMoving = stopMoving
 runtime.distToId = distToId
 runtime.distToLoc = distToLoc
@@ -20040,19 +20046,14 @@ runtime.navLoaded = navLoaded
 runtime.navMeshLoaded = navMeshLoaded
 runtime.stickLoaded = stickLoaded
 runtime.hasActivePet = hasActivePet
-runtime.trioHasPetClass = trioHasPetClass
 runtime.setManualHunterPetHold = setManualHunterPetHold
-runtime.checkGemMemSync = checkGemMemSync
 runtime.baseTok = baseTok
 runtime.sungKey = sungKey
-runtime.isSpecialSkill = isSpecialSkill
-runtime.isActionSkill = isActionSkill
 runtime.isAutoskillEligible = isAutoskillEligible
 runtime.isFeignDeathAbility = isFeignDeathAbility
 runtime.CLASS_ACTIONS = CLASS_ACTIONS
 runtime.defaultActionEntry = defaultActionEntry
 runtime.hasActionSkill = hasActionSkill
-runtime.actionClassInfo = actionClassInfo
 runtime.getClientAbilities = getClientAbilities
 runtime.clearCursor = clearCursor
 runtime.isIgnored = isIgnored
@@ -20569,7 +20570,7 @@ local function combatTick()
         runtime.decayZoneHazards()
         runtime.nextHazardDecayAt = os.time() + 60
     end
-    checkGemMemSync()
+    runtime.checkGemMemSync()
     if (ctrl.mode == 'Manual' and ctrl.manual_auto_xtarget ~= false) or ctrl.mode == 'Puller' then
         checkAggroSwitch()
     end
