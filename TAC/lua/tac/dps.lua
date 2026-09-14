@@ -22,7 +22,7 @@ local plugin = {
     uses               = { boxnet = 'group DPS meter fed by the other boxes (Group tab, compact window)' },
     description        = 'Live combat-log DPS parser with per-fight player / pet breakdowns, encounter history, and chat reports.',
     defaultEnabled     = true,
-    tickInterval       = 0.05,
+    tickInterval       = 0.25,   -- plenty for a 6 s fight timeout and the 2 s share cadence
     runOutOfCombatOnly = false,
     hasThread          = false,
     -- Window owned by this plugin (drives the main-window header button)
@@ -95,6 +95,14 @@ for verb in pairs(COMBAT_VERBS) do
 end
 table.sort(SORTED_COMBAT_VERB_LIST, function(a, b) return #a > #b end)
 
+-- Both match forms per verb, built once: the line-start pattern ("^verb%s+",
+-- multi-word verbs with %s+ between words) and the plain " verb " needle.
+-- parseMeleeSentence runs on every "#1# for #2#" chat line.
+local VERB_PATTERNS = {}
+for i, verb in ipairs(SORTED_COMBAT_VERB_LIST) do
+    VERB_PATTERNS[i] = { verb = verb, start = "^" .. verb:gsub("%s+", "%%s+") .. "%s+", inner = " " .. verb .. " " }
+end
+
 local function getVerbCategory(verb)
     local lowerV = (verb or ''):lower()
     if SKILL_VERBS[lowerV] then
@@ -126,11 +134,15 @@ local rt = {
     -- Box Network: other boxes' fights, keyed by lower-case name
     boxes = {},
     boxesUnsub = nil,
+    boxesApi = nil,        -- the boxnet api table / generation the subscription was made on
+    boxesGen = nil,
+    hitGen = 0,            -- bumped by touched(): invalidates the per-frame view caches
     lastLiveShareAt = 0,
     fightStartTime = 0,
     lastDamageTime = 0,
     currentTargetId = 0,
     currentTargetName = 'None',
+    lastZoneShort = nil,   -- zone short name at the last auto-reset (zone-change detection)
     
     -- Current Fight Overall Totals
     playerDamage = 0,
@@ -232,9 +244,14 @@ end
 local function isValidMobName(name)
     if not name or name == '' then return false end
     local lower = name:lower()
+    -- Word-anchored keyword checks (frontier patterns) so mob names that merely
+    -- contain these substrings (e.g. "a manaetic golem", "Beenor") stay valid.
     if lower:find("non%-melee") or lower:find("nonmelee") or lower:sub(1,3) == 'by '
-       or lower:find("healed") or lower:find("been") or lower:find("taken") or lower:find("mana") 
-       or lower == 'target' or lower == 'none' or lower == 'unknown' then
+       or lower:find("%f[%a]healed%f[%A]") or lower:find("%f[%a]been%f[%A]")
+       or lower:find("%f[%a]taken%f[%A]") or lower:find("%f[%a]mana%f[%A]")
+       or lower == 'target' or lower == 'none' or lower == 'unknown'
+       or lower == 'you' or lower == 'yourself' or lower == 'itself'
+       or lower == 'himself' or lower == 'herself' then
         return false
     end
     return true
@@ -244,12 +261,27 @@ local function isValidCombatTarget(targetStr)
     return isValidMobName(targetStr)
 end
 
+-- Milliseconds for the lookup / meter caches (mq.gettime when available).
+local function nowMs()
+    local ok, t = pcall(function() return mq.gettime() end)
+    if ok and type(t) == 'number' then return t end
+    return os.clock() * 1000
+end
+
+-- Own name, pet name and group membership are consulted for every combat
+-- line and each is a TLO round-trip, so they are cached for LOOKUP_TTL_MS
+-- (warmed from tick(), refreshed lazily when a line arrives first).
+local LOOKUP_TTL_MS = 1000
+local GROUP_CACHE_MAX = 256
+local lookups = { nameAt = -1e9, name = '', petAt = -1e9, group = {}, groupN = 0 }
+
 local function getMyPlayerName()
+    local now = nowMs()
+    if (now - lookups.nameAt) < LOOKUP_TTL_MS then return lookups.name end
+    lookups.nameAt = now
     local ok, name = pcall(function() return mq.TLO.Me.CleanName() end)
-    if ok and name and name ~= '' then
-        return name:lower()
-    end
-    return ''
+    lookups.name = (ok and name and name ~= '') and tostring(name):lower() or ''
+    return lookups.name
 end
 
 local function isPlayerActor(actorStr)
@@ -280,10 +312,9 @@ local function parseMeleeSentence(sentence)
     local cleanS = cleanLine(sentence)
     local lowerS = cleanS:lower()
     
-    for _, verb in ipairs(SORTED_COMBAT_VERB_LIST) do
+    for _, vp in ipairs(VERB_PATTERNS) do
         -- Tier 1: Check if line starts directly with the verb (e.g. "punch a cleric...", "kick a cleric...")
-        local vPattern = "^" .. verb:gsub("%s+", "%%s+") .. "%s+"
-        local sStart, sEnd = lowerS:find(vPattern)
+        local sStart, sEnd = lowerS:find(vp.start)
         if sStart then
             local actor = "You"
             local matchedVerb = cleanS:sub(sStart, sEnd):match("^%s*(.-)%s*$")
@@ -293,8 +324,7 @@ local function parseMeleeSentence(sentence)
             end
         else
             -- Tier 2: Check for " verb " with leading space (e.g. "Tenekis crushes a forlorn revenant")
-            local searchStr = " " .. verb .. " "
-            local sStart2, sEnd2 = lowerS:find(searchStr, 1, true)
+            local sStart2, sEnd2 = lowerS:find(vp.inner, 1, true)
             if sStart2 then
                 local actor = cleanS:sub(1, sStart2 - 1):match("^%s*(.-)%s*$")
                 local matchedVerb = cleanS:sub(sStart2 + 1, sEnd2 - 1)
@@ -363,13 +393,20 @@ end
 -- Helper & Calculation Functions
 -- ============================================================================
 local function getPetName()
+    local now = nowMs()
+    if (now - lookups.petAt) < LOOKUP_TTL_MS then return petState.name end
+    lookups.petAt = now
     local ok, name = pcall(function() return mq.TLO.Pet.CleanName() end)
     if ok and name and name ~= '' and name ~= 'NULL' then
-        petState.name = name
-        return name
+        petState.name = tostring(name)
     end
     return petState.name
 end
+
+-- True when `name` is in our group. Prefers the Box Network's cached answer
+-- (one place, one TTL); otherwise its own LOOKUP_TTL_MS cache over
+-- Group.Member(). Defined after boxnet() below; used by isFriendlyTarget.
+local isGroupMember
 
 local function getCleanPetName(actorStr)
     local cleaned = cleanLine(actorStr)
@@ -389,9 +426,12 @@ local function isPetActor(actorStr)
     if not actorStr or actorStr == '' then return false end
     if isPlayerActor(actorStr) then return false end
     
-    -- Explicit owner tag indicates a pet
-    if actorStr:find("%([Oo]wner:") then
-        return true
+    -- Explicit owner tag indicates a pet; only ours when the owner is us
+    local owner = actorStr:match("%([Oo]wner:%s*(.-)%s*%)")
+    if owner then
+        local myName = getMyPlayerName()
+        if myName == '' then return true end
+        return owner:gsub("%W", ""):lower() == myName:gsub("%W", ""):lower()
     end
     
     local cleanActor = actorStr:gsub("%W", ""):lower()
@@ -401,7 +441,8 @@ local function isPetActor(actorStr)
         return true
     end
     
-    -- Check Active Pet Clean Name
+    -- Check Active Pet Clean Name (cached Pet.CleanName; the old second
+    -- Pet.ID / Pet.CleanName round-trip could only match what this already did)
     local pName = getPetName()
     if pName and pName ~= '' and pName ~= 'NULL' then
         local cleanPName = pName:gsub("%W", ""):lower()
@@ -410,25 +451,30 @@ local function isPetActor(actorStr)
         end
     end
     
-    -- Check Pet TLO ID & CleanName
-    local ok, petId = pcall(function() return mq.TLO.Pet.ID() end)
-    if ok and petId and petId > 0 then
-        local ok2, cName = pcall(function() return mq.TLO.Pet.CleanName() end)
-        if ok2 and cName and cName ~= '' and cName ~= 'NULL' then
-            local cleanCName = cName:gsub("%W", ""):lower()
-            if cleanCName ~= '' and (cleanActor == cleanCName or cleanActor:find(cleanCName, 1, true)) then
-                return true
-            end
-        end
-    end
-    
     -- Matches swarm pets / generic pet suffixes (e.g. "...'s pet" or "... pet") or Animated Corpse
     if cleanActor:sub(-3) == 'pet' or cleanActor:find('corpse') or cleanActor:find('animated') then
         return true
     end
     
-    -- Any non-player actor that is not a mob target hit is treated as pet/ally
-    return true
+    -- Anything else (mobs hitting us, other players, their pets) is not ours
+    return false
+end
+
+-- True when the damage target is us, our pet, or a group member: those lines
+-- are incoming/friendly-fire damage and must never be recorded as outgoing.
+local function isFriendlyTarget(targetStr)
+    if not targetStr or targetStr == '' then return false end
+    local cleanTarget = cleanLine(targetStr):gsub("[!%.%?,]+$", "")
+    local lower = cleanTarget:lower()
+    if lower == 'you' or lower == 'yourself' or lower == 'itself' or lower == 'himself' or lower == 'herself' then
+        return true
+    end
+    if isPlayerActor(cleanTarget) then return true end
+    local pName = getPetName()
+    if pName and pName ~= '' and pName ~= 'NULL' and lower == pName:lower() then
+        return true
+    end
+    return isGroupMember(cleanTarget)
 end
 
 local function getCurrentFightDuration()
@@ -447,7 +493,15 @@ local function getFightDPS(dmg, dur)
     return math.floor((dmg / dur) + 0.5)
 end
 
+-- Bumped whenever the live breakdowns, the history or the box parses change:
+-- the per-frame views (sorted tables, combined maps, category totals, meter
+-- rows) are only recomputed when it moved.
+local function touched()
+    rt.hitGen = (rt.hitGen or 0) + 1
+end
+
 local function recordHit(sourceTable, attackName, damage, isCrit, isMiss, isPetFlag, category)
+    touched()
     if not sourceTable[attackName] then
         sourceTable[attackName] = {
             count = 0,
@@ -469,7 +523,27 @@ local function recordHit(sourceTable, attackName, damage, isCrit, isMiss, isPetF
         if damage < item.minDmg or item.minDmg == 0 then item.minDmg = damage end
         if damage > item.maxDmg then item.maxDmg = damage end
         if isCrit then item.crits = item.crits + 1 end
+        -- Last hit, so a separate "scores a critical hit! (N)" line can be
+        -- credited to the row it belongs to (see creditCrit).
+        item.lastDmg = damage
+        item.lastSeq = rt.hitGen
     end
+end
+
+-- Credits a standalone crit line to one row of `map`: the row whose last hit
+-- was exactly `dmg`, else the most recently hit row, else nobody (never the
+-- first row in pairs() order).
+local function creditCrit(map, dmg)
+    local match, matchSeq, latest, latestSeq = nil, -1, nil, -1
+    for _, item in pairs(map) do
+        local seq = item.lastSeq or -1
+        if seq >= 0 then
+            if dmg ~= nil and item.lastDmg == dmg and seq > matchSeq then match, matchSeq = item, seq end
+            if seq > latestSeq then latest, latestSeq = item, seq end
+        end
+    end
+    local row = match or latest
+    if row then row.crits = row.crits + 1 end
 end
 
 local function recordPetHit(actorRaw, attackName, damage, isCrit, isMiss, category)
@@ -542,6 +616,7 @@ local function resetCurrentFight()
     rt.petCrits = 0
     rt.playerBreakdown = {}
     rt.petBreakdown = {}
+    touched()
 end
 
 -- ----------------------------------------------------------------------------
@@ -575,14 +650,24 @@ local function onBoxDps(data, sender)
             playerDmg = tonumber(data.playerDmg) or 0, petDmg = tonumber(data.petDmg) or 0, at = os.date('%H:%M:%S') }
     end
     rt.boxes[key] = b
+    touched()
 end
 
 local function ensureBoxSubscription()
-    if rt.boxesUnsub then return end
     local bn = boxnet()
     if not bn or type(bn.subscribe) ~= 'function' then return end
+    -- A reloaded Box Network hands out a new api table (or a new generation
+    -- from the same one): the old subscription is stale, so re-subscribe.
+    local gen = type(bn.generation) == 'function' and bn.generation() or nil
+    if rt.boxesUnsub then
+        if rt.boxesApi == bn and rt.boxesGen == gen then return end
+        pcall(rt.boxesUnsub)
+        rt.boxesUnsub = nil
+    end
     local ok, unsub = pcall(bn.subscribe, 'dps:share', onBoxDps)
-    if ok and type(unsub) == 'function' then rt.boxesUnsub = unsub end
+    if ok and type(unsub) == 'function' then
+        rt.boxesUnsub, rt.boxesApi, rt.boxesGen = unsub, bn, gen
+    end
 end
 
 local function shareLive()
@@ -628,13 +713,29 @@ end
 -- everybody's last fight. Rows are sorted by DPS; pct is the share of the
 -- combined damage.
 -- ----------------------------------------------------------------------------
-local function isGroupMember(name)
+function isGroupMember(name)
     if not name or name == '' then return false end
+    local bn = core and rawget(core, 'boxnet')
+    if type(bn) == 'table' and type(bn.isGroupMember) == 'function' then
+        local okBn, v = pcall(bn.isGroupMember, name)
+        if okBn then return v == true end
+    end
+    local key = tostring(name):lower()
+    local now = nowMs()
+    local c = lookups.group[key]
+    if c and (now - c.at) < LOOKUP_TTL_MS then return c.v end
     local ok, isMember = pcall(function()
         local m = mq.TLO.Group.Member(name)
         return m ~= nil and m() ~= nil and (m.ID() or 0) > 0
     end)
-    return ok and isMember == true
+    local v = ok and isMember == true
+    if not c then
+        -- Mob names flow through here too (isFriendlyTarget): keep it bounded.
+        if lookups.groupN >= GROUP_CACHE_MAX then lookups.group, lookups.groupN = {}, 0 end
+        lookups.groupN = lookups.groupN + 1
+    end
+    lookups.group[key] = { v = v, at = now }
+    return v
 end
 
 local function fmtNum(n)
@@ -696,6 +797,22 @@ local function meterRows()
         return tostring(a.name):lower() < tostring(b.name):lower()
     end)
     return rows, { live = anyLive, dps = partyDps, dmg = total, topDps = topDps, count = #rows, fighting = fighting }
+end
+
+-- meterRows() for the windows: recomputed when a hit / share landed or after
+-- METER_CACHE_MS (the live DPS moves with time), never every frame. tick()
+-- refreshes it while a window is open; the draw only falls back to computing
+-- when the cache is missing or stale. Reports keep calling meterRows() directly.
+local METER_CACHE_MS = 250
+local meterCache = { rows = nil, summary = nil, at = -1e9, gen = nil }
+local function cachedMeterRows()
+    local now = nowMs()
+    if meterCache.rows and meterCache.gen == rt.hitGen and (now - meterCache.at) < METER_CACHE_MS then
+        return meterCache.rows, meterCache.summary
+    end
+    local rows, summary = meterRows()
+    meterCache.rows, meterCache.summary, meterCache.at, meterCache.gen = rows, summary, now, rt.hitGen
+    return rows, summary
 end
 
 -- One meter row: name, then a bar scaled to the top DPS with "dps (share%)"
@@ -813,6 +930,7 @@ local function endFightSession()
     
     rt.inFight = false
     rt.currentTargetId = 0
+    touched()
 end
 
 local function startFightIfNeeded(targetName)
@@ -875,14 +993,22 @@ end
 local function onUnifiedMeleeHit(line, sentenceRaw, dmgStrRaw, extraRaw)
     if cfg.paused then return end
     
-    -- Filter out non-melee spell lines
-    if sentenceRaw:find("non%-melee") or (extraRaw and extraRaw:find("non%-melee")) then
+    -- Filter out non-melee spell lines. With the 2-capture catch-all '#1# for #2#'
+    -- the "points of non-melee damage" text lands in #2# (dmgStrRaw), so check
+    -- every capture; the dedicated spell/DoT/DS/proc events own those lines.
+    local lowerSentence = (sentenceRaw or ''):lower()
+    if lowerSentence:find("non%-melee") or (dmgStrRaw and dmgStrRaw:lower():find("non%-melee"))
+       or (extraRaw and extraRaw:lower():find("non%-melee"))
+       or lowerSentence:find("is struck by") or lowerSentence:find("has taken")
+       or lowerSentence:find(" by your ") or lowerSentence:find("has healed") then
         return
     end
     
     local actor, verb, target = parseMeleeSentence(sentenceRaw)
     if not actor or not verb or not target then return end
     if not isValidCombatTarget(target) then return end
+    -- Mobs hitting us / our pet / a groupmate are incoming damage, not ours
+    if isFriendlyTarget(target) then return end
     
     local dmg = parseDamageValue(dmgStrRaw)
     if not dmg or dmg <= 0 then return end
@@ -914,6 +1040,35 @@ local function onUnifiedMeleeHit(line, sentenceRaw, dmgStrRaw, extraRaw)
     end
 end
 
+-- Spell crit dedupe: the server can announce a crit nuke both inline
+-- ("... non-melee damage. (Critical blast!) (12450)") and as its own line
+-- ("You deliver a critical blast! (12450) (Spell)"). Count it once.
+local lastSpellCrit = { dmg = nil, at = 0 }
+local function noteSpellCrit(dmg)
+    local now = mq.gettime()
+    if lastSpellCrit.dmg ~= nil and lastSpellCrit.dmg == dmg and (now - lastSpellCrit.at) < 1500 then
+        return false
+    end
+    lastSpellCrit.dmg = dmg
+    lastSpellCrit.at = now
+    return true
+end
+
+-- Pull the spell name out of the trailing "#4#" of a non-melee line, skipping
+-- "(Critical blast!)"-style markers and bare "(12450)" damage echoes.
+local function parseSpellExtra(extra)
+    local spellName, isCrit = nil, false
+    for paren in (extra or ''):gmatch("%((.-)%)") do
+        local lower = paren:lower()
+        if lower:find("^critical") or lower:find("^crippling") then
+            isCrit = true
+        elseif not paren:gsub(",", ""):match("^%s*%d+%s*$") and paren:match("%S") then
+            if not spellName then spellName = paren end
+        end
+    end
+    return spellName, isCrit
+end
+
 -- 2. Unified Non-Melee / Spell Hit Handler: "#1# hit #2# for #3# points of non-melee damage#4#"
 local function onUnifiedSpellHit(line, actorRaw, targetRaw, dmgStrRaw, extraRaw)
     if cfg.paused then return end
@@ -921,27 +1076,30 @@ local function onUnifiedSpellHit(line, actorRaw, targetRaw, dmgStrRaw, extraRaw)
     local target = cleanLine(targetRaw)
     local extra = cleanLine(extraRaw)
     
-    if isValidCombatTarget(target) then
+    if isValidCombatTarget(target) and not isFriendlyTarget(target) then
         local dmg = parseDamageValue(dmgStrRaw)
         if dmg then
+            local parsedName, isCrit = parseSpellExtra(extra)
             if isPlayerActor(actor) then
                 -- Player Direct Damage Hit ("You hit a mob for X non-melee damage")
                 startFightIfNeeded(target)
-                local isCrit = extra:find("Critical") and true or false
-                if isCrit then rt.playerCrits = rt.playerCrits + 1 end
+                local countCrit = isCrit and noteSpellCrit(dmg)
+                if countCrit then rt.playerCrits = rt.playerCrits + 1 end
                 rt.playerHits = rt.playerHits + 1
                 rt.playerDamage = rt.playerDamage + dmg
                 rt.totalDamage = rt.totalDamage + dmg
-                local spellName = extra:match("%((.-)%)") or 'Spell DD'
-                recordHit(rt.playerBreakdown, spellName, dmg, isCrit, false, false, 'Spell')
+                local spellName = parsedName or 'Spell DD'
+                recordHit(rt.playerBreakdown, spellName, dmg, countCrit, false, false, 'Spell')
             elseif isPetActor(actor) then
                 -- Pet Spell Hit ("Glidequill (Owner: Gennro) hit a mob for X non-melee damage. (Spell)")
                 startFightIfNeeded(target)
+                local countCrit = isCrit and noteSpellCrit(dmg)
+                if countCrit then rt.petCrits = rt.petCrits + 1 end
                 rt.petHits = rt.petHits + 1
                 rt.petDamage = rt.petDamage + dmg
                 rt.totalDamage = rt.totalDamage + dmg
-                local spellName = extra:match("%((.-)%)") or 'Pet Spell'
-                recordPetHit(actor, spellName, dmg, false, false, 'Spell')
+                local spellName = parsedName or 'Pet Spell'
+                recordPetHit(actor, spellName, dmg, countCrit, false, 'Spell')
             end
         end
     end
@@ -953,7 +1111,13 @@ local function onPlayerDoTHit(line, targetRaw, dmgStrRaw, spellRaw)
     local target = cleanLine(targetRaw)
     local spell = cleanLine(spellRaw)
     
-    if isValidCombatTarget(target) then
+    -- DoT3 ('#1# has taken #2# damage from your #3#.') also matches the DoT1/DoT2
+    -- lines with #2# = "50 points of"; only handle when the capture is a bare number
+    -- so each tick is counted once.
+    local dmgClean = cleanLine(dmgStrRaw):gsub(",", "")
+    if not dmgClean:match("^%d+$") then return end
+    
+    if isValidCombatTarget(target) and not isFriendlyTarget(target) then
         local dmg = parseDamageValue(dmgStrRaw)
         if dmg then
             startFightIfNeeded(target)
@@ -971,7 +1135,7 @@ local function onPlayerDSHit(line, targetRaw, verbRaw, dsTypeRaw, dmgStrRaw)
     if cfg.paused then return end
     local target = cleanLine(targetRaw)
     
-    if isValidCombatTarget(target) then
+    if isValidCombatTarget(target) and not isFriendlyTarget(target) then
         local dmg = parseDamageValue(dmgStrRaw)
         if dmg then
             startFightIfNeeded(target)
@@ -991,25 +1155,17 @@ local function onCriticalHit(line, actorRaw, dmgStrRaw)
     
     if isPlayerActor(actor) then
         rt.playerCrits = rt.playerCrits + 1
-        for _, item in pairs(rt.playerBreakdown) do
-            if dmg == nil or item.maxDmg == dmg or item.minDmg == dmg or item.totalDmg >= (dmg or 0) then
-                item.crits = item.crits + 1
-                break
-            end
-        end
+        creditCrit(rt.playerBreakdown, dmg)
+        touched()
     elseif isPetActor(actor) then
         rt.petCrits = rt.petCrits + 1
         local petName = getCleanPetName(actor)
         local petData = rt.petBreakdown[petName]
         if petData then
             petData.crits = petData.crits + 1
-            for _, item in pairs(petData.attacks) do
-                if dmg == nil or item.maxDmg == dmg or item.minDmg == dmg or item.totalDmg >= (dmg or 0) then
-                    item.crits = item.crits + 1
-                    break
-                end
-            end
+            creditCrit(petData.attacks, dmg)
         end
+        touched()
     end
 end
 
@@ -1018,11 +1174,16 @@ local function onCriticalBlast(line, actorRaw, dmgStrRaw, spellRaw)
     local actor = cleanLine(actorRaw)
     local spell = cleanLine(spellRaw or '')
     spell = spell:match("%((.-)%)") or spell
+    local dmg = parseDamageValue(dmgStrRaw)
+    
+    -- Skip when the matching non-melee hit line already carried "(Critical blast!)"
+    if dmg and not noteSpellCrit(dmg) then return end
     
     if isPlayerActor(actor) then
         rt.playerCrits = rt.playerCrits + 1
         if spell ~= '' and rt.playerBreakdown[spell] then
             rt.playerBreakdown[spell].crits = rt.playerBreakdown[spell].crits + 1
+            touched()
         end
     elseif isPetActor(actor) then
         rt.petCrits = rt.petCrits + 1
@@ -1032,54 +1193,77 @@ local function onCriticalBlast(line, actorRaw, dmgStrRaw, spellRaw)
             petData.crits = petData.crits + 1
             if spell ~= '' and petData.attacks[spell] then
                 petData.attacks[spell].crits = petData.attacks[spell].crits + 1
+                touched()
             end
         end
     end
 end
 
--- 6. Unified Miss Handler: "You try to #1# #2#, but miss!" / "#1# missed #2#"
-local function onUnifiedMiss(line, actorRaw, verbOrTargetRaw, targetRaw)
+-- 6. Unified Miss Handler. MQ passes (line, captures...) in pattern order, so
+-- each pattern gets its own thin wrapper that normalises to (actor, verb, target):
+--   'You try to #1# #2#, but miss!'        -> (line, verb, target)      actor = You
+--   '#1# tried to #2# #3#, but missed!'    -> (line, actor, verb, target)
+--   '#1# missed #2#'                       -> (line, actor, target)     verb = nil
+local function onUnifiedMiss(line, actorRaw, verbRaw, targetRaw)
     if cfg.paused then return end
+    if not rt.inFight then return end
     
-    if targetRaw and targetRaw ~= '' then
-        -- Full format: "You try to kick mob, but miss!" or "Pet tried to kick mob, but missed!"
-        local actor = cleanLine(actorRaw)
-        local verb = cleanLine(verbOrTargetRaw)
-        local target = cleanLine(targetRaw)
-        
-        if isValidCombatTarget(target) and rt.inFight then
-            local cat = getVerbCategory(verb)
-            local attackName = verb:sub(1,1):upper() .. verb:sub(2):lower()
-            if isPlayerActor(actor) then
-                rt.playerMisses = rt.playerMisses + 1
-                recordHit(rt.playerBreakdown, attackName, 0, false, true, false, cat)
-            elseif isPetActor(actor) then
-                rt.petMisses = rt.petMisses + 1
-                recordPetHit(actor, attackName, 0, false, true, cat)
-            end
+    local actor = cleanLine(actorRaw or '')
+    local verb = cleanLine(verbRaw or '')
+    local target = cleanLine(targetRaw or '')
+    if actor == '' or target == '' then return end
+    
+    -- Multi-word skills ("flying kick a mob") split across #2#/#3#; let the
+    -- sentence parser re-join them when it recognises the verb.
+    if verb ~= '' then
+        local pActor, pVerb, pTarget = parseMeleeSentence(actor .. ' ' .. verb .. ' ' .. target)
+        if pActor and pVerb and pTarget then
+            actor, verb, target = pActor, pVerb, pTarget
         end
-    else
-        -- Abbreviated format: "Grimrorik missed a forlorn revenant"
-        local sentence = cleanLine(actorRaw)
-        local actor, target = sentence:match("^%s*(.-)%s+missed%s+(.-)%s*$")
-        if actor and target and isValidCombatTarget(target) and rt.inFight then
-            if isPlayerActor(actor) then
-                rt.playerMisses = rt.playerMisses + 1
-                recordHit(rt.playerBreakdown, 'Miss', 0, false, true, false, 'Melee')
-            elseif isPetActor(actor) then
-                rt.petMisses = rt.petMisses + 1
-                recordPetHit(actor, 'Miss', 0, false, true, 'Melee')
-            end
-        end
+    end
+    
+    if not isValidCombatTarget(target) or isFriendlyTarget(target) then return end
+    
+    local cat = (verb ~= '') and getVerbCategory(verb) or 'Melee'
+    local attackName = (verb ~= '') and (verb:sub(1,1):upper() .. verb:sub(2):lower()) or 'Miss'
+    if isPlayerActor(actor) then
+        rt.playerMisses = rt.playerMisses + 1
+        recordHit(rt.playerBreakdown, attackName, 0, false, true, false, cat)
+    elseif isPetActor(actor) then
+        rt.petMisses = rt.petMisses + 1
+        recordPetHit(actor, attackName, 0, false, true, cat)
     end
 end
 
--- 7. Chat-driven Mob Slain Event Handler
+local function onPlayerMissStandard(line, verbRaw, targetRaw)
+    onUnifiedMiss(line, 'You', verbRaw, targetRaw)
+end
+
+local function onMissShort(line, actorRaw, targetRaw)
+    onUnifiedMiss(line, actorRaw, nil, targetRaw)
+end
+
+-- 7. Chat-driven Mob Slain Event Handler: only end the fight when the slain
+-- name is our current target (or the targeted spawn is actually dead), so
+-- unrelated kills nearby don't cut the parse short.
 local function onMobSlain(line, targetRaw)
     if not rt.inFight then return end
     local target = cleanLine(targetRaw)
     target = target:gsub("[!%.%?]+$", "")
-    if isValidMobName(target) then
+    if not isValidMobName(target) then return end
+    
+    local current = cleanLine(rt.currentTargetName or '')
+    local nameMatches = isValidMobName(current) and current:lower() == target:lower()
+    
+    local targetDead = false
+    if not nameMatches then
+        local okId, tId = pcall(function() return mq.TLO.Target.ID() end)
+        local okDead, tDead = pcall(function() return mq.TLO.Target.Dead() or mq.TLO.Target.Type() == 'Corpse' end)
+        local targetId = (okId and tId and tId > 0) and tId or 0
+        targetDead = (okDead and tDead == true) and targetId > 0 and targetId == rt.currentTargetId
+    end
+    
+    if nameMatches or targetDead then
         endFightSession()
     end
 end
@@ -1121,8 +1305,18 @@ local function registerEvents()
     regEvent('DPS_MeleeHitShort', '#1# for #2#', onUnifiedMeleeHit)
     
     -- Dedicated Critical Hit & Critical Blast Event Patterns
+    -- Third-person ("Genro scores a critical hit! (835)") and the player's own
+    -- first-person lines ("You score a critical hit! (420)", "You deliver a
+    -- critical blast! (3580) (Spell)") are distinct server formats; the
+    -- first-person ones never match the "#1# scores/delivers" patterns.
     regEvent('DPS_CritHit', '#1# scores a critical hit! (#2#)', onCriticalHit)
+    regEvent('DPS_CritHitYou', 'You score a critical hit! (#1#)', function(line, dmgStr)
+        onCriticalHit(line, 'You', dmgStr)
+    end)
     regEvent('DPS_CritBlast', '#1# delivers a critical blast! (#2#)#3#', onCriticalBlast)
+    regEvent('DPS_CritBlastYou', 'You deliver a critical blast! (#1#)#2#', function(line, dmgStr, spellStr)
+        onCriticalBlast(line, 'You', dmgStr, spellStr)
+    end)
     
     -- Spell / Non-Melee Patterns (Plural & Singular)
     regEvent('DPS_SpellHitPlural', '#1# hit #2# for #3# points of non-melee damage#4#', onUnifiedSpellHit)
@@ -1134,7 +1328,8 @@ local function registerEvents()
     regEvent('DPS_MobNonMeleePlural', '#1# was hit by non-melee for #2# points of damage#3#', onMobHitByNonMelee)
     regEvent('DPS_MobNonMeleeSingular', '#1# was hit by non-melee for #2# point of damage#3#', onMobHitByNonMelee)
     
-    -- DoT Patterns
+    -- DoT Patterns (DoT3 also fires for the DoT1/DoT2 lines; onPlayerDoTHit
+    -- ignores the non-numeric "50 points of" capture so each tick counts once)
     regEvent('DPS_PlayerDoT1', '#1# has taken #2# points of damage from your #3#.', onPlayerDoTHit)
     regEvent('DPS_PlayerDoT2', '#1# has taken #2# point of damage from your #3#.', onPlayerDoTHit)
     regEvent('DPS_PlayerDoT3', '#1# has taken #2# damage from your #3#.', onPlayerDoTHit)
@@ -1143,19 +1338,28 @@ local function registerEvents()
     regEvent('DPS_PlayerDSPlural', '#1# is #2# by your #3# for #4# points of damage.', onPlayerDSHit)
     regEvent('DPS_PlayerDSSingular', '#1# is #2# by your #3# for #4# point of damage.', onPlayerDSHit)
     
-    -- Standard & Abbreviated Miss Patterns
-    regEvent('DPS_PlayerMissStandard', 'You try to #1# #2#, but miss!', onUnifiedMiss)
+    -- Standard & Abbreviated Miss Patterns (each wrapper maps MQ's capture
+    -- order for that pattern onto onUnifiedMiss(line, actor, verb, target))
+    regEvent('DPS_PlayerMissStandard', 'You try to #1# #2#, but miss!', onPlayerMissStandard)
     regEvent('DPS_PetMissStandard', '#1# tried to #2# #3#, but missed!', onUnifiedMiss)
-    regEvent('DPS_MissShort', '#1# missed #2#', onUnifiedMiss)
+    regEvent('DPS_MissShort', '#1# missed #2#', onMissShort)
     
     -- Chat-driven Mob Slain Events
     regEvent('DPS_MobSlain1', '#1# has been slain#*#', onMobSlain)
     regEvent('DPS_MobSlain2', 'You have slain #1#!', onMobSlain)
     
-    -- Zone Change Auto-Reset
+    -- Zone Change Auto-Reset: chat-driven fallback. "You have entered" also
+    -- prefixes non-zone messages (levitation, PvP areas, "an area where ..."),
+    -- so only reset when the zone short name actually changed; plugin.onZoned
+    -- below covers the host-driven path.
     regEvent('DPS_Zone', 'You have entered #*#', function()
-        if cfg.autoResetOnZone then
-            resetCurrentFight()
+        if not cfg.autoResetOnZone then return end
+        local ok, zone = pcall(function() return mq.TLO.Zone.ShortName() end)
+        if ok and zone and zone ~= '' and zone ~= 'NULL' then
+            if zone ~= rt.lastZoneShort then
+                rt.lastZoneShort = zone
+                resetCurrentFight()
+            end
         end
     end)
 end
@@ -1228,6 +1432,28 @@ end
 -- ============================================================================
 -- ImGui Rendering Engine (Guaranteed Unique IDs Across Windows)
 -- ============================================================================
+-- Per-frame views (sorted key lists, combined maps, totals) derived from a
+-- breakdown table are cached per source table (weak keys) and rebuilt only
+-- when rt.hitGen moved, i.e. when a hit / share / reset actually changed
+-- something, instead of being sorted and allocated every frame.
+local function viewCache(build)
+    local cache = setmetatable({}, { __mode = 'k' })
+    return function(key)
+        local c = cache[key]
+        if c and c.gen == rt.hitGen then return c.value end
+        local v = build(key)
+        cache[key] = { gen = rt.hitGen, value = v }
+        return v
+    end
+end
+
+local sortedKeysOf = viewCache(function(breakdownMap)
+    local keys = {}
+    for name in pairs(breakdownMap) do table.insert(keys, name) end
+    table.sort(keys, function(a, b) return breakdownMap[a].totalDmg > breakdownMap[b].totalDmg end)
+    return keys
+end)
+
 local function renderBreakdownTable(breakdownMap, showSourceColumn, tableId)
     local tId = tableId or "BreakdownTable"
     if not ImGui.BeginTable(tId, showSourceColumn and 10 or 9, bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)) then
@@ -1248,10 +1474,8 @@ local function renderBreakdownTable(breakdownMap, showSourceColumn, tableId)
     ImGui.TableSetupColumn("Crit %", ImGuiTableColumnFlags.WidthFixed, core.px(50))
     ImGui.TableHeadersRow()
     
-    local sortedKeys = {}
-    for name in pairs(breakdownMap) do table.insert(sortedKeys, name) end
-    table.sort(sortedKeys, function(a,b) return breakdownMap[a].totalDmg > breakdownMap[b].totalDmg end)
-    
+    local sortedKeys = sortedKeysOf(breakdownMap)
+
     for _, name in ipairs(sortedKeys) do
         local data = breakdownMap[name]
         local avg = data.count > 0 and math.floor((data.totalDmg / data.count) + 0.5) or 0
@@ -1366,13 +1590,21 @@ local function getHistoricalOverviewBreakdownMap(h)
     return combined
 end
 
+-- Cached views (see viewCache): keyed by the source table, refreshed on hits.
+local combinedPetAttacksOf = viewCache(getCombinedPetAttackMap)
+local historicalOverviewOf = viewCache(getHistoricalOverviewBreakdownMap)
+local liveOverviewOf = viewCache(function() return getCombinedOverviewBreakdownMap() end)      -- key: rt
+local liveTotalsOf = viewCache(function() return calculateCategoryTotals(rt.playerBreakdown, rt.petBreakdown) end) -- key: rt
+local petNamesOf = viewCache(function(petMap)
+    local names = {}
+    for name in pairs(petMap) do table.insert(names, name) end
+    table.sort(names)
+    return names
+end)
+
 local function renderMultiPetDetails(petMap, tabBarId, tableIdPrefix, fightPetDmg)
-    local petNames = {}
-    for name in pairs(petMap) do
-        table.insert(petNames, name)
-    end
-    table.sort(petNames)
-    
+    local petNames = petNamesOf(petMap)
+
     if #petNames == 0 then
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "No Active Pet Damage Recorded")
         return
@@ -1388,7 +1620,7 @@ local function renderMultiPetDetails(petMap, tabBarId, tableIdPrefix, fightPetDm
     if ImGui.BeginTabBar(tbId) then
         -- Tab 1: All Pets Combined
         if ImGui.BeginTabItem("All Pets Combined##" .. tbId) then
-            local combinedAttacks = getCombinedPetAttackMap(petMap)
+            local combinedAttacks = combinedPetAttacksOf(petMap)
             renderBreakdownTable(combinedAttacks, false, tPrefix .. "_Combined")
             ImGui.EndTabItem()
         end
@@ -1533,7 +1765,7 @@ local function renderHistoricalInspector(h, inTabMode)
         -- Overview Breakdown
         if ImGui.BeginTabItem("Overview##" .. tPrefix .. "OverviewTab") then
             ImGui.Spacing()
-            local combinedMap = getHistoricalOverviewBreakdownMap(h)
+            local combinedMap = historicalOverviewOf(h)
             renderBreakdownTable(combinedMap, true, tPrefix .. "OverviewTable")
             ImGui.EndTabItem()
         end
@@ -1546,8 +1778,8 @@ local function renderHistoricalInspector(h, inTabMode)
             ImGui.EndTabItem()
         end
         
-        -- Pet Details
-        if ImGui.BeginTabItem("Pet Details##" .. tPrefix .. "PetTab") then
+        -- Pet Details (Settings: "Show Pet Breakdown Tab")
+        if cfg.showPetBreakdown ~= false and ImGui.BeginTabItem("Pet Details##" .. tPrefix .. "PetTab") then
             ImGui.Spacing()
             renderMultiPetDetails(h.petBreakdown or {}, tPrefix .. "MultiPetTabBar", tPrefix .. "PetTable", h.petDmg)
             ImGui.EndTabItem()
@@ -1633,7 +1865,7 @@ local function drawMiniDpsGui()
 
         -- Group meter (Box Network): only when there is someone besides us
         if cfg.compactGroup and boxnet() then
-            local rows, summary = meterRows()
+            local rows, summary = cachedMeterRows()
             if #rows > 1 then
                 ImGui.Spacing()
                 ImGui.Separator()
@@ -1748,6 +1980,7 @@ local function drawDpsGui()
             rt.history = {}
             rt.inspectorOpen = false
             rt.inspectedFight = nil
+            touched()
         end
         
         ImGui.Separator()
@@ -1786,8 +2019,8 @@ local function drawDpsGui()
         
         ImGui.Spacing()
         
-        -- Category Breakdown Metric Bar Calculated Dynamically
-        local liveTotals = calculateCategoryTotals(rt.playerBreakdown, rt.petBreakdown)
+        -- Category Breakdown Metric Bar (recomputed only when a hit landed)
+        local liveTotals = liveTotalsOf(rt)
         local mPct = rt.totalDamage > 0 and math.floor((liveTotals.melee / rt.totalDamage * 100) + 0.5) or 0
         local skPct = rt.totalDamage > 0 and math.floor((liveTotals.skill / rt.totalDamage * 100) + 0.5) or 0
         local spPct = rt.totalDamage > 0 and math.floor((liveTotals.spell / rt.totalDamage * 100) + 0.5) or 0
@@ -1826,7 +2059,7 @@ local function drawDpsGui()
                 
                 ImGui.Spacing()
                 ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "Current Encounter Attack Breakdown:")
-                local combinedMap = getCombinedOverviewBreakdownMap()
+                local combinedMap = liveOverviewOf(rt)
                 renderBreakdownTable(combinedMap, true, "MainOverviewTable")
                 
                 ImGui.EndTabItem()
@@ -1841,8 +2074,8 @@ local function drawDpsGui()
                 ImGui.EndTabItem()
             end
             
-            -- TAB 3: Multi-Pet Details
-            if ImGui.BeginTabItem("Pet Details##MainPetTab") then
+            -- TAB 3: Multi-Pet Details (Settings: "Show Pet Breakdown Tab")
+            if cfg.showPetBreakdown ~= false and ImGui.BeginTabItem("Pet Details##MainPetTab") then
                 rt.activeTab = 3
                 ImGui.Spacing()
                 renderMultiPetDetails(rt.petBreakdown, "MainMultiPetTabBar", "MainPetTable")
@@ -1879,13 +2112,20 @@ local function drawDpsGui()
                             ImGui.TableHeadersRow()
                             
                             for _, h in ipairs(rt.history) do
+                                -- Widget labels built once per archived fight, not per frame.
+                                local labels = h.labels
+                                if not labels then
+                                    local id = tostring(h.id)
+                                    labels = { sel = h.targetName .. "##HistTar_" .. id, insp = "Inspect##HistInsp_" .. id, rpt = "Report##HistRpt_" .. id }
+                                    h.labels = labels
+                                end
                                 ImGui.TableNextRow()
                                 ImGui.TableNextColumn()
                                 ImGui.Text(h.timestamp)
                                 
                                 -- Selectable Target Name
                                 ImGui.TableNextColumn()
-                                if ImGui.Selectable(h.targetName .. "##HistTar_" .. tostring(h.id), false) then
+                                if ImGui.Selectable(labels.sel, false) then
                                     rt.inspectedFight = h
                                 end
                                 
@@ -1912,11 +2152,11 @@ local function drawDpsGui()
                                 
                                 -- Action Buttons
                                 ImGui.TableNextColumn()
-                                if ImGui.Button("Inspect##HistInsp_" .. tostring(h.id), core.px(50), core.px(18)) then
+                                if ImGui.Button(labels.insp, core.px(50), core.px(18)) then
                                     rt.inspectedFight = h
                                 end
                                 ImGui.SameLine()
-                                if ImGui.Button("Report##HistRpt_" .. tostring(h.id), core.px(48), core.px(18)) then
+                                if ImGui.Button(labels.rpt, core.px(48), core.px(18)) then
                                     reportHistoricalFight(h)
                                 end
                             end
@@ -1935,7 +2175,7 @@ local function drawDpsGui()
                 if not bn then
                     ImGui.TextDisabled('Box Network plugin not connected - your other boxes cannot share their parses.')
                 else
-                    local rows, summary = meterRows()
+                    local rows, summary = cachedMeterRows()
                     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], summary.live and 'Group DPS (live)' or 'Group DPS (last fight)')
                     ImGui.SameLine()
                     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], fmtNum(summary.dps) .. ' dps')
@@ -2128,6 +2368,8 @@ function plugin.onInit(coreApi)
     if ctrl and ctrl.show_dps == nil then ctrl.show_dps = false end
     cachedConfigPath = nil
     loadConfig()
+    local okZone, zone = pcall(function() return mq.TLO.Zone.ShortName() end)
+    rt.lastZoneShort = (okZone and zone and zone ~= '' and zone ~= 'NULL') and zone or nil
     registerEvents()
     for _, cmd in ipairs({ '/dps', '/triunedps' }) do
         local ok = pcall(mq.bind, cmd, dpsCommandHandler)
@@ -2141,7 +2383,7 @@ function plugin.onDestroy()
     cachedConfigPath = nil
     unregisterEvents()
     if rt.boxesUnsub then pcall(rt.boxesUnsub) end
-    rt.boxesUnsub = nil
+    rt.boxesUnsub, rt.boxesApi, rt.boxesGen = nil, nil, nil
     rt.boxes = {}
     if mq and mq.unbind then
         for _, cmd in ipairs(boundCommands) do pcall(mq.unbind, cmd) end
@@ -2153,6 +2395,13 @@ end
 -- encounter when the target dies or damage goes quiet for cfg.combatTimeout.
 local function tick()
     ensureBoxSubscription()
+    -- Keep the per-line lookups warm (they refresh themselves once a second)
+    -- and the meter rows fresh for the open window, so the draw only reads.
+    getMyPlayerName()
+    getPetName()
+    if ctrl and ctrl.show_dps and (cfg.compact and cfg.compactGroup or not cfg.compact) and boxnet() then
+        cachedMeterRows()
+    end
     if not rt.inFight then return end
     shareLive()
     local okId, tId = pcall(function() return mq.TLO.Target.ID() end)
@@ -2174,6 +2423,16 @@ function plugin.onTick()
     if not core then return end
     refresh()
     tick()
+end
+
+-- Host-driven zone change: the authoritative reset (the chat event above only
+-- resets when the zone short name differs, so both paths never double-reset)
+function plugin.onZoned(zoneShort)
+    if not cfg.autoResetOnZone then return end
+    if zoneShort and zoneShort ~= '' and zoneShort ~= rt.lastZoneShort then
+        rt.lastZoneShort = zoneShort
+        resetCurrentFight()
+    end
 end
 
 function plugin.onDrawUI()

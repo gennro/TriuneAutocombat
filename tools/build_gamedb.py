@@ -211,9 +211,15 @@ CONTAINER_TYPES = {
     45: 'Iksar Pottery Wheel', 47: 'Troll Forge', 48: 'Wood Elf Forge', 49: 'Halfling Forge', 50: 'Erudite Forge', 53: 'Augmentation Pool',
 }
 
+# tradeskill_recipe.tradeskill uses skill ids; 75 is the "quest combine"
+# pseudo-skill in the EQEmu data (it is Remove Traps in the client's skill
+# enum, which no item references). The Lua side decodes recipe tradeskills
+# through D.tradeskillName(), which maps 75 (and the legacy 100) to
+# 'Quest Combine' - keep the two in step when editing either.
 TRADESKILLS = {
     55: 'Fishing', 56: 'Make Poison', 57: 'Tinkering', 58: 'Research', 59: 'Alchemy', 60: 'Baking', 61: 'Tailoring',
     63: 'Blacksmithing', 64: 'Fletching', 65: 'Brewing', 68: 'Jewelry Making', 69: 'Pottery', 75: 'Quest Combine',
+    100: 'Quest Combine',
 }
 
 # ---------------------------------------------------------------------------
@@ -476,7 +482,12 @@ def main():
         fishing[v[fic['Itemid']]].append((v[fic['zoneid']], float(v[fic['chance']] or 0)))
 
     def h_ground(v):
-        ground[v[gsc['item']]].append(v[gsc['zoneid']])
+        # one entry per zone: a zone with several ground spawn points of the
+        # same item must not list that zone repeatedly
+        zones = ground[v[gsc['item']]]
+        zid = v[gsc['zoneid']]
+        if zid not in zones:
+            zones.append(zid)
 
     rd.run({
         'items': h_items_names, 'npc_types': h_npc, 'zone': h_zone, 'lootdrop_entries': h_lde, 'loottable_entries': h_lte,

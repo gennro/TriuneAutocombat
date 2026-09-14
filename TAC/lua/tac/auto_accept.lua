@@ -284,11 +284,29 @@ local function acceptGroupInvite(inviter, inviterId)
     else
         print(string.format('\ag[Triune Auto-Accept]\ax Accepted group invite from \ay%s\ax.', inviter))
     end
+end
+
+-- Read the open ConfirmationDialogBox text (empty string when closed / unreadable).
+local function readConfirmationText(mq)
     local confOpen = false
     pcall(function() confOpen = mq.TLO.Window('ConfirmationDialogBox').Open() end)
-    if confOpen then
-        pcall(function() mq.cmd('/notify ConfirmationDialogBox Yes_Button leftmouseup') end)
-    end
+    if not confOpen then return nil end
+    local text = ''
+    pcall(function()
+        local out = mq.TLO.Window('ConfirmationDialogBox').Child('CD_TextOutput')
+        if out and out() then text = out.Text() or '' end
+    end)
+    return text
+end
+
+-- True only when the dialog text reads like an expedition / DZ invite and
+-- carries none of the reject words (rez prompts, corpse, fellowship removal).
+local function isDzInviteText(text)
+    if type(text) ~= 'string' then return false end
+    local tLower = text:lower()
+    if tLower:find('percent') or tLower:find('corpse') or tLower:find('resurrect') or tLower:find('remove') then return false end
+    if not (tLower:find('expedition') or tLower:find('dynamic zone') or tLower:find('task') or tLower:find('dzadd') or tLower:find('dz')) then return false end
+    return true
 end
 
 local function acceptDzInvite(who, label)
@@ -297,9 +315,9 @@ local function acceptDzInvite(who, label)
     lastDzAcceptAt = now
     local mq = core and core.mq
     if not mq then return end
-    local confOpen = false
-    pcall(function() confOpen = mq.TLO.Window('ConfirmationDialogBox').Open() end)
-    if confOpen then
+    -- Only click Yes when the open dialog is actually a DZ / expedition invite.
+    local confText = readConfirmationText(mq)
+    if confText and isDzInviteText(confText) then
         mq.cmd('/notify ConfirmationDialogBox Yes_Button leftmouseup')
     end
     mq.cmd('/dzaccept')
@@ -346,8 +364,14 @@ local function pollTrade(c, mq, now)
     pcall(function()
         local tgt = mq.TLO.Target
         if tgt and tgt() and tgt.Type() == 'PC' then
-            if not traderName or traderName == '' then traderName = tgt.CleanName() end
-            traderId = tgt.ID() or 0
+            local tgtName = tgt.CleanName() or ''
+            if not traderName or traderName == '' then
+                traderName = tgtName
+                traderId = tgt.ID() or 0
+            elseif tgtName ~= '' and tgtName:lower() == traderName:lower() then
+                -- Only trust the target's ID when it is the person named in the trade window.
+                traderId = tgt.ID() or 0
+            end
         end
     end)
     if traderName and traderName ~= '' and traderId == 0 then
@@ -373,15 +397,10 @@ local function pollDzConfirmation(c, mq)
     pcall(function() confOpen = mq.TLO.Window('ConfirmationDialogBox').Open() end)
     if not confOpen then return end
 
-    local text = ''
-    pcall(function()
-        local out = mq.TLO.Window('ConfirmationDialogBox').Child('CD_TextOutput')
-        if out and out() then text = out.Text() or '' end
-    end)
+    local text = readConfirmationText(mq) or ''
     local tLower = text:lower()
-    -- Ignore rez prompts or fellowship removals
-    if tLower:find('percent') or tLower:find('corpse') or tLower:find('resurrect') or tLower:find('remove') then return end
-    if not (tLower:find('expedition') or tLower:find('dynamic zone') or tLower:find('task') or tLower:find('dzadd') or tLower:find('dz')) then return end
+    -- Ignore rez prompts or fellowship removals; require an invite phrase
+    if not isDzInviteText(text) then return end
 
     local candidateName = text:match('^([%a%d]+)%s+has%s+invited%s+you') or text:match('^([%a%d]+)%s+invites%s+you')
     local candidateId = 0
@@ -399,8 +418,10 @@ local function pollDzConfirmation(c, mq)
         -- No sender in the dialog text: fall back to scanning it for a whitelisted name / id.
         for _, n in ipairs(ensureList() or {}) do
             local eName, eId = getPlayerInfo(n)
-            if (eName ~= '' and tLower:find(eName:lower(), 1, true)) or
-               (eId > 0 and tLower:find(tostring(eId), 1, true)) then
+            -- Whole-word match only ("Bob" must not match "Bobbette"); ids are not
+            -- matched as bare digit substrings.
+            local namePat = eName ~= '' and ('%f[%w]' .. eName:lower():gsub('%W', '%%%0') .. '%f[%W]') or nil
+            if namePat and tLower:find(namePat) then
                 allowed = true
                 candidateName = eName
                 candidateId = eId

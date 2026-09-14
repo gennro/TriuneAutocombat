@@ -6,8 +6,12 @@
 -- con-colored names, HP bars, aggro %, distance / LoS, target-of-target, and a
 -- per-row right-click menu (Target, Face, Add to Ignore List).
 --
--- Render-only plugin driven by ctrl.show_xtarget_window; the header buttons,
--- Mini HUD, window manager, and /ac xtar keep working unchanged.
+-- No fiber: onTick (every 0.25 s) snapshots the XTarget slots into a cache
+-- (static facts per slot/spawn id are cached; only HP, distance, LoS, aggro
+-- and ToT are re-read) and onDrawUI renders that cache. The same throttled
+-- refresh also runs from the render pass so the window stays live while the
+-- main loop is blocked. Visibility is ctrl.show_xtarget_window; the header
+-- buttons, Mini HUD, window manager, and /ac xtar keep working unchanged.
 -- ============================================================================
 
 local plugin = {
@@ -17,7 +21,7 @@ local plugin = {
     author             = 'Triune',
     description        = 'Popout Extended Target window with HP bars, aggro %, distance/LoS, ToT, and right-click actions.',
     defaultEnabled     = true,
-    tickInterval       = 1.0,
+    tickInterval       = 0.25,
     runOutOfCombatOnly = false,
     hasThread          = false,
     -- Window owned by this plugin (drives the main-window header button)
@@ -26,8 +30,40 @@ local plugin = {
 
 local core = nil
 
+-- ---------------------------------------------------------------------------
+-- TLO snapshot cache (same throttle pattern as hud_unitframes.refreshVitals).
+-- refreshXTargets() is shared by onTick and onDrawUI; whichever runs first
+-- inside a REFRESH_INTERVAL window walks the XTarget slots and the render
+-- pass only reads `snap`. Static facts (TargetType, Type, Class, Level,
+-- ConColor) are cached per (slot, spawn id) in `slotStatic`; only HP,
+-- distance, LoS, aggro and target-of-target are re-read each refresh.
+-- ---------------------------------------------------------------------------
+local REFRESH_INTERVAL = 0.25
+local lastRefreshAt = 0
+local snap = { slots = {}, slotCount = 0, activeCount = 0, currentTargetId = 0 }
+-- slotStatic[slot] = { id = <spawn id>, name, level, class, con, targetType, spawnType }
+local slotStatic = {}
+
+-- Set of pet spawn ids (own, group and Trio extra pets) from
+-- core.getMultiPetList(), built once per refresh instead of per slot.
+local function buildPetIdSet()
+    local set = {}
+    if not core or not core.getMultiPetList then return set end
+    local okList, petSlots, extraPets = pcall(core.getMultiPetList)
+    if not okList then return set end
+    for _, ps in ipairs(petSlots or {}) do
+        if ps.petId and ps.petId > 0 then set[ps.petId] = true end
+    end
+    for _, pid in ipairs(extraPets or {}) do
+        if pid and pid > 0 then set[pid] = true end
+    end
+    return set
+end
+
 function plugin.onInit(coreApi)
     core = coreApi
+    lastRefreshAt = 0
+    slotStatic = {}
     local ctrl = core and core.ctrl
     if ctrl then
         if ctrl.show_xtarget_window == nil then ctrl.show_xtarget_window = false end
@@ -49,8 +85,10 @@ local FRIENDLY_SLOT_PATTERNS = { 'pet', 'mercenary', 'group tank', 'group assist
 
 -- Returns true when this slot should be hidden: pets (own, group, and the
 -- Trio's extra pets) and friendly PCs are not hostiles, so they only clutter
--- the extended target list unless the user opts in.
-local function isHiddenSlot(spawnType, targetType, spawnId)
+-- the extended target list unless the user opts in. `petIds` is the pet id
+-- set from buildPetIdSet() (built once per refresh); when nil it is looked
+-- up on the spot.
+local function isHiddenSlot(spawnType, targetType, spawnId, petIds)
     local sType = tostring(spawnType or ''):lower()
     local tType = tostring(targetType or ''):lower()
     local isPet = (sType == 'pet')
@@ -65,18 +103,9 @@ local function isHiddenSlot(spawnType, targetType, spawnId)
             end
         end
     end
-    if not isPet and spawnId and spawnId > 0 and core.getMultiPetList then
-        local okList, petSlots, extraPets = pcall(core.getMultiPetList)
-        if okList then
-            for _, ps in ipairs(petSlots or {}) do
-                if ps.petId == spawnId then isPet = true break end
-            end
-            if not isPet then
-                for _, pid in ipairs(extraPets or {}) do
-                    if pid == spawnId then isPet = true break end
-                end
-            end
-        end
+    if not isPet and spawnId and spawnId > 0 then
+        if petIds == nil then petIds = buildPetIdSet() end
+        if petIds[spawnId] then isPet = true end
     end
     local ctrl = core.ctrl
     if isPet and not ctrl.xt_show_pets then return true end
@@ -85,6 +114,10 @@ local function isHiddenSlot(spawnType, targetType, spawnId)
 end
 
 function plugin.onDestroy()
+    snap.slots = {}
+    snap.activeCount = 0
+    slotStatic = {}
+    lastRefreshAt = 0
 end
 
 -- Settings renderer (right-click on window background, and Plugins tab)
@@ -168,6 +201,105 @@ function plugin.onDrawSettings()
     renderXtSettingsContent()
 end
 
+-- Snapshot every XTarget slot the window needs. Shared by onTick and the
+-- render pass; the throttle makes whichever runs first do the work.
+local function refreshXTargets(force)
+    if not core or not core.mq or not core.ctrl then return end
+    local ctrl = core.ctrl
+    if not ctrl.show_xtarget_window then
+        if snap.activeCount > 0 or #snap.slots > 0 then
+            snap.slots = {}
+            snap.activeCount = 0
+        end
+        return
+    end
+    local now = os.clock()
+    if not force and (now - lastRefreshAt) < REFRESH_INTERVAL then return end
+    lastRefreshAt = now
+    local mq = core.mq
+
+    local xtarSlots = 13
+    pcall(function() xtarSlots = mq.TLO.Me.XTargetSlots() or 13 end)
+    local currentTargetId = 0
+    pcall(function() currentTargetId = mq.TLO.Target.ID() or 0 end)
+    local petIds = buildPetIdSet()
+
+    local slots = {}
+    local activeCount = 0
+    for slot = 1, xtarSlots do
+        local xtData = nil
+        pcall(function()
+            local xt = mq.TLO.Me.XTarget(slot)
+            if xt and xt() and (xt.ID() or 0) > 0 then
+                local xtId = xt.ID()
+                local st = slotStatic[slot]
+                if not st or st.id ~= xtId then
+                    st = { id = xtId, name = 'Unknown', level = 0, class = '?', con = 'White', targetType = '', spawnType = '' }
+                    pcall(function() st.name = xt.CleanName() or 'Unknown' end)
+                    pcall(function() st.level = xt.Level() or 0 end)
+                    pcall(function() st.class = (xt.Class and xt.Class.ShortName and xt.Class.ShortName()) or '?' end)
+                    pcall(function() st.con = xt.ConColor() or 'White' end)
+                    pcall(function() st.targetType = xt.TargetType() or '' end)
+                    pcall(function() st.spawnType = xt.Type() or '' end)
+                    slotStatic[slot] = st
+                end
+                if isHiddenSlot(st.spawnType, st.targetType, xtId, petIds) then return end
+
+                local xtDist = 0
+                pcall(function() xtDist = math.floor(xt.Distance() or 0) end)
+                local xtHp = 0
+                pcall(function() xtHp = xt.PctHPs() or 0 end)
+                local xtAggro = 0
+                pcall(function() xtAggro = xt.PctAggro() or 0 end)
+                local xtLoS = true
+                pcall(function() xtLoS = xt.LineOfSight() ~= false end)
+                local xtTotName, xtTotId = nil, 0
+                pcall(function()
+                    local tot = xt.TargetOfTarget
+                    if tot and tot() then
+                        local tid = tot.ID() or 0
+                        if tid > 0 then
+                            xtTotId = tid
+                            xtTotName = tot.CleanName() or ''
+                        end
+                    end
+                end)
+
+                xtData = {
+                    slot = slot,
+                    id = xtId,
+                    name = st.name,
+                    level = st.level,
+                    class = st.class,
+                    dist = xtDist,
+                    hpPct = xtHp,
+                    con = st.con,
+                    aggroPct = xtAggro,
+                    los = xtLoS,
+                    tot = xtTotName,
+                    totId = xtTotId,
+                    targetType = st.targetType,
+                    rowKey = 'xt_' .. tostring(slot) .. '_' .. tostring(xtId),
+                }
+            else
+                slotStatic[slot] = nil
+            end
+        end)
+        if xtData then activeCount = activeCount + 1 end
+        slots[slot] = xtData or false
+    end
+    for slot = xtarSlots + 1, #slotStatic do slotStatic[slot] = nil end
+
+    snap.slots = slots
+    snap.slotCount = xtarSlots
+    snap.activeCount = activeCount
+    snap.currentTargetId = currentTargetId
+end
+
+function plugin.onTick()
+    refreshXTargets(false)
+end
+
 function plugin.onDrawUI()
     if not core or not core.ImGui or not core.ctrl then return end
     local ImGui = core.ImGui
@@ -212,64 +344,16 @@ function plugin.onDrawUI()
             ImGui.EndPopup()
         end
 
-        -- Query XTarget Slots
-        local xtarSlots = 13
-        pcall(function() xtarSlots = mq.TLO.Me.XTargetSlots() or 13 end)
+        -- Throttled; normally a no-op because onTick already refreshed this cycle.
+        refreshXTargets(false)
+        local currentTargetId = snap.currentTargetId or 0
+        local activeCount = snap.activeCount or 0
 
-        local currentTargetId = 0
-        pcall(function() currentTargetId = mq.TLO.Target.ID() or 0 end)
-
-        local activeCount = 0
-
-        for slot = 1, xtarSlots do
-            local xtData = nil
-            pcall(function()
-                local xt = mq.TLO.Me.XTarget(slot)
-                if xt and xt() and (xt.ID() or 0) > 0 then
-                    local xtId = xt.ID()
-                    local xtName = xt.CleanName() or 'Unknown'
-                    local xtLvl = xt.Level() or 0
-                    local xtCls = (xt.Class and xt.Class.ShortName and xt.Class.ShortName()) or '?'
-                    local xtDist = math.floor(xt.Distance() or 0)
-                    local xtHp = xt.PctHPs() or 0
-                    local xtCon = xt.ConColor() or 'White'
-                    local xtAggro = 0
-                    pcall(function() xtAggro = xt.PctAggro() or 0 end)
-                    local xtLoS = true
-                    pcall(function() xtLoS = xt.LineOfSight() ~= false end)
-                    local xtTotName = nil
-                    pcall(function()
-                        local tot = xt.TargetOfTarget
-                        if tot and tot() and (tot.ID() or 0) > 0 then
-                            xtTotName = tot.CleanName() or ''
-                        end
-                    end)
-                    local ttype = ''
-                    pcall(function() ttype = xt.TargetType() or '' end)
-                    local sType = ''
-                    pcall(function() sType = xt.Type() or '' end)
-                    if isHiddenSlot(sType, ttype, xtId) then return end
-
-                    xtData = {
-                        slot = slot,
-                        id = xtId,
-                        name = xtName,
-                        level = xtLvl,
-                        class = xtCls,
-                        dist = xtDist,
-                        hpPct = xtHp,
-                        con = xtCon,
-                        aggroPct = xtAggro,
-                        los = xtLoS,
-                        tot = xtTotName,
-                        targetType = ttype,
-                    }
-                end
-            end)
+        for slot = 1, (snap.slotCount or 0) do
+            local xtData = snap.slots[slot] or nil
 
             if xtData then
-                activeCount = activeCount + 1
-                local rowKey = 'xt_' .. tostring(slot) .. '_' .. tostring(xtData.id)
+                local rowKey = xtData.rowKey
                 local isCurrentTarget = (currentTargetId > 0 and currentTargetId == xtData.id)
 
                 -- Visual highlight if current target
@@ -327,7 +411,11 @@ function plugin.onDrawUI()
                     ImGui.SameLine()
                     accent(GOLD, xtData.tot)
                     if ImGui.IsItemClicked() then
-                        mq.cmdf('/target %s', xtData.tot)
+                        if (xtData.totId or 0) > 0 then
+                            mq.cmdf('/target id %d', xtData.totId)
+                        else
+                            mq.cmdf('/target %s', xtData.tot)
+                        end
                     end
                 end
 

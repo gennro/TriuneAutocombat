@@ -6,10 +6,13 @@
 -- leader + role badges, member pet tracking, click-to-target, Invite / Disband
 -- toolbar, and a right-click context menu for options.
 --
--- Render-only plugin: everything happens in onDrawUI on the ImGui thread, so
--- there is no fiber and nothing for the main combat loop to do. Visibility is
--- driven by ctrl.show_group_window so the header buttons, Mini HUD, window
--- manager, and /ac group all keep working unchanged.
+-- No fiber: onTick (every 0.25 s) snapshots the group state (roles, member
+-- vitals, distance / LoS, pets, Box Network peers, current target) into a
+-- cache and onDrawUI only renders that cache; the same throttled refresh also
+-- runs from the render pass so the window stays live while the main loop is
+-- blocked (casting, mq.delay). Visibility is driven by ctrl.show_group_window
+-- so the header buttons, Mini HUD, window manager, and /ac group all keep
+-- working unchanged.
 -- ============================================================================
 
 local plugin = {
@@ -20,7 +23,7 @@ local plugin = {
     uses               = { boxnet = 'Box Network characters shown as group rows' },
     description        = 'Popout group window with vitals bars, role badges, member pets, invite/disband, and click-to-target.',
     defaultEnabled     = true,
-    tickInterval       = 1.0,
+    tickInterval       = 0.25,
     runOutOfCombatOnly = false,
     hasThread          = false,
     -- Window owned by this plugin (drives the main-window header button)
@@ -29,8 +32,25 @@ local plugin = {
 
 local core = nil
 
+-- ---------------------------------------------------------------------------
+-- TLO snapshot cache (same throttle pattern as hud_unitframes.refreshVitals /
+-- hud_effects.refreshEffects). refreshGroup() is shared by onTick and
+-- onDrawUI; whichever runs first inside a REFRESH_INTERVAL window queries the
+-- ~100-150 TLOs (roles, members, pets, box peers, target) and the render pass
+-- only reads `snap`.
+-- ---------------------------------------------------------------------------
+local REFRESH_INTERVAL = 0.25
+local lastRefreshAt = 0
+local snap = {
+    members = {},
+    leaderName = '', mtName = '', maName = '', pullerName = '',
+    curTargId = 0, curTargName = '', curTargType = '',
+    myName = '', myLevel = 1, amLeader = false,
+}
+
 function plugin.onInit(coreApi)
     core = coreApi
+    lastRefreshAt = 0
     local ctrl = core and core.ctrl
     if ctrl then
         if ctrl.show_group_window == nil then ctrl.show_group_window = false end
@@ -46,6 +66,8 @@ function plugin.onInit(coreApi)
 end
 
 function plugin.onDestroy()
+    snap.members = {}
+    lastRefreshAt = 0
 end
 
 -- ----------------------------------------------------------------------------
@@ -195,6 +217,279 @@ function plugin.onDrawSettings()
     renderGwSettingsContent()
 end
 
+-- Snapshot every TLO the window needs (roles, members, pets, Box Network
+-- peers, current target, own level / leadership). Shared by onTick and the
+-- render pass; the throttle makes whichever runs first do the work.
+local function refreshGroup(force)
+    if not core or not core.mq or not core.ctrl then return end
+    local ctrl = core.ctrl
+    if not ctrl.show_group_window then
+        if #snap.members > 0 then snap.members = {} end
+        return
+    end
+    local now = os.clock()
+    if not force and (now - lastRefreshAt) < REFRESH_INTERVAL then return end
+    lastRefreshAt = now
+    local mq = core.mq
+
+    -- Group roles and leadership
+    local leaderName, mtName, maName, pullerName = '', '', '', ''
+    local grpSize = 0
+    pcall(function()
+        grpSize = mq.TLO.Group.GroupSize() or 0
+        if mq.TLO.Group.Leader and mq.TLO.Group.Leader() then
+            leaderName = mq.TLO.Group.Leader.CleanName() or ''
+        end
+        if mq.TLO.Group.MainTank and mq.TLO.Group.MainTank() then
+            mtName = mq.TLO.Group.MainTank.CleanName() or ''
+        end
+        if mq.TLO.Group.MainAssist and mq.TLO.Group.MainAssist() then
+            maName = mq.TLO.Group.MainAssist.CleanName() or ''
+        end
+        if mq.TLO.Group.Puller and mq.TLO.Group.Puller() then
+            pullerName = mq.TLO.Group.Puller.CleanName() or ''
+        end
+    end)
+    snap.grpSize = grpSize
+    snap.leaderName, snap.mtName, snap.maName, snap.pullerName = leaderName, mtName, maName, pullerName
+
+    -- Own name / level / id (read once per refresh, not per member row)
+    local myName, myId, myLevel = 'Myself', 0, 1
+    pcall(function()
+        myName = mq.TLO.Me.CleanName() or 'Myself'
+        myId = mq.TLO.Me.ID() or 0
+        myLevel = mq.TLO.Me.Level() or 1
+    end)
+    snap.myName, snap.myId, snap.myLevel = myName, myId, myLevel
+
+    -- Am I the group leader? (/disband as a non-leader makes US leave.)
+    local amLeader = false
+    pcall(function()
+        if mq.TLO.Me.GroupLeader then
+            local v = mq.TLO.Me.GroupLeader()
+            if v == true then amLeader = true end
+        end
+        if not amLeader and mq.TLO.Group.Leader and mq.TLO.Group.Leader() then
+            local lid = mq.TLO.Group.Leader.ID() or 0
+            if lid > 0 and lid == myId then amLeader = true end
+        end
+        if not amLeader and leaderName ~= '' and leaderName == myName then amLeader = true end
+    end)
+    snap.amLeader = amLeader
+
+    local members = {}
+
+    -- Include Self (Member 0)
+    if ctrl.gw_include_self ~= false then
+        local myLvl, myCls = myLevel, '?'
+        local myHpPct, myCurHp, myMaxHp = 100, 0, 0
+        local myManaPct, myCurMana, myMaxMana = 0, 0, 0
+        local myEndPct, myCurEnd, myMaxEnd = 0, 0, 0
+        local myPetId, myPetName, myPetHpPct = 0, 'Pet', 0
+        pcall(function()
+            myCls = mq.TLO.Me.Class.ShortName() or '?'
+            myHpPct = mq.TLO.Me.PctHPs() or 0
+            myCurHp = mq.TLO.Me.CurrentHPs() or 0
+            myMaxHp = mq.TLO.Me.MaxHPs() or 0
+            myManaPct = mq.TLO.Me.PctMana() or 0
+            myCurMana = mq.TLO.Me.CurrentMana() or 0
+            myMaxMana = mq.TLO.Me.MaxMana() or 0
+            myEndPct = mq.TLO.Me.PctEndurance() or 0
+            myCurEnd = mq.TLO.Me.CurrentEndurance() or 0
+            myMaxEnd = mq.TLO.Me.MaxEndurance() or 0
+            if mq.TLO.Me.Pet and mq.TLO.Me.Pet() and (mq.TLO.Me.Pet.ID() or 0) > 0 then
+                myPetId = mq.TLO.Me.Pet.ID()
+                myPetName = mq.TLO.Me.Pet.CleanName() or 'Pet'
+                myPetHpPct = mq.TLO.Me.Pet.PctHPs() or 0
+            end
+        end)
+
+        table.insert(members, {
+            isSelf = true,
+            index = 0,
+            id = myId,
+            name = myName,
+            level = myLvl,
+            cls = myCls,
+            hpPct = myHpPct,
+            curHp = myCurHp,
+            maxHp = myMaxHp,
+            manaPct = myManaPct,
+            curMana = myCurMana,
+            maxMana = myMaxMana,
+            endPct = myEndPct,
+            curEnd = myCurEnd,
+            maxEnd = myMaxEnd,
+            distance = 0,
+            los = true,
+            isLeader = (leaderName ~= '' and leaderName == myName),
+            isMT = (mtName ~= '' and mtName == myName),
+            isMA = (maName ~= '' and maName == myName),
+            isPuller = (pullerName ~= '' and pullerName == myName),
+            isMerc = false,
+            offline = false,
+            otherZone = false,
+            petId = myPetId,
+            petName = myPetName,
+            petHpPct = myPetHpPct,
+        })
+    end
+
+    -- Query Other Group Members (1 .. Members)
+    local otherCount = 0
+    pcall(function() otherCount = mq.TLO.Group.Members() or 0 end)
+    for i = 1, otherCount do
+        pcall(function()
+            local m = mq.TLO.Group.Member(i)
+            if m and m() then
+                local mName = m.CleanName() or ('Member ' .. i)
+                local mId = m.ID() or 0
+                local mLvl = m.Level() or 0
+                local mCls = (m.Class and m.Class.ShortName and m.Class.ShortName()) or '?'
+                local mOtherZone = m.OtherZone() or false
+                local mOffline = m.Offline() or false
+                local mHpPct, mCurHp, mMaxHp = 0, 0, 0
+                local mManaPct, mCurMana, mMaxMana = 0, 0, 0
+                local mEndPct, mCurEnd, mMaxEnd = 0, 0, 0
+                local mDist, mLoS = 0, false
+                local mPetId, mPetName, mPetHpPct = 0, 'Pet', 0
+                if not mOffline then
+                    mHpPct = m.PctHPs() or 0
+                    mCurHp = m.CurrentHPs() or 0
+                    mMaxHp = m.MaxHPs() or 0
+                    mManaPct = m.PctMana() or 0
+                    mCurMana = m.CurrentMana() or 0
+                    mMaxMana = m.MaxMana() or 0
+                    mEndPct = m.PctEndurance() or 0
+                    mCurEnd = m.CurrentEndurance() or 0
+                    mMaxEnd = m.MaxEndurance() or 0
+                end
+                if not mOffline and not mOtherZone then
+                    mDist = m.Distance() or 0
+                    mLoS = m.LineOfSight() or false
+                    if m.Pet and m.Pet() and (m.Pet.ID() or 0) > 0 then
+                        mPetId = m.Pet.ID()
+                        mPetName = m.Pet.CleanName() or 'Pet'
+                        mPetHpPct = m.Pet.PctHPs() or 0
+                    end
+                end
+                local mMerc = m.Mercenary() or false
+                local mLeader = (leaderName ~= '' and leaderName == mName) or (m.Leader and m.Leader()) or false
+                local mMT = (mtName ~= '' and mtName == mName)
+                local mMA = (maName ~= '' and maName == mName)
+                local mPuller = (pullerName ~= '' and pullerName == mName)
+
+                table.insert(members, {
+                    isSelf = false,
+                    index = i,
+                    id = mId,
+                    name = mName,
+                    level = mLvl,
+                    cls = mCls,
+                    hpPct = mHpPct,
+                    curHp = mCurHp,
+                    maxHp = mMaxHp,
+                    manaPct = mManaPct,
+                    curMana = mCurMana,
+                    maxMana = mMaxMana,
+                    endPct = mEndPct,
+                    curEnd = mCurEnd,
+                    maxEnd = mMaxEnd,
+                    distance = mDist,
+                    los = mLoS,
+                    isLeader = mLeader,
+                    isMT = mMT,
+                    isMA = mMA,
+                    isPuller = mPuller,
+                    isMerc = mMerc,
+                    offline = mOffline,
+                    otherZone = mOtherZone,
+                    petId = mPetId,
+                    petName = mPetName,
+                    petHpPct = mPetHpPct,
+                })
+            end
+        end)
+    end
+
+    -- Box Network: this computer's other Triune characters that are not in
+    -- the group (vitals from their heartbeat; spawn looked up locally so the
+    -- row can be targeted and shows distance).
+    if ctrl.gw_show_boxes ~= false and core.boxnet and type(core.boxnet.peers) == 'function' then
+        local okB, peers = pcall(core.boxnet.peers)
+        if okB and type(peers) == 'table' then
+            local seenNames = {}
+            for _, m in ipairs(members) do seenNames[tostring(m.name):lower()] = true end
+            local myZone = ''
+            pcall(function() myZone = tostring(mq.TLO.Zone.ShortName() or ''):lower() end)
+            for _, p in ipairs(peers) do
+                local hb = p.hb
+                if hb and p.name and not seenNames[tostring(p.name):lower()] then
+                    local inZone = tostring(hb.zone or ''):lower() == myZone
+                    local bId, bDist, bLoS = 0, 0, false
+                    if inZone then
+                        pcall(function()
+                            local sp = mq.TLO.Spawn('pc =' .. p.name)
+                            if sp and sp() and (sp.ID() or 0) > 0 then
+                                bId = sp.ID() or 0
+                                bDist = sp.Distance() or 0
+                                bLoS = sp.LineOfSight() or false
+                            end
+                        end)
+                    end
+                    table.insert(members, {
+                        isSelf = false,
+                        isBox = true,
+                        index = 100 + #members,
+                        id = bId,
+                        name = p.name,
+                        level = tonumber(hb.level) or 0,
+                        cls = type(hb.classes) == 'table' and table.concat(hb.classes, '/') or '?',
+                        hpPct = tonumber(hb.hp) or 0,
+                        curHp = 0, maxHp = 0,
+                        manaPct = tonumber(hb.mana) or 0,
+                        curMana = 0, maxMana = 0,
+                        endPct = tonumber(hb.endur) or 0,
+                        curEnd = 0, maxEnd = 0,
+                        distance = bDist,
+                        los = bLoS,
+                        isLeader = false,
+                        isMT = false,
+                        isMA = (maName ~= '' and maName == p.name),
+                        isPuller = false,
+                        isMerc = false,
+                        offline = false,
+                        otherZone = not inZone,
+                        petId = (type(hb.pet) == 'table' and tonumber(hb.pet.id)) or 0,
+                        petName = (type(hb.pet) == 'table' and hb.pet.name) or 'Pet',
+                        petHpPct = (type(hb.pet) == 'table' and tonumber(hb.pet.hp)) or 0,
+                        boxMode = hb.mode, boxRunning = hb.running == true,
+                    })
+                end
+            end
+        end
+    end
+
+    -- Which rows are one of this computer's boxes (drives the [Come] button)
+    for _, m in ipairs(members) do
+        m.isPeer = (not m.isSelf) and (boxPeerFor(m.name) ~= nil) or false
+    end
+
+    -- Current target in EverQuest
+    local curTargId, curTargName, curTargType = 0, '', ''
+    pcall(function()
+        curTargId = mq.TLO.Target.ID() or 0
+        curTargName = mq.TLO.Target.CleanName() or ''
+        curTargType = mq.TLO.Target.Type() or ''
+    end)
+    snap.curTargId, snap.curTargName, snap.curTargType = curTargId, curTargName, curTargType
+    snap.members = members
+end
+
+function plugin.onTick()
+    refreshGroup(false)
+end
+
 function plugin.onDrawUI()
     if not core or not core.ImGui or not core.ctrl then return end
     local ImGui = core.ImGui
@@ -240,224 +535,10 @@ function plugin.onDrawUI()
             ImGui.EndPopup()
         end
 
-        -- Retrieve Group Roles and Leadership
-        local grpSize = 0
-        local leaderName, mtName, maName, pullerName = '', '', '', ''
-        pcall(function()
-            grpSize = mq.TLO.Group.GroupSize() or 0
-            if mq.TLO.Group.Leader and mq.TLO.Group.Leader() then
-                leaderName = mq.TLO.Group.Leader.CleanName() or ''
-            end
-            if mq.TLO.Group.MainTank and mq.TLO.Group.MainTank() then
-                mtName = mq.TLO.Group.MainTank.CleanName() or ''
-            end
-            if mq.TLO.Group.MainAssist and mq.TLO.Group.MainAssist() then
-                maName = mq.TLO.Group.MainAssist.CleanName() or ''
-            end
-            if mq.TLO.Group.Puller and mq.TLO.Group.Puller() then
-                pullerName = mq.TLO.Group.Puller.CleanName() or ''
-            end
-        end)
-
-        local _ = (grpSize and grpSize > 0) -- isGrouped (reserved for future use)
-        local members = {}
-
-        -- Include Self (Member 0)
-        if ctrl.gw_include_self ~= false then
-            local myName, myId, myLvl, myCls = 'Myself', 0, 1, '?'
-            local myHpPct, myCurHp, myMaxHp = 100, 0, 0
-            local myManaPct, myCurMana, myMaxMana = 0, 0, 0
-            local myEndPct, myCurEnd, myMaxEnd = 0, 0, 0
-            local myPetId, myPetName, myPetHpPct = 0, 'Pet', 0
-            pcall(function()
-                myName = mq.TLO.Me.CleanName() or 'Myself'
-                myId = mq.TLO.Me.ID() or 0
-                myLvl = mq.TLO.Me.Level() or 1
-                myCls = mq.TLO.Me.Class.ShortName() or '?'
-                myHpPct = mq.TLO.Me.PctHPs() or 0
-                myCurHp = mq.TLO.Me.CurrentHPs() or 0
-                myMaxHp = mq.TLO.Me.MaxHPs() or 0
-                myManaPct = mq.TLO.Me.PctMana() or 0
-                myCurMana = mq.TLO.Me.CurrentMana() or 0
-                myMaxMana = mq.TLO.Me.MaxMana() or 0
-                myEndPct = mq.TLO.Me.PctEndurance() or 0
-                myCurEnd = mq.TLO.Me.CurrentEndurance() or 0
-                myMaxEnd = mq.TLO.Me.MaxEndurance() or 0
-                if mq.TLO.Me.Pet and mq.TLO.Me.Pet() and (mq.TLO.Me.Pet.ID() or 0) > 0 then
-                    myPetId = mq.TLO.Me.Pet.ID()
-                    myPetName = mq.TLO.Me.Pet.CleanName() or 'Pet'
-                    myPetHpPct = mq.TLO.Me.Pet.PctHPs() or 0
-                end
-            end)
-
-            table.insert(members, {
-                isSelf = true,
-                index = 0,
-                id = myId,
-                name = myName,
-                level = myLvl,
-                cls = myCls,
-                hpPct = myHpPct,
-                curHp = myCurHp,
-                maxHp = myMaxHp,
-                manaPct = myManaPct,
-                curMana = myCurMana,
-                maxMana = myMaxMana,
-                endPct = myEndPct,
-                curEnd = myCurEnd,
-                maxEnd = myMaxEnd,
-                distance = 0,
-                los = true,
-                isLeader = (leaderName ~= '' and leaderName == myName),
-                isMT = (mtName ~= '' and mtName == myName),
-                isMA = (maName ~= '' and maName == myName),
-                isPuller = (pullerName ~= '' and pullerName == myName),
-                isMerc = false,
-                offline = false,
-                otherZone = false,
-                petId = myPetId,
-                petName = myPetName,
-                petHpPct = myPetHpPct,
-            })
-        end
-
-        -- Query Other Group Members (1 .. Members)
-        local otherCount = 0
-        pcall(function() otherCount = mq.TLO.Group.Members() or 0 end)
-        for i = 1, otherCount do
-            pcall(function()
-                local m = mq.TLO.Group.Member(i)
-                if m and m() then
-                    local mName = m.CleanName() or ('Member ' .. i)
-                    local mId = m.ID() or 0
-                    local mLvl = m.Level() or 0
-                    local mCls = (m.Class and m.Class.ShortName and m.Class.ShortName()) or '?'
-                    local mHpPct = m.PctHPs() or 0
-                    local mCurHp = m.CurrentHPs() or 0
-                    local mMaxHp = m.MaxHPs() or 0
-                    local mManaPct = m.PctMana() or 0
-                    local mCurMana = m.CurrentMana() or 0
-                    local mMaxMana = m.MaxMana() or 0
-                    local mEndPct = m.PctEndurance() or 0
-                    local mCurEnd = m.CurrentEndurance() or 0
-                    local mMaxEnd = m.MaxEndurance() or 0
-                    local mDist = m.Distance() or 0
-                    local mLoS = m.LineOfSight() or false
-                    local mOtherZone = m.OtherZone() or false
-                    local mOffline = m.Offline() or false
-                    local mMerc = m.Mercenary() or false
-                    local mLeader = (leaderName ~= '' and leaderName == mName) or (m.Leader and m.Leader()) or false
-                    local mMT = (mtName ~= '' and mtName == mName)
-                    local mMA = (maName ~= '' and maName == mName)
-                    local mPuller = (pullerName ~= '' and pullerName == mName)
-
-                    local mPetId, mPetName, mPetHpPct = 0, 'Pet', 0
-                    if m.Pet and m.Pet() and (m.Pet.ID() or 0) > 0 then
-                        mPetId = m.Pet.ID()
-                        mPetName = m.Pet.CleanName() or 'Pet'
-                        mPetHpPct = m.Pet.PctHPs() or 0
-                    end
-
-                    table.insert(members, {
-                        isSelf = false,
-                        index = i,
-                        id = mId,
-                        name = mName,
-                        level = mLvl,
-                        cls = mCls,
-                        hpPct = mHpPct,
-                        curHp = mCurHp,
-                        maxHp = mMaxHp,
-                        manaPct = mManaPct,
-                        curMana = mCurMana,
-                        maxMana = mMaxMana,
-                        endPct = mEndPct,
-                        curEnd = mCurEnd,
-                        maxEnd = mMaxEnd,
-                        distance = mDist,
-                        los = mLoS,
-                        isLeader = mLeader,
-                        isMT = mMT,
-                        isMA = mMA,
-                        isPuller = mPuller,
-                        isMerc = mMerc,
-                        offline = mOffline,
-                        otherZone = mOtherZone,
-                        petId = mPetId,
-                        petName = mPetName,
-                        petHpPct = mPetHpPct,
-                    })
-                end
-            end)
-        end
-
-        -- Box Network: this computer's other Triune characters that are not in
-        -- the group (vitals from their heartbeat; spawn looked up locally so the
-        -- row can be targeted and shows distance).
-        if ctrl.gw_show_boxes ~= false and core.boxnet and type(core.boxnet.peers) == 'function' then
-            local okB, peers = pcall(core.boxnet.peers)
-            if okB and type(peers) == 'table' then
-                local seenNames = {}
-                for _, m in ipairs(members) do seenNames[tostring(m.name):lower()] = true end
-                local myZone = ''
-                pcall(function() myZone = tostring(mq.TLO.Zone.ShortName() or ''):lower() end)
-                for _, p in ipairs(peers) do
-                    local hb = p.hb
-                    if hb and p.name and not seenNames[tostring(p.name):lower()] then
-                        local inZone = tostring(hb.zone or ''):lower() == myZone
-                        local bId, bDist, bLoS = 0, 0, false
-                        if inZone then
-                            pcall(function()
-                                local sp = mq.TLO.Spawn('pc =' .. p.name)
-                                if sp and sp() and (sp.ID() or 0) > 0 then
-                                    bId = sp.ID() or 0
-                                    bDist = sp.Distance() or 0
-                                    bLoS = sp.LineOfSight() or false
-                                end
-                            end)
-                        end
-                        table.insert(members, {
-                            isSelf = false,
-                            isBox = true,
-                            index = 100 + #members,
-                            id = bId,
-                            name = p.name,
-                            level = tonumber(hb.level) or 0,
-                            cls = type(hb.classes) == 'table' and table.concat(hb.classes, '/') or '?',
-                            hpPct = tonumber(hb.hp) or 0,
-                            curHp = 0, maxHp = 0,
-                            manaPct = tonumber(hb.mana) or 0,
-                            curMana = 0, maxMana = 0,
-                            endPct = tonumber(hb.endur) or 0,
-                            curEnd = 0, maxEnd = 0,
-                            distance = bDist,
-                            los = bLoS,
-                            isLeader = false,
-                            isMT = false,
-                            isMA = (maName ~= '' and maName == p.name),
-                            isPuller = false,
-                            isMerc = false,
-                            offline = false,
-                            otherZone = not inZone,
-                            petId = (type(hb.pet) == 'table' and tonumber(hb.pet.id)) or 0,
-                            petName = (type(hb.pet) == 'table' and hb.pet.name) or 'Pet',
-                            petHpPct = (type(hb.pet) == 'table' and tonumber(hb.pet.hp)) or 0,
-                            boxMode = hb.mode, boxRunning = hb.running == true,
-                        })
-                    end
-                end
-            end
-        end
-
-        -- Query current target in EverQuest
-        local curTargId = 0
-        local curTargName = ''
-        local curTargType = ''
-        pcall(function()
-            curTargId = mq.TLO.Target.ID() or 0
-            curTargName = mq.TLO.Target.CleanName() or ''
-            curTargType = mq.TLO.Target.Type() or ''
-        end)
+        -- Throttled; normally a no-op because onTick already refreshed this cycle.
+        refreshGroup(false)
+        local members = snap.members
+        local curTargId, curTargName, curTargType = snap.curTargId, snap.curTargName, snap.curTargType
 
         -- Determine currently selected group member
         local selectedMember = nil
@@ -525,12 +606,17 @@ function plugin.onDrawUI()
                 if selectedMember.isSelf then
                     mq.cmd('/disband')
                 else
-                    if selectedMember.id and selectedMember.id > 0 then
-                        mq.cmdf('/target id %d', selectedMember.id)
-                    elseif selectedMember.name then
-                        mq.cmdf('/target %s', selectedMember.name)
+                    -- /disband with a member targeted only removes them when WE
+                    -- are the leader; as a non-leader it makes us leave, so
+                    -- non-leaders only send /kickgroup.
+                    if snap.amLeader then
+                        if selectedMember.id and selectedMember.id > 0 then
+                            mq.cmdf('/target id %d', selectedMember.id)
+                        elseif selectedMember.name then
+                            mq.cmdf('/target %s', selectedMember.name)
+                        end
+                        mq.cmd('/disband')
                     end
-                    mq.cmd('/disband')
                     if selectedMember.name and selectedMember.name ~= '' then
                         mq.cmdf('/kickgroup %s', selectedMember.name)
                     end
@@ -544,8 +630,10 @@ function plugin.onDrawUI()
             if selectedMember then
                 if selectedMember.isSelf then
                     core.setTooltip('Leave group (/disband)')
-                else
+                elseif snap.amLeader then
                     core.setTooltip('%s', string.format('Disband / remove %s from group (/disband, /kickgroup)', selectedMember.name))
+                else
+                    core.setTooltip('%s', string.format('Remove %s from group (/kickgroup; only the leader can /disband a member)', selectedMember.name))
                 end
             else
                 core.setTooltip('Disband selected / targeted group member (/disband)')
@@ -569,9 +657,7 @@ function plugin.onDrawUI()
                 elseif mem.otherZone then
                     conR, conG, conB = 0.85, 0.65, 0.25
                 else
-                    local myLevel = 1
-                    pcall(function() myLevel = mq.TLO.Me.Level() or 1 end)
-                    local delta = (mem.level or 1) - myLevel
+                    local delta = (mem.level or 1) - (snap.myLevel or 1)
                     if delta >= 3 then
                         conR, conG, conB = 1.0, 0.25, 0.25
                     elseif delta >= 1 then
@@ -662,14 +748,14 @@ function plugin.onDrawUI()
                     ImGui.SameLine()
                     accent(ARC, string.format('%.0fft', mem.distance or 0))
                     -- [Come]: only for members that are one of this computer's boxes
-                    if boxPeerFor(mem.name) then
+                    if mem.isPeer then
                         ImGui.SameLine()
                         if ImGui.SmallButton('Come##gwCome' .. idx) then
                             local okSend, why = sendComeToMe(mem.name)
                             if not okSend then print('\ay[Triune]\ax Come request to ' .. tostring(mem.name) .. ' not sent: ' .. tostring(why)) end
                         end
                         if ImGui.IsItemHovered() then
-                            core.setTooltip('%s', string.format('Tell %s to navigate to you\n(/ac net %s cometo %s)', mem.name, mem.name, myCleanName() or 'me'))
+                            core.setTooltip('%s', string.format('Tell %s to navigate to you\n(/ac net %s cometo %s)', mem.name, mem.name, snap.myName or 'me'))
                         end
                     end
                 elseif mem.offline then

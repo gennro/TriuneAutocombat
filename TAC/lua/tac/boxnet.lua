@@ -1,4 +1,4 @@
----@diagnostic disable: undefined-global, undefined-field
+---@diagnostic disable: undefined-global, undefined-field, need-check-nil
 -- ============================================================================
 -- TAC/lua/tac/boxnet.lua — Triune Box Network Plugin (MacroQuest Actors)
 -- ============================================================================
@@ -56,8 +56,10 @@ local plugin = {
     window             = { label = 'Box Net', tooltip = 'Toggles the Box Network window (boxnet plugin): peer roster, vitals, and remote commands.', flag = 'show_boxnet', desc = 'Boxed characters roster, vitals, and remote /ac commands', headerButton = true, order = 25 },
 }
 
-local core = nil
-local ctrl, ImGui, mq = nil, nil, nil
+-- Populated by refresh() on every entry point; typed so the language server
+-- does not treat them as permanently nil.
+local core = nil  ---@type table
+local ctrl, ImGui, mq = nil, nil, nil  ---@type table, ImGui, Mq
 
 -- ----------------------------------------------------------------------------
 -- Constants
@@ -71,7 +73,9 @@ local REGISTER_RETRY_SEC = 5.0
 local HB_CHANGE_MIN_SEC  = 0.25   -- min spacing for change-triggered heartbeats
 local LAUNCHER_HINT_SEC  = 6.0    -- "no peers yet" -> launcher hint after this long
 local PROBE_INTERVAL_SEC = 10.0   -- loopback RPC through the launcher while no peers are seen
+local PROBE_OK_INTERVAL_SEC = 60.0 -- ...backed off once a probe has succeeded (routing is known good)
 local PROBE_TIMEOUT_SEC  = 5.0    -- no reply within this -> "no answer"
+local GROUP_CACHE_SEC    = 1.0    -- api.isGroupMember answers from a cache this old
 local SCOPES             = { 'all', 'zone', 'group' }
 
 -- ----------------------------------------------------------------------------
@@ -114,6 +118,10 @@ local net = {
     log            = {},   -- newest first: { time, text, level }
     cmdInput       = '',
     allowInput     = nil,
+    generation     = 0,     -- bumped on every onInit; consumers compare api.generation() to notice a reload
+    me             = nil,   -- cached Me.CleanName() (refreshed on init / zone)
+    pid            = nil,   -- cached EverQuest.PID()
+    groupCache     = {},    -- [lowerName] = { v = bool, at = sec } for api.isGroupMember
 }
 
 local function refresh()
@@ -151,12 +159,27 @@ local function chat(fmt, ...)
     print(string.format('\ag[BoxNet]\ax ' .. fmt, ...))
 end
 
+-- Own name / PID are read once and cached (they are used per message and per
+-- frame); refreshName() re-reads them on init and after a zone.
 local function myName()
-    return tlo(function() return mq.TLO.Me.CleanName() end, '')
+    local n = net.me
+    if n and n ~= '' then return n end
+    n = tlo(function() return mq.TLO.Me.CleanName() end, '')
+    if type(n) ~= 'string' then n = tostring(n or '') end
+    net.me = n
+    return n
 end
 
 local function myPid()
-    return tlo(function() return mq.TLO.EverQuest.PID() end, nil)
+    if net.pid ~= nil then return net.pid end
+    net.pid = tlo(function() return mq.TLO.EverQuest.PID() end, nil)
+    return net.pid
+end
+
+local function refreshName()
+    net.me, net.pid = nil, nil
+    myName()
+    myPid()
 end
 
 local function myZone()
@@ -212,12 +235,14 @@ local function loadActors()
 end
 
 local function onMessage(message)
-    -- Handler contract: never block, never delay. Queue and return.
-    if #net.inbox >= INBOX_MAX then
-        table.remove(net.inbox, 1)
+    -- Handler contract: never block, never delay. Queue and return. A full
+    -- inbox drops the newest message (O(1); no front removal per drop).
+    local n = #net.inbox
+    if n >= INBOX_MAX then
         net.dropped = net.dropped + 1
+        return
     end
-    net.inbox[#net.inbox + 1] = message
+    net.inbox[n + 1] = message
 end
 
 local function registerActor()
@@ -364,9 +389,42 @@ end
 -- ----------------------------------------------------------------------------
 local function peerKey(name) return lower(name) end
 
+-- A peer's heartbeat is untrusted input: keep only the shapes the API and the
+-- window rely on (target = table with a numeric id, classes = strings,
+-- counters = table). Returns nil for anything that is not a table.
+local function validateHeartbeat(hb)
+    if type(hb) ~= 'table' then return nil end
+    if type(hb.name) ~= 'string' then hb.name = nil end
+    if type(hb.zone) ~= 'string' then hb.zone = tostring(hb.zone or '') end
+    local t = hb.target
+    if type(t) ~= 'table' or type(t.id) ~= 'number' then
+        hb.target = nil
+    else
+        if t.name ~= nil and type(t.name) ~= 'string' then t.name = tostring(t.name) end
+        if type(t.hp) ~= 'number' then t.hp = tonumber(t.hp) or 0 end
+        if type(t.since) ~= 'number' then t.since = nil end
+    end
+    if type(hb.classes) == 'table' then
+        local clean = {}
+        for _, c in ipairs(hb.classes) do
+            if type(c) == 'string' then clean[#clean + 1] = c end
+        end
+        hb.classes = clean
+    else
+        hb.classes = nil
+    end
+    if type(hb.counters) ~= 'table' then hb.counters = nil end
+    if hb.pet ~= nil and type(hb.pet) ~= 'table' then hb.pet = nil end
+    return hb
+end
+
 local function touchPeer(sender, hb)
-    local name = (hb and hb.name) or (sender and sender.character) or ''
-    if name == '' then return nil end
+    hb = validateHeartbeat(hb)
+    -- The transport's sender.character is authoritative; the heartbeat's own
+    -- name field only fills in when the transport gave none.
+    local name = sender and sender.character
+    if type(name) ~= 'string' or name == '' then name = hb and hb.name end
+    if type(name) ~= 'string' or name == '' then return nil end
     local key = peerKey(name)
     local p = net.peers[key]
     if not p then
@@ -451,32 +509,55 @@ local function isGroupMember(name)
     end, false) == true
 end
 
+-- Same answer, at most one Group.Member() round-trip per name per
+-- GROUP_CACHE_SEC: for consumers that ask per frame or per chat line (the
+-- DPS meter). Command routing above stays uncached (user-triggered, rare).
+local function isGroupMemberCached(name)
+    if type(name) ~= 'string' or name == '' then return false end
+    local key = lower(name)
+    local t = nowSec()
+    local c = net.groupCache[key]
+    if c and (t - c.at) < GROUP_CACHE_SEC then return c.v end
+    local v = isGroupMember(name)
+    net.groupCache[key] = { v = v, at = t }
+    return v
+end
+
 -- ----------------------------------------------------------------------------
 -- Heartbeat
 -- ----------------------------------------------------------------------------
-local function snapshot()
+-- Current target id, with the "since" bookkeeping: when we acquired this
+-- target. Pullers in the same zone compare it to decide who keeps a mob both
+-- of them picked at the same moment. One TLO read; called every tick.
+local function sampleTarget()
+    local tid = tlo(function() return mq.TLO.Target.ID() end, 0)
+    if not tid or tid <= 0 then
+        net.targetId, net.targetSince = 0, nil
+        return 0
+    end
+    if tid ~= net.targetId then
+        net.targetId, net.targetSince = tid, nowSec()
+    end
+    return tid
+end
+
+-- The few reads whose change is worth an immediate heartbeat (zone, mode,
+-- target / engaged, combat, sitting, cure counters): about ten TLO calls.
+-- This is what a tick samples; the full snapshot below is only built when a
+-- heartbeat is actually sent, and reuses these values.
+local function sampleFingerprint()
+    local tid = sampleTarget()
+    local combat = tlo(function() return mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT') end, false) == true
     local s = {
-        name    = myName(),
-        level   = tlo(function() return mq.TLO.Me.Level() end, 0),
-        zone    = myZone(),
-        zoneId  = tlo(function() return mq.TLO.Zone.ID() end, 0),
-        classes = {},
-        mode    = ctrl and ctrl.mode or '',
-        submode = ctrl and ctrl.submode or '',
-        running = (ctrl and ctrl.running == true) or false,
-        burn    = (ctrl and ctrl.burn == true) or false,
-        ma      = (ctrl and ctrl.ma_name) or '',
-        hp      = tlo(function() return mq.TLO.Me.PctHPs() end, 0),
-        mana    = tlo(function() return mq.TLO.Me.PctMana() end, 0),
-        endur   = tlo(function() return mq.TLO.Me.PctEndurance() end, 0),
-        combat  = tlo(function() return mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT') end, false) == true,
-        sitting = tlo(function() return mq.TLO.Me.Sitting() end, false) == true,
-        casting = tlo(function() return mq.TLO.Me.Casting.Name() end, nil),
-        x       = tlo(function() return mq.TLO.Me.X() end, 0),
-        y       = tlo(function() return mq.TLO.Me.Y() end, 0),
-        z       = tlo(function() return mq.TLO.Me.Z() end, 0),
-        pull    = core.runtime and core.runtime.pullState or nil,
-        ver     = core.VERSION,
+        zone     = myZone(),
+        mode     = ctrl and ctrl.mode or '',
+        submode  = ctrl and ctrl.submode or '',
+        running  = (ctrl and ctrl.running == true) or false,
+        burn     = (ctrl and ctrl.burn == true) or false,
+        ma       = (ctrl and ctrl.ma_name) or '',
+        combat   = combat,
+        sitting  = tlo(function() return mq.TLO.Me.Sitting() end, false) == true,
+        targetId = tid,
         -- Detrimental counters so other boxes can cure us without NetBots / EQBC.
         counters = {
             poison     = tlo(function() return mq.TLO.Me.CountersPoison() end, 0),
@@ -485,28 +566,55 @@ local function snapshot()
             corruption = tlo(function() return mq.TLO.Me.CountersCorruption() end, 0),
         },
     }
+    if tid > 0 then
+        -- One PctHPs read serves both the reported hp and the engaged flag.
+        s.targetHp = tlo(function() return mq.TLO.Target.PctHPs() end, nil)
+        -- "engaged" = we are fighting it: auto-attack on / in combat, or it is
+        -- already hurt. Assist boxes use this instead of guessing from /assist.
+        s.engaged = combat or ((s.targetHp or 100) < 100)
+    end
+    return s
+end
+
+local function snapshot(sample)
+    sample = sample or sampleFingerprint()
+    local s = {
+        name    = myName(),
+        level   = tlo(function() return mq.TLO.Me.Level() end, 0),
+        zone    = sample.zone,
+        zoneId  = tlo(function() return mq.TLO.Zone.ID() end, 0),
+        classes = {},
+        mode    = sample.mode,
+        submode = sample.submode,
+        running = sample.running,
+        burn    = sample.burn,
+        ma      = sample.ma,
+        hp      = tlo(function() return mq.TLO.Me.PctHPs() end, 0),
+        mana    = tlo(function() return mq.TLO.Me.PctMana() end, 0),
+        endur   = tlo(function() return mq.TLO.Me.PctEndurance() end, 0),
+        combat  = sample.combat,
+        sitting = sample.sitting,
+        casting = tlo(function() return mq.TLO.Me.Casting.Name() end, nil),
+        x       = tlo(function() return mq.TLO.Me.X() end, 0),
+        y       = tlo(function() return mq.TLO.Me.Y() end, 0),
+        z       = tlo(function() return mq.TLO.Me.Z() end, 0),
+        pull    = core.runtime and core.runtime.pullState or nil,
+        ver     = core.VERSION,
+        counters = sample.counters,
+    }
     local classes = core.myClasses
     if type(classes) == 'table' then
         for i, c in ipairs(classes) do s.classes[i] = tostring(c) end
     end
-    local tid = tlo(function() return mq.TLO.Target.ID() end, 0)
-    if not tid or tid <= 0 then
-        net.targetId, net.targetSince = 0, nil
-    else
-        -- When we acquired this target. Pullers in the same zone compare it to
-        -- decide who keeps a mob both of them picked at the same moment.
-        if tid ~= net.targetId then
-            net.targetId, net.targetSince = tid, nowSec()
-        end
+    local tid = sample.targetId or 0
+    if tid > 0 then
         s.target = {
             id      = tid,
             name    = tlo(function() return mq.TLO.Target.CleanName() end, ''),
-            hp      = tlo(function() return mq.TLO.Target.PctHPs() end, 0),
+            hp      = sample.targetHp or 0,
             type    = tlo(function() return mq.TLO.Target.Type() end, ''),
             since   = net.targetSince,
-            -- "engaged" = we are fighting it: auto-attack on / in combat, or it is
-            -- already hurt. Assist boxes use this instead of guessing from /assist.
-            engaged = s.combat or (tlo(function() return mq.TLO.Target.PctHPs() end, 100) < 100),
+            engaged = sample.engaged == true,
         }
     end
     local petId = tlo(function() return mq.TLO.Me.Pet.ID() end, 0)
@@ -520,12 +628,16 @@ local function snapshot()
     return s
 end
 
--- Fields whose change is worth an immediate heartbeat (mode flips, targets).
+-- Fields whose change is worth an immediate heartbeat (mode flips, targets),
+-- from a sampleFingerprint() table.
 local function fingerprint(s)
     local c = s.counters or {}
+    local tid = s.targetId or 0
+    local engaged = 'nil'
+    if tid > 0 then engaged = tostring(s.engaged == true) end
     return table.concat({
         s.zone or '', s.mode or '', s.submode or '', tostring(s.running), tostring(s.burn),
-        s.ma or '', tostring(s.target and s.target.id or 0), tostring(s.target and s.target.engaged),
+        s.ma or '', tostring(tid), engaged,
         tostring(s.combat), tostring(s.sitting),
         tostring((c.poison or 0) > 0), tostring((c.disease or 0) > 0), tostring((c.curse or 0) > 0), tostring((c.corruption or 0) > 0),
     }, '|')
@@ -534,14 +646,19 @@ end
 local function sendHeartbeat(force)
     if not net.actor then return false end
     local t = nowSec()
-    local s = snapshot()
-    local fp = fingerprint(s)
-    local due = (t - net.lastHeartbeatAt) >= cfg.heartbeatSec
-    local changed = (fp ~= net.lastFingerprint) and ((t - net.lastHeartbeatAt) >= HB_CHANGE_MIN_SEC)
-    if not (force or due or changed) then return false end
+    local since = t - net.lastHeartbeatAt
+    local due = since >= cfg.heartbeatSec
+    if not (force or due) and since < HB_CHANGE_MIN_SEC then
+        -- Nothing can be sent this tick; keep only the target bookkeeping fresh.
+        sampleTarget()
+        return false
+    end
+    local sample = sampleFingerprint()
+    local fp = fingerprint(sample)
+    if not (force or due) and fp == net.lastFingerprint then return false end
     net.lastHeartbeatAt = t
     net.lastFingerprint = fp
-    return rawSend(nil, 'heartbeat', s)
+    return rawSend(nil, 'heartbeat', snapshot(sample))
 end
 
 -- ----------------------------------------------------------------------------
@@ -748,8 +865,11 @@ local function tickProbe()
         net.probe.state = 'no answer'
         logEvent('Launcher loopback: no answer within ' .. PROBE_TIMEOUT_SEC .. 's', 'error')
     end
-    -- Keep probing while we see nobody; once peers exist the roster is proof enough.
-    if peerCount() == 0 and not sentAt and (t - net.probe.at) >= PROBE_INTERVAL_SEC then
+    -- Keep probing while we see nobody; once peers exist the roster is proof
+    -- enough. After a successful probe the routing is known good, so the
+    -- lonely-box case backs off to once a minute instead of every 10 s forever.
+    local interval = (net.probe.state == 'ok') and PROBE_OK_INTERVAL_SEC or PROBE_INTERVAL_SEC
+    if peerCount() == 0 and not sentAt and (t - net.probe.at) >= interval then
         sendProbe()
     end
 end
@@ -934,7 +1054,10 @@ local function processMessage(message)
         touchPeer(sender, payload.data)
     elseif kind == 'hello' then
         touchPeer(sender, nil)
-        sendHeartbeat(true)
+        -- Answer with our state so the newcomer sees us at once, but never
+        -- faster than a change-triggered heartbeat: a burst of hellos (or a
+        -- misbehaving peer) cannot make every box broadcast without limit.
+        if (nowSec() - net.lastHeartbeatAt) >= HB_CHANGE_MIN_SEC then sendHeartbeat(true) end
     elseif kind == 'bye' then
         local from = (sender and sender.character) or payload.from
         removePeer(from, 'left')
@@ -1020,9 +1143,17 @@ function api.peerTarget(name, maxAgeSec)
     local p, age = api.peerFresh(name, maxAgeSec)
     if not p then return nil end
     local t = p.hb.target
-    if type(t) ~= 'table' or not t.id or t.id <= 0 then return false end
+    if type(t) ~= 'table' or type(t.id) ~= 'number' or t.id <= 0 then return false end
     return { id = t.id, name = t.name, hp = t.hp, type = t.type, engaged = t.engaged == true, combat = p.hb.combat == true, age = age, since = t.since }
 end
+
+-- Bumped on every onInit. A consumer that cached a subscription can compare
+-- this (or the api table identity) to notice the plugin was reloaded.
+function api.generation() return net.generation end
+
+-- True when `name` is in our group; answered from a GROUP_CACHE_SEC cache so
+-- per-frame / per-line callers cost one TLO round-trip per name per second.
+function api.isGroupMember(name) return isGroupMemberCached(name) end
 
 -- When this box acquired its current target, on the same clock the
 -- heartbeat's target.since uses; nil while we have no target (or before
@@ -1347,11 +1478,19 @@ function plugin.onInit(coreApi)
     net.inbox = {}
     net.rpcInbox = {}
     net.peers = {}
+    net.groupCache = {}
     net.lastRegisterAt = -1e9
     net.lastHeartbeatAt = -1e9
     net.lastFingerprint = nil
     net.lastSendStatus = nil
     net.startedAt = nowSec()
+    net.generation = (net.generation or 0) + 1
+    refreshName()
+    -- Other plugins' subscriptions live in the once-per-state registry (like
+    -- the dropbox) so a reload of this plugin does not orphan them.
+    local reg = registry()
+    if type(reg.subscribers) ~= 'table' then reg.subscribers = net.subscribers or {} end
+    net.subscribers = reg.subscribers
     rawset(core, 'boxnet', api)
     if core.runtime then core.runtime.onBoxBuffRequestDone = onBoxBuffRequestDone end
     -- Register straight away so other plugins' onInit can already see us.
@@ -1369,7 +1508,8 @@ function plugin.onDestroy()
     net.inbox = {}
     net.rpcInbox = {}
     net.peers = {}
-    net.subscribers = {}
+    -- net.subscribers is deliberately kept (registry-owned): consumers keep
+    -- their subscription across this plugin's reload.
     if core and rawget(core, 'boxnet') == api then rawset(core, 'boxnet', nil) end
     if core and core.runtime and core.runtime.onBoxBuffRequestDone == onBoxBuffRequestDone then core.runtime.onBoxBuffRequestDone = nil end
 end
@@ -1389,6 +1529,8 @@ end
 function plugin.onZoned()
     if not core then return end
     refresh()
+    refreshName()
+    net.groupCache = {}
     sendHeartbeat(true)
 end
 

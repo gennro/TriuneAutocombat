@@ -6,9 +6,9 @@
 -- bar: dual orientations, compact vs full layouts, live recast timers, active
 -- casting overlays, spell-set presets, and right-click actions.
 --
--- Render-only plugin driven by ctrl.show_spell_gems; the header buttons, Mini
--- HUD, window manager, and /ac gems keep working unchanged. Gem cooldowns are
--- read from runtime.gemCooldownEnd / gemCooldownSpell (owned by the caster).
+-- Driven by ctrl.show_spell_gems; the header buttons, Mini HUD, window
+-- manager, and /ac gems keep working unchanged. Gem TLOs are polled from
+-- onTick (0.1 s) into a snapshot; onDrawUI only reads the snapshot.
 -- ============================================================================
 
 local plugin = {
@@ -19,7 +19,7 @@ local plugin = {
     uses               = { spellbook = 'Open Spellbook from the gem bar' },
     description        = 'Popout spell gem bar with recast timers, casting overlays, spell-set presets, and right-click actions.',
     defaultEnabled     = true,
-    tickInterval       = 1.0,
+    tickInterval       = 0.1,
     runOutOfCombatOnly = false,
     hasThread          = false,
     -- Window owned by this plugin (drives the main-window header button)
@@ -30,6 +30,37 @@ local core = nil
 local rt, ctrl, ImGui, mq, accent = nil, nil, nil, nil, nil
 local GOLD = nil
 local M = { newSpellSetName = '', gemCooldownEnd = {}, gemCooldownSpell = {} }
+
+-- ---------------------------------------------------------------------------
+-- TLO snapshot cache (same throttle pattern as hud_unitframes.refreshVitals).
+-- refreshGems() is shared by onTick (tickInterval 0.1 s) and the render pass;
+-- whichever runs first inside REFRESH_INTERVAL polls the gems, and draw only
+-- reads `snap`. Static per-(slot, spellName) facts (ID, level, mana, icon,
+-- range, cast time, recast) live in gemStatic and are re-queried only when the
+-- spell memorized in that slot changes; per-refresh polling is limited to
+-- SpellReady / GemTimer / Casting / CurrentMana. Each slot stores a readyAt
+-- timestamp so the cooldown sweep and countdown stay smooth between refreshes.
+-- ---------------------------------------------------------------------------
+local REFRESH_INTERVAL = 0.1
+local MAX_GEM_SLOTS = 12
+local lastRefreshAt = 0
+local snap = { slots = {}, maxGems = 8, myMana = 0, castingName = nil, castEndAt = nil }
+local gemStatic = {}
+-- Precomputed per-slot label / ID strings (no string.format per gem per frame).
+local slotLabels = {}
+for slot = 1, MAX_GEM_SLOTS do
+    slotLabels[slot] = {
+        num      = string.format('%d', slot),
+        btnId    = '##gemBtn_' .. tostring(slot),
+        menuId   = '##gemItemMenu_' .. tostring(slot),
+        castId   = 'Cast Spell##cast_' .. tostring(slot),
+        infoId   = 'Inspect Spell Info##info_' .. tostring(slot),
+        unmemId  = 'Unmemorize Gem##unmem_' .. tostring(slot),
+        bookId   = 'Open Spellbook##book_' .. tostring(slot),
+        emptyBtn = string.format('#%d##empty_%d', slot, slot),
+        emptyTip = string.format('Gem Slot #%d (Empty)\nClick to open Spellbook and memorize a spell.', slot),
+    }
+end
 
 -- Opens the Spellbook Browser plugin window (was: /lua run triune_spellbook).
 local function openSpellbook()
@@ -60,6 +91,213 @@ function plugin.onInit(coreApi)
 end
 
 function plugin.onDestroy()
+end
+
+-- Static facts for the spell memorized in a gem; `g` is mq.TLO.Me.Gem(slot).
+local function readGemStatic(g, sName)
+    local st = { name = sName, id = 0, level = 0, mana = 0, icon = 0, range = 0, castTime = 0, recast = 0 }
+    pcall(function() st.id = g.ID() or 0 end)
+    pcall(function() st.level = g.Level() or 0 end)
+    pcall(function() st.mana = g.Mana() or 0 end)
+    pcall(function() st.icon = g.SpellIcon() or 0 end)
+    pcall(function() st.range = g.Range() or 0 end)
+    pcall(function() st.castTime = (g.MyCastTime() or g.CastTime() or 0) / 1000.0 end)
+    pcall(function()
+        local sRecast = core.parseSpellRecastTime(g)
+        if sRecast == 0 then
+            local rcast = tonumber(g.RecastTime and g.RecastTime() or 0) or 0
+            if rcast > 86400 then
+                sRecast = rcast / 1000.0
+            elseif rcast > 0 then
+                sRecast = rcast
+            end
+        end
+        st.recast = sRecast
+    end)
+    return st
+end
+
+-- Snapshot everything the gem bar needs. Shared by onTick and the render pass.
+local function refreshGems(force)
+    if not core or not mq or not ctrl then return end
+    if not ctrl.show_spell_gems then return end
+    local now = os.clock()
+    if not force and (now - lastRefreshAt) < REFRESH_INTERVAL then return end
+    lastRefreshAt = now
+
+    local maxGems = core.getNumGems() or 8
+    snap.maxGems = maxGems
+
+    local myMana = 0
+    pcall(function() myMana = mq.TLO.Me.CurrentMana() or 0 end)
+    snap.myMana = myMana
+
+    local activeCastingName = nil
+    local castTimeLeft = 0
+    pcall(function()
+        if mq.TLO.Me.Casting() then
+            activeCastingName = mq.TLO.Me.Casting.Name()
+            castTimeLeft = (mq.TLO.Me.CastTimeLeft() or 0) / 1000.0
+        end
+    end)
+    snap.castingName = activeCastingName
+    snap.castEndAt = activeCastingName and (now + castTimeLeft) or nil
+
+    M.gemCooldownEnd = M.gemCooldownEnd or {}
+    M.gemCooldownSpell = M.gemCooldownSpell or {}
+
+    for slot = 1, MAX_GEM_SLOTS do
+        local gemData = nil
+        if slot <= maxGems then
+            pcall(function()
+                local g = mq.TLO.Me.Gem(slot)
+                if not (g and g()) then return end
+                local sName = g.Name()
+                if not sName or sName == '' then return end
+
+                local st = gemStatic[slot]
+                if not st or st.name ~= sName then
+                    st = readGemStatic(g, sName)
+                    gemStatic[slot] = st
+                end
+                if M.gemCooldownSpell[slot] ~= sName then
+                    M.gemCooldownSpell[slot] = sName
+                    M.gemCooldownEnd[slot] = nil
+                end
+
+                local sRecast = st.recast
+                local querySec = core.getGemCooldownSec(slot, sName, sRecast)
+
+                local isReady = false
+                pcall(function() isReady = (mq.TLO.Me.SpellReady(slot)() == true) end)
+
+                local isCastingThis = (activeCastingName and activeCastingName == sName)
+                local timer = 0
+                if isReady then
+                    M.gemCooldownEnd[slot] = nil
+                elseif isCastingThis then
+                    -- Actively casting this spell: prime recast countdown so it begins immediately on cast completion
+                    local baseRecast = math.max(2.25, sRecast or 0)
+                    M.gemCooldownEnd[slot] = now + (castTimeLeft or 0) + baseRecast
+                else
+                    local endAt = M.gemCooldownEnd[slot]
+                    local isOtherCasting = (activeCastingName and activeCastingName ~= sName)
+                    local baseRecast = isOtherCasting and 2.25 or (querySec > 0 and querySec or 2.25)
+                    local maxAllowed = (sRecast and sRecast > 0) and math.max(2.5, sRecast + 3.0) or 3.0
+
+                    if not endAt then
+                        local dur = (querySec > 0) and querySec or baseRecast
+                        dur = math.min(dur, maxAllowed)
+                        endAt = now + dur
+                        M.gemCooldownEnd[slot] = endAt
+                        timer = dur
+                    else
+                        local rem = endAt - now
+                        if rem > maxAllowed then
+                            rem = maxAllowed
+                            endAt = now + maxAllowed
+                            M.gemCooldownEnd[slot] = endAt
+                        end
+
+                        if rem > 0 then
+                            timer = rem
+                        else
+                            if querySec > 0 then
+                                local dur = math.min(querySec, maxAllowed)
+                                endAt = now + dur
+                                M.gemCooldownEnd[slot] = endAt
+                                timer = dur
+                            else
+                                timer = 0
+                            end
+                        end
+                    end
+                end
+                local ready = isReady or (timer <= 0.05 and not activeCastingName)
+
+                gemData = {
+                    slot = slot,
+                    name = sName,
+                    id = st.id,
+                    level = st.level,
+                    mana = st.mana,
+                    icon = st.icon,
+                    range = st.range,
+                    castTime = st.castTime,
+                    recast = st.recast,
+                    ready = ready,
+                    readyAt = (timer > 0) and (now + timer) or nil,
+                }
+            end)
+        end
+        if not gemData then
+            gemStatic[slot] = nil
+        end
+        snap.slots[slot] = gemData
+    end
+end
+
+-- Right-click-on-background settings content (hoisted so no closure is
+-- allocated per frame).
+local function renderGemSettingsContent()
+    accent(GOLD, 'Spell Gem Bar Options')
+    ImGui.Separator()
+
+    local lockVal = ImGui.Checkbox('Lock Window Position & Size##gemLock', ctrl.gem_lock or false)
+    if lockVal ~= (ctrl.gem_lock or false) then
+        ctrl.gem_lock = lockVal
+        core.saveLoadout(true)
+    end
+
+    -- Orientation selection
+    ImGui.Text('Orientation:')
+    ImGui.SameLine()
+    if ImGui.RadioButton('Auto##gemOrientAuto', ctrl.gem_orientation == 'Auto' or not ctrl.gem_orientation) then
+        ctrl.gem_orientation = 'Auto'
+        core.saveLoadout(true)
+    end
+    ImGui.SameLine()
+    if ImGui.RadioButton('Horizontal##gemOrientH', ctrl.gem_orientation == 'Horizontal') then
+        ctrl.gem_orientation = 'Horizontal'
+        core.saveLoadout(true)
+    end
+    ImGui.SameLine()
+    if ImGui.RadioButton('Vertical##gemOrientV', ctrl.gem_orientation == 'Vertical') then
+        ctrl.gem_orientation = 'Vertical'
+        core.saveLoadout(true)
+    end
+
+    local badgeVal = ImGui.Checkbox('Show Gem Numbers (#1..#N)##gemBadges', ctrl.gem_show_badges ~= false)
+    if badgeVal ~= (ctrl.gem_show_badges ~= false) then
+        ctrl.gem_show_badges = badgeVal
+        core.saveLoadout(true)
+    end
+
+    local timerVal = ImGui.Checkbox('Show Cooldown Timers##gemTimer', ctrl.gem_show_timer ~= false)
+    if timerVal ~= (ctrl.gem_show_timer ~= false) then
+        ctrl.gem_show_timer = timerVal
+        core.saveLoadout(true)
+    end
+
+    if core.drawWindowScaleControl then core.drawWindowScaleControl('spell_gems', 'Scale', 120) end
+    ImGui.SetNextItemWidth(core.px(120))
+    local newAlpha = ImGui.SliderFloat('Opacity##gemAlpha', ctrl.gem_alpha or 0.85, 0.20, 1.0, '%.2f')
+    if newAlpha ~= (ctrl.gem_alpha or 0.85) then
+        ctrl.gem_alpha = newAlpha
+        core.saveLoadout(true)
+    end
+
+    ImGui.Separator()
+    if ImGui.MenuItem('Open Spellbook##gemOpenBook') then
+        openSpellbook()
+    end
+end
+
+local function toXY(x, y)
+    if type(x) == 'userdata' or (type(x) == 'table' and x.x) then
+        return x.x, x.y
+    end
+    return x or 0, y or 0
 end
 
 function M.drawSpellGemBarWindow()
@@ -93,60 +331,6 @@ function M.drawSpellGemBarWindow()
 
     if show then
         core.postBeginWindow('spell_gems')
-        -- Right-click on window background for settings
-        local function renderGemSettingsContent()
-            accent(GOLD, 'Spell Gem Bar Options')
-            ImGui.Separator()
-
-            local lockVal = ImGui.Checkbox('Lock Window Position & Size##gemLock', ctrl.gem_lock or false)
-            if lockVal ~= (ctrl.gem_lock or false) then
-                ctrl.gem_lock = lockVal
-                core.saveLoadout(true)
-            end
-
-            -- Orientation selection
-            ImGui.Text('Orientation:')
-            ImGui.SameLine()
-            if ImGui.RadioButton('Auto##gemOrientAuto', ctrl.gem_orientation == 'Auto' or not ctrl.gem_orientation) then
-                ctrl.gem_orientation = 'Auto'
-                core.saveLoadout(true)
-            end
-            ImGui.SameLine()
-            if ImGui.RadioButton('Horizontal##gemOrientH', ctrl.gem_orientation == 'Horizontal') then
-                ctrl.gem_orientation = 'Horizontal'
-                core.saveLoadout(true)
-            end
-            ImGui.SameLine()
-            if ImGui.RadioButton('Vertical##gemOrientV', ctrl.gem_orientation == 'Vertical') then
-                ctrl.gem_orientation = 'Vertical'
-                core.saveLoadout(true)
-            end
-
-            local badgeVal = ImGui.Checkbox('Show Gem Numbers (#1..#N)##gemBadges', ctrl.gem_show_badges ~= false)
-            if badgeVal ~= (ctrl.gem_show_badges ~= false) then
-                ctrl.gem_show_badges = badgeVal
-                core.saveLoadout(true)
-            end
-
-            local timerVal = ImGui.Checkbox('Show Cooldown Timers##gemTimer', ctrl.gem_show_timer ~= false)
-            if timerVal ~= (ctrl.gem_show_timer ~= false) then
-                ctrl.gem_show_timer = timerVal
-                core.saveLoadout(true)
-            end
-
-            if core.drawWindowScaleControl then core.drawWindowScaleControl('spell_gems', 'Scale', 120) end
-            ImGui.SetNextItemWidth(core.px(120))
-            local newAlpha = ImGui.SliderFloat('Opacity##gemAlpha', ctrl.gem_alpha or 0.85, 0.20, 1.0, '%.2f')
-            if newAlpha ~= (ctrl.gem_alpha or 0.85) then
-                ctrl.gem_alpha = newAlpha
-                core.saveLoadout(true)
-            end
-
-            ImGui.Separator()
-            if ImGui.MenuItem('Open Spellbook##gemOpenBook') then
-                openSpellbook()
-            end
-        end
 
         if ImGui.BeginPopupContextWindow('##gemWinContextMenu') then
             if core.applyWindowScale then core.applyWindowScale('spell_gems') end
@@ -154,11 +338,15 @@ function M.drawSpellGemBarWindow()
             ImGui.EndPopup()
         end
 
+        -- Throttled; normally a no-op because onTick already refreshed this cycle.
+        refreshGems(false)
+        local nowClock = os.clock()
+
         local availW, availH = ImGui.GetContentRegionAvail()
         availW = math.max(24, availW)
         availH = math.max(24, availH)
 
-        local maxGems = core.getNumGems() or 8
+        local maxGems = snap.maxGems or 8
         local totalItems = maxGems + 1
         local spacing = 2
         local cols = 1  -- luacheck: ignore 311
@@ -195,129 +383,31 @@ function M.drawSpellGemBarWindow()
         local btnH = math.max(18, math.floor((availH - (spacing * (rows - 1))) / rows))
         local iconSize = math.max(14, math.min(btnW - 4, btnH - 4))
 
-        local myMana = 0
-        pcall(function() myMana = mq.TLO.Me.CurrentMana() or 0 end)
-
-        local activeCastingName = nil
+        local myMana = snap.myMana or 0
+        local activeCastingName = snap.castingName
         local castTimeLeft = 0
-        pcall(function()
-            if mq.TLO.Me.Casting() then
-                activeCastingName = mq.TLO.Me.Casting.Name()
-                castTimeLeft = (mq.TLO.Me.CastTimeLeft() or 0) / 1000.0
-            end
-        end)
-
-        local nowClock = os.clock()
-        M.gemCooldownEnd = M.gemCooldownEnd or {}
-
-        local toXY = function(x, y)
-            if type(x) == 'userdata' or (type(x) == 'table' and x.x) then
-                return x.x, x.y
-            end
-            return x or 0, y or 0
+        if snap.castEndAt then
+            castTimeLeft = math.max(0, snap.castEndAt - nowClock)
         end
+
+        M.gemCooldownEnd = M.gemCooldownEnd or {}
 
         local toV = core.toVec
 
         for slot = 1, maxGems do
-            local gemData = nil
-            pcall(function()
-                local g = mq.TLO.Me.Gem(slot)
-                if g and g() and g.Name() and g.Name() ~= '' then
-                    local sName = g.Name()
-                    local sId = g.ID() or 0
-                    local sLvl = g.Level() or 0
-                    local sMana = g.Mana() or 0
-                    local sIcon = g.SpellIcon() or 0
-                    local sRange = g.Range() or 0
-                    local sCastTime = (g.MyCastTime() or g.CastTime() or 0) / 1000.0
-                    local sRecast = core.parseSpellRecastTime(g)
-                    if sRecast == 0 then
-                        local rt = tonumber(g.RecastTime and g.RecastTime() or 0) or 0
-                        if rt > 86400 then
-                            sRecast = rt / 1000.0
-                        elseif rt > 0 then
-                            sRecast = rt
-                        end
-                    end
-                    local querySec = core.getGemCooldownSec(slot, sName, sRecast)
-
-                    M.gemCooldownSpell = M.gemCooldownSpell or {}
-                    if M.gemCooldownSpell[slot] ~= sName then
-                        M.gemCooldownSpell[slot] = sName
-                        M.gemCooldownEnd[slot] = nil
-                    end
-
-                    local isReady = false
-                    pcall(function() isReady = (mq.TLO.Me.SpellReady(slot)() == true) end)
-
-                    local isCastingThis = (activeCastingName and activeCastingName == sName)
-                    local timer = 0
-                    if isReady then
-                        M.gemCooldownEnd[slot] = nil
-                    elseif isCastingThis then
-                        -- Actively casting this spell: prime recast countdown so it begins immediately on cast completion
-                        local baseRecast = math.max(2.25, sRecast or 0)
-                        M.gemCooldownEnd[slot] = nowClock + (castTimeLeft or 0) + baseRecast
-                    else
-                        local endAt = M.gemCooldownEnd[slot]
-                        local isOtherCasting = (activeCastingName and activeCastingName ~= sName)
-                        local baseRecast = isOtherCasting and 2.25 or (querySec > 0 and querySec or 2.25)
-                        local maxAllowed = (sRecast and sRecast > 0) and math.max(2.5, sRecast + 3.0) or 3.0
-
-                        if not endAt then
-                            local dur = (querySec > 0) and querySec or baseRecast
-                            dur = math.min(dur, maxAllowed)
-                            endAt = nowClock + dur
-                            M.gemCooldownEnd[slot] = endAt
-                            timer = dur
-                        else
-                            local rem = endAt - nowClock
-                            if rem > maxAllowed then
-                                rem = maxAllowed
-                                endAt = nowClock + maxAllowed
-                                M.gemCooldownEnd[slot] = endAt
-                            end
-
-                            if rem > 0 then
-                                timer = rem
-                            else
-                                if querySec > 0 then
-                                    local dur = math.min(querySec, maxAllowed)
-                                    endAt = nowClock + dur
-                                    M.gemCooldownEnd[slot] = endAt
-                                    timer = dur
-                                else
-                                    timer = 0
-                                end
-                            end
-                        end
-                    end
-                    local ready = isReady or (timer <= 0.05 and not activeCastingName)
-
-                    gemData = {
-                        slot = slot,
-                        name = sName,
-                        id = sId,
-                        level = sLvl,
-                        mana = sMana,
-                        icon = sIcon,
-                        range = sRange,
-                        castTime = sCastTime,
-                        recast = sRecast,
-                        timer = timer,
-                        ready = ready,
-                    }
-                end
-            end)
+            local gemData = snap.slots[slot]
+            local lbl = slotLabels[slot] or slotLabels[MAX_GEM_SLOTS]
 
             if (slot - 1) % cols ~= 0 then
                 ImGui.SameLine(0, spacing)
             end
 
-            local btnKey = 'gemBtn_' .. tostring(slot)
-
             if gemData then
+                -- Live countdown from the cached readyAt timestamp
+                local timer = 0
+                if gemData.readyAt then
+                    timer = math.max(0, gemData.readyAt - nowClock)
+                end
                 local isCastingThis = (activeCastingName and activeCastingName == gemData.name)
                 local hasMana = (gemData.mana == 0 or myMana >= gemData.mana)
 
@@ -341,7 +431,7 @@ function M.drawSpellGemBarWindow()
                     end
                 end
 
-                local clicked = ImGui.Button('##' .. btnKey, btnW, btnH)
+                local clicked = ImGui.Button(lbl.btnId, btnW, btnH)
                 if clicked then
                     mq.cmdf('/cast %d', slot)
                     local estRecast = math.max(2.25, gemData.recast or 0)
@@ -377,8 +467,8 @@ function M.drawSpellGemBarWindow()
                     local bCol = isCastingThis and core.col32(0.2, 0.85, 1.0, 1.0) or core.col32(1.0, 0.85, 0.25, 0.95)
                     local p1 = toV(mX + 1, mY + 2)
                     local p2 = toV(mX + 2, mY + 1)
-                    if p1 then dl:AddText(p1, core.col32(0, 0, 0, 0.85), string.format('%d', slot)) end
-                    if p2 then dl:AddText(p2, bCol, string.format('%d', slot)) end
+                    if p1 then dl:AddText(p1, core.col32(0, 0, 0, 0.85), lbl.num) end
+                    if p2 then dl:AddText(p2, bCol, lbl.num) end
                 end
 
                 -- Low mana overlay
@@ -391,7 +481,7 @@ function M.drawSpellGemBarWindow()
                 end
 
                 -- Recast cooldown overlay (seconds countdown)
-                if not isCastingThis and not gemData.ready and gemData.timer > 0.05 and dl then
+                if not isCastingThis and not gemData.ready and timer > 0.05 and dl then
                     if dl.AddRectFilled then
                         local p1 = toV(mX + 1, mY + 1)
                         local p2 = toV(maxX - 1, maxY - 1)
@@ -400,7 +490,7 @@ function M.drawSpellGemBarWindow()
                         end
                     end
                     if ctrl.gem_show_timer ~= false and dl.AddText then
-                        local cdSec = math.ceil(gemData.timer)
+                        local cdSec = math.ceil(timer)
                         if cdSec >= 3600 then cdSec = 0 end
                         local cdStr = cdSec >= 60 and string.format('%dm', math.ceil(cdSec / 60)) or tostring(cdSec)
                         local tW = #cdStr * 7
@@ -416,7 +506,7 @@ function M.drawSpellGemBarWindow()
                 -- Active casting overlay (seconds only)
                 if isCastingThis and dl then
                     if dl.AddRect then
-                        local pulse = 0.5 + 0.5 * math.sin(os.clock() * 8.0)
+                        local pulse = 0.5 + 0.5 * math.sin(nowClock * 8.0)
                         local p1 = toV(mX, mY)
                         local p2 = toV(maxX, maxY)
                         if p1 and p2 then
@@ -437,20 +527,20 @@ function M.drawSpellGemBarWindow()
                 end
 
                 -- Right-click popup menu on gem
-                if ImGui.BeginPopupContextItem('##gemItemMenu_' .. slot) then
+                if ImGui.BeginPopupContextItem(lbl.menuId) then
                     accent(GOLD, string.format('Gem #%d: %s', slot, gemData.name))
                     ImGui.TextDisabled(string.format('Level %d | Mana: %d | Cast: %.1fs | Recast: %.1fs', gemData.level, gemData.mana, gemData.castTime, gemData.recast))
                     ImGui.Separator()
-                    if ImGui.MenuItem('Cast Spell##cast_' .. slot) then
+                    if ImGui.MenuItem(lbl.castId) then
                         mq.cmdf('/cast %d', slot)
                     end
-                    if ImGui.MenuItem('Inspect Spell Info##info_' .. slot) then
+                    if ImGui.MenuItem(lbl.infoId) then
                         pcall(function() mq.TLO.Spell(gemData.id).Inspect() end)
                     end
-                    if ImGui.MenuItem('Unmemorize Gem##unmem_' .. slot) then
+                    if ImGui.MenuItem(lbl.unmemId) then
                         mq.cmdf('/memorize "" %d', slot)
                     end
-                    if ImGui.MenuItem('Open Spellbook##book_' .. slot) then
+                    if ImGui.MenuItem(lbl.bookId) then
                         openSpellbook()
                     end
                     ImGui.EndPopup()
@@ -463,8 +553,8 @@ function M.drawSpellGemBarWindow()
                         string.format('Level: %d  |  Mana: %d  |  Range: %d', gemData.level, gemData.mana, gemData.range),
                         string.format('Cast Time: %.1fs  |  Recast: %.1fs', gemData.castTime, gemData.recast),
                     }
-                    if not gemData.ready and gemData.timer > 0 then
-                        table.insert(lines, string.format('Recast Cooldown: %d seconds remaining', math.ceil(gemData.timer)))
+                    if not gemData.ready and timer > 0 then
+                        table.insert(lines, string.format('Recast Cooldown: %d seconds remaining', math.ceil(timer)))
                     elseif isCastingThis then
                         table.insert(lines, string.format('Currently Casting: %d seconds left', math.ceil(castTimeLeft)))
                     elseif not hasMana then
@@ -477,11 +567,11 @@ function M.drawSpellGemBarWindow()
                 end
             else
                 -- Empty gem slot button
-                if ImGui.Button(string.format('#%d##empty_%d', slot, slot), btnW, btnH) then
+                if ImGui.Button(lbl.emptyBtn, btnW, btnH) then
                     openSpellbook()
                 end
                 if ImGui.IsItemHovered() then
-                    core.setTooltip(string.format('Gem Slot #%d (Empty)\nClick to open Spellbook and memorize a spell.', slot))
+                    core.setTooltip(lbl.emptyTip)
                 end
             end
         end
@@ -494,9 +584,6 @@ function M.drawSpellGemBarWindow()
         local sbClicked = ImGui.Button('##gemSpellBookBtn', btnW, btnH)
         if sbClicked then
             openSpellbook()
-        end
-        if ImGui.IsItemHovered() then
-            core.setTooltip('Spellbook & Spell Sets\nLeft-click: Open Spellbook Browser\nRight-click: Load / Save / Delete Spell Sets')
         end
 
         local sbMnX, sbMnY = ImGui.GetItemRectMin()
@@ -595,6 +682,14 @@ function M.drawSpellGemBarWindow()
     ImGui.End()
     ImGui.PopStyleVar(3)
     core.popTheme()
+end
+
+-- Main-loop tick (every tickInterval = 0.1 s): polls the gems into the
+-- snapshot so the render pass only reads the cache. No-op while closed.
+function plugin.onTick()
+    if not core then return end
+    refresh()
+    refreshGems(false)
 end
 
 function plugin.onDrawUI()

@@ -28,7 +28,7 @@ local plugin = {
     author             = 'Triune',
     description        = '2D in-game map with navmesh-aware NPC tracking, click-to-move, Norrath zone atlas, and Triune camp / waypoint overlays.',
     defaultEnabled     = true,
-    tickInterval       = 0.04,
+    tickInterval       = 0.1,
     runOutOfCombatOnly = false,
     hasThread          = false,
     -- Window owned by this plugin (drives the main-window header button)
@@ -144,9 +144,10 @@ local state = {
     -- Throttled Line-of-Sight cache for NPCs, [id] = { los = bool, ts = time }
     losCache            = {},
 
-    -- Incremental spawn-scan progress (work is spread across frames so the
-    -- render callback never stalls behind a large synchronous scan pass).
-    scanChunk           = { phase = 'idle', fetchIdx = 1, fetchTotal = 0, losIdx = 1, losSpent = 0 },
+    -- Rolling Line-of-Sight refresh cursor. The spawn list itself is fetched
+    -- in one native pass per scan cycle; only the LoS raycasts are spread
+    -- across ticks (see refreshLosChunk).
+    scanChunk           = { losIdx = 1 },
 
     -- Maps Directory & Subfolder Management
     baseMapsDirectory   = nil,
@@ -171,6 +172,11 @@ local state = {
     poiSearchText       = '',
     showPoiDrawer       = false,
     highlightedPoi      = nil,    -- { x = num, y = num, z = num, text = string, time = num }
+    poiMatchCache       = { q = nil, labels = nil, list = {} }, -- POI filter result, rebuilt only when the query or loaded zone changes
+    atlasRouteCache     = { key = nil, path = nil, hops = 0 },   -- last BFS route keyed on "cur>target"
+    savedMapFolderName  = nil,    -- folder name restored from config once the folder scan has run
+    pendingShowZone     = nil,    -- zone short requested via plugin.showZone before/outside the tick
+    customMapsDirInput  = nil,    -- edit buffer for the Base Path field (applied on Enter / Apply)
 
     -- UI tracking filter controls
     searchText          = '',
@@ -231,6 +237,9 @@ local state = {
         lastOffset          = 0,
         floorLabel          = 'Level Ground',
         isMultiFloor        = false,
+        manualZ             = nil, -- Manual-mode label cache key (effZ, range, offset)
+        manualR             = nil,
+        manualOff           = nil,
     },
 }
 
@@ -298,6 +307,10 @@ local mapData = {
     totalLines          = 0,
     totalLabels         = 0,
     bounds              = { minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0 },
+    -- Coarse world-space spatial buckets per layer (built once per parsed
+    -- zone, see buildLineBuckets) so the canvas only walks the cells that
+    -- overlap the viewport instead of AABB-testing every segment per frame.
+    grid                = nil,
 }
 
 local spawns = {
@@ -310,11 +323,12 @@ local spawns = {
 local navState = {
     meshLoaded          = false,
     navActive           = false,
-    cache               = {}, -- [id] = { hasPath = bool, length = num, checkedAt = time }
-    checkQueue          = {}, -- array of IDs needing path checks
-    queueHead           = 1,  -- O(1) dequeue pointer
+    cache               = {}, -- [id] = { hasPath = bool, length = num, checkedAt = time, lengthAt = time }
+    checkQueue          = {}, -- array of IDs needing path checks (entries are never nil'd; see queueHead/queueTail)
+    queueHead           = 1,  -- O(1) dequeue pointer (next index to process)
+    queueTail           = 0,  -- index of the last enqueued entry
     queueSet            = {}, -- lookup set to prevent queue duplicates
-    batchSize           = 4,
+    batchSize           = 6,  -- PathExists checks per nav batch (tick is ~100ms, so ~60/s)
     cacheFreshMs        = 15000,
     lastQueueProcessTime = 0,
 }
@@ -477,11 +491,12 @@ local function saveConfig(silent)
         lineThickness       = cfg.lineThickness,
         npcNodeRadius       = cfg.npcNodeRadius,
         playerNodeRadius    = cfg.playerNodeRadius,
+        boostDarkLines      = cfg.boostDarkLines,
+        scanIntervalMs      = state.scanIntervalMs,
 
         -- Tracker & Atlas Filters
         conFilterIndex      = state.conFilterIndex,
-        sortColumn          = state.sortColumn,
-        sortAsc             = state.sortAsc,
+        sortIndex           = state.sortIndex,
         pathableOnly        = state.pathableOnly,
         losOnly             = state.losOnly,
         atlasEraFilterIdx   = state.atlasEraFilterIdx,
@@ -563,27 +578,46 @@ local function loadConfig()
         if cData.lineThickness ~= nil then cfg.lineThickness = tonumber(cData.lineThickness) or 1.0 end
         if cData.npcNodeRadius ~= nil then cfg.npcNodeRadius = tonumber(cData.npcNodeRadius) or 4.5 end
         if cData.playerNodeRadius ~= nil then cfg.playerNodeRadius = tonumber(cData.playerNodeRadius) or 6.0 end
+        if cData.boostDarkLines ~= nil then cfg.boostDarkLines = (cData.boostDarkLines == true) end
+        if cData.scanIntervalMs ~= nil then
+            state.scanIntervalMs = math.max(250, math.min(3000, tonumber(cData.scanIntervalMs) or 500))
+        end
 
         if cData.conFilterIndex ~= nil then state.conFilterIndex = tonumber(cData.conFilterIndex) or 1 end
-        if cData.sortColumn ~= nil then state.sortColumn = cData.sortColumn end
-        if cData.sortAsc ~= nil then state.sortAsc = (cData.sortAsc == true) end
+        if cData.sortIndex ~= nil then
+            local si = math.floor(tonumber(cData.sortIndex) or 1)
+            if si < 1 or si > #SORT_OPTIONS then si = 1 end
+            state.sortIndex = si
+        end
         if cData.pathableOnly ~= nil then state.pathableOnly = (cData.pathableOnly == true) end
         if cData.losOnly ~= nil then state.losOnly = (cData.losOnly == true) end
         if cData.atlasEraFilterIdx ~= nil then state.atlasEraFilterIdx = tonumber(cData.atlasEraFilterIdx) or 1 end
         if cData.atlasTypeFilterIdx ~= nil then state.atlasTypeFilterIdx = tonumber(cData.atlasTypeFilterIdx) or 1 end
         if cData.showPoiDrawer ~= nil then state.showPoiDrawer = (cData.showPoiDrawer == true) end
 
+        -- The folder list is only known after scanMapFolders() (which itself
+        -- depends on customMapsDir loaded above), so remember the name and
+        -- let applySavedMapFolder() resolve it once the scan has run.
         local savedFolder = cData.activeMapFolder or (allData.__global and allData.__global.selectedMapFolder)
         if savedFolder and savedFolder ~= '' then
-            for idx, fName in ipairs(state.mapFolderNames) do
-                if fName == savedFolder then
-                    state.selectedFolderIndex = idx
-                    state.activeMapsDirectory = state.mapFolders[idx] and state.mapFolders[idx].fullPath
-                    break
-                end
-            end
+            state.savedMapFolderName = savedFolder
         end
     end
+end
+
+-- Selects the map folder saved in the config, if it exists in the scanned
+-- folder list. Safe to call before the scan (no-op) and again after it.
+local function applySavedMapFolder()
+    local savedFolder = state.savedMapFolderName
+    if not savedFolder or savedFolder == '' then return false end
+    for idx, fName in ipairs(state.mapFolderNames or {}) do
+        if fName == savedFolder then
+            state.selectedFolderIndex = idx
+            state.activeMapsDirectory = state.mapFolders[idx] and state.mapFolders[idx].fullPath or state.activeMapsDirectory
+            return true
+        end
+    end
+    return false
 end
 
 -- ============================================================================
@@ -812,10 +846,53 @@ local NORRATH_ZONE_REGISTRY = {
     { short = 'guildhall',    name = 'Guild Hall',                     era = 'Hubs & Special',   continent = 'Hubs',                 level = '1-125', type = 'City',    connections = {'guildlobby'} },
 }
 
+-- Zone travel graph (built once per registry change, see rebuildAtlasGraph):
+--   lookup[shortLower] = zone entry, adj[shortLower] = { [nbrLower] = true }
+local atlasGraph = { lookup = nil, adj = nil }
+
+-- Pre-lowercases the strings the per-frame Atlas scans compare against so the
+-- draw callback never calls :lower() per row.
+local function decorateAtlasEntry(z)
+    z.shortLower = (z.short or ''):lower()
+    z.nameLower  = (z.name or ''):lower()
+    z.eraLower   = (z.era or ''):lower()
+    z.contLower  = (z.continent or ''):lower()
+    local cl = {}
+    for i, c in ipairs(z.connections or {}) do cl[i] = tostring(c):lower() end
+    z.connLower = cl
+    return z
+end
+
+local function rebuildAtlasGraph()
+    local lookup, adj = {}, {}
+    local function addEdge(u, v)
+        if not u or not v or u == '' or v == '' then return end
+        if not adj[u] then adj[u] = {} end
+        if not adj[v] then adj[v] = {} end
+        adj[u][v] = true
+        adj[v][u] = true
+    end
+    for _, z in ipairs(state.atlasAllZones or {}) do
+        if not z.shortLower then decorateAtlasEntry(z) end
+        lookup[z.shortLower] = z
+        for _, c in ipairs(z.connLower) do addEdge(z.shortLower, c) end
+    end
+    atlasGraph.lookup = lookup
+    atlasGraph.adj = adj
+    state.atlasRouteCache.key = nil
+    state.atlasRouteCache.path = nil
+    state.atlasRouteCache.hops = 0
+end
+
+local function atlasZoneByShort(shortLower)
+    if not atlasGraph.lookup then rebuildAtlasGraph() end
+    return atlasGraph.lookup[shortLower]
+end
+
 local function initAtlasRegistry()
     state.atlasAllZones = {}
     for _, z in ipairs(NORRATH_ZONE_REGISTRY) do
-        local entry = {
+        local entry = decorateAtlasEntry({
             short       = z.short,
             name        = z.name,
             era         = z.era,
@@ -827,9 +904,10 @@ local function initAtlasRegistry()
             lineCount   = 0,
             labelCount  = 0,
             isCustom    = false,
-        }
+        })
         state.atlasAllZones[#state.atlasAllZones + 1] = entry
     end
+    rebuildAtlasGraph()
 end
 
 -- ============================================================================
@@ -982,7 +1060,8 @@ local function scanMapFiles()
 
     local zoneLookup = {}
     for _, z in ipairs(state.atlasAllZones) do
-        zoneLookup[z.short:lower()] = z
+        if not z.shortLower then decorateAtlasEntry(z) end
+        zoneLookup[z.shortLower] = z
     end
 
     local discoveredShorts = {}
@@ -1007,14 +1086,14 @@ local function scanMapFiles()
             if f then
                 f:close()
                 z.hasMap = true
-                discoveredShorts[z.short:lower()] = true
+                discoveredShorts[z.shortLower] = true
             else
                 z.hasMap = false
             end
         end
     else
         for _, z in ipairs(state.atlasAllZones) do
-            z.hasMap = (discoveredShorts[z.short:lower()] == true)
+            z.hasMap = (discoveredShorts[z.shortLower] == true)
         end
     end
 
@@ -1025,7 +1104,7 @@ local function scanMapFiles()
             local okZ, zName = pcall(function() return mq.TLO.Zone(s).Name() end)
             if okZ and zName and zName ~= '' then cleanName = zName end
 
-            local entry = {
+            local entry = decorateAtlasEntry({
                 short       = s,
                 name        = cleanName,
                 era         = 'Custom / Other',
@@ -1035,11 +1114,15 @@ local function scanMapFiles()
                 connections = {},
                 hasMap      = true,
                 isCustom    = true,
-            }
+            })
             state.atlasAllZones[#state.atlasAllZones + 1] = entry
             zoneLookup[s] = entry
         end
     end
+
+    -- Registry contents may have changed (custom zones / hasMap flags):
+    -- rebuild the travel graph once here rather than per frame in the Atlas tab.
+    rebuildAtlasGraph()
 end
 
 local function filterAtlasZones()
@@ -1051,10 +1134,11 @@ local function filterAtlasZones()
     for _, z in ipairs(state.atlasAllZones) do
         local matchQuery = true
         if q ~= '' then
-            local inName  = (z.name:lower():find(q, 1, true) ~= nil)
-            local inShort = (z.short:lower():find(q, 1, true) ~= nil)
-            local inEra   = (z.era:lower():find(q, 1, true) ~= nil)
-            local inCont  = (z.continent:lower():find(q, 1, true) ~= nil)
+            if not z.shortLower then decorateAtlasEntry(z) end
+            local inName  = (z.nameLower:find(q, 1, true) ~= nil)
+            local inShort = (z.shortLower:find(q, 1, true) ~= nil)
+            local inEra   = (z.eraLower:find(q, 1, true) ~= nil)
+            local inCont  = (z.contLower:find(q, 1, true) ~= nil)
             matchQuery    = (inName or inShort or inEra or inCont)
         end
 
@@ -1096,11 +1180,80 @@ local function filterAtlasZones()
     end
 end
 
--- Zone Map In-Memory Cache (Instant switching between visited zones)
+-- Zone Map In-Memory Cache (Instant switching between visited zones).
+-- Bounded LRU: a parsed zone (lines + labels + buckets) can be several MB,
+-- so only the most recently viewed ZONE_CACHE_MAX zones are retained.
+local ZONE_CACHE_MAX = 5
 local zoneMapCache = {}
+local zoneMapCacheOrder = {} -- cache keys, oldest first
 
 local function clearZoneMapCache()
     zoneMapCache = {}
+    zoneMapCacheOrder = {}
+end
+
+local function touchZoneCacheKey(cacheKey)
+    for i = #zoneMapCacheOrder, 1, -1 do
+        if zoneMapCacheOrder[i] == cacheKey then
+            table.remove(zoneMapCacheOrder, i)
+            break
+        end
+    end
+    zoneMapCacheOrder[#zoneMapCacheOrder + 1] = cacheKey
+end
+
+local function putZoneCache(cacheKey, entry)
+    zoneMapCache[cacheKey] = entry
+    touchZoneCacheKey(cacheKey)
+    while #zoneMapCacheOrder > ZONE_CACHE_MAX do
+        local oldest = table.remove(zoneMapCacheOrder, 1)
+        if oldest ~= cacheKey then zoneMapCache[oldest] = nil end
+    end
+end
+
+-- Coarse spatial buckets for the line layers. Each segment is inserted into
+-- every LINE_BUCKET_SIZE-yard cell its AABB overlaps and remembers its minimum
+-- cell (cx0/cy0) so the canvas can draw a multi-cell segment exactly once
+-- per frame (from the first visible cell it touches) without a per-frame
+-- stamp write. Built once per parsed zone and stored on the cache entry.
+local LINE_BUCKET_SIZE = 250
+
+local function buildLineBuckets(layers)
+    local grid = { cell = LINE_BUCKET_SIZE, layers = {} }
+    local inv = 1 / LINE_BUCKET_SIZE
+    for lId = 0, 3 do
+        local lines = layers[lId] or {}
+        local cells = {}
+        local gMinX, gMaxX, gMinY, gMaxY = math.huge, -math.huge, math.huge, -math.huge
+        for i = 1, #lines do
+            local seg = lines[i]
+            local cx0 = math.floor(seg.minX * inv)
+            local cx1 = math.floor(seg.maxX * inv)
+            local cy0 = math.floor(seg.minY * inv)
+            local cy1 = math.floor(seg.maxY * inv)
+            -- Degenerate guard: a corrupt segment spanning the whole map would
+            -- otherwise be copied into thousands of cells.
+            if (cx1 - cx0) > 64 then cx1 = cx0 + 64 end
+            if (cy1 - cy0) > 64 then cy1 = cy0 + 64 end
+            seg.cx0 = cx0
+            seg.cy0 = cy0
+            if cx0 < gMinX then gMinX = cx0 end
+            if cx1 > gMaxX then gMaxX = cx1 end
+            if cy0 < gMinY then gMinY = cy0 end
+            if cy1 > gMaxY then gMaxY = cy1 end
+            for cy = cy0, cy1 do
+                local row = cells[cy]
+                if not row then row = {}; cells[cy] = row end
+                for cx = cx0, cx1 do
+                    local bucket = row[cx]
+                    if not bucket then bucket = {}; row[cx] = bucket end
+                    bucket[#bucket + 1] = seg
+                end
+            end
+        end
+        grid.layers[lId] = { cells = cells, minCX = gMinX, maxCX = gMaxX, minCY = gMinY, maxCY = gMaxY, count = #lines }
+    end
+    return grid
 end
 
 local function parseMapFile(filePath, layerId)
@@ -1118,23 +1271,33 @@ local function parseMapFile(filePath, layerId)
     local bMinY, bMaxY = mapData.bounds.minY, mapData.bounds.maxY
     local bMinZ, bMaxZ = mapData.bounds.minZ, mapData.bounds.maxZ
 
-    -- Fast single-pass line parser (supports space and comma delimited coordinates)
+    -- Auto-brighten near-black geometry so it is visible on the dark canvas
+    -- (Settings > "Auto-Brighten Black / Dark Map Lines"). Applied at parse
+    -- time, so toggling it clears zoneMapCache and re-parses.
+    local boost = (cfg.boostDarkLines ~= false)
+
+    -- Fast single-pass line parser (supports space and comma delimited coordinates).
+    -- The character class accepts tokens like "-" or "1.2.3" that tonumber
+    -- rejects, so every coordinate is guarded with `or 0`: a malformed line
+    -- degrades to a zero-length segment instead of erroring the plugin.
     for x1, y1, z1, x2, y2, z2, r, g, b in content:gmatch('[Ll]%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)') do
-        local nx1 = -tonumber(x1)
-        local ny1 = -tonumber(y1)
-        local nz1 = tonumber(z1)
-        local nx2 = -tonumber(x2)
-        local ny2 = -tonumber(y2)
-        local nz2 = tonumber(z2)
+        local nx1 = -(tonumber(x1) or 0)
+        local ny1 = -(tonumber(y1) or 0)
+        local nz1 = tonumber(z1) or 0
+        local nx2 = -(tonumber(x2) or 0)
+        local ny2 = -(tonumber(y2) or 0)
+        local nz2 = tonumber(z2) or 0
         local nr = (tonumber(r) or 180) * 0.003921568627
         local ng = (tonumber(g) or 180) * 0.003921568627
         local nb = (tonumber(b) or 180) * 0.003921568627
 
-        local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
-        if lum < 0.25 then
-            nr = 0.72
-            ng = 0.76
-            nb = 0.82
+        if boost then
+            local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+            if lum < 0.25 then
+                nr = 0.72
+                ng = 0.76
+                nb = 0.82
+            end
         end
 
         local segMinX = nx1 < nx2 and nx1 or nx2
@@ -1153,6 +1316,7 @@ local function parseMapFile(filePath, layerId)
         if segMaxZ > bMaxZ then bMaxZ = segMaxZ end
 
         linesAdded = linesAdded + 1
+        local dxS, dyS = nx2 - nx1, ny2 - ny1
         targetLines[#targetLines + 1] = {
             x1 = nx1, y1 = ny1, z1 = nz1,
             x2 = nx2, y2 = ny2, z2 = nz2,
@@ -1160,23 +1324,26 @@ local function parseMapFile(filePath, layerId)
             avgZ = (nz1 + nz2) * 0.5,
             minX = segMinX, maxX = segMaxX,
             minY = segMinY, maxY = segMaxY,
+            len  = math.sqrt(dxS * dxS + dyS * dyS), -- 2D world length (sub-pixel cull at low zoom)
         }
     end
 
     -- Fast single-pass label parser
     for x, y, z, r, g, b, size, text in content:gmatch('[Pp]%s+([%d.-]+)[,%s]+([%d.-]+)[,%s]+([%d.-]+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+(%d+)[,%s]+([^\r\n]+)') do
-        local nx = -tonumber(x)
-        local ny = -tonumber(y)
-        local nz = tonumber(z)
+        local nx = -(tonumber(x) or 0)
+        local ny = -(tonumber(y) or 0)
+        local nz = tonumber(z) or 0
         local nr = (tonumber(r) or 255) * 0.003921568627
         local ng = (tonumber(g) or 255) * 0.003921568627
         local nb = (tonumber(b) or 255) * 0.003921568627
 
-        local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
-        if lum < 0.25 then
-            nr = 0.88
-            ng = 0.92
-            nb = 0.96
+        if boost then
+            local lum = nr * 0.299 + ng * 0.587 + nb * 0.114
+            if lum < 0.25 then
+                nr = 0.88
+                ng = 0.92
+                nb = 0.96
+            end
         end
 
         local cleanText = text:gsub('_', ' ')
@@ -1186,6 +1353,7 @@ local function parseMapFile(filePath, layerId)
             r = nr, g = ng, b = nb,
             size = tonumber(size) or 1,
             text = cleanText,
+            textLower = cleanText:lower(), -- POI drawer / Atlas filter compare against this
         }
     end
 
@@ -1215,12 +1383,14 @@ local function loadZoneMap(zoneShort, isAtlas)
     local cached = zoneMapCache[cacheKey]
 
     if cached then
+        touchZoneCacheKey(cacheKey)
         mapData.zoneShort   = zoneShort
         mapData.layers      = cached.layers
         mapData.labels      = cached.labels
         mapData.totalLines  = cached.totalLines
         mapData.totalLabels = cached.totalLabels
         mapData.bounds      = cached.bounds
+        mapData.grid        = cached.grid
         mapData.isLoaded    = (cached.totalLines > 0 or cached.totalLabels > 0)
         local modeStr = isAtlas and 'Atlas' or 'Live'
         state.statusMsg = string.format('[%s] Loaded (Cached): %s (%d lines, %d labels)', modeStr, zoneShort, mapData.totalLines, mapData.totalLabels)
@@ -1251,6 +1421,7 @@ local function loadZoneMap(zoneShort, isAtlas)
     mapData.zoneShort = zoneShort
     mapData.layers = { [0] = {}, [1] = {}, [2] = {}, [3] = {} }
     mapData.labels = {}
+    mapData.grid = nil
     mapData.totalLines = 0
     mapData.totalLabels = 0
     mapData.bounds = {
@@ -1278,13 +1449,15 @@ local function loadZoneMap(zoneShort, isAtlas)
 
     if mapData.totalLines > 0 or mapData.totalLabels > 0 then
         mapData.isLoaded = true
-        zoneMapCache[cacheKey] = {
+        mapData.grid = buildLineBuckets(mapData.layers)
+        putZoneCache(cacheKey, {
             layers      = mapData.layers,
             labels      = mapData.labels,
             totalLines  = mapData.totalLines,
             totalLabels = mapData.totalLabels,
             bounds      = mapData.bounds,
-        }
+            grid        = mapData.grid,
+        })
 
         local modeStr = isAtlas and 'Atlas' or 'Live'
         state.statusMsg = string.format('[%s] Loaded [%s]: %s (%d lines, %d labels)', modeStr, folderDisplay, zoneShort, mapData.totalLines, mapData.totalLabels)
@@ -1336,15 +1509,9 @@ local function navigateToAtlasZone(zoneShort, pushHistory)
     state.atlasZoneShort = zoneShort
     cfg.followPlayer = false
 
-    local found = nil
-    for _, z in ipairs(state.atlasAllZones) do
-        if z.short:lower() == zoneShort:lower() then
-            found = z
-            break
-        end
-    end
+    local found = atlasZoneByShort(zoneShort:lower())
     if not found then
-        found = { short = zoneShort, name = zoneShort, era = 'Custom / Other', continent = 'Unknown', level = '?', type = 'Outdoor', connections = {}, hasMap = true }
+        found = decorateAtlasEntry({ short = zoneShort, name = zoneShort, era = 'Custom / Other', continent = 'Unknown', level = '?', type = 'Outdoor', connections = {}, hasMap = true })
     end
     state.atlasSelectedZone = found
     state.atlasZoneName = found.name
@@ -1409,79 +1576,68 @@ local function findZoneRoute(startShort, targetShort)
     local sTarget = targetShort:lower():match('^%s*(.-)%s*$')
     if sStart == '' or sTarget == '' then return nil, 0 end
 
-    -- Build zone lookup map for rich metadata
-    local zoneLookup = {}
-    for _, z in ipairs(state.atlasAllZones or {}) do
-        if z.short then
-            zoneLookup[z.short:lower()] = z
-        end
+    -- Per-frame callers (Atlas tab) hit this cache; the BFS below only runs
+    -- when the start/target pair changes or the graph was rebuilt.
+    local rc = state.atlasRouteCache
+    local key = sStart .. '>' .. sTarget
+    if rc.key == key then
+        return rc.path, rc.hops
     end
+
+    if not atlasGraph.lookup or not atlasGraph.adj then rebuildAtlasGraph() end
+    local zoneLookup = atlasGraph.lookup
+    local adj = atlasGraph.adj
 
     local startEntry = zoneLookup[sStart] or { short = sStart, name = sStart, era = 'Unknown', type = 'Zone', level = '?' }
 
+    local path, hops = nil, 0
     if sStart == sTarget then
-        return { startEntry }, 0
-    end
+        path, hops = { startEntry }, 0
+    else
+        -- Breadth-First Search (guaranteed shortest unweighted hop path)
+        local queue = { sStart }
+        local visited = { [sStart] = true }
+        local parent = {}
 
-    -- Build symmetric bidirectional adjacency graph
-    local adj = {}
-    local function addEdge(u, v)
-        if not u or not v or u == '' or v == '' then return end
-        u = u:lower()
-        v = v:lower()
-        if not adj[u] then adj[u] = {} end
-        if not adj[v] then adj[v] = {} end
-        adj[u][v] = true
-        adj[v][u] = true
-    end
+        local found = false
+        local qHead = 1
+        while qHead <= #queue do
+            local curr = queue[qHead]
+            qHead = qHead + 1
 
-    for _, z in ipairs(state.atlasAllZones or {}) do
-        local u = z.short:lower()
-        for _, c in ipairs(z.connections or {}) do
-            addEdge(u, c)
-        end
-    end
+            if curr == sTarget then
+                found = true
+                break
+            end
 
-    -- Breadth-First Search (guaranteed shortest unweighted hop path)
-    local queue = { sStart }
-    local visited = { [sStart] = true }
-    local parent = {}
-
-    local found = false
-    local qHead = 1
-    while qHead <= #queue do
-        local curr = queue[qHead]
-        qHead = qHead + 1
-
-        if curr == sTarget then
-            found = true
-            break
-        end
-
-        local neighbors = adj[curr] or {}
-        for nbr, _ in pairs(neighbors) do
-            if not visited[nbr] then
-                visited[nbr] = true
-                parent[nbr] = curr
-                queue[#queue + 1] = nbr
+            local neighbors = adj[curr]
+            if neighbors then
+                for nbr, _ in pairs(neighbors) do
+                    if not visited[nbr] then
+                        visited[nbr] = true
+                        parent[nbr] = curr
+                        queue[#queue + 1] = nbr
+                    end
+                end
             end
         end
+
+        if found then
+            -- Reconstruct path by backtracking from target to start
+            path = {}
+            local curr = sTarget
+            while curr do
+                local zInfo = zoneLookup[curr] or { short = curr, name = curr, era = 'Unknown', type = 'Zone', level = '?' }
+                table.insert(path, 1, zInfo)
+                curr = parent[curr]
+            end
+            hops = math.max(0, #path - 1)
+        end
     end
 
-    if not found then
-        return nil, 0
-    end
-
-    -- Reconstruct path by backtracking from target to start
-    local path = {}
-    local curr = sTarget
-    while curr do
-        local zInfo = zoneLookup[curr] or { short = curr, name = curr, era = 'Unknown', type = 'Zone', level = '?' }
-        table.insert(path, 1, zInfo)
-        curr = parent[curr]
-    end
-
-    local hops = math.max(0, #path - 1)
+    rc.key = key
+    rc.path = path
+    rc.hops = hops
     return path, hops
 end
 
@@ -1628,10 +1784,16 @@ local function updateSmartFloorBounds(pX, pY, pZ)
         sf.minZ = effZ - r
         sf.maxZ = effZ + r
         sf.activeZ = effZ
-        if sf.overrideOffset ~= 0 then
-            sf.floorLabel = string.format('Manual: Z %.0f (±%dyd, %+d)', effZ, r, sf.overrideOffset)
-        else
-            sf.floorLabel = string.format('Manual: Z %.0f (±%dyd)', effZ, r)
+        -- The label only shows whole yards: rebuild it when the rounded Z,
+        -- range or peek offset actually change instead of every call.
+        local zRound = math.floor(effZ + 0.5)
+        if sf.manualZ ~= zRound or sf.manualR ~= r or sf.manualOff ~= sf.overrideOffset then
+            sf.manualZ, sf.manualR, sf.manualOff = zRound, r, sf.overrideOffset
+            if sf.overrideOffset ~= 0 then
+                sf.floorLabel = string.format('Manual: Z %d (±%dyd, %+d)', zRound, r, sf.overrideOffset)
+            else
+                sf.floorLabel = string.format('Manual: Z %d (±%dyd)', zRound, r)
+            end
         end
         sf.isMultiFloor = true
         return
@@ -1790,12 +1952,13 @@ end
 -- ============================================================================
 -- SPAWN SCANNER & FILTER ENGINE
 -- ============================================================================
--- Chunk sizes for the incremental spawn scan. Keeping these small means each
--- main-loop pass does only a bounded amount of work, so the ImGui draw
--- callback stays responsive between engine ticks.
-local SCAN_FETCH_CHUNK = 12
-local SCAN_LOS_CHUNK   = 4
-local SCAN_LOS_BUDGET  = 16
+-- Spawn scan sizing. The NPC list is fetched in ONE native pass per cycle
+-- (mq.getFilteredSpawns) so positions are never mixed across ticks; only the
+-- Line-of-Sight raycasts are spread across ticks in SCAN_LOS_CHUNK slices.
+local SCAN_MAX_NPCS    = 150 -- nearest NPCs kept per cycle (was 120 via NearestSpawn)
+local SCAN_LOS_CHUNK   = 8   -- raycasts per tick from the rolling LoS cursor
+local SCAN_LOS_BUDGET  = 24  -- raycasts run synchronously on init / zone change
+local LOS_STALE_MS     = 5000
 
 -- Player marker smoothing. The draw callback samples Me.X/Y/Z/Heading live every
 -- frame (the host main loop only reaches the plugin tick every ~150ms, far too
@@ -1829,14 +1992,16 @@ local function samplePlayerSmoothed(dt)
     local lp = state.lastPlayer
 
     local tx, ty, tz, th = lp.x, lp.y, lp.z, lp.heading
-    local okPX, vX = pcall(function() return mq.TLO.Me.X() end)
-    if okPX and vX then tx = vX end
-    local okPY, vY = pcall(function() return mq.TLO.Me.Y() end)
-    if okPY and vY then ty = vY end
-    local okPZ, vZ = pcall(function() return mq.TLO.Me.Z() end)
-    if okPZ and vZ then tz = vZ end
-    local okH, vH = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
-    if okH and vH then th = vH end
+    local okP, vX, vY, vZ, vH = pcall(function()
+        local me = mq.TLO.Me
+        return me.X(), me.Y(), me.Z(), me.Heading.Degrees()
+    end)
+    if okP then
+        if vX then tx = vX end
+        if vY then ty = vY end
+        if vZ then tz = vZ end
+        if vH then th = vH end
+    end
 
     if not sp.seeded then
         sp.x, sp.y, sp.z, sp.heading = tx, ty, tz, th
@@ -1859,233 +2024,268 @@ local function samplePlayerSmoothed(dt)
     return sp.x, sp.y, sp.z, sp.heading
 end
 
--- Incremental spawn scanner. Processes a bounded slice of the (up to 120-mob)
--- fetch plus a slice of the throttled LoS refresh per call, returning nonzero
--- when the cycle is still in progress and nil when it is finished. On init and
--- zone changes the caller passes true (forceComplete) to do everything in one
--- synchronous pass so the map has data immediately.
-local function scanZoneSpawns(forceComplete)
-    local cs = state.scanChunk
+-- Reads the per-spawn fields the map needs into a plain record. cleanName /
+-- level / distance strings and the ImGui id suffixes are precomputed here so
+-- the tracker table and canvas never string.format per row per frame.
+local function buildMobRecord(s, id, dist)
+    local ok, cleanName, level, classShort, conColor, sx, sy, sz, pctHPs, kos = pcall(function()
+        return s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.X(), s.Y(), s.Z(), s.PctHPs(), s.Aggressive()
+    end)
+    if not ok then return nil end
+    local losCacheEntry = state.losCache[id]
+    local name = cleanName or 'Unknown NPC'
+    local lvl = level or 0
+    local idStr = tostring(id)
+    return {
+        id          = id,
+        idStr       = idStr,
+        pushId      = 'tm' .. idStr,
+        cleanName   = name,
+        nameLower   = name:lower(),
+        rowLabel    = name .. '##TrackMob_' .. idStr,
+        rowLabelSel = '> ' .. name .. '##TrackMob_' .. idStr,
+        level       = lvl,
+        levelStr    = tostring(lvl),
+        class       = classShort or 'WAR',
+        conColor    = string.upper(tostring(conColor or 'GREY')),
+        distance    = dist,
+        distStr     = string.format('%.1fy', dist),
+        lineOfSight = (losCacheEntry and losCacheEntry.los) or false,
+        x           = sx or 0,
+        y           = sy or 0,
+        z           = sz or 0,
+        pctHPs      = pctHPs or 100,
+        -- Spawn.Aggressive is the KOS flag (would attack on sight), NOT
+        -- "currently has aggro on me"; the canvas ring and tooltip say so.
+        isKos       = (kos == true),
+    }
+end
 
-    -- A fresh cycle begins when idle or when a force-complete is requested.
-    if forceComplete or cs.phase == 'idle' then
-        navState.meshLoaded = navMeshLoaded()
-        local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
-        navState.navActive = (okNavAct and isNavAct) or false
-
-        local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
-        if okZone and zoneName then state.currentZoneName = zoneName end
-
-        local myX, myY, myZ = 0, 0, 0
-        local okMeX, pX = pcall(function() return mq.TLO.Me.X() end)
-        local okMeY, pY = pcall(function() return mq.TLO.Me.Y() end)
-        local okMeZ, pZ = pcall(function() return mq.TLO.Me.Z() end)
-        if okMeX and pX then myX = pX end
-        if okMeY and pY then myY = pY end
-        if okMeZ and pZ then myZ = pZ end
-        updateSmartFloorBounds(myX, myY, myZ)
-
-        local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
-        if not okCount or not count or count <= 0 then
-            if forceComplete or cs.phase == 'idle' then
-                spawns.allNPCs = {}
-                spawns.filteredNPCs = {}
-                spawns.groupMembers = {}
-                spawns.totalCount = 0
-            end
-            cs.phase = 'idle'
-            return nil
-        end
-        spawns.totalCount = count
-        cs.fetchTotal = math.min(count, 120)
-        cs.fetchIdx = 1
-        cs.losIdx = 1
-        cs.losSpent = 0
-        spawns.allNPCs = {}
-        cs.phase = 'fetch'
+-- One-pass NPC fetch: every NPC spawn in one native call, deduped by spawn ID,
+-- trimmed to the SCAN_MAX_NPCS nearest. Returns the record list and the total
+-- NPC count in the zone.
+local function fetchZoneNPCs()
+    local list = nil
+    if type(mq.getFilteredSpawns) == 'function' then
+        local okList, res = pcall(mq.getFilteredSpawns, function(sp)
+            return sp.Type() == 'NPC'
+        end)
+        if okList and type(res) == 'table' then list = res end
     end
+    if not list then
+        -- Fallback for hosts without getFilteredSpawns: still a single pass,
+        -- so the ordering cannot shift between ticks.
+        list = {}
+        local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
+        count = (okCount and tonumber(count)) or 0
+        for i = 1, math.min(count, SCAN_MAX_NPCS) do
+            local okS, sp = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
+            if okS and sp and sp() then list[#list + 1] = sp end
+        end
+    end
+
+    -- Cheap first pass (ID / distance / dead) so the field reads below only
+    -- run for the NPCs we actually keep.
+    local seen, cand = {}, {}
+    for i = 1, #list do
+        local sp = list[i]
+        local okId, id, dist, dead = pcall(function() return sp.ID(), sp.Distance3D(), sp.Dead() end)
+        if okId and id and id > 0 and not dead and not seen[id] then
+            seen[id] = true
+            cand[#cand + 1] = { s = sp, id = id, dist = dist or 99999 }
+        end
+    end
+    if #cand > SCAN_MAX_NPCS then
+        table.sort(cand, function(a, b) return a.dist < b.dist end)
+        for i = #cand, SCAN_MAX_NPCS + 1, -1 do cand[i] = nil end
+    end
+
+    local out = {}
+    for i = 1, #cand do
+        local c = cand[i]
+        local rec = buildMobRecord(c.s, c.id, c.dist)
+        if rec then out[#out + 1] = rec end
+    end
+    return out, #list
+end
+
+-- Rolling Line-of-Sight refresh: walks spawns.allNPCs from the saved cursor,
+-- re-raycasting at most `budget` stale entries (older than LOS_STALE_MS, or
+-- all of them when forceAll). Runs every tick; never on the draw thread.
+local function refreshLosChunk(budget, forceAll)
+    local list = spawns.allNPCs
+    local n = #list
+    if n == 0 then return end
+    local cs = state.scanChunk
+    local now = mq.gettime()
+    local spent, visited = 0, 0
+    while spent < budget and visited < n do
+        if cs.losIdx > n or cs.losIdx < 1 then cs.losIdx = 1 end
+        local mob = list[cs.losIdx]
+        cs.losIdx = cs.losIdx + 1
+        visited = visited + 1
+        local losE = state.losCache[mob.id]
+        if forceAll or not losE or (now - losE.ts) > LOS_STALE_MS then
+            local losVal = false
+            local okSp, spawnObj = pcall(function() return mq.TLO.Spawn(mob.id) end)
+            if okSp and spawnObj and spawnObj() then
+                local okLos, los = pcall(function() return spawnObj.LineOfSight() end)
+                losVal = (okLos and los) or false
+            end
+            state.losCache[mob.id] = { los = losVal, ts = now }
+            mob.lineOfSight = losVal
+            spent = spent + 1
+        elseif losE then
+            mob.lineOfSight = losE.los
+        end
+    end
+end
+
+-- Spawn scan cycle: refreshes nav/zone state, fetches every NPC in one pass,
+-- then filters, sorts and snapshots the group. Runs on the engine tick only.
+-- forceComplete (init / zone change) also runs a synchronous LoS burst so the
+-- tracker has LoS data immediately.
+local function scanZoneSpawns(forceComplete)
+    navState.meshLoaded = navMeshLoaded()
+    local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
+    navState.navActive = (okNavAct and isNavAct) or false
+
+    local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
+    if okZone and zoneName then state.currentZoneName = zoneName end
 
     local nowTime = mq.gettime()
 
-    -- -- FETCH PHASE: pull a bounded slice of NearestSpawn entries.
-    if cs.phase == 'fetch' then
-        local chunkEnd = forceComplete and cs.fetchTotal or math.min(cs.fetchTotal, cs.fetchIdx + SCAN_FETCH_CHUNK - 1)
-        while cs.fetchIdx <= chunkEnd do
-            local i = cs.fetchIdx
-            local okSpawn, s = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
-            if okSpawn and s and s() then
-                local okData, sId, cleanName, level, classShort, conColor, distance, sx, sy, sz, pctHPs, hate = pcall(function()
-                    local dead = s.Dead()
-                    if dead then return nil end
-                    return s.ID(), s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.Distance3D(), s.X(), s.Y(), s.Z(), s.PctHPs(), s.Aggressive()
+    local npcs, total = fetchZoneNPCs()
+    spawns.allNPCs = npcs
+    spawns.totalCount = total
+    if #npcs == 0 then
+        spawns.filteredNPCs = {}
+        spawns.groupMembers = {}
+        state.scanChunk.losIdx = 1
+    end
+
+    if forceComplete then
+        state.scanChunk.losIdx = 1
+        refreshLosChunk(SCAN_LOS_BUDGET, true)
+    end
+
+    -- Filtering, sorting and group snapshot (in-memory, cheap).
+    local filtered = {}
+    local searchLower = string.lower(state.searchText or '')
+    local filterIdx = state.conFilterIndex
+    local sf = state.smartFloor
+    local applyZ = (cfg.zFilterMode ~= 3)
+    local wantNavChecks = (state.viewMode ~= 'ATLAS')
+
+    for _, mob in ipairs(npcs) do
+        local keep = true
+        if searchLower ~= '' then
+            local nameMatch = mob.nameLower:find(searchLower, 1, true)
+            local idMatch = mob.idStr:find(searchLower, 1, true)
+            if not nameMatch and not idMatch then keep = false end
+        end
+        if keep and filterIdx > 1 then
+            local con = mob.conColor
+            if filterIdx == 2 and con ~= 'RED' and con ~= 'DARK RED' then keep = false
+            elseif filterIdx == 3 and con ~= 'YELLOW' then keep = false
+            elseif filterIdx == 4 and con ~= 'WHITE' then keep = false
+            elseif filterIdx == 5 and con ~= 'BLUE' then keep = false
+            elseif filterIdx == 6 and con ~= 'LIGHT BLUE' then keep = false
+            elseif filterIdx == 7 and con ~= 'GREEN' then keep = false
+            elseif filterIdx == 8 and con ~= 'GREY' and con ~= 'GRAY' then keep = false
+            end
+        end
+        if keep and (mob.level < state.minLevel or mob.level > state.maxLevel) then keep = false end
+        if keep and (mob.distance > state.maxDistance) then keep = false end
+        if keep and state.losOnly and not mob.lineOfSight then keep = false end
+        if keep and applyZ then
+            if mob.z < sf.minZ or mob.z > sf.maxZ then keep = false end
+        end
+
+        local wantOnMap = keep
+        if keep and state.pathableOnly then
+            local c = navState.cache[mob.id]
+            if not c or not c.hasPath then keep = false end
+        end
+        if keep then filtered[#filtered + 1] = mob end
+
+        if wantOnMap and wantNavChecks then
+            local cached = navState.cache[mob.id]
+            if not cached or (nowTime - cached.checkedAt) > navState.cacheFreshMs then
+                if not navState.queueSet[mob.id] then
+                    navState.queueTail = navState.queueTail + 1
+                    navState.checkQueue[navState.queueTail] = mob.id
+                    navState.queueSet[mob.id] = true
+                end
+            end
+        end
+    end
+
+    local sIdx = state.sortIndex
+    table.sort(filtered, function(a, b)
+        if sIdx == 1 then return a.distance < b.distance
+        elseif sIdx == 2 then return a.distance > b.distance
+        elseif sIdx == 3 then
+            if a.level == b.level then return a.distance < b.distance end
+            return a.level > b.level
+        elseif sIdx == 4 then
+            if a.level == b.level then return a.distance < b.distance end
+            return a.level < b.level
+        elseif sIdx == 5 then
+            return a.nameLower < b.nameLower
+        end
+        return a.distance < b.distance
+    end)
+    spawns.filteredNPCs = filtered
+
+    local groupList = {}
+    local okGrp, grpCount = pcall(function() return mq.TLO.Group.Members() end)
+    if okGrp and grpCount and grpCount > 0 then
+        for g = 1, grpCount do
+            local okMem, mem = pcall(function() return mq.TLO.Group.Member(g) end)
+            if okMem and mem and mem() then
+                local okMData, mName, mX, mY, mZ, mHp = pcall(function()
+                    return mem.CleanName(), mem.X(), mem.Y(), mem.Z(), mem.PctHPs()
                 end)
-                if okData and sId and sId > 0 then
-                    local losCacheEntry = state.losCache[sId]
-                    spawns.allNPCs[#spawns.allNPCs + 1] = {
-                        id          = sId,
-                        cleanName   = cleanName or 'Unknown NPC',
-                        level       = level or 0,
-                        class       = classShort or 'WAR',
-                        conColor    = string.upper(tostring(conColor or 'GREY')),
-                        distance    = distance or 99999,
-                        lineOfSight = (losCacheEntry and losCacheEntry.los) or false,
-                        x           = sx or 0,
-                        y           = sy or 0,
-                        z           = sz or 0,
-                        pctHPs      = pctHPs or 100,
-                        isAggro     = hate or false,
+                if okMData and mX and mY then
+                    groupList[#groupList + 1] = {
+                        name = mName or ('Group ' .. g),
+                        x = mX, y = mY, z = mZ or 0,
+                        pctHPs = mHp or 100,
                     }
                 end
             end
-            cs.fetchIdx = cs.fetchIdx + 1
         end
-        if cs.fetchIdx <= cs.fetchTotal then
-            return 1  -- more fetch slices remain
-        end
-        cs.phase = 'los'
-        -- Fall through into the LoS phase for this same pass.
     end
-
-    -- -- LOS PHASE: resolve a small throttled subset of stale raycasts,
-    -- capped at the per-cycle budget (matches prior per-scan behavior).
-    if cs.phase == 'los' then
-        local list = spawns.allNPCs
-        local budgetEnd = cs.losSpent + (forceComplete and SCAN_LOS_BUDGET or SCAN_LOS_CHUNK)
-        if budgetEnd > SCAN_LOS_BUDGET then budgetEnd = SCAN_LOS_BUDGET end
-        while cs.losSpent < budgetEnd and cs.losIdx <= #list do
-            local mob = list[cs.losIdx]
-            cs.losIdx = cs.losIdx + 1
-            local needRefresh = forceComplete
-            if not forceComplete then
-                local losE = state.losCache[mob.id]
-                needRefresh = (not losE) or ((nowTime - losE.ts) > 5000)
-            end
-            if needRefresh then
-                local losVal = false
-                local okSp, spawnObj = pcall(function() return mq.TLO.Spawn(mob.id) end)
-                if okSp and spawnObj and spawnObj() then
-                    local okLos, los = pcall(function() return spawnObj.LineOfSight() end)
-                    losVal = (okLos and los) or false
-                end
-                state.losCache[mob.id] = { los = losVal, ts = nowTime }
-                mob.lineOfSight = losVal
-                cs.losSpent = cs.losSpent + 1
-            end
-        end
-        if cs.losSpent < SCAN_LOS_BUDGET and cs.losIdx <= #list then
-            return 1  -- budget still open and slices remain -- keep draining
-        end
-        cs.phase = 'finalize'
-    end
-
-    -- -- FINALIZE PHASE: filtering, sorting and group snapshot (in-memory/
-    -- -- small; cheap enough to run in one pass).
-    do
-        local newNpcList = spawns.allNPCs
-        local filtered = {}
-        local searchLower = string.lower(state.searchText or '')
-        local filterIdx = state.conFilterIndex
-        local sf = state.smartFloor
-
-        for _, mob in ipairs(newNpcList) do
-            local keep = true
-            if searchLower ~= '' then
-                local nameMatch = string.lower(mob.cleanName):find(searchLower, 1, true)
-                local idMatch = tostring(mob.id):find(searchLower, 1, true)
-                if not nameMatch and not idMatch then keep = false end
-            end
-            if keep and filterIdx > 1 then
-                local con = mob.conColor
-                if filterIdx == 2 and con ~= 'RED' and con ~= 'DARK RED' then keep = false
-                elseif filterIdx == 3 and con ~= 'YELLOW' then keep = false
-                elseif filterIdx == 4 and con ~= 'WHITE' then keep = false
-                elseif filterIdx == 5 and con ~= 'BLUE' then keep = false
-                elseif filterIdx == 6 and con ~= 'LIGHT BLUE' then keep = false
-                elseif filterIdx == 7 and con ~= 'GREEN' then keep = false
-                elseif filterIdx == 8 and con ~= 'GREY' and con ~= 'GRAY' then keep = false
-                end
-            end
-            if keep and (mob.level < state.minLevel or mob.level > state.maxLevel) then keep = false end
-            if keep and (mob.distance > state.maxDistance) then keep = false end
-            if keep and state.losOnly and not mob.lineOfSight then keep = false end
-            if keep and cfg.zFilterMode ~= 3 then
-                if mob.z < sf.minZ or mob.z > sf.maxZ then keep = false end
-            end
-
-            local wantOnMap = keep
-            if keep and state.pathableOnly then
-                local c = navState.cache[mob.id]
-                if not c or not c.hasPath then keep = false end
-            end
-            if keep then filtered[#filtered + 1] = mob end
-
-            if wantOnMap and state.viewMode ~= 'ATLAS' then
-                local cached = navState.cache[mob.id]
-                if not cached or (nowTime - cached.checkedAt) > navState.cacheFreshMs then
-                    if not navState.queueSet[mob.id] then
-                        navState.checkQueue[#navState.checkQueue + 1] = mob.id
-                        navState.queueSet[mob.id] = true
-                    end
-                end
-            end
-        end
-
-        local sIdx = state.sortIndex
-        table.sort(filtered, function(a, b)
-            if sIdx == 1 then return a.distance < b.distance
-            elseif sIdx == 2 then return a.distance > b.distance
-            elseif sIdx == 3 then
-                if a.level == b.level then return a.distance < b.distance end
-                return a.level > b.level
-            elseif sIdx == 4 then
-                if a.level == b.level then return a.distance < b.distance end
-                return a.level < b.level
-            elseif sIdx == 5 then
-                return a.cleanName:lower() < b.cleanName:lower()
-            end
-            return a.distance < b.distance
-        end)
-        spawns.filteredNPCs = filtered
-
-        local groupList = {}
-        local okGrp, grpCount = pcall(function() return mq.TLO.Group.Members() end)
-        if okGrp and grpCount and grpCount > 0 then
-            for g = 1, grpCount do
-                local okMem, mem = pcall(function() return mq.TLO.Group.Member(g) end)
-                if okMem and mem and mem() then
-                    local okMData, mName, mX, mY, mZ, mHp = pcall(function()
-                        return mem.CleanName(), mem.X(), mem.Y(), mem.Z(), mem.PctHPs()
-                    end)
-                    if okMData and mX and mY then
-                        groupList[#groupList + 1] = {
-                            name = mName or ('Group ' .. g),
-                            x = mX, y = mY, z = mZ or 0,
-                            pctHPs = mHp or 100,
-                        }
-                    end
-                end
-            end
-        end
-        spawns.groupMembers = groupList
-        cs.phase = 'idle'
-    end
-    return nil
+    spawns.groupMembers = groupList
 end
 
 -- ============================================================================
 -- NAVMESH PATH ENGINE (Throttled Background Batch Verification)
 -- ============================================================================
+-- Drops every queued-but-unprocessed path check and clears their queueSet
+-- marks so the next scan can re-queue them (otherwise an ID stays marked as
+-- queued forever and its tracker row is stuck on "[CHECKING]").
+local function resetNavQueue()
+    navState.checkQueue = {}
+    navState.queueSet = {}
+    navState.queueHead = 1
+    navState.queueTail = 0
+end
+
 local function processNavBatch()
     if not navState.meshLoaded then return end
-    if navState.queueHead > #navState.checkQueue then return end
+    if navState.queueHead > navState.queueTail then return end
 
     local now = mq.gettime()
     local count = 0
     local maxBatch = navState.batchSize
+    local q = navState.checkQueue
 
-    while navState.queueHead <= #navState.checkQueue and count < maxBatch do
-        local mobId = navState.checkQueue[navState.queueHead]
-        navState.checkQueue[navState.queueHead] = nil
+    -- Entries are never nil'd: the head/tail pointers define the live window,
+    -- so `#q` (undefined on tables with holes) is never consulted.
+    while navState.queueHead <= navState.queueTail and count < maxBatch do
+        local mobId = q[navState.queueHead]
         navState.queueHead = navState.queueHead + 1
 
         if mobId and mobId > 0 then
@@ -2100,26 +2300,46 @@ local function processNavBatch()
             navState.cache[mobId] = {
                 hasPath   = (okPath and hasPath) or false,
                 length    = (cached and cached.length) or 0,
+                lengthAt  = (cached and cached.lengthAt) or 0,
                 checkedAt = now,
             }
             count = count + 1
         end
     end
 
-    if navState.queueHead > #navState.checkQueue then
+    if navState.queueHead > navState.queueTail then
+        -- Fully drained: every dequeued ID was processed, so nothing is left
+        -- marked in queueSet.
         navState.checkQueue = {}
         navState.queueHead = 1
+        navState.queueTail = 0
     elseif navState.queueHead > 128 then
-        -- Compact to avoid indefinite nil-hole growth in checkQueue
+        -- Compact the processed prefix away; the remaining IDs keep their
+        -- queueSet marks because they are still queued.
         local compact = {}
-        for i = navState.queueHead, #navState.checkQueue do
-            if navState.checkQueue[i] and navState.checkQueue[i] > 0 then
-                compact[#compact + 1] = navState.checkQueue[i]
-            end
+        for i = navState.queueHead, navState.queueTail do
+            compact[#compact + 1] = q[i]
         end
         navState.checkQueue = compact
         navState.queueHead = 1
+        navState.queueTail = #compact
     end
+end
+
+-- Spawn IDs are reused per zone, so every per-ID cache and the active nav /
+-- POI markers must be dropped when the character zones.
+local function resetZoneRuntimeState()
+    navState.cache = {}
+    resetNavQueue()
+    state.losCache = {}
+    state.activeNavLoc = nil
+    state.activeNavSpawnId = 0
+    state.activeNavCommandTime = 0
+    state.highlightedPoi = nil
+    state.hoveredMobId = 0
+    state.scanChunk.losIdx = 1
+    spawns.allNPCs = {}
+    spawns.filteredNPCs = {}
 end
 
 -- ============================================================================
@@ -2199,7 +2419,7 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
                 end
 
                 if isCurrentWp then
-                    local wpPulse = math.sin(os.clock() * 5.0) * 2.0
+                    local wpPulse = math.sin(mq.gettime() * 0.005) * 2.0
                     drawList:AddCircle(ImVec2(wsx, wsy), 8.0 + wpPulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.8), 0, 1.8)
                     drawList:AddCircleFilled(ImVec2(wsx, wsy), 5.5, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0), 0)
                 else
@@ -2290,6 +2510,43 @@ local function drawTriuneOverlays(drawList, cX, cY, availW, availH, playerX, pla
     end
 end
 
+-- ImVec2 reuse for the line walk: the MQ binding exposes ImVec2.x/y as
+-- writable fields, so two scratch vectors can be reused for every segment
+-- instead of allocating two userdata per visible line per frame. Probed once;
+-- if the binding turns out to be immutable we fall back to allocation.
+local imVec2Mutable = nil
+local scratchA, scratchB = nil, nil
+
+local function probeImVec2Mutable()
+    if imVec2Mutable ~= nil then return imVec2Mutable end
+    local ok = pcall(function()
+        local v = ImVec2(1, 2)
+        v.x = 3
+        v.y = 4
+        if v.x ~= 3 or v.y ~= 4 then error('immutable') end
+    end)
+    imVec2Mutable = ok and true or false
+    if imVec2Mutable then
+        scratchA = ImVec2(0, 0)
+        scratchB = ImVec2(0, 0)
+    end
+    return imVec2Mutable
+end
+
+-- Con-color U32 cache for fully opaque nodes (alphaMult == 1): one
+-- GetColorU32 marshal per con color for the life of the plugin instead of one
+-- per visible NPC per frame.
+local conColU32Cache = {}
+
+local function getConColU32(conUpper)
+    local col = conColU32Cache[conUpper]
+    if col then return col end
+    local st = getConStyle(conUpper)
+    col = ImGui.GetColorU32(st.r, st.g, st.b, 1.0)
+    conColU32Cache[conUpper] = col
+    return col
+end
+
 local function DrawMapCanvas(availW, availH)
     local sf = state.smartFloor
 
@@ -2339,10 +2596,13 @@ local function DrawMapCanvas(availW, availH)
     local isItemHovered = ImGui.IsItemHovered()
     local isItemActive = ImGui.IsItemActive()
 
-    -- Coordinate under cursor
+    -- Coordinate under cursor. Interaction (hit-testing, click-to-move,
+    -- drag) is gated on the InvisibleButton's own hover so an overlapping
+    -- window (tooltip, popup, another plugin window) blocks it; the raw
+    -- rectangle test is only used for the mouse-wheel zoom.
     local mousePos = ImGui.GetMousePosVec()
     local isMouseOverCanvas = (mousePos.x >= cX and mousePos.x <= cX + availW and mousePos.y >= cY and mousePos.y <= cY + availH)
-    local isHovered = isItemHovered or isMouseOverCanvas or ImGui.IsWindowHovered()
+    local isHovered = isItemHovered
 
     if isHovered then
         state.cursorWorldX, state.cursorWorldY = screenToWorld(mousePos.x, mousePos.y, cX, cY, availW, availH)
@@ -2351,11 +2611,11 @@ local function DrawMapCanvas(availW, availH)
     local isOverFloorPill = (cfg.zFilterMode ~= 3 and mousePos.x >= badgeX - 4 and mousePos.x <= badgeX + navW + 4 and mousePos.y >= badgeY - 4 and mousePos.y <= badgeY + navH + 4)
     local isOverZoomWidget = (mousePos.x >= zoomX - 6 and mousePos.x <= zoomX + zoomPanelW + 6 and mousePos.y >= zoomY - 6 and mousePos.y <= zoomY + zoomPanelH + 6)
 
-    -- Safe IO check for KeyCtrl
+    -- Safe IO check for KeyCtrl (named imIO so the io library is not shadowed)
     local hasCtrl = false
-    local okIO, io = pcall(ImGui.GetIO)
-    if okIO and io then
-        pcall(function() if io.KeyCtrl then hasCtrl = true end end)
+    local okIO, imIO = pcall(ImGui.GetIO)
+    if okIO and imIO then
+        pcall(function() if imIO.KeyCtrl then hasCtrl = true end end)
     end
 
     -- Handle Drag Panning (Only on held down left click, ignored when clicking overlay widgets)
@@ -2440,7 +2700,7 @@ local function DrawMapCanvas(availW, availH)
         -- Horizontal grid lines (constant Y)
         for gy = startGy, endGy, gridSpacing do
             local _, sy = worldToScreen(0, gy, cX, cY, availW, availH)
-            if sy >= cY and sy <= cX + availW then
+            if sy >= cY and sy <= cY + availH then
                 drawList:AddLine(ImVec2(cX, sy), ImVec2(cX + availW, sy), gridCol, 1.0)
                 drawList:AddText(ImVec2(cX + 3, sy + 3), textCol, string.format('Y:%d', gy))
             end
@@ -2452,15 +2712,16 @@ local function DrawMapCanvas(availW, availH)
     -- marker and camera-pan move at render rate; the per-tick cache is only the
     -- fallback inside samplePlayerSmoothed when a live read fails.
     local frameDt = 1 / 60
-    if okIO and io then
+    if okIO and imIO then
         pcall(function()
-            local d = io.DeltaTime
+            local d = imIO.DeltaTime
             if d and d > 0 and d < 0.5 then frameDt = d end
         end)
     end
     local playerX, playerY, playerZ, playerHeading = samplePlayerSmoothed(frameDt)
 
-    updateSmartFloorBounds(playerX, playerY, playerZ)
+    -- Smart floor bounds are recomputed on the engine tick (histogram pass
+    -- over the map geometry); the draw thread only reads the result.
     sf = state.smartFloor
 
     -- Viewport World-Space Bounds for 0-allocation Frustum Culling
@@ -2490,33 +2751,97 @@ local function DrawMapCanvas(availW, availH)
     local sfMinZ, sfMaxZ = sf.minZ, sf.maxZ
     local zFading = cfg.zDepthFading
     local zFilterMode = cfg.zFilterMode
+    local zoomNow = viewport.zoom
+    -- Segments shorter than one screen pixel at this zoom are invisible
+    -- anyway; skipping them is the bulk of the saving when zoomed out.
+    local minLenWorld = 1.0 / math.max(0.0001, zoomNow)
+    local reuseVec = probeImVec2Mutable()
+    local pA, pB = scratchA, scratchB
 
-    for lId = 0, 3 do
-        if layerEnabled[lId] then
-            local lines = mapData.layers[lId] or {}
-            for i = 1, #lines do
-                local seg = lines[i]
-                -- Fast world-space AABB culling
-                if seg.maxX >= vpMinX and seg.minX <= vpMaxX and seg.maxY >= vpMinY and seg.minY <= vpMaxY then
-                    local alphaMult, isVis = 1.0, true
-                    if zFilterMode ~= 3 then
-                        alphaMult, isVis = getZAlphaMultiplier(seg.avgZ, sfMinZ, sfMaxZ, zFilterMode, zFading)
-                    end
+    -- Screen transform inlined for the hot loop (same math as worldToScreen).
+    local originSX = cX + availW * 0.5 + viewport.centerEqX * zoomNow
+    local originSY = cY + availH * 0.5 + viewport.centerEqY * zoomNow
 
-                    if isVis and alphaMult > 0.01 then
-                        local sx1, sy1 = worldToScreen(seg.x1, seg.y1, cX, cY, availW, availH)
-                        local sx2, sy2 = worldToScreen(seg.x2, seg.y2, cX, cY, availW, availH)
-                        local col
-                        if alphaMult >= 0.999 then
-                            -- Lazily precompute the opaque color once per segment,
-                            -- then cache it so steady-state frames skip the
-                            -- GetColorU32 marshal entirely.
-                            if not seg.colBase then seg.colBase = ImGui.GetColorU32(seg.r, seg.g, seg.b, 1.0) end
-                            col = seg.colBase
-                        else
-                            col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
+    local function drawSegment(seg)
+        if seg.len < minLenWorld then return end
+        local alphaMult, isVis = 1.0, true
+        if zFilterMode ~= 3 then
+            alphaMult, isVis = getZAlphaMultiplier(seg.avgZ, sfMinZ, sfMaxZ, zFilterMode, zFading)
+        end
+        if not isVis or alphaMult <= 0.01 then return end
+
+        local sx1 = originSX - seg.x1 * zoomNow
+        local sy1 = originSY - seg.y1 * zoomNow
+        local sx2 = originSX - seg.x2 * zoomNow
+        local sy2 = originSY - seg.y2 * zoomNow
+        local col
+        if alphaMult >= 0.999 then
+            -- Lazily precompute the opaque color once per segment, then
+            -- cache it so steady-state frames skip the GetColorU32 marshal.
+            if not seg.colBase then seg.colBase = ImGui.GetColorU32(seg.r, seg.g, seg.b, 1.0) end
+            col = seg.colBase
+        else
+            col = ImGui.GetColorU32(seg.r, seg.g, seg.b, alphaMult)
+        end
+        if reuseVec then
+            pA.x = sx1; pA.y = sy1
+            pB.x = sx2; pB.y = sy2
+            drawList:AddLine(pA, pB, col, lineThick)
+        else
+            drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, lineThick)
+        end
+    end
+
+    local grid = mapData.grid
+    if grid and grid.cell then
+        -- Walk only the bucket cells overlapping the viewport. A segment that
+        -- spans several cells is drawn from the first visible cell it touches
+        -- (max of its min cell and the visible min cell) so it is emitted
+        -- exactly once per frame.
+        local inv = 1 / grid.cell
+        local vcx0 = math.floor(vpMinX * inv)
+        local vcx1 = math.floor(vpMaxX * inv)
+        local vcy0 = math.floor(vpMinY * inv)
+        local vcy1 = math.floor(vpMaxY * inv)
+        for lId = 0, 3 do
+            local layerGrid = layerEnabled[lId] and grid.layers[lId]
+            if layerGrid and layerGrid.count > 0 then
+                local cells = layerGrid.cells
+                local cy0 = math.max(vcy0, layerGrid.minCY)
+                local cy1 = math.min(vcy1, layerGrid.maxCY)
+                local cx0 = math.max(vcx0, layerGrid.minCX)
+                local cx1 = math.min(vcx1, layerGrid.maxCX)
+                for cy = cy0, cy1 do
+                    local row = cells[cy]
+                    if row then
+                        for cx = cx0, cx1 do
+                            local bucket = row[cx]
+                            if bucket then
+                                for i = 1, #bucket do
+                                    local seg = bucket[i]
+                                    local ownX = seg.cx0 > vcx0 and seg.cx0 or vcx0
+                                    local ownY = seg.cy0 > vcy0 and seg.cy0 or vcy0
+                                    if ownX == cx and ownY == cy
+                                        and seg.maxX >= vpMinX and seg.minX <= vpMaxX
+                                        and seg.maxY >= vpMinY and seg.minY <= vpMaxY then
+                                        drawSegment(seg)
+                                    end
+                                end
+                            end
                         end
-                        drawList:AddLine(ImVec2(sx1, sy1), ImVec2(sx2, sy2), col, lineThick)
+                    end
+                end
+            end
+        end
+    else
+        -- No buckets (map loaded without the grid): linear AABB walk.
+        for lId = 0, 3 do
+            if layerEnabled[lId] then
+                local lines = mapData.layers[lId] or {}
+                for i = 1, #lines do
+                    local seg = lines[i]
+                    if seg.maxX >= vpMinX and seg.minX <= vpMaxX and seg.maxY >= vpMinY and seg.minY <= vpMaxY then
+                        drawSegment(seg)
                     end
                 end
             end
@@ -2619,6 +2944,22 @@ local now = mq.gettime()
         local doubleClickedMob = nil
 
         if cfg.showNPCs then
+            -- Constant colors hoisted out of the per-NPC loop; the opaque
+            -- (alphaMult == 1) con / nav colors come from small caches.
+            local meshUp = navState.meshLoaded
+            local colorMode = cfg.colorModeIndex
+            local nodeRadius = cfg.npcNodeRadius
+            local ringBlack = ImGui.GetColorU32(0, 0, 0, 0.8)
+            local targetRingCol = ImGui.GetColorU32(1.0, 0.85, 0.20, 1.0)
+            local kosRingCol = ImGui.GetColorU32(1.0, 0.1, 0.1, 0.9)
+            local hoverRingCol = ImGui.GetColorU32(1, 1, 1, 0.9)
+            local navGreen = ImGui.GetColorU32(0.15, 0.95, 0.35, 1.0)
+            local navRed = ImGui.GetColorU32(0.95, 0.20, 0.20, 1.0)
+            local navGrey = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8)
+            local hitRadius = nodeRadius + 4.0
+            local hitRadiusSq = hitRadius * hitRadius
+            local showNames = cfg.showNPCNames
+
             for _, mob in ipairs(spawns.filteredNPCs) do
                 local alphaMult, isVis = getZAlphaMultiplier(mob.z, sf.minZ, sf.maxZ)
 
@@ -2627,57 +2968,65 @@ local now = mq.gettime()
 
                     if sx >= cX - 10 and sx <= cX + availW + 10 and sy >= cY - 10 and sy <= cY + availH + 10 then
                         -- Determine Colors
-                        local conStyle = getConStyle(mob.conColor)
-                        local conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, alphaMult)
+                        local opaque = (alphaMult >= 0.999)
+                        local conColU32
+                        if opaque then
+                            conColU32 = getConColU32(mob.conColor)
+                        else
+                            local conStyle = getConStyle(mob.conColor)
+                            conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, alphaMult)
+                        end
 
                         local cNav = navState.cache[mob.id]
                         local isPathable = cNav and cNav.hasPath
-                        local navColU32 = (isPathable and ImGui.GetColorU32(0.15, 0.95, 0.35, alphaMult)) or ImGui.GetColorU32(0.95, 0.20, 0.20, alphaMult)
-                        if not navState.meshLoaded then
-                            navColU32 = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
+                        local navColU32
+                        if not meshUp then
+                            navColU32 = opaque and navGrey or ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
+                        elseif isPathable then
+                            navColU32 = opaque and navGreen or ImGui.GetColorU32(0.15, 0.95, 0.35, alphaMult)
+                        else
+                            navColU32 = opaque and navRed or ImGui.GetColorU32(0.95, 0.20, 0.20, alphaMult)
                         end
 
-                        local nodeRadius = cfg.npcNodeRadius
                         local isTarget = (mob.id == targetId)
 
                         -- Draw Node by Color Mode
-                        if cfg.colorModeIndex == 1 then
+                        if colorMode == 1 then
                             -- Dual Mode: Con fill with Nav halo
                             drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
                             drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
-                        elseif cfg.colorModeIndex == 2 then
+                        elseif colorMode == 2 then
                             -- Navmesh Reachability Only
                             drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32, 0)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ringBlack, 0, 1.0)
                         else
                             -- Con Colors Only
                             drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ImGui.GetColorU32(0, 0, 0, 0.8), 0, 1.0)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ringBlack, 0, 1.0)
                         end
 
                         -- Target Highlight Ring
                         if isTarget then
-                            local pulseCol = ImGui.GetColorU32(1.0, 0.85, 0.20, 1.0)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 4.0, pulseCol, 0, 2.0)
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 4.0, targetRingCol, 0, 2.0)
                         end
 
-                        -- Aggro / Hate Indicator
-                        if mob.isAggro then
-                            local hateCol = ImGui.GetColorU32(1.0, 0.1, 0.1, 0.9)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 6.0, hateCol, 0, 1.5)
+                        -- Aggressive (KOS) Indicator: Spawn.Aggressive is the
+                        -- "will attack on sight" flag, not live hate on us.
+                        if mob.isKos then
+                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 6.0, kosRingCol, 0, 1.5)
                         end
 
                         -- Optional Name Tag on Map
-                        if cfg.showNPCNames then
+                        if showNames then
                             drawList:AddText(ImVec2(sx + 6, sy - 6), conColU32, mob.cleanName)
                         end
 
                         -- Hit Testing
                         if isHovered then
-                            local mDist = math.sqrt((mousePos.x - sx)^2 + (mousePos.y - sy)^2)
-                            if mDist <= (nodeRadius + 4.0) then
+                            local mdx, mdy = mousePos.x - sx, mousePos.y - sy
+                            if (mdx * mdx + mdy * mdy) <= hitRadiusSq then
                                 hoveredMob = mob
-                                drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 5.0, ImGui.GetColorU32(1, 1, 1, 0.9), 0, 2.0)
+                                drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 5.0, hoverRingCol, 0, 2.0)
 
                                 if ImGui.IsMouseClicked(0) then
                                     clickedMob = mob
@@ -2762,7 +3111,7 @@ local now = mq.gettime()
                         drawList:AddLine(ImVec2(pSx, pSy), ImVec2(dSx, dSy), ImGui.GetColorU32(0.15, 0.95, 0.40, 0.95), 2.0)
 
                         -- Destination Waypoint Marker (Pulsing Bullseye)
-                        local pulse = math.sin(os.clock() * 5.0) * 2.0
+                        local pulse = math.sin(mq.gettime() * 0.005) * 2.0
                         drawList:AddCircle(ImVec2(dSx, dSy), 11.0 + pulse, ImGui.GetColorU32(1.0, 0.85, 0.15, 0.6), 0, 2.0)
                         drawList:AddCircleFilled(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(1.0, 0.85, 0.15, 1.0), 0)
                         drawList:AddCircle(ImVec2(dSx, dSy), 5.0, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.9), 0, 1.2)
@@ -3097,18 +3446,25 @@ local now = mq.gettime()
             pathStr = 'Mesh Not Loaded'
         elseif cNav then
             -- Resolve the (expensive) exact path length on demand for the
-            -- hovered mob only, throttled to ~1 refresh/sec, then cache it.
-            local nowT = mq.gettime()
-            if cNav.length == 0 or (nowT - cNav.checkedAt) > 1000 then
-                local okLen, pathLen = pcall(function()
-                    return mq.TLO.Navigation.PathLength(string.format('id %d', hid))()
-                end)
-                if okLen and pathLen then
-                    cNav.length = pathLen
-                    cNav.checkedAt = nowT
+            -- hovered mob only, and only when a path exists, throttled to
+            -- ~1 refresh/sec on its own timestamp. checkedAt belongs to the
+            -- PathExists verification and is left alone so re-checks are
+            -- not suppressed by hovering.
+            if cNav.hasPath then
+                local nowT = mq.gettime()
+                if cNav.length == 0 or (nowT - (cNav.lengthAt or 0)) > 1000 then
+                    local okLen, pathLen = pcall(function()
+                        return mq.TLO.Navigation.PathLength(string.format('id %d', hid))()
+                    end)
+                    if okLen and pathLen then
+                        cNav.length = pathLen
+                    end
+                    cNav.lengthAt = nowT
                 end
+                pathStr = string.format('Valid Path (%.1f yds)', cNav.length or 0)
+            else
+                pathStr = 'NO PATH (Unreachable)'
             end
-            pathStr = cNav.hasPath and string.format('Valid Path (%.1f yds)', cNav.length) or 'NO PATH (Unreachable)'
         end
 
         -- Lazily refresh hovered mob's LoS so the tooltip stays accurate
@@ -3130,7 +3486,7 @@ local now = mq.gettime()
             'Name: %s\n' ..
             'Level: %d  |  Class: %s  |  Con: %s\n' ..
             'Distance: %.1f yds  |  LoS: %s  |  Z-Diff: %.1f yds\n' ..
-            'HP: %d%%\n' ..
+            'HP: %d%%  |  Aggressive (KOS): %s\n' ..
             'Navmesh Status: %s\n\n' ..
             '[Left-Click] Target  |  [Double-Click] Navigate',
             hoveredMob.cleanName,
@@ -3141,6 +3497,7 @@ local now = mq.gettime()
             hoverLos and 'YES' or 'NO',
             math.abs(hoveredMob.z - playerZ),
             hoveredMob.pctHPs,
+            hoveredMob.isKos and 'YES' or 'NO',
             pathStr
         )
         ImGui.SetTooltip('%s', tt)
@@ -3154,6 +3511,35 @@ end
 -- ============================================================================
 -- POI SIDE DRAWER (Map Canvas Overlay)
 -- ============================================================================
+-- Returns the labels matching the POI search text. The filtered list is
+-- rebuilt only when the (trimmed, lowercased) query or the loaded label set
+-- changes; per-frame callers get the cached table back.
+local function getPoiMatches()
+    local labels = mapData.labels or {}
+    local q = (state.poiSearchText or ''):lower():match('^%s*(.-)%s*$')
+    local pc = state.poiMatchCache
+    if pc.q == q and pc.labels == labels then
+        return pc.list, labels
+    end
+    local matching = {}
+    if q == '' then
+        for i = 1, #labels do matching[i] = labels[i] end
+    else
+        for i = 1, #labels do
+            local lb = labels[i]
+            local tl = lb.textLower
+            if not tl then tl = lb.text:lower(); lb.textLower = tl end
+            if tl:find(q, 1, true) ~= nil then
+                matching[#matching + 1] = lb
+            end
+        end
+    end
+    pc.q = q
+    pc.labels = labels
+    pc.list = matching
+    return matching, labels
+end
+
 local function DrawPoiDrawer(availW, availH)
     ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
     if ImGui.BeginChild('##PoiDrawerPanel', ImVec2(availW, availH), true, ImGuiWindowFlags.MenuBar or 0) then
@@ -3187,16 +3573,8 @@ local function DrawPoiDrawer(availW, availH)
 
         ImGui.Separator()
 
-        -- Filter POIs from mapData.labels
-        local q = (state.poiSearchText or ''):lower():match('^%s*(.-)%s*$')
-        local labels = mapData.labels or {}
-        local matching = {}
-
-        for _, lb in ipairs(labels) do
-            if q == '' or lb.text:lower():find(q, 1, true) ~= nil then
-                matching[#matching + 1] = lb
-            end
-        end
+        -- Filter POIs from mapData.labels (cached; see getPoiMatches)
+        local matching, labels = getPoiMatches()
 
         ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('Matches: %d of %d labels', #matching, #labels))
 
@@ -3257,6 +3635,10 @@ local function DrawAtlasTab()
     local availW, availH = ImGui.GetContentRegionAvail()
     local leftW = math.max(340, math.min(480, availW * 0.40))
     local rightW = availW - leftW - 12
+    -- Lowercased once per frame; zone entries carry their own shortLower.
+    local curShortLower = (state.currentZoneShort or ''):lower()
+    local atlasShortLower = (state.atlasZoneShort or ''):lower()
+    local loadedShortLower = (mapData.zoneShort or ''):lower()
 
     -- Left Pane: Zone Catalog & Filter Surface
     if ImGui.BeginChild('##AtlasCatalogPane', ImVec2(leftW, availH), true) then
@@ -3330,7 +3712,7 @@ local function DrawAtlasTab()
                 for _, z in ipairs(state.atlasZoneList) do
                     ImGui.TableNextRow()
                     local isSelected = (state.atlasSelectedZone and state.atlasSelectedZone.short == z.short)
-                    local isCurrent = (state.currentZoneShort:lower() == z.short:lower())
+                    local isCurrent = (curShortLower == z.shortLower)
 
                     ImGui.TableNextColumn()
                     local prefix = isCurrent and '▶ ' or ''
@@ -3375,8 +3757,9 @@ local function DrawAtlasTab()
             ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'Select a zone from the catalog on the left.')
         else
             -- Zone Header Banner
-            local isCurrent = (state.currentZoneShort:lower() == z.short:lower())
-            local isViewedInAtlas = (state.viewMode == 'ATLAS' and state.atlasZoneShort:lower() == z.short:lower())
+            if not z.shortLower then decorateAtlasEntry(z) end
+            local isCurrent = (curShortLower == z.shortLower)
+            local isViewedInAtlas = (state.viewMode == 'ATLAS' and atlasShortLower == z.shortLower)
 
             ImGui.TextColored(0.25, 0.85, 1.0, 1.0, string.format('%s', z.name))
             if isCurrent then
@@ -3415,20 +3798,18 @@ local function DrawAtlasTab()
             -- Travel Route from Current Zone
             ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Travel Route from Current Zone')
 
-            local curShort = (state.currentZoneShort or ''):lower():match('^%s*(.-)%s*$')
-            local targetShort = z.short:lower():match('^%s*(.-)%s*$')
+            local curShort = curShortLower:match('^%s*(.-)%s*$')
+            local targetShort = z.shortLower:match('^%s*(.-)%s*$')
 
             if curShort == '' or curShort == 'unknown' then
                 ImGui.TextColored(0.7, 0.7, 0.7, 0.8, 'Current zone not detected in game.')
             elseif curShort == targetShort then
                 ImGui.TextColored(0.2, 0.95, 0.4, 1.0, string.format('✓ You are already in this zone (%s).', z.name))
             else
-                local curZoneInfo = nil
-                for _, cz in ipairs(state.atlasAllZones) do
-                    if cz.short:lower() == curShort then curZoneInfo = cz break end
-                end
+                local curZoneInfo = atlasZoneByShort(curShort)
                 local curName = curZoneInfo and curZoneInfo.name or (state.currentZoneName ~= '' and state.currentZoneName) or curShort
 
+                -- Cached on (curShort, targetShort); BFS only reruns on change.
                 local path, hops = findZoneRoute(curShort, targetShort)
                 if not path or #path == 0 then
                     ImGui.TextColored(0.9, 0.7, 0.3, 1.0, string.format('No connected route found between %s and %s.', curName, z.name))
@@ -3476,12 +3857,8 @@ local function DrawAtlasTab()
 
                             ImGui.TableNextColumn()
                             if ImGui.SmallButton(string.format('View##RStep_%d', stepIdx)) then
-                                for _, az in ipairs(state.atlasAllZones) do
-                                    if az.short:lower() == stepZone.short:lower() then
-                                        state.atlasSelectedZone = az
-                                        break
-                                    end
-                                end
+                                local az = atlasZoneByShort(stepZone.shortLower or stepZone.short:lower())
+                                if az then state.atlasSelectedZone = az end
                                 navigateToAtlasZone(stepZone.short, true)
                                 switchToTab(1)
                             end
@@ -3506,14 +3883,9 @@ local function DrawAtlasTab()
                 ImGui.TextColored(0.65, 0.72, 0.82, 0.8, string.format('Directly connected to %d zones (Click to inspect / view map):', #conns))
                 ImGui.Spacing()
 
+                local connLower = z.connLower or {}
                 for idx, cShort in ipairs(conns) do
-                    local cZone = nil
-                    for _, cz in ipairs(state.atlasAllZones) do
-                        if cz.short:lower() == cShort:lower() then
-                            cZone = cz
-                            break
-                        end
-                    end
+                    local cZone = atlasZoneByShort(connLower[idx] or cShort:lower())
 
                     local cName = cZone and cZone.name or cShort
                     local cEra = cZone and cZone.era or 'Classic'
@@ -3545,7 +3917,7 @@ local function DrawAtlasTab()
 
             -- Zone Points of Interest (if currently loaded or active)
             ImGui.TextColored(0.3, 0.85, 1.0, 1.0, 'Zone Points of Interest & Key Labels')
-            local currentViewingThis = (mapData.zoneShort:lower() == z.short:lower() and mapData.isLoaded)
+            local currentViewingThis = (loadedShortLower == z.shortLower and mapData.isLoaded)
 
             if not currentViewingThis then
                 ImGui.TextColored(0.6, 0.6, 0.6, 0.8, 'Open this zone\'s map to inspect its points of interest and labels.')
@@ -3570,13 +3942,7 @@ local function DrawAtlasTab()
                     end
                 end
 
-                local q = (state.poiSearchText or ''):lower():match('^%s*(.-)%s*$')
-                local matching = {}
-                for _, lb in ipairs(labels) do
-                    if q == '' or lb.text:lower():find(q, 1, true) ~= nil then
-                        matching[#matching + 1] = lb
-                    end
-                end
+                local matching = getPoiMatches()
 
                 if #matching > 0 then
                     local poiTableH = math.max(120, availH - 330)
@@ -3700,15 +4066,15 @@ local function DrawNPCTrackerTab()
             if okTarg and targId then currentTargetId = targId end
         end
 
-        for idx, mob in ipairs(spawns.filteredNPCs) do
+        for _, mob in ipairs(spawns.filteredNPCs) do
             ImGui.TableNextRow()
             local isSelected = (mob.id == currentTargetId)
 
-            -- Column 1: Clean Name (Interactive row selectable)
+            -- Column 1: Clean Name (Interactive row selectable). Labels and
+            -- the ##id suffixes are precomputed on the record at scan time.
             ImGui.TableSetColumnIndex(0)
             local conStyle = getConStyle(mob.conColor)
-            local namePrefix = isSelected and '> ' or ''
-            local nameLabel = string.format('%s%s##TrackMob_%d_%d', namePrefix, mob.cleanName, mob.id, idx)
+            local nameLabel = isSelected and mob.rowLabelSel or mob.rowLabel
             if isSelected then
                 ImGui.PushStyleColor(ImGuiCol.Text, 0.3, 0.9, 1.0, 1.0)
             else
@@ -3734,7 +4100,7 @@ local function DrawNPCTrackerTab()
 
             -- Column 2: Level
             ImGui.TableSetColumnIndex(1)
-            ImGui.Text(tostring(mob.level))
+            ImGui.Text(mob.levelStr)
 
             -- Column 3: Consideration
             ImGui.TableSetColumnIndex(2)
@@ -3742,7 +4108,7 @@ local function DrawNPCTrackerTab()
 
             -- Column 4: Distance
             ImGui.TableSetColumnIndex(3)
-            ImGui.Text(string.format('%.1fy', mob.distance))
+            ImGui.Text(mob.distStr)
 
             -- Column 5: Navmesh Status Badge
             ImGui.TableSetColumnIndex(4)
@@ -3769,22 +4135,21 @@ local function DrawNPCTrackerTab()
 
             -- Column 7: Spawn ID
             ImGui.TableSetColumnIndex(6)
-            ImGui.TextDisabled(tostring(mob.id))
+            ImGui.TextDisabled(mob.idStr)
 
-            -- Column 8: Actions ([Tar], [Nav], [Map])
+            -- Column 8: Actions ([Tar], [Nav], [Map]) scoped by PushID so the
+            -- button labels are constant strings.
             ImGui.TableSetColumnIndex(7)
-            local targBtnId = string.format('Tar##%d_%d', mob.id, idx)
-            local navBtnId  = string.format('Nav##%d_%d', mob.id, idx)
-            local mapBtnId  = string.format('Map##%d_%d', mob.id, idx)
+            ImGui.PushID(mob.pushId)
 
-            if ImGui.SmallButton(targBtnId) then
+            if ImGui.SmallButton('Tar') then
                 actionQueue.pendingTargetId = mob.id
                 state.statusMsg = string.format('Targeted: %s (ID: %d)', mob.cleanName, mob.id)
             end
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', string.format('Target %s (ID: %d)', mob.cleanName, mob.id)) end
 
             ImGui.SameLine()
-            if ImGui.SmallButton(navBtnId) then
+            if ImGui.SmallButton('Nav') then
                 actionQueue.pendingTargetId = mob.id
                 actionQueue.pendingNavId = mob.id
                 state.activeNavSpawnId = mob.id
@@ -3795,7 +4160,7 @@ local function DrawNPCTrackerTab()
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', string.format('Navigate to %s (ID: %d)', mob.cleanName, mob.id)) end
 
             ImGui.SameLine()
-            if ImGui.SmallButton(mapBtnId) then
+            if ImGui.SmallButton('Map') then
                 viewport.centerEqX = mob.x
                 viewport.centerEqY = mob.y
                 cfg.followPlayer = false
@@ -3803,6 +4168,7 @@ local function DrawNPCTrackerTab()
                 state.statusMsg = string.format('Focused map on: %s (Y: %.1f, X: %.1f)', mob.cleanName, mob.y, mob.x)
             end
             if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', string.format('Center 2D map on %s (Y: %.1f, X: %.1f)', mob.cleanName, mob.y, mob.x)) end
+            ImGui.PopID()
         end
 
         ImGui.EndTable()
@@ -3905,20 +4271,33 @@ local function DrawSettingsTab()
     -- Optional Advanced Custom Base Path
     if ImGui.TreeNodeEx('Advanced Custom Base Path##AdvPathTree', ImGuiTreeNodeFlags.None or 0) then
         ImGui.TextDisabled('Override the root directory to search for maps/')
+        -- Edits go to a buffer; the folder rescan + map reload only run when
+        -- the user presses Enter or clicks Apply (not per keystroke).
         ImGui.PushItemWidth(320)
-        local custDir, custChanged = ImGui.InputText('Base Path##CustDirInput', state.customMapsDir)
-        if custChanged then
-            state.customMapsDir = custDir
+        local enterFlag = (ImGuiInputTextFlags and ImGuiInputTextFlags.EnterReturnsTrue) or 0
+        local custDir, entered = ImGui.InputText('Base Path##CustDirInput', state.customMapsDirInput or state.customMapsDir or '', enterFlag)
+        if type(custDir) == 'string' then state.customMapsDirInput = custDir end
+        ImGui.PopItemWidth()
+        ImGui.SameLine()
+        local applyClicked = ImGui.Button('Apply##ApplyBaseBtn')
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Apply the base path (or press Enter in the field), rescan folders and reload the map') end
+        if entered == true or applyClicked then
+            state.customMapsDir = (state.customMapsDirInput or ''):match('^%s*(.-)%s*$')
+            state.customMapsDirInput = state.customMapsDir
+            clearZoneMapCache()
             scanMapFolders()
+            scanMapFiles()
             loadZoneMap(state.currentZoneShort)
             state.dirtySettings = true
             state.dirtySettingsTime = mq.gettime()
         end
-        ImGui.PopItemWidth()
         ImGui.SameLine()
         if ImGui.Button('Reset to Auto##ResetAutoBaseBtn') then
             state.customMapsDir = ''
+            state.customMapsDirInput = ''
+            clearZoneMapCache()
             scanMapFolders()
+            scanMapFiles()
             loadZoneMap(state.currentZoneShort)
             state.dirtySettings = true
             state.dirtySettingsTime = mq.gettime()
@@ -4055,7 +4434,18 @@ local function DrawSettingsTab()
     ImGui.PopItemWidth()
 
     local bd, cbd = ImGui.Checkbox('Auto-Brighten Black / Dark Map Lines (High Contrast)##BoostDarkLinesCheck', cfg.boostDarkLines)
-    if cbd then cfg.boostDarkLines = bd; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
+    if cbd and bd ~= cfg.boostDarkLines then
+        cfg.boostDarkLines = bd
+        state.dirtySettings = true
+        state.dirtySettingsTime = mq.gettime()
+        -- The brighten is applied at parse time: drop the parsed cache and
+        -- re-parse the zone on view, keeping the current viewport.
+        clearZoneMapCache()
+        local keepX, keepY, keepZoom = viewport.centerEqX, viewport.centerEqY, viewport.zoom
+        local isAtlas = (state.viewMode == 'ATLAS')
+        loadZoneMap(isAtlas and state.atlasZoneShort or state.currentZoneShort, isAtlas)
+        viewport.centerEqX, viewport.centerEqY, viewport.zoom = keepX, keepY, keepZoom
+    end
     if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', 'Automatically converts black (0,0,0) and dark map lines/labels to crisp visible silver/white against dark backgrounds') end
 
     ImGui.Spacing()
@@ -4103,6 +4493,9 @@ end
 -- ============================================================================
 -- MAIN IMGUI DRAW CALLBACK
 -- ============================================================================
+-- Set by initialize() (engine tick only); the draw callback shows a
+-- "Loading..." placeholder until then.
+local initialized = false
 
 local function DrawTriuneMapUI()
     if not ctrl.show_map then return end
@@ -4128,7 +4521,12 @@ local function DrawTriuneMapUI()
         return
     end
 
-    if draw then
+    if draw and not initialized then
+        -- Folder scan, file parse and the first spawn scan run from the engine
+        -- tick (see initialize); the draw thread never does that work.
+        core.postBeginWindow('map')
+        ImGui.TextColored(0.65, 0.72, 0.82, 0.9, 'Loading map data...')
+    elseif draw then
         core.postBeginWindow('map')
         -- Tab Bar
         local tabFlags = ImGuiTabBarFlags.None or 0
@@ -4217,15 +4615,16 @@ end
 -- ============================================================================
 -- INITIALIZATION & ENGINE TICK (was the standalone main loop)
 -- ============================================================================
-local initialized = false
-
 local function initialize()
     if initialized then return end
     initialized = true
     CONFIG_FILE = mq.configDir and (mq.configDir .. '/triune_map_config.lua') or 'triune_map_config.lua'
     initAtlasRegistry()
-    scanMapFolders()
+    -- Config first: the saved custom base path decides where scanMapFolders
+    -- looks, and the saved folder name is applied once the scan has run.
     loadConfig()
+    scanMapFolders()
+    applySavedMapFolder()
     scanMapFiles()
     filterAtlasZones()
 
@@ -4252,6 +4651,11 @@ local function initialize()
     end
 
     syncTriuneLoadout()
+    local okP, pX, pY, pZ = pcall(function()
+        local me = mq.TLO.Me
+        return me.X(), me.Y(), me.Z()
+    end)
+    if okP then updateSmartFloorBounds(pX or 0, pY or 0, pZ or 0) end
     scanZoneSpawns(true)
 
     print(string.format('\ag[Triune Map]\ax v%s loaded -- In-Game Map, Norrath Atlas & NPC Tracker (plugin). Toggle with /ac map.', VERSION))
@@ -4270,12 +4674,24 @@ local function tick()
             state.currentZoneId = (okZId and zId) or 0
             local okZName, zName = pcall(function() return mq.TLO.Zone.Name() end)
             state.currentZoneName = (okZName and zName) or curShort
+            -- Spawn IDs restart per zone: drop every per-ID cache, the nav
+            -- queue and the active nav / POI markers before rescanning.
+            resetZoneRuntimeState()
             if state.viewMode == 'LIVE' then
                 loadZoneMap(curShort, false)
             end
             syncTriuneLoadout()
             scanZoneSpawns(true)
         end
+    end
+
+    -- Deferred plugin.showZone request (may have arrived from another
+    -- plugin's draw callback before we were initialized).
+    if state.pendingShowZone then
+        local zs = state.pendingShowZone
+        state.pendingShowZone = nil
+        navigateToAtlasZone(zs, true)
+        switchToTab(2)
     end
 
     -- Periodic Triune Loadout Sync (every 2.5s)
@@ -4296,32 +4712,33 @@ local function tick()
     -- and the fallback for samplePlayerSmoothed when a live read fails. Target
     -- ID rides a slower 100ms gate since it needs no per-loop freshness.
     local lp = state.lastPlayer
-    local okX, vX = pcall(function() return mq.TLO.Me.X() end)
-    if okX and vX then lp.x = vX end
-    local okY, vY = pcall(function() return mq.TLO.Me.Y() end)
-    if okY and vY then lp.y = vY end
-    local okZ, vZ = pcall(function() return mq.TLO.Me.Z() end)
-    if okZ and vZ then lp.z = vZ end
-    local okH, vH = pcall(function() return mq.TLO.Me.Heading.Degrees() end)
-    if okH and vH then lp.heading = vH end
+    local okP, vX, vY, vZ, vH = pcall(function()
+        local me = mq.TLO.Me
+        return me.X(), me.Y(), me.Z(), me.Heading.Degrees()
+    end)
+    if okP then
+        if vX then lp.x = vX end
+        if vY then lp.y = vY end
+        if vZ then lp.z = vZ end
+        if vH then lp.heading = vH end
+    end
     if (now - lp.updatedAt) >= 100 then
         local okT, vT = pcall(function() return mq.TLO.Target.ID() end)
         if okT and vT then state.lastTargetId = vT end
     end
     lp.updatedAt = now
 
-    -- Regular Spawn Scanning: spread one incremental chunk across each frame so
-    -- a large zone's full fetch+LoS refresh never freezes the render callback.
-    -- A new cycle starts when the interval elapsed and no cycle is mid-flight;
-    -- otherwise we keep draining the in-progress cycle one chunk per frame.
-    local scanBusy = (state.scanChunk.phase ~= 'idle')
-    if not scanBusy and (now - state.lastScanTime) >= state.scanIntervalMs then
+    -- Smart Auto-Z floor bounds (histogram over the map geometry) belong on
+    -- the engine tick; the canvas only reads state.smartFloor.
+    updateSmartFloorBounds(lp.x, lp.y, lp.z)
+
+    -- Spawn scanning: one native fetch per interval (positions are never
+    -- mixed across ticks), plus a small rolling LoS raycast slice every tick.
+    if (now - state.lastScanTime) >= state.scanIntervalMs then
         state.lastScanTime = now
-        scanBusy = true
-    end
-    if scanBusy then
         scanZoneSpawns()
     end
+    refreshLosChunk(SCAN_LOS_CHUNK, false)
 
     -- Process Throttled Background Navmesh Batch
     if (now - navState.lastQueueProcessTime) >= 80 then
@@ -4418,7 +4835,7 @@ function plugin.onDrawUI()
     if not core then return end
     refresh()
     if not ctrl.show_map then return end
-    if not initialized then initialize() end
+    -- initialize() runs from onTick only; the window shows "Loading..." until then.
     DrawTriuneMapUI()
 end
 
@@ -4467,9 +4884,10 @@ plugin.help = {
 function plugin.showZone(zoneShort)
     if not core or not zoneShort or zoneShort == '' then return false end
     refresh()
-    if not initialized then initialize() end
     ctrl.show_map = true
-    navigateToAtlasZone(zoneShort, true)
+    -- Callers are other plugins' draw callbacks; the atlas navigation (file
+    -- parse) is handed to the engine tick, which also initializes first.
+    state.pendingShowZone = zoneShort
     switchToTab(2)
     return true
 end

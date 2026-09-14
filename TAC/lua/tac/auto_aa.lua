@@ -74,19 +74,58 @@ local function resetState()
     AA.lastAACapDelegatedAt = nil
     AA.lastAACapDelegatedPoints = nil
     AA.lastAASpendAutoloadAttempt = nil
+    AA.scanRequestAt = nil          -- os.clock() when the next deferred scan is due (nil = none)
+    AA.scanning = false             -- set while a scan runs (the window shows "scanning...")
+    AA.scanCtx = nil                -- per-scan TLO lookup caches (see scanPlayerAAs)
+    AA.trainBackoff = {}            -- AA name -> os.clock() until which it is not retried
+    AA.trainFailLogged = {}         -- AA name -> true once the failure was reported
+    AA.aaSpendLoadedCache = nil
+    AA.aaSpendLoadedAt = 0
 end
 resetState()
+
+-- One bank / reserve threshold default for every path (slider, cap spender,
+-- MQ2AAspend delegation, command output). nil is the only "unset" value:
+-- a user-picked 100 is a real threshold, not a default to second-guess.
+AA.DEFAULT_THRESHOLD = 25
+AA.MIN_THRESHOLD = 5
+AA.TRAIN_FAIL_BACKOFF = 300.0     -- seconds before an AA whose purchase did not land is retried
+AA.SCAN_MIN_INTERVAL = 10.0       -- unforced scans are skipped inside this window
+
+function AA.threshold()
+    return math.max(AA.MIN_THRESHOLD, tonumber(ctrl.auto_spend_aa_threshold) or AA.DEFAULT_THRESHOLD)
+end
+
+-- Ask the tick to (re)scan; several triggers of one purchase (Train click,
+-- "You have purchased" event, AAPointsSpent change, window refresh) fold
+-- into the earliest pending request, so a purchase costs one scan.
+function AA.requestScan(delay)
+    local due = os.clock() + (tonumber(delay) or 0)
+    if AA.scanRequestAt == nil or due < AA.scanRequestAt then AA.scanRequestAt = due end
+end
 
 -- ----------------------------------------------------------------------------
 -- MQ2AAspend detection
 -- ----------------------------------------------------------------------------
+-- Probes each plugin name in turn (a TLO object is truthy even for an
+-- unloaded plugin, so `a or b` never reached the second name). The answer
+-- is cached for two seconds: the window asks every frame.
+AA.AASPEND_NAMES = { 'mq2aaspend', 'MQ2AASpend', 'aaspend' }
 function AA.aaSpendLoaded()
+    local now = os.clock()
+    if AA.aaSpendLoadedCache ~= nil and (now - (AA.aaSpendLoadedAt or 0)) < 2.0 then
+        return AA.aaSpendLoadedCache
+    end
     local ok, loaded = pcall(function()
-        local p = mq.TLO.Plugin('mq2aaspend') or mq.TLO.Plugin('MQ2AASpend') or mq.TLO.Plugin('aaspend')
-        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        for _, nm in ipairs(AA.AASPEND_NAMES) do
+            local p = mq.TLO.Plugin(nm)
+            if p and p() and p.IsLoaded and p.IsLoaded() then return true end
+        end
         return false
     end)
-    return ok and (loaded == true)
+    AA.aaSpendLoadedCache = ok and (loaded == true)
+    AA.aaSpendLoadedAt = now
+    return AA.aaSpendLoadedCache
 end
 
 function AA.findChildRecursive(parent, targetName)
@@ -242,14 +281,13 @@ function AA.isSpecialTabAA(name)
         local cat = rt.cachedAAData[name].category
         if cat and cat:lower():find('special') then return true end
     end
-    if AA.scannedAAs then
-        for _, itm in ipairs(AA.scannedAAs) do
-            if itm.name == name then
-                if itm.category and itm.category:lower():find('special') then return true end
-                if itm.type == 4 then return true end
-                break
-            end
-        end
+    -- The entry map of the running scan, else of the last completed one
+    -- (a linear walk of scannedAAs here made every scan O(n^2)).
+    local map = (AA.scanCtx and AA.scanCtx.foundMap) or AA.scannedAAMap
+    local itm = map and map[name]
+    if itm then
+        if itm.category and itm.category:lower():find('special') then return true end
+        if itm.type == 4 then return true end
     end
     return false
 end
@@ -346,10 +384,17 @@ function AA.findAAInWindowLists(targetName, preferredTab)
                 return cand.name, cand.directIdx, cand.tab, child
             end
 
-            -- 2. Fallback to iterating rows
+            -- 2. Fallback to iterating rows: an exact match (after stripping
+            -- everything but letters and digits) wins; a row that merely
+            -- starts with the target is remembered as a fallback; a row that
+            -- only contains it somewhere ("Innate Run Speed" for "Run
+            -- Speed") never matches. For the Special-tab fireworks AA (whose
+            -- row text varies by server) a row naming fireworks is the last
+            -- resort.
             local count = 0
             pcall(function() count = tonumber(child.Items() or 0) or 0 end)
             if count > 0 and count <= 500 then
+                local prefixRow, fireworkRow = nil, nil
                 for row = 1, count do
                     local rowText = nil
                     pcall(function()
@@ -378,18 +423,17 @@ function AA.findAAInWindowLists(targetName, preferredTab)
                     end
                     if rowText and type(rowText) == 'string' and rowText ~= '' then
                         local cleanRow = rowText:lower():gsub('[^%a%d]', '')
-                        local matched = false
-                        if cleanRow == cleanTarget then
-                            matched = true
-                        elseif cleanRow ~= '' and cleanTarget ~= '' and cleanRow:find(cleanTarget, 1, true) then
-                            matched = true
-                        elseif isSpecial and cleanRow:find('firework') then
-                            matched = true
-                        end
-                        if matched then
+                        if cleanRow ~= '' and cleanRow == cleanTarget then
                             return cand.name, row, cand.tab, child
+                        elseif not prefixRow and cleanTarget ~= '' and cleanRow:sub(1, #cleanTarget) == cleanTarget then
+                            prefixRow = row
+                        elseif not fireworkRow and isSpecial and cleanRow:find('firework', 1, true) then
+                            fireworkRow = row
                         end
                     end
+                end
+                if prefixRow or fireworkRow then
+                    return cand.name, prefixRow or fireworkRow, cand.tab, child
                 end
             end
         end
@@ -608,18 +652,25 @@ function AA.isAAAllowedForPlayer(name, classes, isFromUI)
     -- 2. If character currently owns ranks in this ability, it belongs to the player
     local owned = false
     local isForeignStub = false
-    pcall(function()
-        local ma = mq.TLO.Me.AltAbility(name)
-        if ma and ma() then
-            local r = tonumber(ma.Rank and ma.Rank() or 0) or 0
-            local mr = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
-            if r > 0 and mr > 0 then
-                owned = true
-            elseif r > 0 and mr <= 0 then
-                isForeignStub = true
+    local ctx = AA.scanCtx
+    local probe = ctx and ctx.owned[name]
+    if probe then
+        owned, isForeignStub = probe[1], probe[2]
+    else
+        pcall(function()
+            local ma = mq.TLO.Me.AltAbility(name)
+            if ma and ma() then
+                local r = tonumber(ma.Rank and ma.Rank() or 0) or 0
+                local mr = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
+                if r > 0 and mr > 0 then
+                    owned = true
+                elseif r > 0 and mr <= 0 then
+                    isForeignStub = true
+                end
             end
-        end
-    end)
+        end)
+        if ctx then ctx.owned[name] = { owned, isForeignStub } end
+    end
     if isForeignStub then return false end
     if owned then return true end
 
@@ -663,18 +714,52 @@ function AA.isAAAllowedForPlayer(name, classes, isFromUI)
     return true
 end
 
+-- Cost of the next rank of `name`. Me.AltAbility(name).Cost is the cost of
+-- the rank the character owns (or of rank 1 when untrained); the next rank
+-- is a separate AltAbility record reached through NextIndex, and its Cost
+-- is the real price. Neither member exists on every client build, so both
+-- are probed under pcall. Fallback: the old "rank + 1" guess, which holds
+-- for the General / Archetype lines whose ranks cost 1, 2, 3, ... but not
+-- for flat-cost class lines - hence the probe first.
+function AA.nextRankCost(name, rank)
+    rank = tonumber(rank) or 0
+    local cost = 0
+    pcall(function()
+        local ma = mq.TLO.Me.AltAbility(name)
+        if not (ma and ma()) then return end
+        if rank <= 0 and ma.Cost then
+            cost = tonumber(ma.Cost() or 0) or 0
+            if cost > 0 then return end
+        end
+        if ma.NextIndex then
+            local nextIdx = tonumber(ma.NextIndex() or 0) or 0
+            if nextIdx > 0 then
+                local nx = mq.TLO.AltAbility(nextIdx)
+                if nx and nx() and nx.Cost then cost = tonumber(nx.Cost() or 0) or 0 end
+            end
+        end
+    end)
+    if cost > 0 then return cost end
+    return (rank > 0) and (rank + 1) or 1
+end
+
 function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, knownCost, isKnownCharAA, category, isFromUI)
     if not name or name == '' or tonumber(name) then return end
     name = tostring(name):match('^%s*(.-)%s*$')
     if name == '' then return end
 
     -- Explicitly reject normal character skills (e.g. Mend, Flying Kick, Backstab, Dual Wield, Bandage Wounds)
-    local isSkill = false
-    pcall(function()
-        if mq.TLO.Skill and mq.TLO.Skill(name) and mq.TLO.Skill(name)() ~= nil then
-            isSkill = true
-        end
-    end)
+    local ctx = AA.scanCtx
+    local isSkill = ctx and ctx.skill[name]
+    if isSkill == nil then
+        isSkill = false
+        pcall(function()
+            if mq.TLO.Skill and mq.TLO.Skill(name) and mq.TLO.Skill(name)() ~= nil then
+                isSkill = true
+            end
+        end)
+        if ctx then ctx.skill[name] = isSkill end
+    end
     if isSkill then return end
 
     -- Strictly reject abilities that do not belong to the player's class or archetype
@@ -706,13 +791,15 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
             existing.category = category
         end
         if not rt.cachedAAData then rt.cachedAAData = {} end
+        local old = rt.cachedAAData[name]
         rt.cachedAAData[name] = {
             rank = existing.rank,
             maxRank = existing.maxRank,
             cost = existing.cost,
             category = existing.category,
             id = existing.id,
-            description = existing.description or (rt.cachedAAData[name] and rt.cachedAAData[name].description)
+            minLevel = existing.minLevel or (old and old.minLevel),
+            description = existing.description or (old and old.description)
         }
         return
     end
@@ -796,7 +883,7 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
         if isSpecial then
             cost = tonumber(ctrl.auto_spend_aa_cost) or 25
         else
-            cost = (rank > 0) and (rank + 1) or 1
+            cost = AA.nextRankCost(name, rank)
         end
     end
 
@@ -940,15 +1027,23 @@ function AA.readSpecialTabOnce(force)
     return AA.specialTabAAs or {}
 end
 
+-- Full rescan: ~1,640 AltAbility ids by index plus name lookups for every
+-- catalogued AA. Runs on the tick only (never from a draw hook): the window
+-- and the purchase workflow queue it through AA.requestScan. Name-keyed TLO
+-- results (skill check, ownership probe) are cached in AA.scanCtx for the
+-- duration of one scan, since most names are recorded several times.
 function AA.scanPlayerAAs(force)
     local now = os.clock()
-    if not force and AA.lastAAScanAt and (now - AA.lastAAScanAt) < 10.0 and AA.scannedAAs and #AA.scannedAAs > 0 then
+    if not force and AA.lastAAScanAt and (now - AA.lastAAScanAt) < AA.SCAN_MIN_INTERVAL and AA.scannedAAs and #AA.scannedAAs > 0 then
         return AA.scannedAAs
     end
     AA.lastAAScanAt = now
+    AA.scanRequestAt = nil
+    AA.scanning = true
 
     local foundMap = {}
     local list = {}
+    AA.scanCtx = { foundMap = foundMap, skill = {}, owned = {} }
 
     -- 1. Scan in-game AAWindow lists if present in UI memory
     pcall(function()
@@ -1121,13 +1216,30 @@ function AA.scanPlayerAAs(force)
 
     AA.scannedAAs = list
     AA.scannedAAMap = foundMap
+    AA.scanCtx = nil
+    AA.scanning = false
     AA.aaFilterDirty = true
     return list
 end
 
+-- Tick side of AA.requestScan.
+function AA.runPendingScan()
+    if AA.scanRequestAt and os.clock() >= AA.scanRequestAt then
+        AA.scanRequestAt = nil
+        AA.lastAAScanAt = 0
+        AA.aaFilterDirty = true
+        local ok, err = pcall(AA.scanPlayerAAs, true)
+        AA.scanning = false
+        AA.scanCtx = nil
+        if not ok then print(string.format('\ar[Triune]\ax AA scan failed: %s', tostring(err))) end
+    end
+end
+
 function AA.getFilteredSortedAAs()
     if not AA.scannedAAs or #AA.scannedAAs == 0 then
-        AA.scanPlayerAAs(false)
+        -- Runs from the window (draw thread): only ask for a scan.
+        AA.requestScan(0)
+        return AA.filteredSortedAAs or {}
     end
 
     if not AA.aaFilterDirty and AA.filteredSortedAAs then
@@ -1227,13 +1339,9 @@ function AA.startAATrainWorkflow(targetName, allowStop)
     if rt.cachedAAData and rt.cachedAAData[targetName] and rt.cachedAAData[targetName].category then
         cat = tostring(rt.cachedAAData[targetName].category):lower()
     end
-    if not cat and AA.scannedAAs then
-        for _, itm in ipairs(AA.scannedAAs) do
-            if itm.name == targetName and itm.category then
-                cat = tostring(itm.category):lower()
-                break
-            end
-        end
+    if not cat and AA.scannedAAMap then
+        local itm = AA.scannedAAMap[targetName]
+        if itm and itm.category then cat = tostring(itm.category):lower() end
     end
     local isClass = false
     if cat then
@@ -1273,9 +1381,13 @@ function AA.startAATrainWorkflow(targetName, allowStop)
         aaId = aaId,
         aaType = aaType,
         targetTab = prefTab,
+        prefTab = prefTab,
         step = 'open',
         tab = prefTab,
         maxTabs = 4,
+        tabsTried = 0,               -- tabs searched so far (wraps around from prefTab)
+        toggledTrainFilter = false,  -- we clicked AAW_TrainFilter; finish/abort clicks it back
+        pointsBefore = nil,          -- Me.AAPoints before the Train click (purchase check)
         openedByUs = false,
         allowStop = allowStop or false,
         startedAt = os.clock(),
@@ -1284,6 +1396,29 @@ function AA.startAATrainWorkflow(targetName, allowStop)
     }
     print(string.format('\ag[Triune]\ax Initiating AA Window train sequence for "%s" (ID: %d, Tab: %d)...', targetName, aaId, prefTab))
     return true
+end
+
+-- AAW_TrainFilter ("Can Purchase") is a toggle: clicking it flips it.
+function AA.clickTrainFilter(winName)
+    winName = winName or AA.getAAWindowName()
+    mq.cmdf('/nomodkey /notify %s AAW_TrainFilter leftmouseup', winName)
+    mq.cmdf('/nomodkey /notify %s CanPurchaseFilter leftmouseup', winName)
+end
+
+-- Puts the AA window back the way the workflow found it: the train filter
+-- we toggled, and the window itself when we opened it.
+function AA.restoreAAWindow(task)
+    if not task then return end
+    if task.toggledTrainFilter then
+        task.toggledTrainFilter = false
+        if AA.isAAWindowOpen() then AA.clickTrainFilter(AA.getAAWindowName()) end
+    end
+    if task.openedByUs then AA.closeAAWindow() end
+end
+
+function AA.abortAATrain(task)
+    AA.restoreAAWindow(task)
+    AA.pendingAATrain = nil
 end
 
 function AA.processAATrainWorkflow()
@@ -1305,13 +1440,11 @@ function AA.processAATrainWorkflow()
             task.nextStepAt = now + 0.1
             return
         end
-        if task.openedByUs then AA.closeAAWindow() end
-        AA.pendingAATrain = nil
+        AA.abortAATrain(task)
         return
     end
     if rt.isCasting() then
-        if task.openedByUs then AA.closeAAWindow() end
-        AA.pendingAATrain = nil
+        AA.abortAATrain(task)
         return
     end
 
@@ -1325,8 +1458,7 @@ function AA.processAATrainWorkflow()
         if rt.anyXtarAlive and rt.anyXtarAlive(true) then inCombat = true return end
     end)
     if inCombat then
-        if task.openedByUs then AA.closeAAWindow() end
-        AA.pendingAATrain = nil
+        AA.abortAATrain(task)
         return
     end
 
@@ -1348,8 +1480,7 @@ function AA.processAATrainWorkflow()
         end
 
     elseif task.step == 'wait_open' then
-        local isOpen = AA.isAAWindowOpen()
-        if isOpen or (task.retries and task.retries >= 3) then
+        if AA.isAAWindowOpen() then
             task.step = 'prepare_tab'
             task.nextStepAt = now + 0.1
             return
@@ -1361,7 +1492,10 @@ function AA.processAATrainWorkflow()
             task.nextStepAt = now + 0.35
             return
         else
+            -- Nothing to click on: fail the task (the 30 s per-AA retry
+            -- spacing applies) rather than driving a window that is closed.
             print(string.format('\ar[Triune]\ax Failed to open AA Window after %d attempts. Aborting AA train sequence for "%s".', task.retries, task.name))
+            task.failed = 'window'
             task.step = 'finish'
             task.nextStepAt = now + 0.05
             return
@@ -1409,8 +1543,8 @@ function AA.processAATrainWorkflow()
                     local tf = win.Child('AAW_TrainFilter') or win.Child('CanPurchaseFilter')
                     if not tf then tf = AA.findChildRecursive(win, 'AAW_TrainFilter') or AA.findChildRecursive(win, 'CanPurchaseFilter') end
                     if tf and tf.Checked and tf.Checked() then
-                        mq.cmdf('/nomodkey /notify %s AAW_TrainFilter leftmouseup', winName)
-                        mq.cmdf('/nomodkey /notify %s CanPurchaseFilter leftmouseup', winName)
+                        AA.clickTrainFilter(winName)
+                        task.toggledTrainFilter = not task.toggledTrainFilter
                     end
                 end
             end)
@@ -1465,9 +1599,11 @@ function AA.processAATrainWorkflow()
             task.nextStepAt = now + 0.25
             return
         else
-            -- If not found on current tab, try next tab
-            task.tab = (task.tab or 1) + 1
-            if task.tab <= (task.maxTabs or 4) then
+            -- Not on this tab: try the next one, wrapping around so every
+            -- tab is searched once no matter which one we started on.
+            task.tabsTried = (task.tabsTried or 0) + 1
+            if task.tabsTried < (task.maxTabs or 4) then
+                task.tab = ((task.tab or 1) % (task.maxTabs or 4)) + 1
                 task.targetTab = task.tab
                 task.step = 'prepare_tab'
                 task.nextStepAt = now + 0.15
@@ -1475,10 +1611,20 @@ function AA.processAATrainWorkflow()
             elseif not task.triedUncheckTrainFilter then
                 -- Try unchecking CanPurchase/Train filter in case completed/repeatable ability is hidden
                 task.triedUncheckTrainFilter = true
-                mq.cmdf('/nomodkey /notify %s AAW_TrainFilter leftmouseup', winName)
-                mq.cmdf('/nomodkey /notify %s CanPurchaseFilter leftmouseup', winName)
-                task.tab = 1
-                task.targetTab = 1
+                local checked = nil
+                pcall(function()
+                    local win = AA.getAAWindow()
+                    local tf = win and (win.Child('AAW_TrainFilter') or win.Child('CanPurchaseFilter'))
+                    if tf and tf.Checked then checked = (tf.Checked() == true) end
+                end)
+                if checked ~= false then
+                    -- toggle it (and remember to toggle it back) unless it is known to be off already
+                    AA.clickTrainFilter(winName)
+                    task.toggledTrainFilter = not task.toggledTrainFilter
+                end
+                task.tabsTried = 0
+                task.tab = task.prefTab or 1
+                task.targetTab = task.tab
                 task.step = 'prepare_tab'
                 task.nextStepAt = now + 0.15
                 return
@@ -1487,8 +1633,9 @@ function AA.processAATrainWorkflow()
                 task.triedResetFilter = true
                 mq.cmdf('/nomodkey /notify %s AAW_ResetFilter leftmouseup', winName)
                 mq.cmdf('/nomodkey /notify %s ResetFilter leftmouseup', winName)
-                task.tab = 1
-                task.targetTab = 1
+                task.tabsTried = 0
+                task.tab = task.prefTab or 1
+                task.targetTab = task.tab
                 task.step = 'prepare_tab'
                 task.nextStepAt = now + 0.15
                 return
@@ -1497,6 +1644,7 @@ function AA.processAATrainWorkflow()
                 if task.aaId and task.aaId > 0 then
                     print(string.format('\ay[Triune]\ax Could not locate "%s" in AA Window lists (ID: %d). Recording attempt.', task.name, task.aaId))
                 end
+                task.failed = 'notfound'
                 task.step = 'finish'
                 task.nextStepAt = now + 0.4
                 return
@@ -1508,6 +1656,8 @@ function AA.processAATrainWorkflow()
         local winName = AA.getAAWindowName()
         local trainButtons = { 'AAW_TrainButton', 'TrainButton', 'AA_TrainButton' }
         local clicked = false
+        task.pointsBefore = nil
+        pcall(function() task.pointsBefore = tonumber(mq.TLO.Me.AAPoints() or 0) or 0 end)
         if win then
             for _, btnName in ipairs(trainButtons) do
                 local btn = nil
@@ -1543,14 +1693,33 @@ function AA.processAATrainWorkflow()
             local fwId = tonumber(ctrl.auto_spend_aa_id or task.aaId or 17788) or 17788
             AA.scheduleFireworksSummon(fwId, task.name)
         end
+        task.step = 'verify'
+        task.verifyUntil = now + 2.5
+        task.nextStepAt = now + 0.3
+        return
+
+    elseif task.step == 'verify' then
+        -- The purchase round-trips the server: wait (up to ~2.5 s) for the
+        -- unspent total to drop below what it was before the Train click.
+        local after = nil
+        pcall(function() after = tonumber(mq.TLO.Me.AAPoints() or 0) or 0 end)
+        if task.pointsBefore ~= nil and after ~= nil and after < task.pointsBefore then
+            task.purchased = true
+            task.step = 'finish'
+            task.nextStepAt = now + 0.1
+            return
+        end
+        if now < (task.verifyUntil or 0) then
+            task.nextStepAt = now + 0.25
+            return
+        end
+        task.purchased = false
         task.step = 'finish'
-        task.nextStepAt = now + 0.4
+        task.nextStepAt = now + 0.05
         return
 
     elseif task.step == 'finish' then
-        if task.openedByUs then
-            AA.closeAAWindow()
-        end
+        AA.restoreAAWindow(task)
         AA.lastAATrainAttempt = AA.lastAATrainAttempt or {}
         AA.lastAATrainAttempt[task.name] = now
         AA.pendingAATrain = nil
@@ -1558,11 +1727,29 @@ function AA.processAATrainWorkflow()
         AA.lastAASpendDelegatedAt = nil
         AA.lastAACapDelegatedAt = nil
         AA.lastAACapDelegatedTarget = nil
-        AA.lastAAScanAt = 0
-        AA.aaFilterDirty = true
-        if AA.scanPlayerAAs then AA.scanPlayerAAs(true) end
-        AA.pendingPostTrainScanAt = now + 1.2
-        core.saveLoadout(true)
+        if task.purchased then
+            AA.trainBackoff[task.name] = nil
+            AA.trainFailLogged[task.name] = nil
+            -- One deferred scan once the client has the new rank (the
+            -- purchase event and the AAPointsSpent change fold into it).
+            AA.requestScan(1.2)
+            AA.pendingPostTrainScanAt = nil
+            core.saveLoadout(true)
+        elseif task.failed == 'window' then
+            -- could not even open the window: the 30 s per-AA spacing applies
+            AA.aaFilterDirty = true
+        else
+            -- Clicked (or could not find) the row and no points were spent:
+            -- back this AA off instead of running the whole window cycle
+            -- again every 30 s. Log it once until it succeeds.
+            AA.trainBackoff[task.name] = now + AA.TRAIN_FAIL_BACKOFF
+            if not AA.trainFailLogged[task.name] then
+                AA.trainFailLogged[task.name] = true
+                print(string.format('\ay[Triune]\ax AA purchase of "%s" did not go through (%s); not retrying it for %d minutes.',
+                    task.name, task.failed == 'notfound' and 'not found in the AA window' or 'no points were spent after Train', math.floor(AA.TRAIN_FAIL_BACKOFF / 60)))
+            end
+            AA.requestScan(1.0)
+        end
         return
     end
 end
@@ -1580,36 +1767,6 @@ function AA.syncAAsToMQ2AASpendIni(silent, force)
     if not server or server == '' or not cleanName or cleanName == '' then return false end
 
     local iniFile = string.format('%s/%s_%s.ini', (mq.configDir or 'config'), server, cleanName)
-
-    local lines = {}
-    local f = io.open(iniFile, 'r')
-    if f then
-        for line in f:lines() do
-            lines[#lines + 1] = line
-        end
-        f:close()
-    end
-
-    local newLines = {}
-    local inTargetSection = false
-    for _, line in ipairs(lines) do
-        local trimmed = line:match('^%s*(.-)%s*$')
-        if trimmed:find('^%[') then
-            local lowerHeader = trimmed:lower()
-            if lowerHeader == '[mq2aaspend_aalist]' or lowerHeader == '[mq2aaspend_settings]' then
-                inTargetSection = true
-            else
-                inTargetSection = false
-                newLines[#newLines + 1] = line
-            end
-        elseif not inTargetSection then
-            newLines[#newLines + 1] = line
-        end
-    end
-
-    while #newLines > 0 and newLines[#newLines]:match('^%s*$') do
-        table.remove(newLines)
-    end
 
     local prioList = {}
     if ctrl.auto_aa_priorities then
@@ -1646,10 +1803,41 @@ function AA.syncAAsToMQ2AASpendIni(silent, force)
         section[#section + 1] = string.format('%d=%s|M', idx, item.name)
     end
 
-    -- Skip the write + /aaspend load when nothing that feeds the INI changed.
+    -- Skip the file read, the write and /aaspend load when nothing that
+    -- feeds the INI changed (this runs on every loadout save).
     local fingerprint = iniFile .. '\n' .. table.concat(section, '\n')
     if not force and AA.lastAASpendIniFingerprint == fingerprint then
         return true, false
+    end
+
+    local lines = {}
+    local f = io.open(iniFile, 'r')
+    if f then
+        for line in f:lines() do
+            lines[#lines + 1] = line
+        end
+        f:close()
+    end
+
+    local newLines = {}
+    local inTargetSection = false
+    for _, line in ipairs(lines) do
+        local trimmed = line:match('^%s*(.-)%s*$')
+        if trimmed:find('^%[') then
+            local lowerHeader = trimmed:lower()
+            if lowerHeader == '[mq2aaspend_aalist]' or lowerHeader == '[mq2aaspend_settings]' then
+                inTargetSection = true
+            else
+                inTargetSection = false
+                newLines[#newLines + 1] = line
+            end
+        elseif not inTargetSection then
+            newLines[#newLines + 1] = line
+        end
+    end
+
+    while #newLines > 0 and newLines[#newLines]:match('^%s*$') do
+        table.remove(newLines)
     end
 
     if #newLines > 0 then newLines[#newLines + 1] = '' end
@@ -1710,6 +1898,8 @@ function AA.checkAutoSpendAA(allowStop)
     pcall(function() myLevel = tonumber(mq.TLO.Me.Level() or 0) or 0 end)
     if AA.lastCharLevel and myLevel > 0 and myLevel ~= AA.lastCharLevel then
         AA.lastAATrainAttempt = {}
+        AA.trainBackoff = {}
+        AA.trainFailLogged = {}
     end
     if myLevel > 0 then AA.lastCharLevel = myLevel end
 
@@ -1741,7 +1931,8 @@ function AA.checkAutoSpendAA(allowStop)
         for nm, enabled in pairs(ctrl.auto_aa_priorities) do
             if enabled then
                 local lastAttempt = (AA.lastAATrainAttempt and AA.lastAATrainAttempt[nm]) or 0
-                if (now - lastAttempt) >= 30.0 then
+                local backoff = (AA.trainBackoff and AA.trainBackoff[nm]) or 0
+                if (now - lastAttempt) >= 30.0 and now >= backoff then
                     local rank, maxRank, cost = 0, 0, 0
                     local minLevel = 0
                     if rt.cachedAAData and rt.cachedAAData[nm] then
@@ -1751,15 +1942,13 @@ function AA.checkAutoSpendAA(allowStop)
                         if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
                         if cd.minLevel ~= nil and cd.minLevel > 0 then minLevel = cd.minLevel end
                     end
-                    if (rank == 0 or maxRank == 0 or cost == 0) and AA.scannedAAs then
-                        for _, itm in ipairs(AA.scannedAAs) do
-                            if itm.name == nm then
-                                if rank == 0 and itm.rank then rank = itm.rank end
-                                if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
-                                if cost == 0 and itm.cost then cost = itm.cost end
-                                if minLevel == 0 and itm.minLevel then minLevel = itm.minLevel end
-                                break
-                            end
+                    if (rank == 0 or maxRank == 0 or cost == 0) and AA.scannedAAMap then
+                        local itm = AA.scannedAAMap[nm]
+                        if itm then
+                            if rank == 0 and itm.rank then rank = itm.rank end
+                            if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
+                            if cost == 0 and itm.cost then cost = itm.cost end
+                            if minLevel == 0 and itm.minLevel then minLevel = itm.minLevel end
                         end
                     end
                     pcall(function()
@@ -1806,7 +1995,7 @@ function AA.checkAutoSpendAA(allowStop)
                     end
                     local canTrainMet = isSpecial or canTrainCheck
                     if not fullyTrained and not isInvalidStub and levelMet and canTrainMet then
-                        if cost <= 0 then cost = (rank > 0) and (rank + 1) or 1 end
+                        if cost <= 0 then cost = AA.nextRankCost(nm, rank) end
                         if unspent >= cost then
                             candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
                         end
@@ -1849,7 +2038,7 @@ function AA.checkAutoSpendAA(allowStop)
 
             -- For regular general/class abilities, if MQ2AAspend is active, delegate with native fallback:
             if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-                local threshold = math.max(5, tonumber(ctrl.auto_spend_aa_threshold) or 5)
+                local threshold = AA.threshold()
                 if unspent >= threshold then
                     local delegTarget = AA.lastAASpendDelegatedTarget
                     local delegAt = AA.lastAASpendDelegatedAt or 0
@@ -1885,20 +2074,23 @@ function AA.checkAutoSpendAA(allowStop)
     end
 
     -- 2. Fallback: Cap threshold spender (Fireworks or general delegation)
-    local threshold = math.max(5, tonumber(ctrl.auto_spend_aa_threshold) or 25)
+    local threshold = AA.threshold()
     local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
     local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
     local isSpecialCap = (AA.isSpecialTabAA and AA.isSpecialTabAA(effectiveName)) or effectiveName:lower():find('firework')
 
     local lastCapAttempt = (AA.lastAATrainAttempt and AA.lastAATrainAttempt[effectiveName]) or 0
+    local capBackoff = (AA.trainBackoff and AA.trainBackoff[effectiveName]) or 0
     local effectiveThreshold = threshold
-    -- If cap spender is Fireworks and threshold was unadjusted default (100) on a character with points >= cost, allow spending at cost
-    if isSpecialCap and (ctrl.auto_spend_aa_threshold == nil or ctrl.auto_spend_aa_threshold == 100) and unspent >= cost then
+    -- With no threshold ever set, a Fireworks cap spender may spend as soon
+    -- as the points cover its cost; any saved threshold (100 included) is the
+    -- user's choice and is honoured.
+    if isSpecialCap and ctrl.auto_spend_aa_threshold == nil and unspent >= cost then
         effectiveThreshold = cost
     elseif isSpecialCap and unspent >= cost and unspent >= threshold then
         effectiveThreshold = threshold
     end
-    if unspent >= effectiveThreshold and (now - lastCapAttempt) >= 30.0 then
+    if unspent >= effectiveThreshold and (now - lastCapAttempt) >= 30.0 and now >= capBackoff then
         -- Movement check: if moving and allowStop is true, cleanly stop movement before purchasing
         local moving = false
         pcall(function()
@@ -1958,11 +2150,15 @@ function AA.manualSpendAA(targetName)
     -- If a specific ability is being trained, always train that specific ability natively!
     if targetName and targetName ~= '' then
         if AA.lastAATrainAttempt then AA.lastAATrainAttempt[targetName] = nil end
+        AA.trainBackoff[targetName] = nil
+        AA.trainFailLogged[targetName] = nil
         return AA.startAATrainWorkflow(targetName)
     end
 
     -- Generic spend clicked (e.g. from Spend Now button)
     AA.lastAATrainAttempt = {}
+    AA.trainBackoff = {}
+    AA.trainFailLogged = {}
     local unspent = 0
     pcall(function()
         local raw = mq.TLO.Me.AAPoints()
@@ -1982,14 +2178,12 @@ function AA.manualSpendAA(targetName)
                     if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
                     if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
                 end
-                if (rank == 0 or maxRank == 0 or cost == 0) and AA.scannedAAs then
-                    for _, itm in ipairs(AA.scannedAAs) do
-                        if itm.name == nm then
-                            if rank == 0 and itm.rank then rank = itm.rank end
-                            if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
-                            if cost == 0 and itm.cost then cost = itm.cost end
-                            break
-                        end
+                if (rank == 0 or maxRank == 0 or cost == 0) and AA.scannedAAMap then
+                    local itm = AA.scannedAAMap[nm]
+                    if itm then
+                        if rank == 0 and itm.rank then rank = itm.rank end
+                        if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
+                        if cost == 0 and itm.cost then cost = itm.cost end
                     end
                 end
                 pcall(function()
@@ -2012,7 +2206,7 @@ function AA.manualSpendAA(targetName)
                 local isSpecial = (AA.isSpecialTabAA and AA.isSpecialTabAA(nm))
                 local fullyTrained = not isSpecial and (maxRank > 0 and rank >= maxRank)
                 if not fullyTrained then
-                    if cost <= 0 then cost = (rank > 0) and (rank + 1) or 1 end
+                    if cost <= 0 then cost = AA.nextRankCost(nm, rank) end
                     if unspent >= cost then
                         candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
                     end
@@ -2041,7 +2235,7 @@ function AA.manualSpendAA(targetName)
 
         -- If MQ2AAspend is active, try delegation first unless already delegated or disabled
         if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-            local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+            local threshold = AA.threshold()
             local now = os.clock()
             local delegTarget = AA.lastAASpendDelegatedTarget
             local delegAt = AA.lastAASpendDelegatedAt or 0
@@ -2075,7 +2269,7 @@ function AA.manualSpendAA(targetName)
     end
 
     if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-        local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
+        local threshold = AA.threshold()
         local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
         mq.cmdf('/aaspend bank %d', threshold)
         mq.cmd('/aaspend ' .. mode)
@@ -2087,13 +2281,9 @@ function AA.manualSpendAA(targetName)
     if rt.cachedAAData and rt.cachedAAData[fallbackName] and rt.cachedAAData[fallbackName].cost then
         cost = tonumber(rt.cachedAAData[fallbackName].cost) or 0
     end
-    if cost == 0 and AA.scannedAAs then
-        for _, itm in ipairs(AA.scannedAAs) do
-            if itm.name == fallbackName and itm.cost and itm.cost > 0 then
-                cost = itm.cost
-                break
-            end
-        end
+    if cost == 0 and AA.scannedAAMap then
+        local itm = AA.scannedAAMap[fallbackName]
+        if itm and itm.cost and itm.cost > 0 then cost = itm.cost end
     end
     if cost == 0 then
         pcall(function()
@@ -2283,9 +2473,8 @@ function AA.drawWindow()
 
     if AA.lastObservedAAPointsSpent ~= nil and spentAA ~= AA.lastObservedAAPointsSpent then
         AA.lastObservedAAPointsSpent = spentAA
-        AA.lastAAScanAt = 0
         AA.aaFilterDirty = true
-        if AA.scanPlayerAAs then AA.scanPlayerAAs(true) end
+        AA.requestScan(1.0)
     else
         AA.lastObservedAAPointsSpent = spentAA
     end
@@ -2304,7 +2493,7 @@ function AA.drawWindow()
     ImGui.SameLine()
     if unspentAA >= 100 then
         ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], string.format('%d/100 [CAP!]', unspentAA))
-    elseif unspentAA >= (ctrl.auto_spend_aa_threshold or 100) then
+    elseif unspentAA >= AA.threshold() then
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format('%d [THRESHOLD]', unspentAA))
     else
         ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%d AA', unspentAA))
@@ -2362,12 +2551,12 @@ function AA.drawWindow()
 
     ImGui.SameLine()
     ImGui.SetNextItemWidth(core.px(90))
-    local curThresh = math.max(5, tonumber(ctrl.auto_spend_aa_threshold) or 25)
+    local curThresh = AA.threshold()
     local newThresh = ImGui.SliderInt('##autoAaThresh', curThresh, 5, 100, 'Bank: %d')
     if newThresh ~= curThresh then
         ctrl.auto_spend_aa_threshold = newThresh
-        core.saveLoadout(true)
     end
+    if ImGui.IsItemDeactivatedAfterEdit() then core.saveLoadout(true) end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', string.format('Reserve/Bank Threshold: %d AA points (min: 5).\nAuto-spending begins once your unspent points reach this number.', curThresh))
     end
@@ -2394,10 +2583,14 @@ function AA.drawWindow()
     if ImGui.Button('↻ Refresh##autoAaRefreshBtn') then
         AA.specialTabReadDone = false
         AA.pendingReadSpecialTab = true
-        if AA.scanPlayerAAs then AA.scanPlayerAAs(true) end
+        AA.requestScan(0)
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'Re-scans all character Alternate Advancement abilities.')
+        ImGui.SetTooltip('%s', 'Re-scans all character Alternate Advancement abilities (runs in the background).')
+    end
+    if AA.scanning or AA.scanRequestAt then
+        ImGui.SameLine()
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'scanning...')
     end
 
     ImGui.SameLine()
@@ -2517,9 +2710,21 @@ function AA.drawWindow()
             ImGui.TableSetupColumn('Action', ImGuiTableColumnFlags.WidthFixed, core.px(55))
             ImGui.TableHeadersRow()
 
-            for _, itm in ipairs(allItems) do
+            -- Per-row strings are formatted once per scan (the entries are
+            -- rebuilt by every scan); only the rows the clipper shows draw.
+            local function drawRow(i, itm)
                 ImGui.TableNextRow()
-                ImGui.PushID('aa_row_' .. itm.name)
+                ImGui.PushID(i)
+                local ui = itm.ui
+                if not ui then
+                    ui = {
+                        rank = (itm.maxRank and itm.maxRank > 0) and string.format('%d/%d', itm.rank, itm.maxRank) or string.format('%d/?', itm.rank),
+                        cost = (itm.cost and itm.cost > 0) and string.format('%d AA', itm.cost) or '-',
+                        prioTip = string.format('Prioritize "%s" for automatic training when points are available.', itm.name),
+                        trainTip = string.format('Click to train next rank of "%s" (%d AA).', itm.name, itm.cost or 0),
+                    }
+                    itm.ui = ui
+                end
 
                 -- Col 1: Priority Checkbox
                 ImGui.TableNextColumn()
@@ -2532,7 +2737,7 @@ function AA.drawWindow()
                     core.saveLoadout(true)
                 end
                 if ImGui.IsItemHovered() then
-                    ImGui.SetTooltip('%s', string.format('Prioritize "%s" for automatic training when points are available.', itm.name))
+                    ImGui.SetTooltip('%s', ui.prioTip)
                 end
 
                 -- Col 2: Ability Name
@@ -2549,11 +2754,11 @@ function AA.drawWindow()
                 -- Col 3: Rank
                 ImGui.TableNextColumn()
                 if itm.fullyTrained then
-                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%d/%d', itm.rank, itm.maxRank))
+                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], ui.rank)
                 elseif itm.maxRank and itm.maxRank > 0 then
-                    ImGui.Text(string.format('%d/%d', itm.rank, itm.maxRank))
+                    ImGui.Text(ui.rank)
                 else
-                    ImGui.TextDisabled(string.format('%d/?', itm.rank))
+                    ImGui.TextDisabled(ui.rank)
                 end
                 if ImGui.IsItemHovered() then
                     rt.showAATooltip(itm)
@@ -2565,9 +2770,9 @@ function AA.drawWindow()
                     ImGui.TextDisabled('-')
                 elseif itm.cost and itm.cost > 0 then
                     if unspentAA >= itm.cost then
-                        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], string.format('%d AA', itm.cost))
+                        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], ui.cost)
                     else
-                        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format('%d AA', itm.cost))
+                        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], ui.cost)
                     end
                 else
                     ImGui.TextDisabled('-')
@@ -2597,13 +2802,32 @@ function AA.drawWindow()
                     end
                     if not canAfford then ImGui.PopStyleVar() end
                     if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('%s', string.format('Click to train next rank of "%s" (%d AA).', itm.name, itm.cost))
+                        ImGui.SetTooltip('%s', ui.trainTip)
                     end
                 else
                     ImGui.TextDisabled('---')
                 end
 
                 ImGui.PopID()
+            end
+
+            local clipper = nil
+            local ClipperClass = ImGui.ListClipper or (mq.imgui and mq.imgui.ListClipper) or _G['ImGuiListClipper']
+            if type(ClipperClass) == 'table' and ClipperClass.new then
+                local okC, c = pcall(ClipperClass.new)
+                if okC and c then clipper = c end
+            end
+            if clipper then
+                clipper:Begin(#allItems)
+                while clipper:Step() do
+                    for i = clipper.DisplayStart + 1, clipper.DisplayEnd do
+                        local itm = allItems[i]
+                        if itm then drawRow(i, itm) end
+                    end
+                end
+                clipper:End()
+            else
+                for i, itm in ipairs(allItems) do drawRow(i, itm) end
             end
 
             ImGui.EndTable()
@@ -2631,8 +2855,8 @@ function AA.drawWindow()
             ImGui.PopItemWidth()
             if newDelay and math.abs(newDelay - curDelay) > 0.01 then
                 ctrl.auto_summon_delay_sec = newDelay
-                core.saveLoadout(true)
             end
+            if ImGui.IsItemDeactivatedAfterEdit() then core.saveLoadout(true) end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('%s', 'How long to wait after buying the fireworks AA before /alt act is issued (the purchase must reach the server first).\nAlso the minimum spacing between automatic summons. Default 3s.')
             end
@@ -2658,8 +2882,8 @@ function AA.drawWindow()
             local newName = ImGui.InputText('Cap Spender AA Name##autoAaCapName', curName, 128)
             if newName and newName ~= curName and newName ~= '' then
                 ctrl.auto_spend_aa_name = newName
-                core.saveLoadout(true)
             end
+            if ImGui.IsItemDeactivatedAfterEdit() then core.saveLoadout(true) end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('%s', 'The fallback AA Ability name used for point dumping when cap is reached (e.g. Alternately Advanced Fireworks).')
             end
@@ -2669,8 +2893,8 @@ function AA.drawWindow()
             local newId = ImGui.InputInt('Activation ID##autoAaActId', curId)
             if newId ~= curId and newId > 0 then
                 ctrl.auto_spend_aa_id = newId
-                core.saveLoadout(true)
             end
+            if ImGui.IsItemDeactivatedAfterEdit() then core.saveLoadout(true) end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('%s', 'The Spell / Ability ID used for fireworks summoning (default: 17788, hotkey: Summon Firework).')
             end
@@ -2695,15 +2919,13 @@ function AA.tick()
     end
     if AA.pendingPostTrainScanAt and os.clock() >= AA.pendingPostTrainScanAt then
         AA.pendingPostTrainScanAt = nil
-        AA.lastAAScanAt = 0
-        AA.aaFilterDirty = true
-        if AA.scanPlayerAAs then AA.scanPlayerAAs(true) end
+        AA.requestScan(0)
     end
     if AA.pendingReadSpecialTab then
         if not ctrl.paused and ctrl.auto_spend_aa and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not rt.isCasting() then
             AA.pendingReadSpecialTab = false
             if AA.readSpecialTabOnce then AA.readSpecialTabOnce(false) end
-            if AA.scanPlayerAAs then AA.scanPlayerAAs(true) end
+            AA.requestScan(0)
         elseif not ctrl.auto_spend_aa or ctrl.paused then
             AA.pendingReadSpecialTab = false
         end
@@ -2712,10 +2934,12 @@ function AA.tick()
     pcall(function() currentSpentAA = tonumber(mq.TLO.Me.AAPointsSpent() or 0) or 0 end)
     if currentSpentAA and AA.lastObservedAAPointsSpent ~= nil and currentSpentAA ~= AA.lastObservedAAPointsSpent then
         AA.lastObservedAAPointsSpent = currentSpentAA
-        AA.lastAAScanAt = 0
         AA.aaFilterDirty = true
-        if AA.scanPlayerAAs then AA.scanPlayerAAs(true) end
+        AA.requestScan(1.0)
     end
+    -- The one place a scan actually runs (window refresh, purchases, the
+    -- purchase event and the spent-points change all queue through here).
+    AA.runPendingScan()
     if ctrl.auto_spend_aa and AA.checkAutoSpendAA and not rt.isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() then
         AA.checkAutoSpendAA()
     end
@@ -2749,7 +2973,7 @@ function AA.onCommand(cmd, args)
         core.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Auto-Spend AA Points %s (Threshold: %d AA, Cost: %d AA, ID: %d).',
             ctrl.auto_spend_aa and '\agENABLED\ax' or '\arDISABLED\ax',
-            ctrl.auto_spend_aa_threshold or 100, ctrl.auto_spend_aa_cost or 25, ctrl.auto_spend_aa_id or 17788))
+            AA.threshold(), ctrl.auto_spend_aa_cost or 25, ctrl.auto_spend_aa_id or 17788))
     elseif cmd == 'autofw' or cmd == 'summonfw' or cmd == 'auto_summon_fireworks' or cmd == 'autofireworks' then
         local sub = args[2] and string.lower(args[2]) or ''
         if sub == 'on' or sub == '1' or sub == 'enable' then
@@ -2782,7 +3006,7 @@ function AA.onCommand(cmd, args)
             end
         elseif sub == 'now' then
             if AA.aaSpendLoaded and AA.aaSpendLoaded() then
-                mq.cmdf('/aaspend bank %d', ctrl.auto_spend_aa_threshold or 0)
+                mq.cmdf('/aaspend bank %d', AA.threshold())
                 mq.cmd('/aaspend ' .. ((ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'))
                 print(string.format('\ag[Triune]\ax Triggered: /aaspend %s now', ctrl.auto_aa_aaspend_mode or 'auto'))
             else
@@ -2805,7 +3029,7 @@ function AA.onCommand(cmd, args)
             core.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Auto-Spend AA Trigger Threshold set to %d AA.', ctrl.auto_spend_aa_threshold))
         else
-            print(string.format('\ag[Triune]\ax Current Auto-Spend AA Threshold: %d AA. (usage: /ac aathreshold [25-100])', ctrl.auto_spend_aa_threshold or 100))
+            print(string.format('\ag[Triune]\ax Current Auto-Spend AA Threshold: %d AA. (usage: /ac aathreshold [25-100])', AA.threshold()))
         end
     elseif cmd == 'aacost' or cmd == 'spendcost' then
         local val = tonumber(args[2])
@@ -2887,9 +3111,9 @@ function plugin.onInit(coreApi)
         table.insert(registeredEvents, name)
     end
     local function onPurchased()
-        AA.lastAAScanAt = 0
+        -- folds into the scan the Train workflow already queued
         AA.aaFilterDirty = true
-        AA.scanPlayerAAs(true)
+        AA.requestScan(1.0)
     end
     reg('TacAAPurchased1', '#*#You have purchased #*#', onPurchased)
     reg('TacAAPurchased2', '#*#You have improved #*#', onPurchased)
@@ -2901,7 +3125,7 @@ function plugin.onDestroy()
         for _, name in ipairs(registeredEvents) do pcall(mq.unevent, name) end
     end
     registeredEvents = {}
-    if AA.pendingAATrain then AA.closeAAWindow() end
+    if AA.pendingAATrain then AA.abortAATrain(AA.pendingAATrain) end
     resetState()
 end
 

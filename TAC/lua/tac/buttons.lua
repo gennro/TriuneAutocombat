@@ -161,6 +161,7 @@ local state = {
     lastBroadcast  = 0,
     bindsBound     = {},
     bmImportResult = nil,
+    frame          = 0,         -- onDrawUI counter ("Every frame" buttons evaluate once per frame)
 }
 
 -- Edit Button window
@@ -178,7 +179,8 @@ local edit = {
 }
 
 -- Icon Picker window
-local picker = { open = false, page = 1, tab = 'Spell', maxSpell = 2243, maxItem = 12599, perPage = 500, size = 40 }
+local picker = { open = false, page = 1, tab = 'Spell', maxSpell = 2243, maxItem = 12599, perPage = 500, size = 40,
+                 pageKey = nil, pageAnims = nil, spellDedicated = nil }
 
 -- Import Button / Set window
 local imp = { open = false, hbId = 0, text = '', decoded = nil, valid = false, err = nil }
@@ -194,6 +196,9 @@ local browser = {
     lists   = {},          -- tab -> { entries }
     scanAt  = {},          -- tab -> os.clock() of the last scan
     boxScope = 'all',      -- Box Control tab: all | zone | group
+    scanRequest = {},      -- tab -> true: the draw thread wants onTick to (re)scan it
+    gemFp   = nil,         -- memorized-gem fingerprint the Gem list was built from
+    gemFpAt = 0,
 }
 local BROWSER_TABS = {
     { id = 'AA',      label = 'AAs' },
@@ -518,7 +523,10 @@ end
 -- Icons (spell icons via the core helper, item icons via A_DragItem)
 -- ----------------------------------------------------------------------------
 local EQ_ICON_OFFSET = 500
-local itemIcon = { mode = 'probe', shared = nil, lastCell = nil, cache = {} }
+-- cache: cell -> { ta = TextureAnimation, at = use counter }; capped at
+-- `max` by evicting the least recently used quarter (the Icon Picker can
+-- browse thousands of item cells).
+local itemIcon = { mode = 'probe', shared = nil, lastCell = nil, cache = {}, count = 0, tick = 0, max = 600 }
 
 local function probeItemIcons()
     if itemIcon.mode ~= 'probe' then return end
@@ -541,22 +549,35 @@ local function probeItemIcons()
 end
 
 -- `cell` is the A_DragItem cell (item Icon - 500), as Button Master stores it.
+function itemIcon.evict()
+    local entries = {}
+    for k, e in pairs(itemIcon.cache) do entries[#entries + 1] = { k, e.at } end
+    table.sort(entries, function(a, b) return a[2] < b[2] end)
+    local drop = math.max(1, math.floor(#entries / 4))
+    for i = 1, drop do itemIcon.cache[entries[i][1]] = nil end
+    itemIcon.count = math.max(0, itemIcon.count - drop)
+end
+
 local function itemIconAnim(cell)
     local id = tonumber(cell)
     if not id or id < 0 then return nil end
     probeItemIcons()
     if itemIcon.mode == 'dedicated' then
-        local key = tostring(id)
-        local ta = itemIcon.cache[key]
-        if not ta then
-            local ok, res = pcall(mq.TextureAnimation, 'triunebtn_' .. key)
-            if ok and res then
-                pcall(function() res:SetTextureCell(id) end)
-                itemIcon.cache[key] = res
-                ta = res
-            end
+        itemIcon.tick = itemIcon.tick + 1
+        local ent = itemIcon.cache[id]
+        if ent then
+            ent.at = itemIcon.tick
+            return ent.ta
         end
-        return ta
+        local ok, res = pcall(mq.TextureAnimation, 'triunebtn_' .. id)
+        if ok and res then
+            pcall(function() res:SetTextureCell(id) end)
+            if itemIcon.count >= itemIcon.max then itemIcon.evict() end
+            itemIcon.cache[id] = { ta = res, at = itemIcon.tick }
+            itemIcon.count = itemIcon.count + 1
+            return res
+        end
+        return nil
     elseif itemIcon.mode == 'shared' and itemIcon.shared then
         if itemIcon.lastCell ~= id then
             if not pcall(function() itemIcon.shared:SetTextureCell(id) end) then return nil end
@@ -594,10 +615,40 @@ local function luaEnv(delayFn)
     return env
 end
 
-local function evalLua(src, name)
-    local fn, err = compile(src, name or 'triune_button', luaEnv())
-    if not fn then return false, err end
-    return pcall(fn)
+-- Label / icon / timer chunks run synchronously, so one sandbox per button
+-- (kept on its cache entry) is enough; the old code built two tables and two
+-- metatables per evaluation, up to five times per button per 100 ms. The
+-- environment is rebuilt (and the compiled chunks dropped) when the core
+-- handles change, e.g. when the plugin is re-initialised with a fresh mock.
+local function buttonEnv(c)
+    local env = c.env
+    if not env or c.envMq ~= mq or c.envImGui ~= ImGui or c.envCore ~= core or c.envCtrl ~= ctrl then
+        env = luaEnv()
+        c.env = env
+        c.envMq, c.envImGui, c.envCore, c.envCtrl = mq, ImGui, core, ctrl
+        c.fns = nil
+    end
+    return env
+end
+
+-- Compiles `src` once per (cache entry, field) and runs it. The chunk name
+-- is only built when compiling, never per call; cacheFor() drops the entry
+-- (and so the compiled chunks) whenever the button is edited or reloaded.
+local function evalCached(c, field, src, label)
+    local env = buttonEnv(c)
+    local fns = c.fns
+    if not fns then
+        fns = {}
+        c.fns = fns
+    end
+    local slot = fns[field]
+    if not slot or slot.src ~= src then
+        local fn, err = compile(src, field .. ':' .. tostring(label or ''), env)
+        slot = { src = src, fn = fn, err = err }
+        fns[field] = slot
+    end
+    if not slot.fn then return false, slot.err end
+    return pcall(slot.fn)
 end
 
 -- ----------------------------------------------------------------------------
@@ -648,7 +699,11 @@ local function normalizeButton(b)
     local valid = false
     for _, t in ipairs(TIMER_TYPES) do if t.id == b.timerType then valid = true end end
     if not valid then b.timerType = 'None' end
-    if b.updateRate ~= nil then b.updateRate = tonumber(b.updateRate) end
+    if b.updateRate ~= nil then
+        b.updateRate = tonumber(b.updateRate)
+        -- a negative interval means "as often as possible", i.e. every frame
+        if b.updateRate and b.updateRate < 0 then b.updateRate = 0 end
+    end
     if b.fontScale ~= nil then
         b.fontScale = tonumber(b.fontScale)
         if b.fontScale then b.fontScale = math.max(0.4, math.min(3.0, b.fontScale)) end
@@ -674,22 +729,30 @@ local function normalizeDb(d)
             end
         end
     end
-    for _, c in pairs(d.characters) do
-        if type(c.hotbars) ~= 'table' then c.hotbars = {} end
-        for i, hb in ipairs(c.hotbars) do
-            local def = newHotbar()
-            for k, v in pairs(def) do
-                if hb[k] == nil then hb[k] = v end
+    for ck, c in pairs(d.characters) do
+        if type(c) ~= 'table' then
+            d.characters[ck] = nil
+        else
+            if type(c.hotbars) ~= 'table' then c.hotbars = {} end
+            for i = #c.hotbars, 1, -1 do
+                if type(c.hotbars[i]) ~= 'table' then table.remove(c.hotbars, i) end
             end
-            hb.buttonSize = math.max(MIN_BUTTON_SIZE, math.min(MAX_BUTTON_SIZE, math.floor(tonumber(hb.buttonSize) or 6)))
-            hb.fontScale = tonumber(hb.fontScale) or 1.0
-            hb.alpha = math.max(0.1, math.min(1.0, tonumber(hb.alpha) or 1.0))
-            if hb.title == '' then hb.title = 'Hot Buttons ' .. i end
-            local keep = {}
-            for _, s in ipairs(hb.sets) do
-                if d.sets[s] then keep[#keep + 1] = s end
+            for i, hb in ipairs(c.hotbars) do
+                local def = newHotbar()
+                for k, v in pairs(def) do
+                    if hb[k] == nil then hb[k] = v end
+                end
+                hb.buttonSize = math.max(MIN_BUTTON_SIZE, math.min(MAX_BUTTON_SIZE, math.floor(tonumber(hb.buttonSize) or 6)))
+                hb.fontScale = tonumber(hb.fontScale) or 1.0
+                hb.alpha = math.max(0.1, math.min(1.0, tonumber(hb.alpha) or 1.0))
+                if hb.title == '' then hb.title = 'Hot Buttons ' .. i end
+                local keep = {}
+                if type(hb.sets) ~= 'table' then hb.sets = {} end
+                for _, s in ipairs(hb.sets) do
+                    if d.sets[s] then keep[#keep + 1] = s end
+                end
+                hb.sets = keep
             end
-            hb.sets = keep
         end
     end
     return d
@@ -1023,11 +1086,31 @@ local function newHotbarForMe()
     return #hbs
 end
 
+-- Per-hotbar UI state is keyed by hotbar index; removing hotbar `id` shifts
+-- every later hotbar down by one, so the maps have to follow.
+local function shiftHotbarKeys(t, id)
+    local out = {}
+    for k, v in pairs(t or {}) do
+        if type(k) ~= 'number' or k < id then
+            out[k] = v
+        elseif k > id then
+            out[k - 1] = v
+        end
+    end
+    return out
+end
+
 local function deleteHotbar(id)
     local hbs = hotbars()
     if #hbs <= 1 or not hbs[id] then return false end
     table.remove(hbs, id)
-    state.activeSet[id] = nil
+    state.activeSet = shiftHotbarKeys(state.activeSet, id)
+    state.search = shiftHotbarKeys(state.search, id)
+    state.newSetName = shiftHotbarKeys(state.newSetName, id)
+    state.titleEdit = shiftHotbarKeys(state.titleEdit, id)
+    if edit.hbId > id then edit.hbId = edit.hbId - 1 end
+    if imp.hbId > id then imp.hbId = imp.hbId - 1 end
+    if browser.target and (browser.target.hbId or 0) > id then browser.target.hbId = browser.target.hbId - 1 end
     saveDb()
     return true
 end
@@ -1177,6 +1260,59 @@ local function num(v)
     return n
 end
 
+-- Timer readers as named functions: pcall(fn, arg) allocates nothing per
+-- call, unlike the tlo(function() ... end) closure pattern, and the cooldown
+-- poll runs for every cooling button at 10 Hz (or every frame).
+local TIMER = {
+    gemTimer     = function(gem) return mq.TLO.Me.GemTimer(gem)() end,
+    gemRecast    = function(gem) return mq.TLO.Me.Gem(gem).RecastTime() end,
+    aaTimer      = function(key) return mq.TLO.Me.AltAbilityTimer(key)() end,
+    aaReuse      = function(key) return mq.TLO.Me.AltAbility(key).MyReuseTime() end,
+    discTimer    = function(name) return mq.TLO.Me.CombatAbilityTimer(name).TotalSeconds() end,
+    spellRecast  = function(name) return mq.TLO.Spell(name).RecastTime() end,
+    abilityTimer = function(name) return mq.TLO.Me.AbilityTimer(name)() end,
+    abilityTotal = function(name) return mq.TLO.Me.AbilityTimerTotal(name)() end,
+    itemTimer    = function(name) return mq.TLO.FindItem(name).TimerReady() end,
+    -- Full duration of a game timer (gem recast, AA reuse, disc recast) is
+    -- static: read it once per button and refresh it every TOTAL_TTL seconds
+    -- (sooner while it reads as 0, e.g. a gem that is not memorized yet).
+    -- Editing the button drops its cache entry and so the value.
+    TOTAL_TTL    = 30,
+    TOTAL_RETRY  = 5,
+}
+
+function TIMER.call(fn, arg)
+    local ok, v = pcall(fn, arg)
+    if ok then return v end
+    return nil
+end
+
+function TIMER.staticTotal(c, tt, arg, now)
+    if c.totalKind == tt and c.totalArg == arg and c.totalAt then
+        local ttl = (c.staticTotal or 0) > 0 and TIMER.TOTAL_TTL or TIMER.TOTAL_RETRY
+        if (now - c.totalAt) < ttl then return c.staticTotal end
+    end
+    local total = 0
+    if tt == 'Gem' then
+        total = num(TIMER.call(TIMER.gemRecast, arg)) / 1000
+    elseif tt == 'AA' then
+        total = num(TIMER.call(TIMER.aaReuse, arg))
+    elseif tt == 'Disc' then
+        total = num(TIMER.call(TIMER.spellRecast, arg)) / 1000
+    end
+    c.totalKind, c.totalArg, c.totalAt, c.staticTotal = tt, arg, now, total
+    return total
+end
+
+-- Trimmed timer key, cached on the entry (trim() allocates per call).
+function TIMER.keyOf(b, c)
+    if c.keySrc ~= b.timerKey or c.keyTrim == nil then
+        c.keySrc = b.timerKey
+        c.keyTrim = trim(b.timerKey)
+    end
+    return c.keyTrim
+end
+
 -- Returns remaining seconds, total seconds, toggle-locked.
 local function readCooldown(b, c)
     local tt = b.timerType or 'None'
@@ -1196,50 +1332,50 @@ local function readCooldown(b, c)
     elseif tt == 'Gem' then
         local gem = math.floor(num(key))
         if gem >= 1 then
-            remaining = num(tlo(function() return mq.TLO.Me.GemTimer(gem)() end)) / 1000
-            total = num(tlo(function() return mq.TLO.Me.Gem(gem).RecastTime() end)) / 1000
+            remaining = num(TIMER.call(TIMER.gemTimer, gem)) / 1000
+            total = TIMER.staticTotal(c, tt, gem, os.clock())
         end
     elseif tt == 'AA' then
-        local name = trim(key)
+        local name = TIMER.keyOf(b, c)
         if name ~= '' then
-            local n = tonumber(name)
-            remaining = num(tlo(function() return mq.TLO.Me.AltAbilityTimer(n or name)() end)) / 1000
-            total = num(tlo(function() return mq.TLO.Me.AltAbility(n or name).MyReuseTime() end))
+            local arg = tonumber(name) or name
+            remaining = num(TIMER.call(TIMER.aaTimer, arg)) / 1000
+            total = TIMER.staticTotal(c, tt, arg, os.clock())
         end
     elseif tt == 'Disc' then
-        local name = trim(key)
+        local name = TIMER.keyOf(b, c)
         if name ~= '' then
-            remaining = num(tlo(function() return mq.TLO.Me.CombatAbilityTimer(name).TotalSeconds() end))
-            total = num(tlo(function() return mq.TLO.Spell(name).RecastTime() end)) / 1000
+            remaining = num(TIMER.call(TIMER.discTimer, name))
+            total = TIMER.staticTotal(c, tt, name, os.clock())
         end
     elseif tt == 'Ability' then
-        local name = trim(key)
+        local name = TIMER.keyOf(b, c)
         if name ~= '' then
-            remaining = num(tlo(function() return mq.TLO.Me.AbilityTimer(name)() end)) / 1000
-            total = num(tlo(function() return mq.TLO.Me.AbilityTimerTotal(name)() end)) / 1000
+            remaining = num(TIMER.call(TIMER.abilityTimer, name)) / 1000
+            total = num(TIMER.call(TIMER.abilityTotal, name)) / 1000
         end
     elseif tt == 'Item' then
-        local name = trim(key)
+        local name = TIMER.keyOf(b, c)
         if name ~= '' then
-            remaining = num(tlo(function() return mq.TLO.FindItem(name).TimerReady() end))
+            remaining = num(TIMER.call(TIMER.itemTimer, name))
         end
     elseif tt == 'Lua' then
         if b.timerLua and b.timerLua ~= '' then
-            local ok, res = evalLua(b.timerLua, 'timer:' .. (b.label or ''))
+            local ok, res = evalCached(c, 'timer', b.timerLua, b.label)
             if ok then remaining = num(res) elseif not c.warnedTimer then
                 c.warnedTimer = true
                 log('\arTimer Lua failed for [%s]: %s', b.label or '?', tostring(res))
             end
         end
         if b.cooldownLua and b.cooldownLua ~= '' then
-            local ok, res = evalLua(b.cooldownLua, 'cooldown:' .. (b.label or ''))
+            local ok, res = evalCached(c, 'cooldown', b.cooldownLua, b.label)
             if ok then total = num(res) elseif not c.warnedCooldown then
                 c.warnedCooldown = true
                 log('\arCooldown Lua failed for [%s]: %s', b.label or '?', tostring(res))
             end
         end
         if b.toggleLua and b.toggleLua ~= '' then
-            local ok, res = evalLua(b.toggleLua, 'toggle:' .. (b.label or ''))
+            local ok, res = evalCached(c, 'toggle', b.toggleLua, b.label)
             if ok then locked = (res == true) elseif not c.warnedToggle then
                 c.warnedToggle = true
                 log('\arToggle Lua failed for [%s]: %s', b.label or '?', tostring(res))
@@ -1258,13 +1394,23 @@ local function evaluateButton(b, key, force)
     local now = os.clock()
     local rate = b.updateRate
     if rate == nil then rate = DEFAULT_RATE end
-    if not force and c.lastEval >= 0 and (now - c.lastEval) < rate then return c end
+    if rate < 0 then rate = 0 end
+    if not force and c.lastEval >= 0 then
+        if rate > 0 then
+            if (now - c.lastEval) < rate then return c end
+        elseif c.lastFrame == state.frame then
+            -- "Every frame": at most once per drawn frame, even when the
+            -- button sits in several sets or hotbars.
+            return c
+        end
+    end
     c.lastEval = now
+    c.lastFrame = state.frame
     c.remaining, c.total, c.locked = readCooldown(b, c)
     -- Label
     local label = b.label or ''
     if b.evaluateLabel and label ~= '' then
-        local ok, res = evalLua(label, 'label:' .. label)
+        local ok, res = evalCached(c, 'label', label, label)
         if ok and res ~= nil then label = tostring(res) elseif not ok and not c.warnedLabel then
             c.warnedLabel = true
             log('\arLabel Lua failed for [%s]: %s', b.label or '?', tostring(res))
@@ -1274,7 +1420,7 @@ local function evaluateButton(b, key, force)
     -- Icon
     c.icon, c.iconType = b.icon, b.iconType
     if b.iconLua and b.iconLua ~= '' then
-        local ok, id, typ = evalLua(b.iconLua, 'icon:' .. (b.label or ''))
+        local ok, id, typ = evalCached(c, 'icon', b.iconLua, b.label)
         if ok and tonumber(id) then
             c.icon = tonumber(id)
             c.iconType = (typ == 'Item') and 'Item' or 'Spell'
@@ -1392,6 +1538,7 @@ local function tick()
         if ok and type(unsub) == 'function' then state.boxnetUnsub = unsub end
     end
     pumpScripts()
+    browser.processScans()
 end
 
 -- ----------------------------------------------------------------------------
@@ -1789,17 +1936,75 @@ end
 
 local SCANNERS = { AA = scanAAs, Gem = scanGems, Ability = scanAbilities, Disc = scanDiscs, Item = scanItems, Box = scanBoxControl, Cmd = scanCommands }
 
+-- Synchronous scan (onTick, tests, the /ac btn add command path). The AA
+-- scan alone is ~1,650 ids x up to 8 TLO calls, so the draw thread never
+-- calls this: see browserListCached / requestScan.
 local function browserList(tab, force)
     if force or not browser.lists[tab] then
         local ok, res = pcall(SCANNERS[tab] or function() return {} end)
         browser.lists[tab] = ok and res or {}
         browser.scanAt[tab] = os.clock()
+        browser.scanRequest[tab] = nil
     end
     return browser.lists[tab]
 end
 
+function browser.requestScan(tab)
+    browser.scanRequest[tab] = true
+end
+
+-- Draw-thread view of a tab's list: the cached entries, or nil (with a scan
+-- requested for the next tick) while the tab has not been scanned yet.
+function browser.listCached(tab)
+    local list = browser.lists[tab]
+    if list then return list end
+    browser.requestScan(tab)
+    return nil
+end
+
+-- Memorized gems as one string; the Gem list is rebuilt when it changes
+-- instead of on every open of the browser (12 cheap TLO calls, on the tick).
+function browser.gemFingerprint()
+    local n = (core.getNumGems and core.getNumGems()) or tonumber(tlo(function() return mq.TLO.Me.NumGems() end)) or 8
+    local parts = {}
+    for g = 1, n do
+        local name = tlo(function() return mq.TLO.Me.Gem(g).Name() end)
+        parts[g] = tostring(name or '')
+    end
+    return table.concat(parts, '|')
+end
+
+-- onTick: one requested scan per pass, plus the gem change check while the
+-- browser is open on the Gem tab.
+function browser.processScans()
+    local tab = next(browser.scanRequest)
+    if tab then
+        browser.scanRequest[tab] = nil
+        browserList(tab, true)
+        if tab == 'Gem' then
+            browser.gemFp = browser.gemFingerprint()
+            browser.gemFpAt = os.clock()
+        end
+        return
+    end
+    if browser.open and browser.tab == 'Gem' and browser.lists.Gem then
+        local now = os.clock()
+        if (now - (browser.gemFpAt or 0)) >= 2.0 then
+            browser.gemFpAt = now
+            local fp = browser.gemFingerprint()
+            -- nil: unknown since the list was built (first open, zoned): rescan once
+            if fp ~= browser.gemFp then
+                browser.gemFp = fp
+                browserList('Gem', true)
+            end
+        end
+    end
+end
+
 -- mode 'assign': create the button and place it in target (slot index or the
 -- first free slot of the set); mode 'editor': fill the open editor instead.
+-- Lists are cached until Refresh, a zone change (items) or a change of the
+-- memorized gems (see processBrowserScans).
 local function openBrowser(tab, mode, target)
     browser.open = true
     browser.tab = tab or browser.tab
@@ -1807,10 +2012,7 @@ local function openBrowser(tab, mode, target)
     browser.mode = mode or 'assign'
     browser.target = target
     browser.search = ''
-    -- Gems / items change often; always rescan them on open.
-    browser.lists.Gem = nil
-    browser.lists.Item = nil
-    browser.lists.Cmd = nil
+    browser.gemFpAt = 0
 end
 
 local function firstFreeSlot(setName)
@@ -1956,6 +2158,38 @@ local function gridLayout(hb, setName, availW, availH)
     return size, cols, count
 end
 
+-- Cooldown sweep: a pie over the remaining fraction, clipped to the slot.
+-- A named function so the per-frame pcall allocates no closure.
+local SLOT = {}
+
+function SLOT.sweep(dl, p1, p2, center, radius, aMin, aMax, col)
+    dl:PushClipRect(p1, p2, true)
+    dl:PathLineTo(center)
+    dl:PathArcTo(center, radius, aMin, aMax, 0)
+    dl:PathFillConvex(col)
+    dl:PopClipRect()
+end
+
+-- Label layout (words stacked as lines, merged into the last line when they
+-- do not fit) with each word measured once. Cached on the button's entry and
+-- rebuilt only when the label, the font scale or the slot size changes;
+-- must be computed with the slot's font scale active.
+function SLOT.layoutLabel(label, scale, size)
+    local words = split(label, ' ')
+    local _, lineH = textSize('Ag')
+    lineH = math.max(1, lineH)
+    local maxLines = math.max(1, math.floor((size - 4) / lineH))
+    if #words > maxLines then
+        local merged = {}
+        for i = 1, maxLines do merged[i] = words[i] end
+        merged[maxLines] = merged[maxLines] .. ' ' .. table.concat(words, ' ', maxLines + 1)
+        words = merged
+    end
+    local widths = {}
+    for i = 1, #words do widths[i] = (textSize(words[i])) end
+    return { label = label, scale = scale, size = size, words = words, widths = widths, lineH = lineH, blockH = #words * lineH }
+end
+
 -- Draws one slot. Returns true when clicked.
 local function drawSlot(hb, hbId, setName, index, size, dimmed)
     local b, key = buttonAt(setName, index)
@@ -1988,7 +2222,7 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
                 local pad = 2
                 local ip = toV(mnX + pad, mnY + pad)
                 local isz = toV(size - pad * 2, size - pad * 2)
-                if ip and isz then pcall(function() dl:AddTextureAnimation(anim, ip, isz) end) end
+                if ip and isz then pcall(dl.AddTextureAnimation, dl, anim, ip, isz) end
             end
         end
 
@@ -2000,21 +2234,21 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
                 local center = toV((mnX + mxX) / 2, (mnY + mxY) / 2)
                 local aMin = -math.pi / 2 + 2 * math.pi * (1 - frac)
                 local aMax = 1.5 * math.pi
-                drewArc = pcall(function()
-                    dl:PushClipRect(p1, p2, true)
-                    dl:PathLineTo(center)
-                    dl:PathArcTo(center, size * 0.8, aMin, aMax, 0)
-                    dl:PathFillConvex(col32(0, 0, 0, 0.62 * alphaMul))
-                    dl:PopClipRect()
-                end)
+                drewArc = pcall(SLOT.sweep, dl, p1, p2, center, size * 0.8, aMin, aMax, col32(0, 0, 0, 0.62 * alphaMul))
             end
             if not drewArc then
                 local oh = (mxY - mnY) * frac
                 local q2 = toV(mxX, mnY + oh)
                 if q2 then dl:AddRectFilled(p1, q2, col32(0, 0, 0, 0.62 * alphaMul), 4) end
             end
-            local ts = fmtTime(c.remaining)
-            local tw, th = textSize(ts)
+            -- Timer text formats to whole seconds: measure it once per second.
+            local secs = math.floor(c.remaining + 0.5)
+            if c.tsSec ~= secs or c.tsText == nil then
+                c.tsSec = secs
+                c.tsText = fmtTime(c.remaining)
+                c.tsW, c.tsH = textSize(c.tsText)
+            end
+            local ts, tw, th = c.tsText, c.tsW, c.tsH
             local tp = toV(mnX + (size - tw) / 2, mnY + (size - th) / 2)
             local tp2 = toV(mnX + (size - tw) / 2 + 1, mnY + (size - th) / 2 + 1)
             if tp2 then dl:AddText(tp2, col32(0, 0, 0, 0.9 * alphaMul), ts) end
@@ -2025,7 +2259,7 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
         if b and c.locked then
             dl:AddRectFilled(p1, p2, col32(1.0, 0.72, 0.25, 0.18 * alphaMul), 4)
             local goldCol = col32(1.0, 0.72, 0.25, 0.95 * alphaMul)
-            if not pcall(function() dl:AddRect(p1, p2, goldCol, 4, 0, 2) end) then
+            if not pcall(dl.AddRect, dl, p1, p2, goldCol, 4, 0, 2) then
                 dl:AddRect(p1, p2, goldCol, 4)
             end
         elseif hovered then
@@ -2036,32 +2270,30 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
 
         -- Label (words stacked as lines, centred) or slot number
         local winScale = core.currentWindowScale and core.currentWindowScale() or 1.0
-        pcall(ImGui.SetWindowFontScale, ((b and b.fontScale) or hb.fontScale or 1.0) * winScale)
+        local fontScale = ((b and b.fontScale) or hb.fontScale or 1.0) * winScale
+        pcall(ImGui.SetWindowFontScale, fontScale)
         if b then
             if b.showLabel ~= false and c.label and c.label ~= '' and not (c.total > 0 and c.remaining > 0.05) then
                 local tr, tg, tb = rgbTo01(b.textColor, { 1, 1, 1 })
-                local words = split(c.label, ' ')
-                local _, lineH = textSize('Ag')
-                local maxLines = math.max(1, math.floor((size - 4) / math.max(1, lineH)))
-                if #words > maxLines then
-                    local merged = {}
-                    for i = 1, maxLines do merged[i] = words[i] end
-                    merged[maxLines] = merged[maxLines] .. ' ' .. table.concat(words, ' ', maxLines + 1)
-                    words = merged
+                local lay = c.layout
+                if not lay or lay.label ~= c.label or lay.scale ~= fontScale or lay.size ~= size then
+                    lay = SLOT.layoutLabel(c.label, fontScale, size)
+                    c.layout = lay
                 end
-                local blockH = #words * lineH
-                local y = mnY + (size - blockH) / 2
-                pcall(function() dl:PushClipRect(p1, p2, true) end)
-                for _, w in ipairs(words) do
-                    local tw = textSize(w)
-                    local tx = mnX + math.max(0, (size - tw) / 2)
+                local words, widths, lineH = lay.words, lay.widths, lay.lineH
+                local y = mnY + (size - lay.blockH) / 2
+                local shadow, textCol = col32(0, 0, 0, 0.85 * alphaMul), col32(tr, tg, tb, alphaMul)
+                pcall(dl.PushClipRect, dl, p1, p2, true)
+                for i = 1, #words do
+                    local w = words[i]
+                    local tx = mnX + math.max(0, (size - widths[i]) / 2)
                     local sp = toV(tx + 1, y + 1)
                     local lp = toV(tx, y)
-                    if sp then dl:AddText(sp, col32(0, 0, 0, 0.85 * alphaMul), w) end
-                    if lp then dl:AddText(lp, col32(tr, tg, tb, alphaMul), w) end
+                    if sp then dl:AddText(sp, shadow, w) end
+                    if lp then dl:AddText(lp, textCol, w) end
                     y = y + lineH
                 end
-                pcall(function() dl:PopClipRect() end)
+                pcall(dl.PopClipRect, dl)
             end
         else
             local ns = tostring(index)
@@ -2100,7 +2332,9 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
         local okSrc, src = pcall(ImGui.BeginDragDropSource)
         if okSrc and src then
             state.dnd = { hb = hbId, set = setName, index = index }
-            pcall(ImGui.SetDragDropPayload, 'TRIUNE_BTN', string.format('%d|%s|%d', hbId, setName, index))
+            -- The payload only tags the drag; the source slot lives in state.dnd
+            -- (set names may contain any character, so nothing is parsed back).
+            pcall(ImGui.SetDragDropPayload, 'TRIUNE_BTN', 'slot')
             ImGui.Text(c.label ~= '' and c.label or (b.label or 'Button'))
             pcall(ImGui.EndDragDropSource)
         end
@@ -2110,12 +2344,7 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
         local payload = ImGui.AcceptDragDropPayload('TRIUNE_BTN')
         if payload then
             local src = state.dnd
-            local data = (type(payload) == 'table' or type(payload) == 'userdata') and payload.Data or payload
-            if type(data) == 'string' then
-                local sHb, sSet, sIdx = data:match('^(%d+)|(.-)|(%d+)$')
-                if sHb and db.sets[sSet] then src = { hb = tonumber(sHb), set = sSet, index = tonumber(sIdx) } end
-            end
-            if src and src.set and src.index then
+            if src and src.set and src.index and db.sets[src.set] then
                 swapSlots(src.set, src.index, setName, index)
             end
             state.dnd = nil
@@ -2363,8 +2592,12 @@ drawHotbarMenu = function(hb, hbId)
         end
         ImGui.SetNextItemWidth(core.px(140))
         local a = pushSlider('Opacity##hbAlpha_' .. hbId, hb.alpha or 1.0, 0.1, 1.0, '%.2f')
-        if math.abs(a - (hb.alpha or 1.0)) > 0.001 then
-            hb.alpha = a
+        -- Update live so the hotbar reflects the drag, but only write the DB
+        -- (file + .bak + boxnet broadcast) once the slider is released.
+        local okDone, done = pcall(ImGui.IsItemDeactivatedAfterEdit)
+        local changed = math.abs(a - (hb.alpha or 1.0)) > 0.001
+        if changed then hb.alpha = a end
+        if (okDone and done) or (changed and not okDone) then
             saveDb({ silent = true })
         end
         ImGui.Separator()
@@ -2846,6 +3079,20 @@ local function drawEditor()
 end
 
 -- Icon Picker window ----------------------------------------------------------
+-- True when iconAnim() hands out one object per icon id for this tab (so a
+-- page of animations can be cached); false for the shared-texture fallbacks.
+function picker.pageCacheable(tabName)
+    if tabName == 'Item' then
+        probeItemIcons()
+        return itemIcon.mode == 'dedicated'
+    end
+    if picker.spellDedicated == nil then
+        local a, b = iconAnim(1, 'Spell'), iconAnim(2, 'Spell')
+        picker.spellDedicated = (a ~= nil and b ~= nil and a ~= b)
+    end
+    return picker.spellDedicated
+end
+
 local function drawPicker()
     if not picker.open then return end
     core.pushTheme()
@@ -2893,16 +3140,39 @@ local function drawPicker()
                         local dl = ImGui.GetWindowDrawList()
                         local n = 0
                         local pushedSp = pushStyleVarSafe('ItemSpacing', 4, 4)
+                        -- One animation object per icon id (the "dedicated" modes)
+                        -- can be resolved once per page instead of 500 times per
+                        -- frame; a shared animation has its cell set per draw and
+                        -- must be resolved every time.
+                        local anims = nil
+                        if picker.pageCacheable(tabName) then
+                            local pageKey = tabName .. ':' .. picker.page
+                            if picker.pageKey ~= pageKey or not picker.pageAnims then
+                                picker.pageKey = pageKey
+                                picker.pageAnims = {}
+                            end
+                            anims = picker.pageAnims
+                        end
+                        local isz = core.toVec(picker.size, picker.size)
                         for id = startId, endId do
                             if n > 0 and n % cols ~= 0 then ImGui.SameLine(0, core.px(4)) end
                             n = n + 1
                             ImGui.PushID(id)
                             local clicked = ImGui.InvisibleButton('##icon', picker.size, picker.size)
                             local mnX, mnY = xy(ImGui.GetItemRectMin())
-                            local anim = iconAnim(id, tabName)
+                            local anim
+                            if anims then
+                                anim = anims[id]
+                                if anim == nil then
+                                    anim = iconAnim(id, tabName) or false
+                                    anims[id] = anim
+                                end
+                            else
+                                anim = iconAnim(id, tabName)
+                            end
                             if anim and dl and dl.AddTextureAnimation then
-                                local ip, isz = core.toVec(mnX, mnY), core.toVec(picker.size, picker.size)
-                                if ip and isz then pcall(function() dl:AddTextureAnimation(anim, ip, isz) end) end
+                                local ip = core.toVec(mnX, mnY)
+                                if ip and isz then pcall(dl.AddTextureAnimation, dl, anim, ip, isz) end
                             end
                             if ImGui.IsItemHovered() then
                                 core.setTooltip(string.format('%s icon %d', tabName, id))
@@ -3011,8 +3281,11 @@ local function drawBrowser()
         local txt = ImGui.InputText('##browserSearch', browser.search)
         if type(txt) == 'string' then browser.search = txt end
         ImGui.SameLine()
-        if ImGui.Button('Refresh##browserRefresh', core.px(80), 0) then browserList(browser.tab, true) end
-        if ImGui.IsItemHovered() then core.setTooltip('Rescan this tab (AAs are scanned once and cached; gems and items rescan when the window opens).') end
+        if ImGui.Button('Refresh##browserRefresh', core.px(80), 0) then
+            browser.lists[browser.tab] = nil
+            browser.requestScan(browser.tab)
+        end
+        if ImGui.IsItemHovered() then core.setTooltip('Rescan this tab (lists are scanned in the background and cached; items rescan on zone change, gems when your memorized spells change).') end
 
         if ImGui.BeginTabBar('##browserTabs') then
             for _, tab in ipairs(BROWSER_TABS) do
@@ -3047,12 +3320,16 @@ local function drawBrowser()
                     elseif tab.id == 'Cmd' then
                         ImGui.TextDisabled('Triune slash commands. Entries with an <argument> open the editor to fill it in.')
                     end
-                    local list = browserList(tab.id, false)
+                    local list = browser.listCached(tab.id)
                     local needle = trim(browser.search):lower()
                     if ImGui.BeginChild('##browserList', 0, 0, false) then
                         local shown = 0
                         local dl = ImGui.GetWindowDrawList()
-                        for i, e in ipairs(list) do
+                        if not list then
+                            ImGui.TextDisabled('Scanning...')
+                            shown = -1
+                        end
+                        for i, e in ipairs(list or {}) do
                             local hay = (e.name .. ' ' .. (e.sub or '')):lower()
                             if needle == '' or hay:find(needle, 1, true) then
                                 shown = shown + 1
@@ -3292,6 +3569,7 @@ end
 function plugin.onDrawUI()
     if not core or not state.loaded then return end
     refresh()
+    state.frame = state.frame + 1
     pumpScripts()
     if ctrl.show_buttons then
         for i, hb in ipairs(hotbars()) do drawHotbar(hb, i) end
@@ -3300,6 +3578,13 @@ function plugin.onDrawUI()
     drawPicker()
     drawImport()
     drawBrowser()
+end
+
+-- Zoning changes what the character carries; the item list rescans on the
+-- next look (the gem list follows the memorized-gem fingerprint).
+function plugin.onZoned()
+    browser.lists.Item = nil
+    browser.gemFp = nil
 end
 
 function plugin.onSaveSettings()

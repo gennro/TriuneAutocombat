@@ -363,6 +363,14 @@ end
 
 function D.itemTypeName(t) return D.ITEM_TYPES[tonumber(t) or -1] or ('Type ' .. tostring(t)) end
 function D.skillName(s) return D.SKILLS[tonumber(s) or -1] or ('Skill ' .. tostring(s)) end
+-- tradeskill_recipe.tradeskill: the EQEmu data files quest combines under
+-- 75 (Remove Traps in the client skill enum, which no item references);
+-- tools/build_gamedb.py TRADESKILLS carries the same mapping.
+function D.tradeskillName(s)
+    local id = tonumber(s) or -1
+    if id == 75 or id == 100 then return 'Quest Combine' end
+    return D.skillName(id)
+end
 function D.sizeName(s) return D.SIZES[tonumber(s) or -1] or tostring(s) end
 function D.raceName(r) return D.RACE_NAMES[tonumber(r) or -1] or ('Race ' .. tostring(r)) end
 function D.bodyTypeName(b) return D.BODY_TYPES[tonumber(b) or -1] or ('Body ' .. tostring(b)) end
@@ -641,6 +649,8 @@ local DB = {
     loading  = nil,
     error    = nil,
     manifest = nil,
+    cards    = {},   -- decoded card data per kind:id:tier (see cardFor)
+    cardsN   = 0,
 }
 -- Index loading is sliced per *frame* (onDrawUI runs every frame; the core
 -- only ticks plugins every 150-200 ms, which would make a load crawl): a
@@ -650,9 +660,15 @@ DB.BUDGET_IDLE = 0.002
 DB.BUDGET_OPEN = 0.009
 DB.BUDGET = DB.BUDGET_IDLE
 DB.MAX_RESULTS = 300
+-- Occurrences of the first query word looked at per search pass, accepted
+-- or not: a filtered query ("a" + a zone) must not walk every line.
+DB.MAX_SCAN = 20000
 
+-- Names live in two blobs, `orig` (as written) and `lower` (for matching),
+-- both '\n'-joined with the same `starts` offsets (string.lower keeps byte
+-- length), so a 150k-entry index costs two strings rather than 150k of them.
 local function newIndex(kind)
-    return { kind = kind, loaded = false, count = 0, n = 0, ids = {}, names = {}, refs = {}, byId = {}, pieces = {}, starts = {}, pos = 1, lower = nil,
+    return { kind = kind, loaded = false, count = 0, n = 0, ids = {}, refs = {}, byId = {}, pieces = {}, starts = {}, pos = 1, lower = nil, orig = nil,
              extra = {},            -- items: tier letters; spells: "class:level,..." string
              refE = {}, refL = {},  -- items: enchanted / legendary record refs (false when absent)
              lvl = {}, zone = {} }  -- npcs
@@ -664,6 +680,8 @@ function DB.setDir(dir)
     DB.kinds = {}
     DB.cache = {}
     DB.cacheN = 0
+    DB.cards = {}
+    DB.cardsN = 0
     for _, f in pairs(DB.handles) do pcall(function() f:close() end) end
     DB.handles = {}
     DB.loadQueue = {}
@@ -750,13 +768,25 @@ local function addEntry(ix, id, ref, name)
     ix.n = n
     ix.ids[n] = id
     ix.refs[n] = packRef(ref)
-    ix.names[n] = name
     ix.byId[id] = n
-    local low = name:lower()
-    ix.pieces[n] = low
+    ix.pieces[n] = name
     ix.starts[n] = ix.pos
-    ix.pos = ix.pos + #low + 1
+    ix.pos = ix.pos + #name + 1
     return n
+end
+
+-- Original-case name of entry n.
+function DB.nameAt(ix, n)
+    local starts = ix.starts
+    local s = starts[n]
+    if not s then return '' end
+    local blob = ix.orig
+    if not blob then
+        -- still loading: the pieces array holds the names
+        return ix.pieces and ix.pieces[n] or ''
+    end
+    local e = (starts[n + 1] or (#blob + 2)) - 2
+    return blob:sub(s, e)
 end
 
 local PARSERS = {}
@@ -778,7 +808,7 @@ PARSERS.npcs = function(ix, line)
     ix.zone[n] = ENC.unescape(zone)
     -- name -> entries, for resolving a live spawn to its database NPC
     ix.byName = ix.byName or {}
-    local low = ix.pieces[n]
+    local low = name:lower()
     local list = ix.byName[low]
     if not list then
         ix.byName[low] = n
@@ -801,7 +831,8 @@ PARSERS.zones = function(ix, line)
 end
 
 local function finishLoad(ix)
-    ix.lower = table.concat(ix.pieces, '\n')
+    ix.orig = table.concat(ix.pieces, '\n')
+    ix.lower = ix.orig:lower()
     ix.pieces = nil
     ix.loaded = true
     ix.count = ix.n
@@ -914,8 +945,12 @@ function DB.search(kind, query, filter, limit)
     local seen = {}
     local qlen = #query
     local maxCollect = limit * 4
+    local maxScan = DB.MAX_SCAN
+    local scanned = 0
     -- Accepts entry n (after word / filter checks) into a rank bucket.
+    -- Every call counts toward the scan budget, accepted or not.
     local function accept(n, lineStart, lineEnd, s)
+        scanned = scanned + 1
         if seen[n] then return end
         seen[n] = true
         local lname = nil
@@ -951,7 +986,7 @@ function DB.search(kind, query, filter, limit)
     end
     local needle = '\n' .. first
     local init = 1
-    while collected < maxCollect do
+    while collected < maxCollect and scanned < maxScan do
         local s = lower:find(needle, init, true)
         if not s then break end
         s = s + 1
@@ -965,7 +1000,7 @@ function DB.search(kind, query, filter, limit)
     -- cannot stall the frame.
     collected = 0
     init = 1
-    while collected < maxCollect do
+    while collected < maxCollect and scanned < maxScan do
         local s = lower:find(first, init, true)
         if not s then break end
         local n = entryAt(ix, s)
@@ -975,13 +1010,21 @@ function DB.search(kind, query, filter, limit)
         init = lineEnd + 2
         if init > #lower then break end
     end
-    local names = ix.names
+    local nameCache = {}
+    local function nameOf(x)
+        local v = nameCache[x]
+        if not v then
+            v = DB.nameAt(ix, x)
+            nameCache[x] = v
+        end
+        return v
+    end
     for r = 1, 4 do
         local b = buckets[r]
         if #out >= limit then break end
         if #b <= 2000 then
             table.sort(b, function(x, y)
-                local nx, ny = names[x], names[y]
+                local nx, ny = nameOf(x), nameOf(y)
                 if nx ~= ny then return nx < ny end
                 return x < y
             end)
@@ -1043,7 +1086,7 @@ function DB.itemName(id)
     local tier, base = D.tierOf(id)
     local n, ix = DB.itemEntry(base)
     if not n then return 'Item ' .. tostring(id) end
-    local name = ix.names[n]
+    local name = DB.nameAt(ix, n)
     if tier == 'E' then return name .. ' (Enchanted)' end
     if tier == 'L' then return name .. ' (Legendary)' end
     return name
@@ -1072,14 +1115,14 @@ function DB.npcName(id)
     local ix = DB.kinds.npcs
     local n = ix and ix.loaded and ix.byId[tonumber(id) or -1]
     if not n then return 'NPC ' .. tostring(id) end
-    return ix.names[n]
+    return DB.nameAt(ix, n)
 end
 
 function DB.npcInfo(id)
     local ix = DB.kinds.npcs
     local n = ix and ix.loaded and ix.byId[tonumber(id) or -1]
     if not n then return nil end
-    return { name = ix.names[n], lvl = ix.lvl[n], zone = ix.zone[n], ref = ix.refs[n] }
+    return { name = DB.nameAt(ix, n), lvl = ix.lvl[n], zone = ix.zone[n], ref = ix.refs[n] }
 end
 
 function DB.npcRecord(id)
@@ -1096,7 +1139,7 @@ function DB.spellName(id)
         if nm and nm ~= '' and nm ~= 'NULL' then return nm end
         return 'Spell ' .. tostring(id)
     end
-    return ix.names[n]
+    return DB.nameAt(ix, n)
 end
 
 function DB.spellRecord(id)
@@ -1151,7 +1194,7 @@ function DB.zoneName(short)
     local ix = DB.kinds.zones
     local n = ix and ix.loaded and ix.byId[short]
     if not n then return short end
-    return ix.names[n]
+    return DB.nameAt(ix, n)
 end
 
 -- ----------------------------------------------------------------------------
@@ -1159,9 +1202,9 @@ end
 -- ----------------------------------------------------------------------------
 local S = {
     tab      = 'items',
-    items    = { query = '', results = {}, sel = nil, tier = 'B', dirty = false, scroll = false },
-    npcs     = { query = '', results = {}, sel = nil, zone = '', minLvl = 0, maxLvl = 0, dirty = false },
-    spells   = { query = '', results = {}, sel = nil, class = 0, minLvl = 0, maxLvl = 0, dirty = false },
+    items    = { query = '', results = {}, labels = {}, sel = nil, tier = 'B', dirty = false, dirtyAt = 0, scroll = false },
+    npcs     = { query = '', results = {}, labels = {}, sel = nil, zone = '', minLvl = 0, maxLvl = 0, dirty = false, dirtyAt = 0 },
+    spells   = { query = '', results = {}, labels = {}, sel = nil, class = 0, minLvl = 0, maxLvl = 0, dirty = false, dirtyAt = 0 },
     history  = {},
     histPos  = 0,
     pendingTab = nil,
@@ -1182,6 +1225,14 @@ local KIND_LABELS = { items = 'Items', npcs = 'NPCs', spells = 'Spells' }
 local function queueAll()
     DB.ensure('zones')
     for _, k in ipairs(KINDS) do DB.ensure(k) end
+end
+
+-- Search text / filter change from the window: the search itself runs on
+-- the tick once the input has been quiet for SEARCH_DEBOUNCE seconds.
+local SEARCH_DEBOUNCE = 0.15
+local function markDirty(st)
+    st.dirty = true
+    st.dirtyAt = os.clock()
 end
 
 local function stepLoading()
@@ -1253,6 +1304,35 @@ local function openPopout(kind, id)
     return pop
 end
 
+local function spellClassesText(classes)
+    local out = {}
+    for c, l in (classes or ''):gmatch('(%d+):(%d+)') do
+        out[#out + 1] = string.format('%s %s', D.CLASSES[tonumber(c)] or ('C' .. c), l)
+    end
+    return table.concat(out, '  ')
+end
+
+-- Result row label, built once per search (drawResults used to format it
+-- for every row on every frame).
+local function resultLabel(kind, ix, n)
+    local label = DB.nameAt(ix, n)
+    if kind == 'npcs' then
+        local z = ix.zone[n]
+        label = string.format('%s  (%d, %s)', label, ix.lvl[n], z ~= '' and z or '-')
+    elseif kind == 'spells' then
+        local cls = ix.extra[n] or ''
+        local first = cls:match('^(%d+):(%d+)')
+        if first then
+            local cnt = select(2, cls:gsub(':', ''))
+            label = string.format('%s  (%s)', label, cnt > 3 and (cnt .. ' classes') or spellClassesText(cls))
+        end
+    elseif kind == 'items' then
+        local tiers = ix.extra[n] or ''
+        if tiers:find('L', 1, true) then label = label .. '  [B/E/L]' elseif tiers:find('E', 1, true) then label = label .. '  [B/E]' end
+    end
+    return label
+end
+
 local function runSearch(kind)
     local st = S[kind]
     st.dirty = false
@@ -1291,6 +1371,24 @@ local function runSearch(kind)
         end
     end
     st.results = DB.search(kind, st.query, filter, DB.MAX_RESULTS)
+    local ix = DB.kinds[kind]
+    local labels = {}
+    if ix and ix.loaded then
+        for i, n in ipairs(st.results) do labels[i] = resultLabel(kind, ix, n) end
+    end
+    st.labels = labels
+end
+
+-- Tick side of markDirty: one search per kind once its index is in and
+-- the input has settled.
+local function runPendingSearches()
+    local now = os.clock()
+    for _, kind in ipairs(KINDS) do
+        local st = S[kind]
+        if st.dirty and DB.isLoaded(kind) and (now - (st.dirtyAt or 0)) >= SEARCH_DEBOUNCE then
+            runSearch(kind)
+        end
+    end
 end
 
 -- Public entry points -------------------------------------------------------
@@ -1311,6 +1409,7 @@ function plugin.search(kind, text)
     S.pendingTab = kind
     S[kind].query = tostring(text or '')
     S[kind].dirty = true
+    S[kind].dirtyAt = 0
     ctrl.show_gamedb = true
     return true
 end
@@ -1339,14 +1438,25 @@ function plugin.closePopouts()
 end
 
 -- Live spawn -> database NPC id (nil when the NPC index is not loaded or the
--- spawn is unknown). Cached per spawn id for the session.
-local spawnNpcCache = {}
+-- spawn is unknown). Hits are cached per spawn id until the zone changes
+-- (spawn ids are per zone instance); misses only for a few seconds, and a
+-- spawn that could not be read at all (out of range) is not cached.
+local spawnNpcCache = { hits = {}, misses = {}, n = 0 }
+local SPAWN_MISS_TTL = 10.0
 function plugin.npcIdForSpawn(spawnId)
     spawnId = tonumber(spawnId)
     if not spawnId or spawnId <= 0 or not mq then return nil end
-    local cached = spawnNpcCache[spawnId]
-    if cached ~= nil then return cached or nil end
-    if not DB.isLoaded('npcs') then return nil end
+    local hit = spawnNpcCache.hits[spawnId]
+    if hit then return hit end
+    local now = os.clock()
+    local missAt = spawnNpcCache.misses[spawnId]
+    if missAt and (now - missAt) < SPAWN_MISS_TTL then return nil end
+    if not DB.isLoaded('npcs') then
+        -- first lookup starts the (sliced) load
+        DB.ensure('zones')
+        DB.ensure('npcs')
+        return nil
+    end
     local name, level, zone = nil, 0, ''
     pcall(function()
         local sp = mq.TLO.Spawn(spawnId)
@@ -1356,11 +1466,20 @@ function plugin.npcIdForSpawn(spawnId)
         end
         zone = mq.TLO.Zone.ShortName() or ''
     end)
-    local id = name and DB.npcIdFor(name, zone, level) or nil
-    if next(spawnNpcCache) and (spawnNpcCache.n or 0) > 500 then spawnNpcCache = {} end
-    spawnNpcCache[spawnId] = id or false
-    spawnNpcCache.n = (spawnNpcCache.n or 0) + 1
+    if not name or name == '' then return nil end
+    local id = DB.npcIdFor(name, zone, level)
+    if spawnNpcCache.n > 500 then spawnNpcCache = { hits = {}, misses = {}, n = 0 } end
+    spawnNpcCache.n = spawnNpcCache.n + 1
+    if id then
+        spawnNpcCache.hits[spawnId] = id
+    else
+        spawnNpcCache.misses[spawnId] = now
+    end
     return id
+end
+
+local function clearSpawnCache()
+    spawnNpcCache = { hits = {}, misses = {}, n = 0 }
 end
 
 -- Cast tracker hook: reason a detrimental spell is wasted on this spawn, or
@@ -1387,7 +1506,14 @@ end
 local summaryCache, summaryCount = {}, 0
 function plugin.itemSummary(id)
     local _, base = D.tierOf(tonumber(id) or 0)
-    if base <= 0 or not DB.isLoaded('items') or not DB.isLoaded('npcs') then return nil end
+    if base <= 0 then return nil end
+    if not DB.isLoaded('items') or not DB.isLoaded('npcs') then
+        -- first lookup starts the (sliced) load; nil until it is in
+        DB.ensure('zones')
+        DB.ensure('items')
+        DB.ensure('npcs')
+        return nil
+    end
     local cached = summaryCache[base]
     if cached ~= nil then return cached or nil end
     local rec = DB.itemRecord(base, 'B')
@@ -1424,7 +1550,7 @@ function plugin.itemSummary(id)
         if #made > 0 or #usedin > 0 then
             local parts = {}
             if #made > 0 then
-                parts[#parts + 1] = string.format('made by %s (trivial %s)', D.skillName(tonumber(made[1][3]) or 0), made[1][5] ~= '' and made[1][5] or '?')
+                parts[#parts + 1] = string.format('made by %s (trivial %s)', D.tradeskillName(tonumber(made[1][3]) or 0), made[1][5] ~= '' and made[1][5] or '?')
             end
             if #usedin > 0 then parts[#parts + 1] = string.format('used in %d recipe%s', #usedin + (usedin.more or 0), (#usedin + (usedin.more or 0)) == 1 and '' or 's') end
             lines[#lines + 1] = 'Tradeskill: ' .. table.concat(parts, '; ')
@@ -1445,14 +1571,18 @@ end
 -- Spell id for a spell name (exact, case-insensitive); when several spells
 -- share the name, prefers one a class learns at `level`. nil when unknown.
 function plugin.spellIdByName(name, level)
+    if not name or name == '' then return nil end
     local ix = DB.kinds.spells
-    if not ix or not ix.loaded or not name or name == '' then return nil end
+    if not ix or not ix.loaded then
+        DB.ensure('spells')
+        return nil
+    end
     local hits = DB.search('spells', name, nil, 20)
     local want = tostring(name):lower()
     level = tonumber(level) or 0
     local best = nil
     for _, n in ipairs(hits) do
-        if ix.names[n]:lower() == want then
+        if DB.nameAt(ix, n):lower() == want then
             if level > 0 and (ix.extra[n] or ''):find(':' .. level .. '%f[%D]') then return ix.ids[n] end
             best = best or ix.ids[n]
         end
@@ -1465,7 +1595,14 @@ end
 local spellSummaryCache, spellSummaryCount = {}, 0
 function plugin.spellSummary(id)
     id = tonumber(id)
-    if not id or not DB.isLoaded('spells') or not DB.isLoaded('items') or not DB.isLoaded('npcs') then return nil end
+    if not id then return nil end
+    if not DB.isLoaded('spells') or not DB.isLoaded('items') or not DB.isLoaded('npcs') then
+        DB.ensure('zones')
+        DB.ensure('spells')
+        DB.ensure('items')
+        DB.ensure('npcs')
+        return nil
+    end
     local cached = spellSummaryCache[id]
     if cached ~= nil then return cached or nil end
     local rec = DB.spellRecord(id)
@@ -1625,39 +1762,66 @@ end
 -- ----------------------------------------------------------------------------
 -- Item card
 -- ----------------------------------------------------------------------------
-local function spellLinkLine(label, spellId, extra)
-    if (tonumber(spellId) or 0) <= 0 then return end
-    muted(label .. ':')
-    ImGui.SameLine()
-    if link(DB.spellName(spellId), 'spell' .. label .. spellId) then showEntry('spells', spellId) end
-    if extra and extra ~= '' then
-        ImGui.SameLine()
-        muted(extra)
+-- Cards are decoded once per (kind, id, tier) into DB.cards and drawn from
+-- that: every list field parsed, every cross-referenced name resolved and
+-- every label formatted at build time, so a frame only walks plain tables.
+-- The main pane and the popouts share entries; a selection change looks up
+-- (or builds) another entry, DB.setDir() drops them all.
+local CARD_CACHE_MAX = 16
+
+-- Memoised numeric field reader for one record.
+local function numReader(rec)
+    local memo = {}
+    return function(k)
+        local v = memo[k]
+        if v == nil then
+            v = ENC.num(rec, k)
+            memo[k] = v
+        end
+        return v
     end
 end
 
-local function drawItemStats(rec)
-    local n = function(k) return ENC.num(rec, k) end
+local function moreText(list)
+    return list.more and (' of ' .. (#list + list.more)) or ''
+end
+
+-- ---- item ------------------------------------------------------------------
+local ELEM_NAMES = { [1] = 'Magic', [2] = 'Fire', [3] = 'Cold', [4] = 'Poison', [5] = 'Disease', [6] = 'Chromatic', [7] = 'Prismatic', [8] = 'Physical', [9] = 'Corruption' }
+local STAT_HEROIC = { { 'astr', 'heroic_str', 'STR' }, { 'asta', 'heroic_sta', 'STA' }, { 'aagi', 'heroic_agi', 'AGI' }, { 'adex', 'heroic_dex', 'DEX' },
+                      { 'awis', 'heroic_wis', 'WIS' }, { 'aint', 'heroic_int', 'INT' }, { 'acha', 'heroic_cha', 'CHA' } }
+local RESIST_HEROIC = { { 'mr', 'heroic_mr', 'Magic' }, { 'fr', 'heroic_fr', 'Fire' }, { 'cr', 'heroic_cr', 'Cold' }, { 'dr', 'heroic_dr', 'Disease' },
+                        { 'pr', 'heroic_pr', 'Poison' }, { 'svcorruption', 'heroic_svcorrup', 'Corruption' } }
+local MOD_STATS = { { 'attack', 'Attack' }, { 'haste', 'Haste', '%' }, { 'regen', 'HP Regen' }, { 'manaregen', 'Mana Regen' }, { 'enduranceregen', 'End Regen' },
+                    { 'accuracy', 'Accuracy' }, { 'avoidance', 'Avoidance' }, { 'shielding', 'Shielding', '%' }, { 'spellshield', 'Spell Shield', '%' },
+                    { 'strikethrough', 'Strikethrough', '%' }, { 'stunresist', 'Stun Resist', '%' }, { 'dotshielding', 'DoT Shielding', '%' },
+                    { 'damageshield', 'Damage Shield' }, { 'dsmitigation', 'DS Mitigation' }, { 'combateffects', 'Combat Effects' },
+                    { 'healamt', 'Heal Amount' }, { 'spelldmg', 'Spell Dmg' }, { 'clairvoyance', 'Clairvoyance' } }
+local ITEM_FLAGS = { { 'magic', 'MAGIC' }, { 'NODROP', 'NO DROP' }, { 'NORENT', 'NO RENT' }, { 'attuneable', 'ATTUNEABLE' }, { 'questitemflag', 'QUEST' },
+                     { 'heirloom', 'HEIRLOOM' }, { 'artifactflag', 'ARTIFACT' }, { 'placeable', 'PLACEABLE' }, { 'fvnodrop', 'FV NO DROP' },
+                     { 'notransfer', 'NO TRANSFER' }, { 'nopet', 'NO PET' }, { 'epicitem', 'EPIC' }, { 'augdistiller', 'AUG DISTILLER' } }
+
+-- Stats block of an item record: labelled lines, the three stat columns and
+-- the effect links, all as strings.
+local function buildItemStats(rec)
+    local n = numReader(rec)
+    local st = { lines = {}, cols = { {}, {}, {} }, effects = {} }
     local flags = {}
     if n('magic') > 0 then flags[#flags + 1] = 'MAGIC' end
     if n('loregroup') ~= 0 then flags[#flags + 1] = 'LORE' end
-    if n('NODROP') > 0 then flags[#flags + 1] = 'NO DROP' end
-    if n('NORENT') > 0 then flags[#flags + 1] = 'NO RENT' end
-    if n('attuneable') > 0 then flags[#flags + 1] = 'ATTUNEABLE' end
-    if n('questitemflag') > 0 then flags[#flags + 1] = 'QUEST' end
-    if n('heirloom') > 0 then flags[#flags + 1] = 'HEIRLOOM' end
-    if n('artifactflag') > 0 then flags[#flags + 1] = 'ARTIFACT' end
-    if n('placeable') > 0 then flags[#flags + 1] = 'PLACEABLE' end
-    if n('fvnodrop') > 0 then flags[#flags + 1] = 'FV NO DROP' end
-    if n('notransfer') > 0 then flags[#flags + 1] = 'NO TRANSFER' end
-    if n('nopet') > 0 then flags[#flags + 1] = 'NO PET' end
-    if n('epicitem') > 0 then flags[#flags + 1] = 'EPIC' end
-    if n('augdistiller') > 0 then flags[#flags + 1] = 'AUG DISTILLER' end
-    if #flags > 0 then warn(table.concat(flags, '  ')) end
+    for _, f in ipairs(ITEM_FLAGS) do
+        if f[1] ~= 'magic' and n(f[1]) > 0 then flags[#flags + 1] = f[2] end
+    end
+    st.flags = #flags > 0 and table.concat(flags, '  ') or nil
 
     local itemtype = n('itemtype')
     local isAug = itemtype == 54
     local isWeapon = (itemtype <= 5) or itemtype == 7 or itemtype == 18 or itemtype == 27 or itemtype == 35 or itemtype == 45
+    local lines = st.lines
+    local function labelled(label, value)
+        if value == nil or value == '' or value == 0 then return end
+        lines[#lines + 1] = { label, tostring(value) }
+    end
     local slots = D.slotsText(n('slots'))
     labelled('Slot', slots ~= '' and slots or nil)
     local typeText = D.itemTypeName(itemtype)
@@ -1669,73 +1833,48 @@ local function drawItemStats(rec)
         local s = ''
         if n('reqlevel') > 0 then s = 'Required Level: ' .. n('reqlevel') end
         if n('reclevel') > 0 then s = s .. (s ~= '' and '   ' or '') .. 'Recommended Level: ' .. n('reclevel') end
-        txt(s)
+        lines[#lines + 1] = { nil, s }
     end
     labelled('Class', D.classesText(n('classes')))
     labelled('Race', D.racesText(n('races')))
     if n('deity') > 0 then labelled('Deity', D.deityName(n('deity'))) end
 
-    -- combat + stats table
-    local tableFlags = ImGuiTableFlags.SizingFixedFit
-    if ImGui.BeginTable('##itemstats', 6, tableFlags) then
-        local rows = {}
-        local function add(col, label, value) rows[#rows + 1] = { col, label, value } end
-        if n('ac') ~= 0 then add(1, 'AC', n('ac')) end
-        if isWeapon and n('damage') > 0 then
-            add(1, 'Damage', n('damage'))
-            add(1, 'Delay', n('delay'))
-            if n('delay') > 0 then add(1, 'Ratio', string.format('%.3f', n('damage') / n('delay'))) end
-        end
-        if n('range') > 0 then add(1, 'Range', n('range')) end
-        if n('backstabdmg') > 0 then add(1, 'Backstab Dmg', n('backstabdmg')) end
-        if n('elemdmgamt') > 0 then add(1, ({ [1] = 'Magic', [2] = 'Fire', [3] = 'Cold', [4] = 'Poison', [5] = 'Disease', [6] = 'Chromatic', [7] = 'Prismatic', [8] = 'Physical', [9] = 'Corruption' })[n('elemdmgtype')] or 'Elem', n('elemdmgamt')) end
-        if n('banedmgamt') > 0 then add(1, 'Bane ' .. D.bodyTypeName(n('banedmgbody')), n('banedmgamt')) end
-        if n('banedmgraceamt') > 0 then add(1, 'Bane ' .. D.raceName(n('banedmgrace')), n('banedmgraceamt')) end
-        if n('hp') ~= 0 then add(1, 'HP', fmtSigned(n('hp'))) end
-        if n('mana') ~= 0 then add(1, 'Mana', fmtSigned(n('mana'))) end
-        if n('endur') ~= 0 then add(1, 'Endurance', fmtSigned(n('endur'))) end
-        for _, s in ipairs({ { 'astr', 'heroic_str', 'STR' }, { 'asta', 'heroic_sta', 'STA' }, { 'aagi', 'heroic_agi', 'AGI' }, { 'adex', 'heroic_dex', 'DEX' },
-                             { 'awis', 'heroic_wis', 'WIS' }, { 'aint', 'heroic_int', 'INT' }, { 'acha', 'heroic_cha', 'CHA' } }) do
-            local v = fmtStatHeroic(n(s[1]), n(s[2]))
-            if v then add(2, s[3], v) end
-        end
-        for _, s in ipairs({ { 'mr', 'heroic_mr', 'Magic' }, { 'fr', 'heroic_fr', 'Fire' }, { 'cr', 'heroic_cr', 'Cold' }, { 'dr', 'heroic_dr', 'Disease' },
-                             { 'pr', 'heroic_pr', 'Poison' }, { 'svcorruption', 'heroic_svcorrup', 'Corruption' } }) do
-            local v = fmtStatHeroic(n(s[1]), n(s[2]))
-            if v then add(3, s[3], v) end
-        end
-        for _, s in ipairs({ { 'attack', 'Attack' }, { 'haste', 'Haste', '%' }, { 'regen', 'HP Regen' }, { 'manaregen', 'Mana Regen' }, { 'enduranceregen', 'End Regen' },
-                             { 'accuracy', 'Accuracy' }, { 'avoidance', 'Avoidance' }, { 'shielding', 'Shielding', '%' }, { 'spellshield', 'Spell Shield', '%' },
-                             { 'strikethrough', 'Strikethrough', '%' }, { 'stunresist', 'Stun Resist', '%' }, { 'dotshielding', 'DoT Shielding', '%' },
-                             { 'damageshield', 'Damage Shield' }, { 'dsmitigation', 'DS Mitigation' }, { 'combateffects', 'Combat Effects' },
-                             { 'healamt', 'Heal Amount' }, { 'spelldmg', 'Spell Dmg' }, { 'clairvoyance', 'Clairvoyance' } }) do
-            local v = n(s[1])
-            if v ~= 0 then add(3, s[2], fmtSigned(v) .. (s[3] or '')) end
-        end
-        if n('skillmodvalue') ~= 0 then add(3, D.skillName(n('skillmodtype')), fmtSigned(n('skillmodvalue')) .. '%') end
-        -- lay out: three column pairs
-        local cols = { {}, {}, {} }
-        for _, r in ipairs(rows) do table.insert(cols[r[1]], r) end
-        local maxRows = math.max(#cols[1], #cols[2], #cols[3])
-        for i = 1, maxRows do
-            ImGui.TableNextRow()
-            for c = 1, 3 do
-                local r = cols[c][i]
-                ImGui.TableSetColumnIndex((c - 1) * 2)
-                if r then muted(r[2] .. ':') end
-                ImGui.TableSetColumnIndex((c - 1) * 2 + 1)
-                if r then txt(r[3]) end
-            end
-        end
-        ImGui.EndTable()
+    local cols = st.cols
+    local function add(col, label, value) table.insert(cols[col], { label .. ':', tostring(value) }) end
+    if n('ac') ~= 0 then add(1, 'AC', n('ac')) end
+    if isWeapon and n('damage') > 0 then
+        add(1, 'Damage', n('damage'))
+        add(1, 'Delay', n('delay'))
+        if n('delay') > 0 then add(1, 'Ratio', string.format('%.3f', n('damage') / n('delay'))) end
     end
+    if n('range') > 0 then add(1, 'Range', n('range')) end
+    if n('backstabdmg') > 0 then add(1, 'Backstab Dmg', n('backstabdmg')) end
+    if n('elemdmgamt') > 0 then add(1, ELEM_NAMES[n('elemdmgtype')] or 'Elem', n('elemdmgamt')) end
+    if n('banedmgamt') > 0 then add(1, 'Bane ' .. D.bodyTypeName(n('banedmgbody')), n('banedmgamt')) end
+    if n('banedmgraceamt') > 0 then add(1, 'Bane ' .. D.raceName(n('banedmgrace')), n('banedmgraceamt')) end
+    if n('hp') ~= 0 then add(1, 'HP', fmtSigned(n('hp'))) end
+    if n('mana') ~= 0 then add(1, 'Mana', fmtSigned(n('mana'))) end
+    if n('endur') ~= 0 then add(1, 'Endurance', fmtSigned(n('endur'))) end
+    for _, s in ipairs(STAT_HEROIC) do
+        local v = fmtStatHeroic(n(s[1]), n(s[2]))
+        if v then add(2, s[3], v) end
+    end
+    for _, s in ipairs(RESIST_HEROIC) do
+        local v = fmtStatHeroic(n(s[1]), n(s[2]))
+        if v then add(3, s[3], v) end
+    end
+    for _, s in ipairs(MOD_STATS) do
+        local v = n(s[1])
+        if v ~= 0 then add(3, s[2], fmtSigned(v) .. (s[3] or '')) end
+    end
+    if n('skillmodvalue') ~= 0 then add(3, D.skillName(n('skillmodtype')), fmtSigned(n('skillmodvalue')) .. '%') end
+    st.maxRows = math.max(#cols[1], #cols[2], #cols[3])
 
-    -- effects
-    local effects = false
+    -- effects: { label, spellId, spellName, extra }
+    local effects = st.effects
     local function eff(label, idKey, typeKey, lvlKey, extraFn)
         local sid = n(idKey)
         if sid <= 0 then return end
-        effects = true
         local extra = {}
         if typeKey and n(typeKey) > 0 and D.CLICK_TYPES[n(typeKey)] and D.CLICK_TYPES[n(typeKey)] ~= '' and label == 'Effect' then extra[#extra + 1] = D.CLICK_TYPES[n(typeKey)] end
         if lvlKey and n(lvlKey) > 0 then extra[#extra + 1] = 'Level ' .. n(lvlKey) end
@@ -1743,7 +1882,7 @@ local function drawItemStats(rec)
             local e = extraFn()
             if e and e ~= '' then extra[#extra + 1] = e end
         end
-        spellLinkLine(label, sid, #extra > 0 and ('(' .. table.concat(extra, ', ') .. ')') or '')
+        effects[#effects + 1] = { label, sid, DB.spellName(sid), #extra > 0 and ('(' .. table.concat(extra, ', ') .. ')') or '' }
     end
     eff('Effect', 'clickeffect', 'clicktype', 'clicklevel2', function()
         local parts = {}
@@ -1757,182 +1896,500 @@ local function drawItemStats(rec)
     eff('Focus', 'focuseffect', nil, 'focuslevel2')
     eff('Scroll', 'scrolleffect', nil, 'scrolllevel2')
     eff('Bard', 'bardeffect', nil, 'bardlevel2')
-    if n('bardtype') > 0 then labelled('Instrument', string.format('%s (+%d%%)', D.skillName(n('bardtype')), n('bardvalue'))) end
 
-    -- augment slots
+    local tail = {}
+    st.tail = tail
+    if n('bardtype') > 0 then tail[#tail + 1] = { 'Instrument', string.format('%s (+%d%%)', D.skillName(n('bardtype')), n('bardvalue')) } end
     local augSlots = {}
     for i = 1, 6 do
         local t = n('augslot' .. i .. 'type')
         if t > 0 then augSlots[#augSlots + 1] = string.format('%d (%s)', t, D.AUG_TYPES[t] or ('Type ' .. t)) end
     end
-    if #augSlots > 0 then labelled('Aug Slots', table.concat(augSlots, ', ')) end
+    if #augSlots > 0 then tail[#tail + 1] = { 'Aug Slots', table.concat(augSlots, ', ') } end
     if isAug then
-        labelled('Aug Type', D.augTypesText(n('augtype')))
-        if n('augrestrict') > 0 then labelled('Aug Restriction', tostring(n('augrestrict'))) end
+        local at = D.augTypesText(n('augtype'))
+        if at ~= '' then tail[#tail + 1] = { 'Aug Type', at } end
+        if n('augrestrict') > 0 then tail[#tail + 1] = { 'Aug Restriction', tostring(n('augrestrict')) } end
     end
     if n('bagslots') > 0 then
-        labelled('Container', string.format('%d slots, up to %s items, %d%% weight reduction', n('bagslots'), D.sizeName(n('bagsize')), n('bagwr')))
+        tail[#tail + 1] = { 'Container', string.format('%d slots, up to %s items, %d%% weight reduction', n('bagslots'), D.sizeName(n('bagsize')), n('bagwr')) }
     end
-    if n('stackable') > 0 and n('stacksize') > 1 then labelled('Stack', tostring(n('stacksize'))) end
-    if n('price') > 0 then labelled('Value', D.moneyText(n('price'))) end
-    if n('ldonprice') > 0 then labelled('LDoN', string.format('%d points (theme %d)', n('ldonprice'), n('ldontheme'))) end
-    if n('tradeskills') > 0 then muted('Tradeskill item') end
-    local lore = ENC.str(rec, 'lore')
-    if lore ~= '' then
-        ImGui.PushStyleColor(ImGuiCol.Text, C.MUTED[1], C.MUTED[2], C.MUTED[3], C.MUTED[4])
-        ImGui.TextWrapped(lore)
-        ImGui.PopStyleColor()
-    end
-    if not effects and n('book') > 0 then muted('Book') end
+    if n('stackable') > 0 and n('stacksize') > 1 then tail[#tail + 1] = { 'Stack', tostring(n('stacksize')) } end
+    if n('price') > 0 then tail[#tail + 1] = { 'Value', D.moneyText(n('price')) } end
+    if n('ldonprice') > 0 then tail[#tail + 1] = { 'LDoN', string.format('%d points (theme %d)', n('ldonprice'), n('ldontheme')) } end
+    st.tradeskill = n('tradeskills') > 0
+    st.lore = ENC.str(rec, 'lore')
+    st.book = (#effects == 0) and n('book') > 0
+    return st
 end
 
-local function drawItemSources(base)
+local function drawItemStats(st)
+    if st.flags then warn(st.flags) end
+    for _, l in ipairs(st.lines) do
+        if l[1] then labelled(l[1], l[2]) else txt(l[2]) end
+    end
+    if ImGui.BeginTable('##itemstats', 6, ImGuiTableFlags.SizingFixedFit) then
+        local cols = st.cols
+        for i = 1, st.maxRows do
+            ImGui.TableNextRow()
+            for c = 1, 3 do
+                local r = cols[c][i]
+                ImGui.TableSetColumnIndex((c - 1) * 2)
+                if r then muted(r[1]) end
+                ImGui.TableSetColumnIndex((c - 1) * 2 + 1)
+                if r then txt(r[2]) end
+            end
+        end
+        ImGui.EndTable()
+    end
+    for _, e in ipairs(st.effects) do
+        muted(e[1] .. ':')
+        ImGui.SameLine()
+        if link(e[3], 'spell' .. e[1] .. e[2]) then showEntry('spells', e[2]) end
+        if e[4] ~= '' then
+            ImGui.SameLine()
+            muted(e[4])
+        end
+    end
+    for _, l in ipairs(st.tail) do labelled(l[1], l[2]) end
+    if st.tradeskill then muted('Tradeskill item') end
+    if st.lore ~= '' then
+        ImGui.PushStyleColor(ImGuiCol.Text, C.MUTED[1], C.MUTED[2], C.MUTED[3], C.MUTED[4])
+        ImGui.TextWrapped(st.lore)
+        ImGui.PopStyleColor()
+    end
+    if st.book then muted('Book') end
+end
+
+-- Sources of the base record, names resolved: drops, quests, recipes,
+-- gathering, vendors.
+local function buildItemSources(base)
+    local src = {}
     local drops = ENC.list(base, 'drops')
+    src.drops = {}
+    for _, d in ipairs(drops) do
+        local nid = tonumber(d[1]) or 0
+        local info = DB.npcInfo(nid)
+        src.drops[#src.drops + 1] = { nid = nid, name = info and info.name or ('NPC ' .. nid), lvl = info and tostring(info.lvl) or '',
+                                      zone = info and DB.zoneName(info.zone) or '', chance = (d[2] or '') .. '%' }
+    end
+    src.dropsHeader = string.format('Drops From (%d%s)', #drops, moreText(drops))
     local quests = ENC.list(base, 'quests')
+    src.quests = {}
+    for _, q in ipairs(quests) do
+        local nid = tonumber(q[1]) or 0
+        src.quests[#src.quests + 1] = { nid = nid, name = nid > 0 and DB.npcName(nid) or (q[2] ~= '' and q[2] or 'Unknown NPC'),
+                                        zone = q[3] == 'global' and 'Global' or DB.zoneName(q[3]), reward = (q[4] == 'R') }
+    end
     local made = ENC.list(base, 'made')
+    src.made = {}
+    for _, r in ipairs(made) do
+        local skill = D.tradeskillName(tonumber(r[3]) or 0)
+        local line = string.format('%s  -  %s', r[2] ~= '' and r[2] or ('Recipe ' .. r[1]), skill)
+        local reqs = {}
+        if (tonumber(r[4]) or 0) > 0 then reqs[#reqs + 1] = 'skill ' .. r[4] end
+        if (tonumber(r[5]) or 0) > 0 then reqs[#reqs + 1] = 'trivial ' .. r[5] end
+        if r[6] == '1' then reqs[#reqs + 1] = 'no fail' end
+        if r[7] == '1' then reqs[#reqs + 1] = 'must learn' end
+        if r[9] == '1' then reqs[#reqs + 1] = 'quest' end
+        if #reqs > 0 then line = line .. ' (' .. table.concat(reqs, ', ') .. ')' end
+        local rec = { line = line, learn = nil, conts = nil, comps = {}, yields = nil }
+        local learnId = tonumber(r[8]) or 0
+        if learnId > 0 then rec.learn = { id = learnId, name = DB.itemName(learnId) } end
+        local conts = ENC.nested(r[11])
+        if #conts > 0 then
+            local names = {}
+            for _, c in ipairs(conts) do
+                local cid = tonumber(c[1]) or 0
+                names[#names + 1] = cid > 0 and DB.itemName(cid) or (c[2] or 'container')
+            end
+            rec.conts = 'In: ' .. table.concat(names, ' / ')
+        end
+        for _, c in ipairs(ENC.nested(r[10])) do
+            local cid = tonumber(c[1]) or 0
+            rec.comps[#rec.comps + 1] = { id = cid, label = string.format('%s x%d', DB.itemName(cid), tonumber(c[2]) or 1) }
+        end
+        local results = ENC.nested(r[12])
+        if #results > 1 then
+            local names = {}
+            for _, rr in ipairs(results) do names[#names + 1] = DB.itemName(tonumber(rr[1]) or 0) end
+            rec.yields = 'Yields: ' .. table.concat(names, ', ')
+        end
+        src.made[#src.made + 1] = rec
+    end
     local usedin = ENC.list(base, 'usedin')
-    local src = ENC.list(base, 'src')
+    src.usedin = {}
+    for _, u in ipairs(usedin) do
+        local rid = tonumber(u[4]) or 0
+        src.usedin[#src.usedin + 1] = { rid = rid, name = rid > 0 and DB.itemName(rid) or ('Recipe ' .. u[1]), skill = D.tradeskillName(tonumber(u[2]) or 0), trivial = u[3] }
+    end
+    src.usedinHeader = string.format('Tradeskill: Used In (%d%s)', #usedin, moreText(usedin))
+    src.gathered = {}
+    for _, g in ipairs(ENC.list(base, 'src')) do
+        local kind = ({ F = 'Foraged in', W = 'Fished in', G = 'Ground spawn in' })[g[1]] or g[1]
+        local chance = (g[3] and g[3] ~= '') and (' (' .. g[3] .. '%)') or ''
+        src.gathered[#src.gathered + 1] = string.format('%s %s%s', kind, DB.zoneName(g[2]), chance)
+    end
     local sold = ENC.list(base, 'sold')
-    local any = #drops + #quests + #made + #usedin + #src + #sold
-    if any == 0 then
+    src.sold = {}
+    for _, v in ipairs(sold) do
+        local nid = tonumber(v[1]) or 0
+        local info = DB.npcInfo(nid)
+        src.sold[#src.sold + 1] = { nid = nid, label = string.format('%s  -  %s', info and info.name or ('NPC ' .. nid), info and DB.zoneName(info.zone) or '') }
+    end
+    src.soldHeader = string.format('Sold By (%d%s)', #sold, moreText(sold))
+    src.any = #src.drops + #src.quests + #src.made + #src.usedin + #src.gathered + #src.sold
+    return src
+end
+
+local function drawItemSources(src)
+    if src.any == 0 then
         header('Sources')
         muted('No known drop, quest, tradeskill or vendor source.')
         return
     end
 
-    if #drops > 0 then
-        header(string.format('Drops From (%d%s)', #drops, drops.more and (' of ' .. (#drops + drops.more)) or ''))
+    if #src.drops > 0 then
+        header(src.dropsHeader)
         if ImGui.BeginTable('##drops', 4, ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingStretchProp) then
             ImGui.TableSetupColumn('NPC', ImGuiTableColumnFlags.WidthStretch, 3)
             ImGui.TableSetupColumn('Lvl', ImGuiTableColumnFlags.WidthFixed, core.px(36))
             ImGui.TableSetupColumn('Zone', ImGuiTableColumnFlags.WidthStretch, 3)
             ImGui.TableSetupColumn('Chance', ImGuiTableColumnFlags.WidthFixed, core.px(60))
             ImGui.TableHeadersRow()
-            for _, d in ipairs(drops) do
-                local nid = tonumber(d[1]) or 0
-                local info = DB.npcInfo(nid)
+            for _, d in ipairs(src.drops) do
                 ImGui.TableNextRow()
                 ImGui.TableSetColumnIndex(0)
-                if link(info and info.name or ('NPC ' .. nid), 'drop' .. nid) then showEntry('npcs', nid) end
-                ImGui.TableSetColumnIndex(1); txt(info and info.lvl or '')
-                ImGui.TableSetColumnIndex(2); txt(info and DB.zoneName(info.zone) or '')
-                ImGui.TableSetColumnIndex(3); txt((d[2] or '') .. '%')
+                if link(d.name, 'drop' .. d.nid) then showEntry('npcs', d.nid) end
+                ImGui.TableSetColumnIndex(1); txt(d.lvl)
+                ImGui.TableSetColumnIndex(2); txt(d.zone)
+                ImGui.TableSetColumnIndex(3); txt(d.chance)
             end
             ImGui.EndTable()
         end
     end
 
-    if #quests > 0 then
+    if #src.quests > 0 then
         header('Quests')
         if ImGui.BeginTable('##quests', 3, ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingStretchProp) then
             ImGui.TableSetupColumn('NPC', ImGuiTableColumnFlags.WidthStretch, 3)
             ImGui.TableSetupColumn('Zone', ImGuiTableColumnFlags.WidthStretch, 3)
             ImGui.TableSetupColumn('Role', ImGuiTableColumnFlags.WidthFixed, core.px(70))
             ImGui.TableHeadersRow()
-            for _, q in ipairs(quests) do
-                local nid = tonumber(q[1]) or 0
+            for i, q in ipairs(src.quests) do
                 ImGui.TableNextRow()
                 ImGui.TableSetColumnIndex(0)
-                if nid > 0 then
-                    if link(DB.npcName(nid), 'q' .. nid .. q[4]) then showEntry('npcs', nid) end
+                if q.nid > 0 then
+                    if link(q.name, 'q' .. i) then showEntry('npcs', q.nid) end
                 else
-                    txt(q[2] ~= '' and q[2] or 'Unknown NPC')
+                    txt(q.name)
                 end
-                ImGui.TableSetColumnIndex(1); txt(q[3] == 'global' and 'Global' or DB.zoneName(q[3]))
+                ImGui.TableSetColumnIndex(1); txt(q.zone)
                 ImGui.TableSetColumnIndex(2)
-                if q[4] == 'R' then good('Reward') else warn('Turn-in') end
+                if q.reward then good('Reward') else warn('Turn-in') end
             end
             ImGui.EndTable()
         end
     end
 
-    if #made > 0 then
+    if #src.made > 0 then
         header('Tradeskill: Made By')
-        for i, r in ipairs(made) do
-            local skill = D.skillName(tonumber(r[3]) or 0)
-            local line = string.format('%s  -  %s', r[2] ~= '' and r[2] or ('Recipe ' .. r[1]), skill)
-            local reqs = {}
-            if (tonumber(r[4]) or 0) > 0 then reqs[#reqs + 1] = 'skill ' .. r[4] end
-            if (tonumber(r[5]) or 0) > 0 then reqs[#reqs + 1] = 'trivial ' .. r[5] end
-            if r[6] == '1' then reqs[#reqs + 1] = 'no fail' end
-            if r[7] == '1' then reqs[#reqs + 1] = 'must learn' end
-            if r[9] == '1' then reqs[#reqs + 1] = 'quest' end
-            if #reqs > 0 then line = line .. ' (' .. table.concat(reqs, ', ') .. ')' end
-            good(line)
-            if (tonumber(r[8]) or 0) > 0 then
+        for i, r in ipairs(src.made) do
+            good(r.line)
+            if r.learn then
                 ImGui.Indent(core.px(12))
                 muted('Learned from:')
                 ImGui.SameLine()
-                if link(DB.itemName(tonumber(r[8])), 'learn' .. i .. r[8]) then showEntry('items', tonumber(r[8])) end
+                if link(r.learn.name, 'learn' .. i) then showEntry('items', r.learn.id) end
                 ImGui.Unindent(core.px(12))
             end
-            local comps = ENC.nested(r[10])
-            local conts = ENC.nested(r[11])
-            local results = ENC.nested(r[12])
             ImGui.Indent(core.px(12))
-            if #conts > 0 then
-                local names = {}
-                for _, c in ipairs(conts) do
-                    local cid = tonumber(c[1]) or 0
-                    names[#names + 1] = cid > 0 and DB.itemName(cid) or (c[2] or 'container')
-                end
-                muted('In: ' .. table.concat(names, ' / '))
+            if r.conts then muted(r.conts) end
+            for ci, c in ipairs(r.comps) do
+                if link(c.label, 'comp' .. i .. '_' .. ci) then showEntry('items', c.id) end
             end
-            for ci, c in ipairs(comps) do
-                local cid = tonumber(c[1]) or 0
-                local cnt = tonumber(c[2]) or 1
-                if link(string.format('%s x%d', DB.itemName(cid), cnt), 'comp' .. i .. '_' .. ci) then showEntry('items', cid) end
-            end
-            if #results > 1 then
-                local names = {}
-                for _, rr in ipairs(results) do names[#names + 1] = DB.itemName(tonumber(rr[1]) or 0) end
-                muted('Yields: ' .. table.concat(names, ', '))
-            end
+            if r.yields then muted(r.yields) end
             ImGui.Unindent(core.px(12))
         end
     end
 
-    if #usedin > 0 then
-        header(string.format('Tradeskill: Used In (%d%s)', #usedin, usedin.more and (' of ' .. (#usedin + usedin.more)) or ''))
+    if #src.usedin > 0 then
+        header(src.usedinHeader)
         if ImGui.BeginTable('##usedin', 3, ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingStretchProp) then
             ImGui.TableSetupColumn('Result', ImGuiTableColumnFlags.WidthStretch, 4)
             ImGui.TableSetupColumn('Tradeskill', ImGuiTableColumnFlags.WidthStretch, 2)
             ImGui.TableSetupColumn('Trivial', ImGuiTableColumnFlags.WidthFixed, core.px(50))
             ImGui.TableHeadersRow()
-            for i, u in ipairs(usedin) do
-                local rid = tonumber(u[4]) or 0
+            for i, u in ipairs(src.usedin) do
                 ImGui.TableNextRow()
                 ImGui.TableSetColumnIndex(0)
-                if rid > 0 then
-                    if link(DB.itemName(rid), 'use' .. i) then showEntry('items', rid) end
+                if u.rid > 0 then
+                    if link(u.name, 'use' .. i) then showEntry('items', u.rid) end
                 else
-                    txt('Recipe ' .. u[1])
+                    txt(u.name)
                 end
-                ImGui.TableSetColumnIndex(1); txt(D.skillName(tonumber(u[2]) or 0))
-                ImGui.TableSetColumnIndex(2); txt(u[3])
+                ImGui.TableSetColumnIndex(1); txt(u.skill)
+                ImGui.TableSetColumnIndex(2); txt(u.trivial)
             end
             ImGui.EndTable()
         end
     end
 
-    if #src > 0 then
+    if #src.gathered > 0 then
         header('Gathered')
-        for _, s in ipairs(src) do
-            local kind = ({ F = 'Foraged in', W = 'Fished in', G = 'Ground spawn in' })[s[1]] or s[1]
-            local zone = DB.zoneName(s[2])
-            local chance = (s[3] and s[3] ~= '') and (' (' .. s[3] .. '%)') or ''
-            txt(string.format('%s %s%s', kind, zone, chance))
-        end
+        for _, line in ipairs(src.gathered) do txt(line) end
     end
 
-    if #sold > 0 then
-        header(string.format('Sold By (%d%s)', #sold, sold.more and (' of ' .. (#sold + sold.more)) or ''))
-        for _, v in ipairs(sold) do
-            local nid = tonumber(v[1]) or 0
-            local info = DB.npcInfo(nid)
-            if link(string.format('%s  -  %s', info and info.name or ('NPC ' .. nid), info and DB.zoneName(info.zone) or ''), 'sold' .. nid) then showEntry('npcs', nid) end
+    if #src.sold > 0 then
+        header(src.soldHeader)
+        for _, v in ipairs(src.sold) do
+            if link(v.label, 'sold' .. v.nid) then showEntry('npcs', v.nid) end
         end
     end
+end
+
+-- ---- npc -------------------------------------------------------------------
+local function buildNpcCard(id, rec)
+    local n = numReader(rec)
+    local c = {}
+    local name = ENC.str(rec, 'name')
+    local last = ENC.str(rec, 'lastname')
+    c.title = name .. (last ~= '' and (' (' .. last .. ')') or '')
+    local lvl = n('level')
+    if n('maxlevel') > lvl then lvl = lvl .. '-' .. n('maxlevel') end
+    c.subtitle = string.format('ID %d   Level %s   %s %s   %s', id, tostring(lvl), D.raceName(n('race')), D.className(n('class')), D.bodyTypeName(n('bodytype')))
+    local tags = {}
+    if n('raid_target') > 0 then tags[#tags + 1] = 'RAID TARGET' end
+    if n('rare_spawn') > 0 then tags[#tags + 1] = 'RARE' end
+    if n('quest') > 0 or n('isquest') > 0 then tags[#tags + 1] = 'QUEST NPC' end
+    if n('merchant_id') > 0 then tags[#tags + 1] = 'MERCHANT' end
+    if n('trackable') == 0 then tags[#tags + 1] = 'UNTRACKABLE' end
+    if n('untargetable') > 0 then tags[#tags + 1] = 'UNTARGETABLE' end
+    c.tags = #tags > 0 and table.concat(tags, '  ') or nil
+
+    local cols = { {}, {}, {} }
+    local function add(col, l, v) if v ~= nil and v ~= 0 and v ~= '' then table.insert(cols[col], { l .. ':', tostring(v) }) end end
+    add(1, 'HP', n('hp'))
+    add(1, 'Mana', n('mana'))
+    add(1, 'AC', n('AC'))
+    if n('maxdmg') > 0 then add(1, 'Damage', string.format('%d - %d', n('mindmg'), n('maxdmg'))) end
+    if n('attack_delay') > 0 then add(1, 'Attack Delay', n('attack_delay')) end
+    if n('attack_count') > 0 then add(1, 'Attacks', n('attack_count')) end
+    if n('attack_speed') ~= 0 then add(1, 'Attack Speed', fmtSigned(n('attack_speed')) .. '%') end
+    if n('runspeed') > 0 then add(1, 'Run Speed', string.format('%.2f', n('runspeed'))) end
+    if n('hp_regen_rate') > 0 then add(1, 'HP Regen', n('hp_regen_rate')) end
+    if n('mana_regen_rate') > 0 then add(1, 'Mana Regen', n('mana_regen_rate')) end
+    for _, s in ipairs({ { 'MR', 'Magic' }, { 'FR', 'Fire' }, { 'CR', 'Cold' }, { 'DR', 'Disease' }, { 'PR', 'Poison' }, { 'Corrup', 'Corruption' }, { 'PhR', 'Physical' } }) do
+        add(2, s[2], n(s[1]))
+    end
+    for _, s in ipairs({ { 'STR', 'STR' }, { 'STA', 'STA' }, { 'AGI', 'AGI' }, { 'DEX', 'DEX' }, { 'WIS', 'WIS' }, { '_INT', 'INT' }, { 'CHA', 'CHA' }, { 'ATK', 'ATK' }, { 'Accuracy', 'Accuracy' }, { 'Avoidance', 'Avoidance' } }) do
+        add(3, s[2], n(s[1]))
+    end
+    if n('aggroradius') > 0 then add(3, 'Aggro Radius', n('aggroradius')) end
+    if n('assistradius') > 0 then add(3, 'Assist Radius', n('assistradius')) end
+    if n('exp_mod') > 0 and n('exp_mod') ~= 100 then add(3, 'XP Mod', n('exp_mod') .. '%') end
+    if n('slow_mitigation') > 0 then add(3, 'Slow Mitigation', n('slow_mitigation') .. '%') end
+    c.cols = cols
+    c.maxRows = math.max(#cols[1], #cols[2], #cols[3])
+
+    local abilities = D.specialAbilitiesText(ENC.str(rec, 'special_abilities'))
+    if n('see_invis') > 0 then abilities[#abilities + 1] = 'Sees Invisible' end
+    if n('see_invis_undead') > 0 then abilities[#abilities + 1] = 'Sees Invis vs Undead' end
+    if n('see_hide') > 0 then abilities[#abilities + 1] = 'Sees Hide' end
+    if n('see_improved_hide') > 0 then abilities[#abilities + 1] = 'Sees Improved Hide' end
+    if n('npc_aggro') > 0 then abilities[#abilities + 1] = 'Aggro' end
+    c.abilities = #abilities > 0 and table.concat(abilities, ', ') or nil
+    c.faction = ENC.str(rec, 'faction')
+    local hits = ENC.list(rec, 'fachits')
+    if #hits > 0 then
+        local parts = {}
+        for _, h in ipairs(hits) do parts[#parts + 1] = string.format('%s %s', h[1], fmtSigned(h[2])) end
+        c.factionHits = table.concat(parts, ', ')
+    end
+
+    local spawns = ENC.list(rec, 'spawns')
+    c.spawns = {}
+    for _, s in ipairs(spawns) do
+        c.spawns[#c.spawns + 1] = { s[1], zone = DB.zoneName(s[1]) .. '  (' .. s[1] .. ')', points = s[2], respawn = D.secondsText(tonumber(s[3]) or 0),
+                                    chance = (s[4] or '') .. '%', mapTip = 'Open the Zone Atlas on ' .. DB.zoneName(s[1]) }
+    end
+    c.spawnsHeader = #spawns > 0 and string.format('Spawns In (%d zone%s)', #spawns, #spawns == 1 and '' or 's') or 'Spawns'
+
+    local drops = ENC.list(rec, 'drops')
+    c.drops = {}
+    for _, d in ipairs(drops) do
+        local iid = tonumber(d[1]) or 0
+        c.drops[#c.drops + 1] = { id = iid, name = DB.itemName(iid), chance = (d[2] or '') .. '%' }
+    end
+    c.dropsHeader = string.format('Drops (%d%s)', #drops, moreText(drops))
+
+    local casts = ENC.list(rec, 'casts')
+    c.casts = {}
+    for _, cs in ipairs(casts) do
+        local sid = tonumber(cs[1]) or 0
+        local t = D.npcSpellTypes(tonumber(cs[2]) or 0)
+        c.casts[#c.casts + 1] = { id = sid, name = DB.spellName(sid), types = t ~= '' and ('(' .. t .. ')') or nil }
+    end
+    c.castsHeader = string.format('Casts (%d)', #casts)
+
+    c.quest = n('quest') > 0
+    c.rewards, c.handins = {}, {}
+    if c.quest then
+        for _, r in ipairs(ENC.list(rec, 'qrewards')) do
+            local iid = tonumber(r[1]) or 0
+            c.rewards[#c.rewards + 1] = { id = iid, name = DB.itemName(iid) }
+        end
+        for _, h in ipairs(ENC.list(rec, 'qhandins')) do
+            local iid = tonumber(h[1]) or 0
+            c.handins[#c.handins + 1] = { id = iid, name = DB.itemName(iid) }
+        end
+    end
+    local sells = ENC.list(rec, 'sells')
+    c.sells = {}
+    for _, s in ipairs(sells) do
+        local iid = tonumber(s[1]) or 0
+        c.sells[#c.sells + 1] = { id = iid, name = DB.itemName(iid) }
+    end
+    c.sellsHeader = string.format('Sells (%d%s)', #sells, moreText(sells))
+    return c
+end
+
+-- ---- spell -----------------------------------------------------------------
+local function buildSpellCard(id, rec)
+    local n = numReader(rec)
+    local c = {}
+    c.name = ENC.str(rec, 'name')
+    c.iconId = n('new_icon') > 0 and n('new_icon') or n('icon')
+    local classes = spellClassesText(rec.classes)
+    c.subtitle = 'ID ' .. id .. '   ' .. (classes ~= '' and classes or 'Not player castable')
+
+    -- live client values (duration at your level, description), read once
+    local duration, desc = nil, nil
+    pcall(function()
+        local sp = mq.TLO.Spell(id)
+        if sp and sp() then
+            local d = sp.Duration and sp.Duration.TotalSeconds and sp.Duration.TotalSeconds() or nil
+            if d and d > 0 then duration = d end
+            if sp.Description then desc = sp.Description() end
+        end
+    end)
+    c.desc = (desc and desc ~= '') and desc or nil
+
+    local rows = { {}, {} }
+    local function add(col, l, v) if v ~= nil and v ~= 0 and v ~= '' then table.insert(rows[col], { l .. ':', tostring(v) }) end end
+    add(1, 'Mana', n('mana'))
+    add(1, 'Endurance', n('EndurCost'))
+    if n('EndurUpkeep') > 0 then add(1, 'End Upkeep', n('EndurUpkeep')) end
+    add(1, 'Cast Time', string.format('%.2fs', n('cast_time') / 1000))
+    if n('recast_time') > 0 then add(1, 'Recast', D.secondsText(n('recast_time') / 1000)) end
+    if n('recovery_time') > 0 then add(1, 'Recovery', string.format('%.2fs', n('recovery_time') / 1000)) end
+    if duration then
+        add(1, 'Duration', D.secondsText(duration) .. ' (at your level)')
+    elseif n('buffduration') > 0 then
+        add(1, 'Duration', string.format('%d ticks max (formula %d)', n('buffduration'), n('buffdurationformula')))
+    end
+    add(2, 'Target', D.targetTypeName(n('targettype')))
+    if n('range') > 0 then add(2, 'Range', n('range')) end
+    if n('aoerange') > 0 then add(2, 'AE Range', n('aoerange')) end
+    if n('maxtargets') > 0 then add(2, 'Max Targets', n('maxtargets')) end
+    add(2, 'Resist', D.resistTypeName(n('resisttype')) .. (n('basediff') ~= 0 and (' (' .. fmtSigned(n('basediff')) .. ')') or ''))
+    add(2, 'Skill', D.skillName(n('skill')))
+    if n('HateAdded') ~= 0 then add(2, 'Hate', fmtSigned(n('HateAdded'))) end
+    if n('numhits') > 0 then add(2, 'Hits', n('numhits')) end
+    if n('IsDiscipline') > 0 then add(2, 'Discipline', 'yes') end
+    c.rows = rows
+    c.maxRows = math.max(#rows[1], #rows[2])
+
+    local tele = ENC.str(rec, 'teleport_zone')
+    c.teleport = tele ~= '' and DB.zoneName(tele) or nil
+    local flags = {}
+    if n('uninterruptable') > 0 then flags[#flags + 1] = 'Uninterruptable' end
+    if n('nodispell') > 0 then flags[#flags + 1] = 'Cannot be dispelled' end
+    if n('can_mgb') > 0 then flags[#flags + 1] = 'MGB-able' end
+    if n('reflectable') > 0 then flags[#flags + 1] = 'Reflectable' end
+    if n('cast_not_standing') > 0 then flags[#flags + 1] = 'Castable while not standing' end
+    if n('goodEffect') > 0 then flags[#flags + 1] = 'Beneficial' end
+    c.flags = #flags > 0 and table.concat(flags, ', ') or nil
+
+    c.comps = {}
+    for i = 1, 4 do
+        local cid = n('components' .. i)
+        if cid > 0 then c.comps[#c.comps + 1] = { id = cid, label = string.format('%s x%d', DB.itemName(cid), math.max(n('component_counts' .. i), 1)) } end
+    end
+
+    -- effects: { num = 'slot: ', text, ref = spellId, refName, iref = itemId, irefName }
+    c.effects = {}
+    for _, e in ipairs(ENC.list(rec, 'effects')) do
+        local spa = tonumber(e[2]) or 0
+        local text = D.spaText(spa, e[3], e[4], e[5])
+        local ref = text:match('%[spell (%d+)%]')
+        local iref = text:match('%[item (%d+)%]')
+        local ef = { num = string.format('%d: ', tonumber(e[1]) or 0), text = text }
+        if ref then
+            ef.text = text:gsub('%[spell %d+%]', '')
+            ef.ref = tonumber(ref)
+            ef.refName = DB.spellName(ef.ref)
+        elseif iref then
+            ef.text = text:gsub('%[item %d+%]', '')
+            ef.iref = tonumber(iref)
+            ef.irefName = DB.itemName(ef.iref)
+        end
+        c.effects[#c.effects + 1] = ef
+    end
+
+    local items = ENC.list(rec, 'items')
+    c.items = {}
+    for _, it in ipairs(items) do
+        local iid = tonumber(it[2]) or 0
+        local kind = ({ click = 'Click', proc = 'Proc', worn = 'Worn', focus = 'Focus', scroll = 'Scroll', bard = 'Bard' })[it[1]] or it[1]
+        c.items[#c.items + 1] = { id = iid, name = DB.itemName(iid), kind = '(' .. kind .. ')' }
+    end
+    c.itemsHeader = string.format('Items (%d%s)', #items, moreText(items))
+    local npcs = ENC.list(rec, 'npcs')
+    c.npcs = {}
+    for _, np in ipairs(npcs) do
+        local nid = tonumber(np[1]) or 0
+        local info = DB.npcInfo(nid)
+        c.npcs[#c.npcs + 1] = { id = nid, label = info and string.format('%s  (%d, %s)', info.name, info.lvl, DB.zoneName(info.zone)) or ('NPC ' .. nid) }
+    end
+    c.npcsHeader = string.format('Cast By (%d%s)', #npcs, moreText(npcs))
+    return c
+end
+
+-- ---- cache -----------------------------------------------------------------
+-- Decoded card for (kind, id, tier); `rec` is nil when the record is missing.
+local function cardFor(kind, id, tier)
+    tier = tier or 'B'
+    local key = kind .. ':' .. id .. ':' .. tier
+    local card = DB.cards[key]
+    if card then return card end
+    if DB.cardsN >= CARD_CACHE_MAX then
+        DB.cards = {}
+        DB.cardsN = 0
+    end
+    card = { kind = kind, id = id, tier = tier }
+    if kind == 'items' then
+        card.rec = DB.itemRecord(id, tier)
+        if card.rec then
+            local baseRec = DB.itemRecord(id, 'B') or card.rec
+            card.fullId = id + D.TIER_OFFSET[tier]
+            card.name = DB.itemName(card.fullId)
+            card.tiers = DB.itemTiers(id)
+            card.iconId = ENC.num(card.rec, 'icon')
+            card.subtitle = 'ID ' .. card.fullId .. (card.tiers ~= '' and ('   Tiers: ' .. card.tiers:gsub('B', 'Base '):gsub('E', 'Enchanted '):gsub('L', 'Legendary ')) or '')
+            card.stats = buildItemStats(card.rec)
+            card.sources = buildItemSources(baseRec)
+        end
+    elseif kind == 'npcs' then
+        card.rec = DB.npcRecord(id)
+        if card.rec then card.npc = buildNpcCard(id, card.rec) end
+    else
+        card.rec = DB.spellRecord(id)
+        if card.rec then card.spell = buildSpellCard(id, card.rec) end
+    end
+    DB.cards[key] = card
+    DB.cardsN = DB.cardsN + 1
+    return card
 end
 
 -- Item card body for a state table { sel = baseId, tier = 'B'|'E'|'L' }:
@@ -1946,22 +2403,19 @@ local function drawItemCardFor(st, compact)
     end
     local tiers = DB.itemTiers(base)
     if tiers ~= '' and not tiers:find(st.tier or 'B', 1, true) then st.tier = tiers:sub(1, 1) end
-    local rec = DB.itemRecord(base, st.tier)
-    local baseRec = DB.itemRecord(base, 'B') or rec
-    if not rec then
+    local card = cardFor('items', base, st.tier or 'B')
+    if not card.rec then
         warn('Item ' .. base .. ' is not in the database.')
         return
     end
-    local id = base + D.TIER_OFFSET[st.tier]
-    local name = DB.itemName(id)
 
     -- header: icon, name, tier buttons
-    local anim = itemIconAnim(ENC.num(rec, 'icon'))
+    local anim = itemIconAnim(card.iconId)
     drawIcon(anim, core.px(40))
     ImGui.SameLine()
     ImGui.BeginGroup()
-    gold(name)
-    muted('ID ' .. id .. (tiers ~= '' and ('   Tiers: ' .. tiers:gsub('B', 'Base '):gsub('E', 'Enchanted '):gsub('L', 'Legendary ')) or ''))
+    gold(card.name)
+    muted(card.subtitle)
     ImGui.EndGroup()
     if #tiers > 1 then
         for _, t in ipairs({ 'B', 'E', 'L' }) do
@@ -1976,19 +2430,19 @@ local function drawItemCardFor(st, compact)
         ImGui.NewLine()
     end
     ImGui.Separator()
-    drawItemStats(rec)
+    drawItemStats(card.stats)
     if compact then
         ImGui.Dummy(0, core.px(4))
         if ImGui.SmallButton('Open in Database##pop' .. tostring(st.key)) then
-            showEntry('items', id)
+            showEntry('items', card.fullId)
             ctrl.show_gamedb = true
         end
         ImGui.SameLine()
         local label = st.showSources and 'Hide sources' or 'Show sources'
         if ImGui.SmallButton(label .. '##popsrc' .. tostring(st.key)) then st.showSources = not st.showSources end
-        if st.showSources then drawItemSources(baseRec) end
+        if st.showSources then drawItemSources(card.sources) end
     else
-        drawItemSources(baseRec)
+        drawItemSources(card.sources)
     end
 end
 
@@ -2013,92 +2467,46 @@ local function drawNpcCardFor(st)
         muted('Search for an NPC by name (filter by zone or level on the left).')
         return
     end
-    local rec = DB.npcRecord(id)
-    if not rec then
+    local card = cardFor('npcs', id, 'B')
+    local c = card.npc
+    if not c then
         warn('NPC ' .. id .. ' is not in the database.')
         return
     end
-    local n = function(k) return ENC.num(rec, k) end
-    local name = ENC.str(rec, 'name')
-    local last = ENC.str(rec, 'lastname')
-    gold(name .. (last ~= '' and (' (' .. last .. ')') or ''))
-    local lvl = n('level')
-    if n('maxlevel') > lvl then lvl = lvl .. '-' .. n('maxlevel') end
-    muted(string.format('ID %d   Level %s   %s %s   %s', id, tostring(lvl), D.raceName(n('race')), D.className(n('class')), D.bodyTypeName(n('bodytype'))))
-    local tags = {}
-    if n('raid_target') > 0 then tags[#tags + 1] = 'RAID TARGET' end
-    if n('rare_spawn') > 0 then tags[#tags + 1] = 'RARE' end
-    if n('quest') > 0 or n('isquest') > 0 then tags[#tags + 1] = 'QUEST NPC' end
-    if n('merchant_id') > 0 then tags[#tags + 1] = 'MERCHANT' end
-    if n('trackable') == 0 then tags[#tags + 1] = 'UNTRACKABLE' end
-    if n('untargetable') > 0 then tags[#tags + 1] = 'UNTARGETABLE' end
-    if #tags > 0 then warn(table.concat(tags, '  ')) end
+    gold(c.title)
+    muted(c.subtitle)
+    if c.tags then warn(c.tags) end
     ImGui.Separator()
 
     if ImGui.BeginTable('##npcstats', 6, ImGuiTableFlags.SizingFixedFit) then
-        local cols = { {}, {}, {} }
-        local function add(c, l, v) if v ~= nil and v ~= 0 and v ~= '' then table.insert(cols[c], { l, v }) end end
-        add(1, 'HP', n('hp'))
-        add(1, 'Mana', n('mana'))
-        add(1, 'AC', n('AC'))
-        if n('maxdmg') > 0 then add(1, 'Damage', string.format('%d - %d', n('mindmg'), n('maxdmg'))) end
-        if n('attack_delay') > 0 then add(1, 'Attack Delay', n('attack_delay')) end
-        if n('attack_count') > 0 then add(1, 'Attacks', n('attack_count')) end
-        if n('attack_speed') ~= 0 then add(1, 'Attack Speed', fmtSigned(n('attack_speed')) .. '%') end
-        if n('runspeed') > 0 then add(1, 'Run Speed', string.format('%.2f', n('runspeed'))) end
-        if n('hp_regen_rate') > 0 then add(1, 'HP Regen', n('hp_regen_rate')) end
-        if n('mana_regen_rate') > 0 then add(1, 'Mana Regen', n('mana_regen_rate')) end
-        for _, s in ipairs({ { 'MR', 'Magic' }, { 'FR', 'Fire' }, { 'CR', 'Cold' }, { 'DR', 'Disease' }, { 'PR', 'Poison' }, { 'Corrup', 'Corruption' }, { 'PhR', 'Physical' } }) do
-            add(2, s[2], n(s[1]))
-        end
-        for _, s in ipairs({ { 'STR', 'STR' }, { 'STA', 'STA' }, { 'AGI', 'AGI' }, { 'DEX', 'DEX' }, { 'WIS', 'WIS' }, { '_INT', 'INT' }, { 'CHA', 'CHA' }, { 'ATK', 'ATK' }, { 'Accuracy', 'Accuracy' }, { 'Avoidance', 'Avoidance' } }) do
-            add(3, s[2], n(s[1]))
-        end
-        if n('aggroradius') > 0 then add(3, 'Aggro Radius', n('aggroradius')) end
-        if n('assistradius') > 0 then add(3, 'Assist Radius', n('assistradius')) end
-        if n('exp_mod') > 0 and n('exp_mod') ~= 100 then add(3, 'XP Mod', n('exp_mod') .. '%') end
-        if n('slow_mitigation') > 0 then add(3, 'Slow Mitigation', n('slow_mitigation') .. '%') end
-        local maxRows = math.max(#cols[1], #cols[2], #cols[3])
-        for i = 1, maxRows do
+        local cols = c.cols
+        for i = 1, c.maxRows do
             ImGui.TableNextRow()
-            for c = 1, 3 do
-                local r = cols[c][i]
-                ImGui.TableSetColumnIndex((c - 1) * 2)
-                if r then muted(r[1] .. ':') end
-                ImGui.TableSetColumnIndex((c - 1) * 2 + 1)
+            for col = 1, 3 do
+                local r = cols[col][i]
+                ImGui.TableSetColumnIndex((col - 1) * 2)
+                if r then muted(r[1]) end
+                ImGui.TableSetColumnIndex((col - 1) * 2 + 1)
                 if r then txt(r[2]) end
             end
         end
         ImGui.EndTable()
     end
 
-    local abilities = D.specialAbilitiesText(ENC.str(rec, 'special_abilities'))
-    local sees = {}
-    if n('see_invis') > 0 then sees[#sees + 1] = 'Sees Invisible' end
-    if n('see_invis_undead') > 0 then sees[#sees + 1] = 'Sees Invis vs Undead' end
-    if n('see_hide') > 0 then sees[#sees + 1] = 'Sees Hide' end
-    if n('see_improved_hide') > 0 then sees[#sees + 1] = 'Sees Improved Hide' end
-    if n('npc_aggro') > 0 then sees[#sees + 1] = 'Aggro' end
-    for _, s in ipairs(sees) do abilities[#abilities + 1] = s end
-    if #abilities > 0 then
+    if c.abilities then
         muted('Abilities:')
         ImGui.SameLine()
-        ImGui.TextWrapped(table.concat(abilities, ', '))
+        ImGui.TextWrapped(c.abilities)
     end
-    local faction = ENC.str(rec, 'faction')
-    if faction ~= '' then labelled('Faction', faction) end
-    local hits = ENC.list(rec, 'fachits')
-    if #hits > 0 then
-        local parts = {}
-        for _, h in ipairs(hits) do parts[#parts + 1] = string.format('%s %s', h[1], fmtSigned(h[2])) end
+    if c.faction ~= '' then labelled('Faction', c.faction) end
+    if c.factionHits then
         muted('Faction hits:')
         ImGui.SameLine()
-        ImGui.TextWrapped(table.concat(parts, ', '))
+        ImGui.TextWrapped(c.factionHits)
     end
 
-    local spawns = ENC.list(rec, 'spawns')
-    header(#spawns > 0 and string.format('Spawns In (%d zone%s)', #spawns, #spawns == 1 and '' or 's') or 'Spawns')
-    if #spawns == 0 then
+    header(c.spawnsHeader)
+    if #c.spawns == 0 then
         muted('No spawn point (summoned, pet, or scripted).')
     elseif ImGui.BeginTable('##spawns', 5, ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingStretchProp) then
         local map = mapPlugin()
@@ -2108,81 +2516,70 @@ local function drawNpcCardFor(st)
         ImGui.TableSetupColumn('Chance', ImGuiTableColumnFlags.WidthFixed, core.px(60))
         ImGui.TableSetupColumn('##map', ImGuiTableColumnFlags.WidthFixed, core.px(44))
         ImGui.TableHeadersRow()
-        for i, s in ipairs(spawns) do
+        for i, s in ipairs(c.spawns) do
             ImGui.TableNextRow()
-            ImGui.TableSetColumnIndex(0); txt(DB.zoneName(s[1]) .. '  (' .. s[1] .. ')')
-            ImGui.TableSetColumnIndex(1); txt(s[2])
-            ImGui.TableSetColumnIndex(2); txt(D.secondsText(tonumber(s[3]) or 0))
-            ImGui.TableSetColumnIndex(3); txt((s[4] or '') .. '%')
+            ImGui.TableSetColumnIndex(0); txt(s.zone)
+            ImGui.TableSetColumnIndex(1); txt(s.points)
+            ImGui.TableSetColumnIndex(2); txt(s.respawn)
+            ImGui.TableSetColumnIndex(3); txt(s.chance)
             ImGui.TableSetColumnIndex(4)
             if map then
-                if ImGui.SmallButton('Map##sp' .. i .. tostring(st.key or '')) then map.showZone(s[1]) end
-                if ImGui.IsItemHovered() then ImGui.SetTooltip('Open the Zone Atlas on ' .. DB.zoneName(s[1])) end
+                ImGui.PushID(i)
+                if ImGui.SmallButton('Map') then map.showZone(s[1]) end
+                if ImGui.IsItemHovered() then ImGui.SetTooltip('%s', s.mapTip) end
+                ImGui.PopID()
             end
         end
         ImGui.EndTable()
     end
 
-    local drops = ENC.list(rec, 'drops')
-    if #drops > 0 then
-        header(string.format('Drops (%d%s)', #drops, drops.more and (' of ' .. (#drops + drops.more)) or ''))
+    if #c.drops > 0 then
+        header(c.dropsHeader)
         if ImGui.BeginTable('##npcdrops', 2, ImGuiTableFlags.RowBg + ImGuiTableFlags.SizingStretchProp) then
             ImGui.TableSetupColumn('Item', ImGuiTableColumnFlags.WidthStretch, 5)
             ImGui.TableSetupColumn('Chance', ImGuiTableColumnFlags.WidthFixed, core.px(60))
             ImGui.TableHeadersRow()
-            for i, d in ipairs(drops) do
-                local iid = tonumber(d[1]) or 0
+            for i, d in ipairs(c.drops) do
                 ImGui.TableNextRow()
                 ImGui.TableSetColumnIndex(0)
-                if link(DB.itemName(iid), 'nd' .. i) then showEntry('items', iid) end
-                ImGui.TableSetColumnIndex(1); txt((d[2] or '') .. '%')
+                if link(d.name, 'nd' .. i) then showEntry('items', d.id) end
+                ImGui.TableSetColumnIndex(1); txt(d.chance)
             end
             ImGui.EndTable()
         end
     end
 
-    local casts = ENC.list(rec, 'casts')
-    if #casts > 0 then
-        header(string.format('Casts (%d)', #casts))
-        for i, c in ipairs(casts) do
-            local sid = tonumber(c[1]) or 0
-            if link(DB.spellName(sid), 'nc' .. i) then showEntry('spells', sid) end
-            local t = D.npcSpellTypes(tonumber(c[2]) or 0)
-            if t ~= '' then
+    if #c.casts > 0 then
+        header(c.castsHeader)
+        for i, cs in ipairs(c.casts) do
+            if link(cs.name, 'nc' .. i) then showEntry('spells', cs.id) end
+            if cs.types then
                 ImGui.SameLine()
-                muted('(' .. t .. ')')
+                muted(cs.types)
             end
         end
     end
 
-    if n('quest') > 0 then
-        local rewards = ENC.list(rec, 'qrewards')
-        local handins = ENC.list(rec, 'qhandins')
-        if #rewards > 0 or #handins > 0 then
-            header('Quest')
-            if #handins > 0 then
-                muted('Accepts:')
-                for i, h in ipairs(handins) do
-                    local iid = tonumber(h[1]) or 0
-                    if link(DB.itemName(iid), 'qh' .. i) then showEntry('items', iid) end
-                end
+    if c.quest and (#c.rewards > 0 or #c.handins > 0) then
+        header('Quest')
+        if #c.handins > 0 then
+            muted('Accepts:')
+            for i, h in ipairs(c.handins) do
+                if link(h.name, 'qh' .. i) then showEntry('items', h.id) end
             end
-            if #rewards > 0 then
-                muted('Rewards:')
-                for i, r in ipairs(rewards) do
-                    local iid = tonumber(r[1]) or 0
-                    if link(DB.itemName(iid), 'qr' .. i) then showEntry('items', iid) end
-                end
+        end
+        if #c.rewards > 0 then
+            muted('Rewards:')
+            for i, r in ipairs(c.rewards) do
+                if link(r.name, 'qr' .. i) then showEntry('items', r.id) end
             end
         end
     end
 
-    local sells = ENC.list(rec, 'sells')
-    if #sells > 0 then
-        header(string.format('Sells (%d%s)', #sells, sells.more and (' of ' .. (#sells + sells.more)) or ''))
-        for i, s in ipairs(sells) do
-            local iid = tonumber(s[1]) or 0
-            if link(DB.itemName(iid), 'ns' .. i) then showEntry('items', iid) end
+    if #c.sells > 0 then
+        header(c.sellsHeader)
+        for i, s in ipairs(c.sells) do
+            if link(s.name, 'ns' .. i) then showEntry('items', s.id) end
         end
     end
 end
@@ -2190,157 +2587,87 @@ end
 -- ----------------------------------------------------------------------------
 -- Spell card
 -- ----------------------------------------------------------------------------
-local function spellClassesText(classes)
-    local out = {}
-    for c, l in (classes or ''):gmatch('(%d+):(%d+)') do
-        out[#out + 1] = string.format('%s %s', D.CLASSES[tonumber(c)] or ('C' .. c), l)
-    end
-    return table.concat(out, '  ')
-end
-
 local function drawSpellCardFor(st)
     local id = st.sel
     if not id then
         muted('Search for a spell by name (filter by class and level on the left).')
         return
     end
-    local rec = DB.spellRecord(id)
-    if not rec then
+    local card = cardFor('spells', id, 'B')
+    local c = card.spell
+    if not c then
         warn('Spell ' .. id .. ' is not in the database.')
         return
     end
-    local n = function(k) return ENC.num(rec, k) end
-    local name = ENC.str(rec, 'name')
-    local anim = core.getSpellIconAnimation and core.getSpellIconAnimation(n('new_icon') > 0 and n('new_icon') or n('icon')) or nil
+    local anim = core.getSpellIconAnimation and core.getSpellIconAnimation(c.iconId) or nil
     drawIcon(anim, core.px(32))
     ImGui.SameLine()
     ImGui.BeginGroup()
-    gold(name)
-    local classes = spellClassesText(rec.classes)
-    muted('ID ' .. id .. '   ' .. (classes ~= '' and classes or 'Not player castable'))
+    gold(c.name)
+    muted(c.subtitle)
     ImGui.EndGroup()
     ImGui.Separator()
 
-    -- live client values (duration at your level, description)
-    local duration, desc = nil, nil
-    pcall(function()
-        local sp = mq.TLO.Spell(id)
-        if sp and sp() then
-            local d = sp.Duration and sp.Duration.TotalSeconds and sp.Duration.TotalSeconds() or nil
-            if d and d > 0 then duration = d end
-            if sp.Description then desc = sp.Description() end
-        end
-    end)
-
     if ImGui.BeginTable('##spellstats', 4, ImGuiTableFlags.SizingFixedFit) then
-        local rows = { {}, {} }
-        local function add(c, l, v) if v ~= nil and v ~= 0 and v ~= '' then table.insert(rows[c], { l, v }) end end
-        add(1, 'Mana', n('mana'))
-        add(1, 'Endurance', n('EndurCost'))
-        if n('EndurUpkeep') > 0 then add(1, 'End Upkeep', n('EndurUpkeep')) end
-        add(1, 'Cast Time', string.format('%.2fs', n('cast_time') / 1000))
-        if n('recast_time') > 0 then add(1, 'Recast', D.secondsText(n('recast_time') / 1000)) end
-        if n('recovery_time') > 0 then add(1, 'Recovery', string.format('%.2fs', n('recovery_time') / 1000)) end
-        if duration then
-            add(1, 'Duration', D.secondsText(duration) .. ' (at your level)')
-        elseif n('buffduration') > 0 then
-            add(1, 'Duration', string.format('%d ticks max (formula %d)', n('buffduration'), n('buffdurationformula')))
-        end
-        add(2, 'Target', D.targetTypeName(n('targettype')))
-        if n('range') > 0 then add(2, 'Range', n('range')) end
-        if n('aoerange') > 0 then add(2, 'AE Range', n('aoerange')) end
-        if n('maxtargets') > 0 then add(2, 'Max Targets', n('maxtargets')) end
-        add(2, 'Resist', D.resistTypeName(n('resisttype')) .. (n('basediff') ~= 0 and (' (' .. fmtSigned(n('basediff')) .. ')') or ''))
-        add(2, 'Skill', D.skillName(n('skill')))
-        if n('HateAdded') ~= 0 then add(2, 'Hate', fmtSigned(n('HateAdded'))) end
-        if n('numhits') > 0 then add(2, 'Hits', n('numhits')) end
-        if n('IsDiscipline') > 0 then add(2, 'Discipline', 'yes') end
-        local maxRows = math.max(#rows[1], #rows[2])
-        for i = 1, maxRows do
+        local rows = c.rows
+        for i = 1, c.maxRows do
             ImGui.TableNextRow()
-            for c = 1, 2 do
-                local r = rows[c][i]
-                ImGui.TableSetColumnIndex((c - 1) * 2)
-                if r then muted(r[1] .. ':') end
-                ImGui.TableSetColumnIndex((c - 1) * 2 + 1)
+            for col = 1, 2 do
+                local r = rows[col][i]
+                ImGui.TableSetColumnIndex((col - 1) * 2)
+                if r then muted(r[1]) end
+                ImGui.TableSetColumnIndex((col - 1) * 2 + 1)
                 if r then txt(r[2]) end
             end
         end
         ImGui.EndTable()
     end
-    local tele = ENC.str(rec, 'teleport_zone')
-    if tele ~= '' then labelled('Teleports to', DB.zoneName(tele)) end
-    local flags = {}
-    if n('uninterruptable') > 0 then flags[#flags + 1] = 'Uninterruptable' end
-    if n('nodispell') > 0 then flags[#flags + 1] = 'Cannot be dispelled' end
-    if n('can_mgb') > 0 then flags[#flags + 1] = 'MGB-able' end
-    if n('reflectable') > 0 then flags[#flags + 1] = 'Reflectable' end
-    if n('cast_not_standing') > 0 then flags[#flags + 1] = 'Castable while not standing' end
-    if n('goodEffect') > 0 then flags[#flags + 1] = 'Beneficial' end
-    if #flags > 0 then muted(table.concat(flags, ', ')) end
+    if c.teleport then labelled('Teleports to', c.teleport) end
+    if c.flags then muted(c.flags) end
 
-    local comps = {}
-    for i = 1, 4 do
-        local cid = n('components' .. i)
-        if cid > 0 then comps[#comps + 1] = { cid, n('component_counts' .. i) } end
-    end
-    if #comps > 0 then
+    if #c.comps > 0 then
         muted('Components:')
-        for i, c in ipairs(comps) do
+        for i, cp in ipairs(c.comps) do
             ImGui.SameLine()
-            if link(string.format('%s x%d', DB.itemName(c[1]), math.max(c[2], 1)), 'comp' .. i) then showEntry('items', c[1]) end
+            if link(cp.label, 'comp' .. i) then showEntry('items', cp.id) end
         end
     end
 
     header('Effects')
-    local effects = ENC.list(rec, 'effects')
-    if #effects == 0 then muted('None') end
-    for _, e in ipairs(effects) do
-        local spa = tonumber(e[2]) or 0
-        local text = D.spaText(spa, e[3], e[4], e[5])
-        local ref = text:match('%[spell (%d+)%]')
-        local iref = text:match('%[item (%d+)%]')
-        txt(string.format('%d: ', tonumber(e[1]) or 0))
+    if #c.effects == 0 then muted('None') end
+    for i, e in ipairs(c.effects) do
+        txt(e.num)
         ImGui.SameLine()
-        if ref then
-            local before = text:gsub('%[spell %d+%]', '')
-            txt(before)
+        if e.ref then
+            txt(e.text)
             ImGui.SameLine()
-            if link(DB.spellName(tonumber(ref)), 'spa' .. e[1]) then showEntry('spells', tonumber(ref)) end
-        elseif iref then
-            local before = text:gsub('%[item %d+%]', '')
-            txt(before)
+            if link(e.refName, 'spa' .. i) then showEntry('spells', e.ref) end
+        elseif e.iref then
+            txt(e.text)
             ImGui.SameLine()
-            if link(DB.itemName(tonumber(iref)), 'spai' .. e[1]) then showEntry('items', tonumber(iref)) end
+            if link(e.irefName, 'spai' .. i) then showEntry('items', e.iref) end
         else
-            txt(text)
+            txt(e.text)
         end
     end
 
-    if desc and desc ~= '' then
+    if c.desc then
         header('Description')
-        ImGui.TextWrapped(desc)
+        ImGui.TextWrapped(c.desc)
     end
 
-    local items = ENC.list(rec, 'items')
-    if #items > 0 then
-        header(string.format('Items (%d%s)', #items, items.more and (' of ' .. (#items + items.more)) or ''))
-        for i, it in ipairs(items) do
-            local iid = tonumber(it[2]) or 0
-            local kind = ({ click = 'Click', proc = 'Proc', worn = 'Worn', focus = 'Focus', scroll = 'Scroll', bard = 'Bard' })[it[1]] or it[1]
-            if link(DB.itemName(iid), 'si' .. i) then showEntry('items', iid) end
+    if #c.items > 0 then
+        header(c.itemsHeader)
+        for i, it in ipairs(c.items) do
+            if link(it.name, 'si' .. i) then showEntry('items', it.id) end
             ImGui.SameLine()
-            muted('(' .. kind .. ')')
+            muted(it.kind)
         end
     end
-    local npcs = ENC.list(rec, 'npcs')
-    if #npcs > 0 then
-        header(string.format('Cast By (%d%s)', #npcs, npcs.more and (' of ' .. (#npcs + npcs.more)) or ''))
-        for i, np in ipairs(npcs) do
-            local nid = tonumber(np[1]) or 0
-            local info = DB.npcInfo(nid)
-            local label = info and string.format('%s  (%d, %s)', info.name, info.lvl, DB.zoneName(info.zone)) or ('NPC ' .. nid)
-            if link(label, 'sn' .. i) then showEntry('npcs', nid) end
+    if #c.npcs > 0 then
+        header(c.npcsHeader)
+        for i, np in ipairs(c.npcs) do
+            if link(np.label, 'sn' .. i) then showEntry('npcs', np.id) end
         end
     end
 end
@@ -2436,34 +2763,44 @@ local function drawResults(kind, height)
         end
         return
     end
-    if st.dirty then runSearch(kind) end
     local results = st.results
-    muted(string.format('%d result%s%s', #results, #results == 1 and '' or 's', #results >= DB.MAX_RESULTS and ' (capped)' or ''))
+    local labels = st.labels or {}
+    if st.dirty then
+        muted('Searching...')
+    else
+        muted(string.format('%d result%s%s', #results, #results == 1 and '' or 's', #results >= DB.MAX_RESULTS and ' (capped)' or ''))
+    end
     if ImGui.BeginChild('##results' .. kind, ImVec2(0, height), true) then
-        for i, n in ipairs(results) do
+        local function drawRow(i, n)
             local id = ix.ids[n]
-            local label = ix.names[n]
-            if kind == 'npcs' then
-                local z = ix.zone[n]
-                label = string.format('%s  (%d, %s)', label, ix.lvl[n], z ~= '' and z or '-')
-            elseif kind == 'spells' then
-                local cls = ix.extra[n] or ''
-                local first = cls:match('^(%d+):(%d+)')
-                if first then
-                    local cnt = select(2, cls:gsub(':', ''))
-                    label = string.format('%s  (%s)', label, cnt > 3 and (cnt .. ' classes') or spellClassesText(cls))
-                end
-            elseif kind == 'items' then
-                local tiers = ix.extra[n] or ''
-                if tiers:find('L', 1, true) then label = label .. '  [B/E/L]' elseif tiers:find('E', 1, true) then label = label .. '  [B/E]' end
-            end
+            local label = labels[i] or resultLabel(kind, ix, n)
             local selected = (st.sel == id)
             -- MQ's binding returns (selected, pressed): the first value is the
             -- selection state, true every frame for the selected row.
-            local _, pressed = ImGui.Selectable(label .. '##r' .. i, selected)
+            ImGui.PushID(i)
+            local _, pressed = ImGui.Selectable(label, selected)
+            ImGui.PopID()
             if pressed then showEntry(kind, id) end
         end
-        if #results == 0 and st.query ~= '' then muted('No matches.') end
+        local clipper = nil
+        local ClipperClass = ImGui.ListClipper or (mq and mq.imgui and mq.imgui.ListClipper) or _G['ImGuiListClipper']
+        if type(ClipperClass) == 'table' and ClipperClass.new then
+            local okC, c = pcall(ClipperClass.new)
+            if okC and c then clipper = c end
+        end
+        if clipper then
+            clipper:Begin(#results)
+            while clipper:Step() do
+                for i = clipper.DisplayStart + 1, clipper.DisplayEnd do
+                    local n = results[i]
+                    if n then drawRow(i, n) end
+                end
+            end
+            clipper:End()
+        else
+            for i, n in ipairs(results) do drawRow(i, n) end
+        end
+        if #results == 0 and st.query ~= '' and not st.dirty then muted('No matches.') end
     end
     ImGui.EndChild()
 end
@@ -2474,7 +2811,7 @@ local function drawSearchPane(kind)
     local q, changed = ImGui.InputTextWithHint('##q' .. kind, 'Search ' .. KIND_LABELS[kind] .. ' by name or ID...', st.query)
     if changed then
         st.query = q
-        st.dirty = true
+        markDirty(st)
     end
     if kind == 'items' then
         if ImGui.SmallButton('Cursor Item') then plugin.lookupCursor() end
@@ -2482,38 +2819,39 @@ local function drawSearchPane(kind)
     elseif kind == 'npcs' then
         ImGui.SetNextItemWidth(core.px(110))
         local z, zc = ImGui.InputTextWithHint('##zone', 'zone', st.zone)
-        if zc then st.zone = z; st.dirty = true end
+        if zc then st.zone = z; markDirty(st) end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(core.px(50))
         local a, ac = ImGui.InputInt('##minl', st.minLvl, 0, 0)
-        if ac then st.minLvl = math.max(0, a); st.dirty = true end
+        if ac then st.minLvl = math.max(0, a); markDirty(st) end
         ImGui.SameLine(); muted('-'); ImGui.SameLine()
         ImGui.SetNextItemWidth(core.px(50))
         local b, bc = ImGui.InputInt('##maxl', st.maxLvl, 0, 0)
-        if bc then st.maxLvl = math.max(0, b); st.dirty = true end
+        if bc then st.maxLvl = math.max(0, b); markDirty(st) end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Level range (0 = any)') end
     elseif kind == 'spells' then
         ImGui.SetNextItemWidth(core.px(90))
         local label = st.class > 0 and D.CLASSES[st.class] or 'Any class'
         if ImGui.BeginCombo('##cls', label) then
             local _, anyPressed = ImGui.Selectable('Any class', st.class == 0)
-            if anyPressed then st.class = 0; st.dirty = true end
+            if anyPressed then st.class = 0; markDirty(st) end
             for i, c in ipairs(D.CLASSES) do
                 local _, pressed = ImGui.Selectable(c .. ' - ' .. D.CLASS_NAMES[i], st.class == i)
-                if pressed then st.class = i; st.dirty = true end
+                if pressed then st.class = i; markDirty(st) end
             end
             ImGui.EndCombo()
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(core.px(50))
         local a, ac = ImGui.InputInt('##sminl', st.minLvl, 0, 0)
-        if ac then st.minLvl = math.max(0, a); st.dirty = true end
+        if ac then st.minLvl = math.max(0, a); markDirty(st) end
         ImGui.SameLine(); muted('-'); ImGui.SameLine()
         ImGui.SetNextItemWidth(core.px(50))
         local b, bc = ImGui.InputInt('##smaxl', st.maxLvl, 0, 0)
-        if bc then st.maxLvl = math.max(0, b); st.dirty = true end
+        if bc then st.maxLvl = math.max(0, b); markDirty(st) end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Level range (0 = any)') end
-        if st.class > 0 and st.query == '' and #st.results == 0 and not st.dirty then st.dirty = true end
+        -- (the class / level widgets mark the search dirty when they change;
+        -- an empty result set must not re-run the search every frame)
     end
     drawResults(kind, -1)
 end
@@ -2533,14 +2871,24 @@ local function scanLoot()
     if not open then
         L.rows = {}
         L.corpseId = 0
+        L.count = nil
         return
     end
-    if not DB.isLoaded('items') or not DB.isLoaded('npcs') then return end
+    if not DB.isLoaded('items') or not DB.isLoaded('npcs') then
+        -- a corpse is open: start the (sliced) load now
+        DB.ensure('zones')
+        DB.ensure('items')
+        DB.ensure('npcs')
+        return
+    end
     local corpseId, count = 0, 0
     pcall(function()
         corpseId = mq.TLO.Corpse.ID() or 0
         count = mq.TLO.Corpse.Items() or 0
     end)
+    -- Same corpse, same item count: the rows are still right.
+    if corpseId == L.corpseId and count == L.count then return end
+    L.count = count
     if corpseId ~= L.corpseId then
         L.corpseId = corpseId
         L.rows = {}
@@ -2588,6 +2936,7 @@ local function scanLoot()
                 if l:find('^Quest turn%-in') then row.tags[#row.tags + 1] = 'TURN-IN' end
                 if l:find('^Tradeskill') then row.tags[#row.tags + 1] = 'RECIPE' end
             end
+            row.tip = #row.lines > 0 and table.concat(row.lines, '\n') or nil
             rows[#rows + 1] = row
         end
     end
@@ -2625,7 +2974,7 @@ local function drawLootAdvisor()
                 ImGui.TableNextRow()
                 ImGui.TableSetColumnIndex(0)
                 if link(row.name, 'loot' .. i) then openPopout('items', row.id) end
-                if ImGui.IsItemHovered() and #row.lines > 0 then ImGui.SetTooltip(table.concat(row.lines, '\n')) end
+                if ImGui.IsItemHovered() and #row.lines > 0 then ImGui.SetTooltip('%s', row.tip or table.concat(row.lines, '\n')) end
                 ImGui.TableSetColumnIndex(1)
                 local ch = tonumber(row.chance)
                 if ch then
@@ -2654,6 +3003,20 @@ end
 -- ----------------------------------------------------------------------------
 -- Window
 -- ----------------------------------------------------------------------------
+-- BeginTabItem with flags. MQ's binding takes (label, open, flags); with a
+-- nil `open` it returns the "should draw" state first (the Map plugin relies
+-- on that every frame). If a binding ever returned the (open, show) tuple
+-- of the sol2 bindings instead, `open` would not be a boolean for a nil
+-- p_open, so the second value is taken in that case. Falls back to the
+-- plain call when the flagged form is unavailable.
+local function beginTabItem(label, flags)
+    if flags == 0 then return ImGui.BeginTabItem(label) == true end
+    local ok, a, b = pcall(ImGui.BeginTabItem, label, nil, flags)
+    if not ok then return ImGui.BeginTabItem(label) == true end
+    if type(a) ~= 'boolean' and type(b) == 'boolean' then return b end
+    return a == true
+end
+
 local function drawWindow()
     if not ctrl.show_gamedb then return end
     local colors = core.colors or {}
@@ -2715,15 +3078,19 @@ local function drawWindow()
         warn('resources/gamedb not found - install the full release or run tools/build_gamedb.py')
     end
 
+    -- A link clicked inside a card (drawn under its own tab) requests another
+    -- kind's tab; tabs earlier in this loop have already been drawn this
+    -- frame, so the request is kept until the frame in which that tab
+    -- actually received the SetSelected flag.
+    local applied = nil
     if ImGui.BeginTabBar('##gamedbtabs') then
         for _, kind in ipairs(KINDS) do
             local flags = 0
             if S.pendingTab == kind and ImGuiTabItemFlags and ImGuiTabItemFlags.SetSelected then
                 flags = ImGuiTabItemFlags.SetSelected
+                applied = kind
             end
-            local okTab, tabOpen = false, false
-            if flags ~= 0 then okTab, tabOpen = pcall(ImGui.BeginTabItem, KIND_LABELS[kind] .. '##tab' .. kind, nil, flags) end
-            if not okTab then tabOpen = ImGui.BeginTabItem(KIND_LABELS[kind] .. '##tab' .. kind) end
+            local tabOpen = beginTabItem(KIND_LABELS[kind] .. '##tab' .. kind, flags)
             if tabOpen then
                 if S.pendingTab ~= kind then S.tab = kind end
                 local leftW = core.px(310)
@@ -2743,7 +3110,7 @@ local function drawWindow()
         end
         ImGui.EndTabBar()
     end
-    S.pendingTab = nil
+    if applied and S.pendingTab == applied then S.pendingTab = nil end
 
     ImGui.End()
     core.popTheme()
@@ -2756,8 +3123,10 @@ function plugin.onInit(coreApi)
     core = coreApi
     refresh()
     if ctrl and ctrl.show_gamedb == nil then ctrl.show_gamedb = false end
-    -- Preload in the background so the window is ready when first opened.
-    queueAll()
+    -- The indexes (~260k entries) load lazily: the first window open, lookup
+    -- command, spawn / item / spell lookup or loot window queues them, and
+    -- the tick-driven loader slices the work from there.
+    if ctrl and ctrl.show_gamedb then queueAll() end
     -- Let the combat loop skip casts the database knows are wasted.
     local tracker = core.castTracker
     if type(tracker) == 'table' then tracker.knownImmunity = plugin.immunityReason end
@@ -2765,7 +3134,7 @@ end
 
 function plugin.onDestroy()
     S.popouts = {}
-    spawnNpcCache = {}
+    clearSpawnCache()
     local tracker = core and core.castTracker
     if type(tracker) == 'table' and tracker.knownImmunity == plugin.immunityReason then tracker.knownImmunity = nil end
     DB.setDir(DB.dir)
@@ -2775,6 +3144,7 @@ function plugin.onTick()
     if not core then return end
     refresh()
     stepLoading()
+    runPendingSearches()
     if S.lootAdvisor then
         local now = os.clock()
         if now - (S.loot.lastScan or 0) >= 0.5 then
@@ -2791,6 +3161,15 @@ function plugin.onDrawUI()
     drawWindow()
     drawPopouts()
     drawLootAdvisor()
+end
+
+-- Spawn ids are per zone instance: the spawn -> NPC cache and the loot
+-- corpse state are invalid after zoning.
+function plugin.onZoned()
+    clearSpawnCache()
+    S.loot.corpseId = 0
+    S.loot.count = nil
+    S.loot.rows = {}
 end
 
 function plugin.onSaveSettings()

@@ -82,6 +82,12 @@ end
 -- leading whitespace), and captures lines until the matching `end` at column 1.
 -- For top-level functions in triune.lua, the closing `end` is always un-indented.
 
+-- The real logger module: initPluginManager and friends reference it as an
+-- upvalue (`tlog`), so every sandbox gets it. Its file output stays off
+-- (no getFileEnabled getter), so tests only touch the in-memory ring.
+package.path = 'TAC/lua/?.lua;' .. package.path
+local tlog = require('triune_log')
+
 local function readFile(path)
     local f = assert(io.open(path, 'r'), 'Cannot open: ' .. path)
     local content = f:read('*a')
@@ -142,6 +148,7 @@ local function loadFunc(src, funcName, env)
     for k, v in pairs(_G) do sandbox[k] = v end
     if not sandbox.runtime then sandbox.runtime = {} end
     if not sandbox.invLogic then sandbox.invLogic = {} end
+    sandbox.tlog = tlog
     if env then
         for k, v in pairs(env) do
             sandbox[k] = v
@@ -4529,14 +4536,19 @@ do
     mockState.isCasting = false
     mockState.castTracker.activeSpell = nil
 
+    -- The real helper: only a heal may go out with the mob still targeted.
+    local castThroughHostileTarget = loadFunc(triuneSrc, 'castThroughHostileTarget', {})
+
     -- 3. Self-healing while attacking an enemy mob #1001
     -- In combat with a hostile target, character casts Greater Healing on self (myId) without switching target
     setTarget(1001)
     assert_eq(mockState.currentTargetId, 1001, 'targeting enemy mob 1001')
     local isSelf = (myId == myId)
     local curT = mockState.currentTargetId
-    local isHostileT = (curT > 0 and isHostile(curT))
-    local needT = (curT ~= myId) and not (isSelf and isHostileT)
+    local isHostileT = (curT > 0 and isHostile(curT)) == true
+    local keepHostile = castThroughHostileTarget(isSelf, isHostileT, true)
+    local needT = (curT ~= myId) and not keepHostile
+    assert_eq(keepHostile, true, 'self-heal on hostile target casts through the mob')
     assert_eq(needT, false, 'self-heal on hostile target does not need to select self')
     assert_eq(mockState.currentTargetId, 1001, 'target remains on enemy mob 1001')
 
@@ -4544,10 +4556,10 @@ do
     mockState.isCasting = true
     mockState.castTracker.activeSpell = 'Greater Healing'
     mockState.castTracker.activeTargetId = myId
-    if isSelf and isHostileT then
+    if keepHostile then
         mockState.castTracker.targetRequired = false
     else
-        mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing')
+        mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing') or isSelf
     end
     mockState.castTracker.castStartTime = os.clock()
 
@@ -4562,13 +4574,53 @@ do
     mockState.castTracker.targetRequired = false
     assert_eq(mockState.currentTargetId, 1001, 'post-heal: character still targeting enemy mob 1001')
 
+    -- 3b. Anything that is NOT a heal (self buff, group buff, AA, clickie) aimed
+    -- at self while a mob is targeted has to select the caster to land, and holds
+    -- self as the required target until the cast finishes; the mob is restored after.
+    setTarget(1001)
+    curT = mockState.currentTargetId
+    isHostileT = (curT > 0 and isHostile(curT)) == true
+    for _, case in ipairs({
+        { spell = 'Armor of Protection', label = 'self buff' },
+        { spell = 'Celestial Elixir', label = 'group spell' },
+        { spell = 'Cannibalize', label = 'self AA/util' },
+    }) do
+        keepHostile = castThroughHostileTarget(isSelf, isHostileT, false)
+        needT = (curT ~= myId) and not keepHostile
+        assert_eq(keepHostile, false, case.label .. ' on hostile target may not cast through the mob')
+        assert_eq(needT, true, case.label .. ' on hostile target MUST select self')
+        local restoreId = (curT ~= myId and curT > 0 and not keepHostile) and curT or nil
+        assert_eq(restoreId, 1001, case.label .. ': mob 1001 saved for restoreTargetId')
+        assert_eq(setTarget(myId), true, case.label .. ': self targeted for the cast')
+        mockState.isCasting = true
+        mockState.castTracker.activeSpell = case.spell
+        mockState.castTracker.activeTargetId = myId
+        mockState.castTracker.targetRequired = isTargetRequiredSpell(case.spell) or isSelf
+        mockState.castTracker.castStartTime = os.clock()
+        assert_eq(mockState.castTracker.targetRequired, true, case.label .. ': self held as required target')
+        assert_eq(getActiveTargetRequiredCastingId(), myId, case.label .. ': target locked on self during cast')
+        assert_eq(setTarget(1001), false, case.label .. ': cannot switch back to the mob mid-cast')
+        mockState.isCasting = false
+        mockState.castTracker.activeSpell = nil
+        mockState.castTracker.activeTargetId = nil
+        mockState.castTracker.targetRequired = false
+        mockState.castTracker.castStartTime = 0
+        assert_eq(setTarget(restoreId), true, case.label .. ': mob restored after the cast')
+        assert_eq(mockState.currentTargetId, 1001, case.label .. ': back on enemy mob 1001')
+    end
+    -- helper contract: every leg must hold
+    assert_eq(castThroughHostileTarget(false, true, true), false, 'heal on an ally never casts through the mob')
+    assert_eq(castThroughHostileTarget(true, false, true), false, 'self-heal with no hostile target selects self')
+    assert_eq(castThroughHostileTarget(true, true, nil), false, 'unknown action kind is treated as not a heal')
+
     -- 4. Self-healing OUT OF COMBAT (no target, curT == 0)
     -- Out of combat, you DO have to select yourself to cast beneficial/heal spells
     clearTarget()
     assert_eq(mockState.currentTargetId, 0, 'out of combat: idle with no target')
     curT = mockState.currentTargetId
-    isHostileT = (curT > 0 and isHostile(curT))
-    needT = (curT ~= myId) and not (isSelf and isHostileT)
+    isHostileT = (curT > 0 and isHostile(curT)) == true
+    keepHostile = castThroughHostileTarget(isSelf, isHostileT, true)
+    needT = (curT ~= myId) and not keepHostile
     assert_eq(needT, true, 'out of combat with no target: self-heal MUST select self')
     if needT then setTarget(myId) end
     assert_eq(mockState.currentTargetId, myId, 'target set to self (myId) for out-of-combat heal')
@@ -4577,10 +4629,10 @@ do
     mockState.isCasting = true
     mockState.castTracker.activeSpell = 'Greater Healing'
     mockState.castTracker.activeTargetId = myId
-    if isSelf and isHostileT then
+    if keepHostile then
         mockState.castTracker.targetRequired = false
     else
-        mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing')
+        mockState.castTracker.targetRequired = isTargetRequiredSpell('Greater Healing') or isSelf
     end
     mockState.castTracker.castStartTime = os.clock()
 
@@ -4602,10 +4654,11 @@ do
     setTarget(5000)
     assert_eq(mockState.currentTargetId, 5000, 'targeting neutral NPC 5000')
     curT = mockState.currentTargetId
-    isHostileT = (curT > 0 and isHostile(curT))
-    needT = (curT ~= myId) and not (isSelf and isHostileT)
+    isHostileT = (curT > 0 and isHostile(curT)) == true
+    keepHostile = castThroughHostileTarget(isSelf, isHostileT, true)
+    needT = (curT ~= myId) and not keepHostile
     assert_eq(needT, true, 'out of combat targeting non-hostile: self-heal MUST select self')
-    local restoreId = (curT ~= myId and curT > 0 and not (isSelf and isHostileT)) and curT or nil
+    local restoreId = (curT ~= myId and curT > 0 and not keepHostile) and curT or nil
     assert_eq(restoreId, 5000, 'restoreTargetId saved as 5000')
     if needT then setTarget(myId) end
     assert_eq(mockState.currentTargetId, myId, 'target switched to self for heal')
@@ -9288,8 +9341,9 @@ do
     -- 5. Verify window context menus and actions
     assert_true(sgContent:find("ImGui%.BeginPopupContextWindow%('##gemWinContextMenu'%)") ~= nil,
         'Suite 79: Spell Gem Bar window has background options context menu')
-    assert_true(sgContent:find("ImGui%.BeginPopupContextItem%('##gemItemMenu_'") ~= nil,
-        'Suite 79: Each gem slot has its own right-click context menu')
+    assert_true(sgContent:find("menuId%s*=%s*'##gemItemMenu_' %.%. tostring%(slot%)") ~= nil
+        and sgContent:find("ImGui%.BeginPopupContextItem%(lbl%.menuId%)") ~= nil,
+        'Suite 79: Each gem slot has its own right-click context menu (per-slot ID precomputed)')
     assert_true(sgContent:find("mq%.cmdf%('/cast %%d', slot%)") ~= nil,
         'Suite 79: Clicking or selecting gem issues /cast <slot>')
     assert_true(sgContent:find("mq%.cmdf%('/memorize \"\" %%d', slot%)") ~= nil,
@@ -9312,7 +9366,7 @@ do
         'Suite 79: UI.getGemCooldownSec converts EQ millisecond timer to true seconds')
     assert_true(sgContent:find("M%.gemCooldownEnd") ~= nil and triuneContent:find("gemCooldownEnd") == nil,
         'Suite 79: gemCooldownEnd frame countdown is plugin-local state')
-    assert_true(sgContent:find("math%.ceil%(gemData%.timer%)") ~= nil,
+    assert_true(sgContent:find("local cdSec = math%.ceil%(timer%)") ~= nil,
         'Suite 79: Recast cooldowns simplified to integer seconds')
 
     -- 6. Verify Spell Set InputText and Preset Sorting Logic
@@ -10264,7 +10318,7 @@ do
         'Suite 87: main loop restarts plugins after a character swap replaces ctrl')
     assert_true(triuneContent:find('function pm.drawPluginSettings(id)', 1, true) ~= nil,
         'Suite 87: pm.drawPluginSettings lets core sub-tabs delegate to a plugin')
-    assert_true(triuneContent:find("p.errorMsg = 'onDrawUI: '", 1, true) ~= nil,
+    assert_true(triuneContent:find("pm.reportError(p, 'onDrawUI', err)", 1, true) ~= nil,
         'Suite 87: onDrawUI failures flag the plugin as Error instead of retrying every frame')
     assert_true(triuneContent:find('if not fileSet[low] and not loadedFiles[low] then', 1, true) ~= nil,
         'Suite 87: pm.discover skips files that are already loaded (rescan never double-inits)')
@@ -10774,8 +10828,8 @@ do
         dps.onInit(core)
         local evCount = 0
         for _ in pairs(rec.events) do evCount = evCount + 1 end
-        assert_eq(evCount, 20, 'Suite 89: dps registers its 20 combat-log events')
-        assert_eq(#dps.registeredEvents(), 20, 'Suite 89: dps tracks registered event names')
+        assert_eq(evCount, 22, 'Suite 89: dps registers its 22 combat-log events')
+        assert_eq(#dps.registeredEvents(), 22, 'Suite 89: dps tracks registered event names')
         assert_true(rec.binds['/dps'] and rec.binds['/triunedps'], 'Suite 89: dps binds /dps and /triunedps')
         assert_eq(ctrl.show_dps, false, 'Suite 89: dps seeds show_dps = false')
         assert_true(dps.onCommand('dps', { 'dps' }), 'Suite 89: /ac dps handled by the plugin')
@@ -10838,7 +10892,7 @@ do
         bb.onInit(core)
         assert_eq(bb.cfg.enabled, false, 'Suite 89: buffbot station is OFF after load (never auto-starts)')
         assert_eq(bb.rt.state, 'STOPPED', 'Suite 89: buffbot state STOPPED after load')
-        assert_eq(#bb.registeredEvents(), 11, 'Suite 89: buffbot registers its tell + hail events')
+        assert_eq(#bb.registeredEvents(), 4, 'Suite 89: buffbot registers its tell + hail events (hail variants consolidated into one handler)')
         assert_eq(ctrl.show_buffbot, false, 'Suite 89: buffbot seeds show_buffbot = false')
         assert_eq(bb.wantsCombatHold(), false, 'Suite 89: buffbot does not hold combat while stopped')
         assert_true(bb.onCommand('buffbot', { 'buffbot', 'on' }), 'Suite 89: /ac buffbot on handled')
@@ -11700,7 +11754,7 @@ do
     assert_true(src:find("manual_stick%s*=%s*true,") ~= nil, 'Suite 94: manual_stick defaults to true')
     assert_true(src:find("manual_auto_nav%s*=%s*false,") ~= nil, 'Suite 94: manual_auto_nav defaults to false')
     assert_true(src:find("manualMovePolicy(isXtar or inCombatState, pursuit.id == id)", 1, true) ~= nil, 'Suite 94: combatTick consults the policy')
-    assert_true(src:find("if haveNPC and not manualHold and (ctrl.mode ~= 'Manual'", 1, true) ~= nil, 'Suite 94: approach timeout skipped while holding')
+    assert_true(src:find("if haveNPC and not manualHold and not noApproachMode and (ctrl.mode ~= 'Manual'", 1, true) ~= nil, 'Suite 94: approach timeout skipped while holding (and in Assist Backline)')
     assert_true(src:find("Stick to Target in Combat##manualStick", 1, true) ~= nil, 'Suite 94: Stick checkbox on the Control tab')
     assert_true(src:find("Auto-Nav to Selected Target##manualAutoNav", 1, true) ~= nil, 'Suite 94: Auto-Nav checkbox on the Control tab')
     assert_true(src:find("cmd == 'manualstick'", 1, true) ~= nil, 'Suite 94: /ac manualstick command')
@@ -13495,10 +13549,13 @@ end)()
     env.distToId = function() return 500 end
     assert_nil(loadFunc(src, 'maTargetId', env)(), 'Suite 96: fed target beyond xtar_nav_dist is rejected')
     env.distToId = function() return 40 end
-    -- no fresh feed -> legacy /assist path (the rat is hurt, so it counts as engaged)
+    -- no fresh feed -> legacy /assist path (the rat is on our XTarget, so it counts as engaged;
+    -- "hurt" alone no longer does, since that let Assist pick up other groups' mobs)
     S.feed = nil
     S.targetId = 777
     spawns[777].hp = 60
+    env.isXTargetId = function(id) return id == 777 end
+    env.targetIsEngaged = loadFunc(src, 'targetIsEngaged', env)
     S.cmds = {}
     env.lastAssistCmdAt = -100
     maTargetId = loadFunc(src, 'maTargetId', env)
@@ -14328,7 +14385,7 @@ end)()
     S.clickLabel = nil
     assert_eq(ctrl.running, false, 'Suite 100: PAUSE stops the engine')
     assert_eq(S.fullStops, 1, 'Suite 100: PAUSE calls runtime.fullStop')
-    assert_eq(S.petHold, false, 'Suite 100: PAUSE in Puller releases the manual pet hold')
+    assert_eq(S.petHold, nil, 'Suite 100: PAUSE leaves the pet hold to runtime.fullStop (no contradictory hold-off first)')
     assert_eq(S.styleCols, 0, 'Suite 100: every pushed button colour is popped')
     S.clickLabel = 'Burn##miniBurn'
     draw()
@@ -14600,7 +14657,7 @@ end)()
         assert_true(fn ~= nil, 'Suite 101: runtime.restartScript exists')
         local runAt, stopAt = fn:find("mq.cmd('/timed 15 /lua run ", 1, true), fn:find("mq.cmd('/lua stop ", 1, true)
         assert_true(runAt and stopAt and runAt < stopAt, 'Suite 101: restart queues the run through /timed before stopping itself')
-        assert_true(fn:find('runtime.saveLoadout(true)', 1, true) ~= nil, 'Suite 101: restart saves the loadout first')
+        assert_true(fn:find('runtime.saveLoadout(true, true)', 1, true) ~= nil, 'Suite 101: restart saves the loadout first (forced past the debounce)')
         assert_true(tsrc:find("Restart Triune##btnRestartScript', UI.px(", 1, true) ~= nil, 'Suite 101: Restart Triune button is scaled and lives in settings')
         assert_true(tsrc:find("cmd == 'restart' or cmd == 'reload'", 1, true) ~= nil, 'Suite 101: /ac restart command')
     end
@@ -15371,7 +15428,7 @@ end)()
     cfg.renderer = 'inline'
     rt.editor = nil
 
-    -- 10. Tells: recent-partner list and per-conversation popout windows
+    -- 10. Tells: recent-partner list and the tabbed Tells window
     core.ImGui = drawMock
     cfg.recentTells = {}
     S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'hi'")
@@ -15383,54 +15440,117 @@ end)()
     assert_true(cfg.recentTells[1] == 'Playerone' and cfg.recentTells[2] == 'Playertwo', 'Suite 102: recent tells are most recent first, incoming and outgoing')
     for i = 1, 7 do plugin.noteTeller('Person' .. i) end
     assert_true(#cfg.recentTells == 5 and cfg.recentTells[1] == 'Person7', 'Suite 102: recent tells capped at five')
-    assert_eq(#cfg.windows, 1, 'Suite 102: no popout while the option is off')
+    assert_eq(#cfg.windows, 1, 'Suite 102: no Tells window while the option is off')
     cfg.tellPopouts = true
     S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'pop'")
     S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'pop2'")
     plugin.onTick()
-    local pop = plugin.findTellWindow('playerone')
-    assert_true(pop ~= nil and #cfg.windows == 2 and pop.open and pop.title == 'Playerone' and pop.tellWith == 'Playerone', 'Suite 102: a tell opens one popout window for that person')
-    assert_true(#pop.tabs == 1 and pop.tabs[1].send == 'tell' and pop.tabs[1].tellTarget == 'Playerone' and pop.tabs[1].tellWith == 'Playerone', 'Suite 102: popout tab replies to that person')
+    local tw = plugin.findTellWindow()
+    assert_true(tw ~= nil and #cfg.windows == 2 and tw.open and tw.title == 'Tells' and tw.tellWindow == true and tw.id == 'tells', 'Suite 102: a tell opens the one Tells window')
+    local t1 = plugin.findTellTab(tw, 'playerone')
+    assert_true(t1 ~= nil and #tw.tabs == 1 and t1.name == 'Playerone' and t1.send == 'tell' and t1.tellTarget == 'Playerone' and t1.tellWith == 'Playerone', 'Suite 102: the conversation is one tab, set to reply to that person')
     S.events.TACChatAll.fn("You told " .. P('Playerone') .. ", 'back at you'")
     S.events.TACChatAll.fn(P('Playertwo') .. " tells you, 'other convo'")
     S.events.TACChatAll.fn('You receive 5 gold.')
     plugin.onTick()
-    assert_true(plugin.findTellWindow('Playertwo') ~= nil and #cfg.windows == 3, 'Suite 102: a second person gets their own popout')
+    local t2, t2i = plugin.findTellTab(tw, 'Playertwo')
+    assert_true(t2 ~= nil and t2i == 2 and #tw.tabs == 2 and #cfg.windows == 2, 'Suite 102: a second person gets a second tab, not a second window')
+    assert_true(plugin.isTabActive(tw, 1) and not plugin.isTabActive(tw, 2), 'Suite 102: an arriving tell does not steal the selected conversation')
     okDraw, errDraw = pcall(plugin.onDrawUI)
-    assert_true(okDraw and rt.stats.drawErr == nil, 'Suite 102: popout windows draw (no tab bar): ' .. tostring(rt.stats.drawErr or errDraw))
-    local popSt = rt.tabs[pop.id .. '/' .. pop.tabs[1].id]
-    assert_true(popSt ~= nil and popSt.last == 5, 'Suite 102: popout holds that whole conversation (both directions, from the ring): ' .. tostring(popSt and popSt.last))
-    -- closing a popout from its title bar removes it; the next tell brings it back
+    assert_true(okDraw and rt.stats.drawErr == nil, 'Suite 102: the Tells window draws: ' .. tostring(rt.stats.drawErr or errDraw))
+    local st1 = rt.tabs[tw.id .. '/' .. t1.id]
+    assert_true(st1 ~= nil and st1.last == 5, 'Suite 102: a conversation tab holds that whole conversation (both directions, from the ring): ' .. tostring(st1 and st1.last))
+    local st2 = rt.tabs[tw.id .. '/' .. t2.id]
+    assert_true(st2 ~= nil and st2.last == 2, 'Suite 102: ...and only that person (their earlier tell too): ' .. tostring(st2 and st2.last))
+    -- the other player's name on a line is the clickable run
+    local inLine, outLine, goldLine = rt.ring.items[rt.ring.last - 1], rt.ring.items[rt.ring.last - 2], rt.ring.items[rt.ring.last]
+    assert_eq(inLine.player, 'Playertwo', 'Suite 102: the sender of an incoming tell is the clickable name')
+    assert_eq(outLine.player, 'Playerone', 'Suite 102: the recipient of an outgoing tell is the clickable name')
+    assert_true(goldLine.player == nil, 'Suite 102: a line with no player has no clickable name')
+    local function runsOf(e)
+        local out = {}
+        plugin.layoutEntry(e, 10000, 7, false, function(t) return #t * 7 end, 13, function(_, text, _, _, _, isName) out[#out + 1] = { text = text, name = isName } end)
+        return out
+    end
+    local r1 = runsOf(inLine)
+    assert_true(r1[1].text == 'Playertwo' and r1[1].name == true and r1[2].name == false, 'Suite 102: the name is its own run at the start of a tell: ' .. tostring(r1[1].text))
+    local r2 = runsOf(outLine)
+    assert_true(r2[1].text == 'You told' and r2[1].name == false and r2[2].text == 'Playerone' and r2[2].name == true and r2[3].name == false, 'Suite 102: the name run is found mid-line: ' .. tostring(r2[2] and r2[2].text))
+    S.events.TACChatAll.fn(P('Groupguy') .. " tells the group, 'inc'")
+    S.events.TACChatAll.fn("a rat says 'Squeak'")
+    S.events.TACChatAll.fn("You tell your party, 'ok'")
+    S.events.TACChatAll.fn("You told Plainname, 'no link on this one'")
+    plugin.onTick()
+    assert_eq(rt.ring.items[rt.ring.last - 3].player, 'Groupguy', 'Suite 102: group / say / guild senders are clickable too')
+    assert_true(rt.ring.items[rt.ring.last - 2].player == nil and rt.ring.items[rt.ring.last - 1].player == nil, 'Suite 102: NPCs and my own lines are not')
+    local r3 = runsOf(rt.ring.items[rt.ring.last])
+    assert_true(r3[2].text == 'Plainname,' and r3[2].name == true, 'Suite 102: an unlinked name is matched with its punctuation stuck on: ' .. tostring(r3[2] and r3[2].text))
+    -- a clicked name is honoured before the next draw: the tab is added, selected (SetSelected on that frame) and its input focused
+    local savedTIF = rawget(_G, 'ImGuiTabItemFlags')
+    rawset(_G, 'ImGuiTabItemFlags', { SetSelected = 2 })
+    local selectedLabels, focusCalls = {}, 0
+    drawMock.BeginTabItem = function(label, _, flags) if flags then selectedLabels[#selectedLabels + 1] = label end return true end
+    drawMock.SetKeyboardFocusHere = function() focusCalls = focusCalls + 1 end
+    plugin.requestTell('Playerthree')
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    local t3, t3i = plugin.findTellTab(tw, 'Playerthree')
+    assert_true(okDraw and t3 ~= nil and #tw.tabs == 4 and plugin.isTabActive(tw, t3i), 'Suite 102: clicking a name adds that person\'s tab and selects it: ' .. tostring(errDraw))
+
+    assert_true(t3.send == 'tell' and t3.tellTarget == 'Playerthree' and t3.tellWith == 'Playerthree', 'Suite 102: the new tab is ready to send to them')
+    assert_true(#selectedLabels == 1 and selectedLabels[1]:find('Playerthree', 1, true) ~= nil, 'Suite 102: the tab item is drawn with SetSelected once: ' .. tostring(selectedLabels[1]))
+    assert_true(focusCalls >= 1 and rt.focusRequested == false and (rt.selectReq == nil or rt.selectReq[tw.id] == nil), 'Suite 102: the input took focus and the one-frame requests are cleared')
+    selectedLabels = {}
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and #selectedLabels == 0, 'Suite 102: the next frame draws the tab bar plainly')
+    plugin.requestTell('playerthree')
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and #tw.tabs == 4 and plugin.isTabActive(tw, t3i), 'Suite 102: clicking a name that already has a tab just selects it (case-insensitive)')
+    drawMock.BeginTabItem = function() return true end
+    drawMock.SetKeyboardFocusHere = noop
+    rawset(_G, 'ImGuiTabItemFlags', savedTIF)
+    plugin.chatCommand('tell', 'Playerfour')
+
+    assert_true(#tw.tabs == 5 and plugin.findTellTab(tw, 'Playerfour') ~= nil and plugin.isTabActive(tw, 5), 'Suite 102: /tacchat tell <name> opens a conversation the same way')
+    -- closing conversations: a tab at a time, the last one closes the window
+    assert_true(plugin.closeTab(tw, 5) and plugin.closeTab(tw, select(2, plugin.findTellTab(tw, 'Playerthree'))) and #tw.tabs == 3 and plugin.findTellTab(tw, 'Playerthree') == nil and plugin.findTellTab(tw, 'Playerone') ~= nil, 'Suite 102: closing a conversation removes its tab')
+    assert_true(plugin.closeTab(tw, 1) and plugin.closeTab(tw, 1) and plugin.closeTab(tw, 1) and plugin.findTellWindow() == nil and #cfg.windows == 1, 'Suite 102: closing the last conversation closes the Tells window')
+
+    -- closing the window from its title bar removes it; the next tell brings it back
+    S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'pop3'")
+    plugin.onTick()
+    tw = plugin.findTellWindow()
+    assert_true(tw ~= nil and #tw.tabs == 1, 'Suite 102: a tell after closing recreates the window with just that conversation')
     drawMock.Begin = function() return false, true end
     okDraw, errDraw = pcall(plugin.onDrawUI)
     drawMock.Begin = function() return true, true end
-    assert_true(okDraw and plugin.findTellWindow('Playerone') == nil and #cfg.windows >= 1, 'Suite 102: closing a popout removes it: ' .. tostring(errDraw))
+    assert_true(okDraw and plugin.findTellWindow() == nil and #cfg.windows >= 1, 'Suite 102: closing the Tells window removes it: ' .. tostring(errDraw))
     assert_true(cfg.windows[1] == win and win.open == false, 'Suite 102: closing the main window still just hides it')
     win.open = true
     ctrl.show_chat = true
     S.events.TACChatAll.fn(P('Playerone') .. " tells you, 'back?'")
     plugin.onTick()
-    assert_true(plugin.findTellWindow('Playerone') ~= nil, 'Suite 102: the next tell recreates the popout')
-    -- popouts are per-session: sanitize drops them, the main window survives
-    local persisted = plugin.sanitizeConfig({ version = 2, windows = { { id = 'main', tabs = { { id = 'all' } } }, { id = 'tell1', tellWith = 'Someone', tabs = { { id = 'tell', tellWith = 'Someone' } } } } })
-    assert_true(#persisted.windows == 1 and persisted.windows[1].id == 'main', 'Suite 102: tell popouts are not reloaded from disk')
+    tw = plugin.findTellWindow()
+    assert_true(tw ~= nil and plugin.findTellTab(tw, 'Playerone') ~= nil, 'Suite 102: the next tell recreates the window')
+    -- the Tells window is per-session: sanitize drops it (and the old per-person popouts), the main window survives
+    local persisted = plugin.sanitizeConfig({ version = 2, windows = { { id = 'main', tabs = { { id = 'all' } } }, { id = 'tells', tellWindow = true, tabs = { { id = 'tell1', tellWith = 'Someone' } } }, { id = 'tell1', tellWith = 'Someone', tabs = { { id = 'tell', tellWith = 'Someone' } } } } })
+    assert_true(#persisted.windows == 1 and persisted.windows[1].id == 'main', 'Suite 102: the Tells window is not reloaded from disk')
     local rc = plugin.sanitizeConfig({ recentTells = { 'A', 3, 'B', '', 'C', 'D', 'E', 'F', 'G' } }).recentTells
     assert_true(#rc == 5 and rc[2] == 'B' and rc[5] == 'E', 'Suite 102: recent tells sanitized and capped')
     -- the game's tell-window format echoes my own tells as "Genro tells you, '...'":
-    -- they must land in the recipient's conversation, never open a window for me
-    local winCount = #cfg.windows
-    local popTab = plugin.findTellWindow('Playerone').tabs[1]
-    plugin.sendText(popTab, 'sent from the popout')
-    S.events.TACChatAll.fn("Genro tells you, 'sent from the popout'")
+    -- they must land in the recipient's conversation, never open a tab for me
+    local winCount, tabCount = #cfg.windows, #tw.tabs
+    local popTab = plugin.findTellTab(tw, 'Playerone')
+    plugin.sendText(popTab, 'sent from the tab')
+    S.events.TACChatAll.fn("Genro tells you, 'sent from the tab'")
     plugin.sendText(popTab, '/tell Playertwo via slash command')
     S.events.TACChatAll.fn("Genro tells you, 'via slash command'")
     S.events.TACChatAll.fn("Genro tells you, 'typed in the game box'")
     plugin.onTick()
-    assert_true(plugin.findTellWindow('Genro') == nil and #cfg.windows == winCount + 1 and plugin.findTellWindow('Playertwo') ~= nil, 'Suite 102: echoed self tells open the recipient popout, never one for me')
+    assert_true(plugin.findTellTab(tw, 'Genro') == nil and #cfg.windows == winCount and #tw.tabs == tabCount + 1 and plugin.findTellTab(tw, 'Playertwo') ~= nil, 'Suite 102: echoed self tells open the recipient\'s tab, never one for me')
     local lastTwo = rt.ring.items[rt.ring.last]
     assert_true(lastTwo.channel == 'tell_out' and lastTwo.outgoing and lastTwo.sender == 'Playertwo', 'Suite 102: an unmatched echo goes to the last recipient: ' .. tostring(lastTwo.sender))
     assert_eq(rt.ring.items[rt.ring.last - 1].sender, 'Playertwo', 'Suite 102: /tell typed in the input is matched to its echo')
-    assert_eq(rt.ring.items[rt.ring.last - 2].sender, 'Playerone', 'Suite 102: a tell sent from the popout is matched to its echo')
+    assert_eq(rt.ring.items[rt.ring.last - 2].sender, 'Playerone', 'Suite 102: a tell sent from the tab is matched to its echo')
     assert_eq(cfg.recentTells[1], 'Playertwo', 'Suite 102: echoed tells update the recent list with the recipient')
     S.events.TACChatAll.fn(P('Playerthree') .. " tells you, 'yo'")
     plugin.onTick()
@@ -15438,11 +15558,9 @@ end)()
     S.events.TACChatAll.fn("Genro tells you, 'back at you'")
     plugin.onTick()
     assert_eq(rt.ring.items[rt.ring.last].sender, 'Playerthree', 'Suite 102: /r replies resolve to the last person who sent a tell')
-    for _, w in ipairs({ plugin.findTellWindow('Playerone'), plugin.findTellWindow('Playertwo'), plugin.findTellWindow('Playerthree') }) do
-        if w then plugin.closeWindow(w) end
-    end
+    plugin.closeWindow(tw)
     cfg.tellPopouts = false
-    assert_eq(#cfg.windows, 1, 'Suite 102: popouts closed')
+    assert_true(plugin.findTellWindow() == nil and #cfg.windows == 1, 'Suite 102: Tells window closed')
     -- the log height leaves room for the status row and the input frame
     local chatSrc = readFile('TAC/lua/tac/chat.lua')
     assert_true(chatSrc:find('GetFrameHeightWithSpacing', 1, true) ~= nil and chatSrc:find('GetTextLineHeightWithSpacing)', 1, true) ~= nil, 'Suite 102: input row height is measured, not guessed')
@@ -15701,6 +15819,9 @@ end)()
         print = quiet
         plugin.onInit(coreStub)
         print = origPrint
+        -- indexes now load lazily (first window open / lookup) instead of at init;
+        -- queue them the way those paths do and check resolveDir doesn't wipe the queue
+        DB.ensure('zones'); DB.ensure('items')
         local queued = #DB.loadQueue
         while DB.stepLoad(1) do end
         assert_true(queued > 0 and DB.isLoaded('zones') and DB.isLoaded('items'), 'Suite 103: the first background load survives resolving the data dir')
@@ -16098,6 +16219,85 @@ end)()
     assert_true(ssrc:find('db.spellSummary(dbId)', 1, true) ~= nil and ssrc:find("db.popout('spells', dbId)", 1, true) ~= nil, 'Suite 103: spellbook tooltips use the database summary and middle-click cards')
 end)()
 
+
+-- ==========================================================================
+-- Suite 104: Diagnostic logger (triune_log.lua) + core wiring
+-- ==========================================================================
+;(function()
+    print('--- Suite 104: Diagnostic logger (triune_log.lua) ---')
+    -- configDir '.' -> resolveDir probes ./../Logs (absent here) and falls
+    -- back to '.', so the files land in the repo root; removed at the end.
+    local L = tlog
+    L._reset()
+    local fileOn, dbgOn = false, false
+    L.init({
+        configDir = '.', version = 'T', getFileEnabled = function() return fileOn end,
+        getDebug = function() return dbgOn end, identity = function() return 'TestSrv', 'Suite104' end,
+        headerInfo = function() return { { 'class', 'WAR' } } end,
+    })
+    assert_eq(L.stripColors('\ag[Triune]\ax hi \a#FF00AAx \a-r y'), '[Triune] hi x  y', 'Suite 104: MQ colour codes are stripped')
+
+    L.debug('t', 'dropped %d', 1)
+    dbgOn = true
+    L.debug('t', 'kept %d', 2)
+    L.info('t', 'info %s', 'x')
+    L.warn('t', 'plain')
+    L.info('t', 'bad %d', 'notnum')
+    L.capturePrint('\ar[Triune]\ax red line')
+    local r = L.recent()
+    assert_eq(#r, 5, 'Suite 104: debug lines are dropped while Debug Mode is off, everything else is kept')
+    assert_true(r[1]:find('DBG %[t%] kept 2') ~= nil, 'Suite 104: debug line kept once Debug Mode is on')
+    assert_true(r[4]:find('bad %%d notnum') ~= nil, 'Suite 104: a bad format string never throws')
+    assert_true(r[5]:find('WRN %[chat%] %[Triune%] red line') ~= nil, 'Suite 104: captured red print lines are classed as warnings')
+    assert_true(not L.isFileOpen(), 'Suite 104: no file while Log To File is off')
+
+    fileOn = true
+    L.tick()
+    assert_true(L.isFileOpen(), 'Suite 104: tick opens the file once Log To File is on: ' .. tostring(L.lastOpenError()))
+    local path = L.currentFilePath()
+    assert_true(path ~= nil and path:find('triune_TestSrv_Suite104%.log$') ~= nil, 'Suite 104: file named after server + character: ' .. tostring(path))
+    L.info('t', 'live line')
+    L.flush()
+    local content = readFile(path)
+    assert_true(content:find('==== Triune vT log session', 1, true) ~= nil, 'Suite 104: session header written')
+    assert_true(content:find('class:%s+WAR') ~= nil, 'Suite 104: header rows come from headerInfo()')
+    assert_true(content:find('5 buffered lines', 1, true) ~= nil, 'Suite 104: ring contents replayed on open')
+    assert_true(content:find('live line', 1, true) ~= nil, 'Suite 104: live lines appended')
+
+    local dumpPath, derr = L.dump({
+        { title = 'ctrl', value = { b = true, a = { x = 1, s = '\agq\ax' } } },
+        { title = 'lines', value = { 'one', 'two' } },
+    })
+    assert_true(dumpPath ~= nil, 'Suite 104: dump writes a file: ' .. tostring(derr))
+    local d = dumpPath and readFile(dumpPath) or ''
+    assert_true(d:find('#### ctrl', 1, true) ~= nil, 'Suite 104: dump sections are titled')
+    assert_true(d:find('a = {\n    s = "q",\n    x = 1,\n  },', 1, true) ~= nil, 'Suite 104: dump serialises nested tables with sorted keys and stripped colours')
+    assert_true(d:find('#### lines\none\ntwo', 1, true) ~= nil, 'Suite 104: string-list sections are written line by line')
+    assert_true(d:find('#### Recent log lines (6)', 1, true) ~= nil, 'Suite 104: dump ends with the ring buffer')
+    local cyc = {}; cyc.self = cyc
+    assert_true(L.serializeValue(cyc):find('<cycle>', 1, true) ~= nil, 'Suite 104: cyclic tables are cut short')
+
+    fileOn = false
+    L.tick()
+    assert_true(not L.isFileOpen(), 'Suite 104: turning the option off closes the file')
+    os.remove(path)
+    if dumpPath then os.remove(dumpPath) end
+    L._reset()
+
+    -- Core wiring
+    assert_true(src:find("local tlog              = require('triune_log')", 1, true) ~= nil, 'Suite 104: triune.lua loads the logger')
+    assert_true(src:find('tlog.hookPrint()', 1, true) ~= nil, 'Suite 104: print() is hooked so existing output is captured')
+    assert_true(src:find('log_to_file              = false,', 1, true) ~= nil, 'Suite 104: log_to_file has a ctrl default')
+    assert_true(src:find('log                   = tlog,', 1, true) ~= nil, 'Suite 104: plugins get core.log')
+    assert_true(src:find('        tlog.tick()', 1, true) ~= nil, 'Suite 104: main loop ticks the logger')
+    assert_true(src:find("cmd == 'log' or cmd == 'logfile'", 1, true) ~= nil, 'Suite 104: /ac log command')
+    assert_true(src:find("cmd == 'dump' or cmd == 'dumpstate'", 1, true) ~= nil, 'Suite 104: /ac dump command')
+    assert_true(src:find('function runtime.buildDiagnosticDump()', 1, true) ~= nil, 'Suite 104: diagnostic dump builder')
+    assert_true(src:find('xpcall(runMainLoop, runtime.onMainLoopError)', 1, true) ~= nil, 'Suite 104: main loop crash is trapped and logged')
+    assert_true(src:find("ImGui.Checkbox('Log To File'", 1, true) ~= nil, 'Suite 104: Settings has the Log To File checkbox')
+    assert_true(src:find("ImGui.Button('Dump Diagnostics Now')", 1, true) ~= nil, 'Suite 104: Settings has the dump button')
+    assert_true(src:find('xpcall(p.instance.onTick, debug.traceback)', 1, true) ~= nil, 'Suite 104: plugin hooks run under xpcall for tracebacks')
+end)()
 
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

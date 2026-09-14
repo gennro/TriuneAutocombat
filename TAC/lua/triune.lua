@@ -37,7 +37,11 @@ local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "
 package.path            = scriptDir .. "?.lua;" .. package.path
 local VERSION           = '2.15'
 local open              = true
-local cfg               = mq.configDir
+-- File-backed diagnostic logger. Hooked into print() right away so every
+-- chat line from here on (core and plugins) is captured in its ring buffer;
+-- identity / flag getters are wired up once ctrl and myName exist below.
+local tlog              = require('triune_log')
+tlog.hookPrint()
 
 -- ============================================================================
 -- Constants / class data
@@ -94,7 +98,7 @@ local ERR               = { 0.95, 0.35, 0.35, 1 }
 local DATA              = { era_expansion = 5, spells = {}, discs = {}, aas = {} }
 local DATA_OK           = false
 do
-    local paths = { cfg .. '/triune_data.lua' }
+    local paths = { mq.configDir .. '/triune_data.lua' }
     pcall(function()
         if scriptDir then table.insert(paths, scriptDir .. 'triune_data.lua') end
         if scriptDir then table.insert(paths, scriptDir .. '../config/triune_data.lua') end
@@ -392,6 +396,7 @@ local function defaultCtrl()
         nav_levitation_clear     = true,
         zone_hazards             = {},
         debug_mode               = false,
+        log_to_file              = false,
         scribed_only             = true,
         action_trained_only      = true,
         aa_purchased_only        = true,
@@ -737,7 +742,8 @@ local function toCanonicalClassAbbr(str)
     local s = tostring(str)
     if s == '' or s == 'nil' or s == 'NULL' then return nil end
     local up = s:upper():gsub('%s+', '')
-    return MQSHORT[up] or (ALL_ABBR and idxOf(ALL_ABBR, s) > 0 and s) or nil
+    -- idxOf returns 1 on a miss (combo-box default), so confirm the element matches
+    return MQSHORT[up] or (ALL_ABBR and ALL_ABBR[idxOf(ALL_ABBR, s)] == s and s) or nil
 end
 
 local function classColor(abbr)
@@ -848,6 +854,17 @@ local function isScribed(nm)
     local norm = normalizeSpellName(strNm)
     if norm ~= "" and sbSet[norm] then return true end
 
+    -- Negative-path TLO probes (3-4 lookups) are remembered for the life of
+    -- the current spellbook snapshot; with scribed_only on, every unscribed
+    -- spell in the class list paid them on every filteredSpells rebuild.
+    local neg = runtime.unscribedCache
+    if not neg or neg.set ~= sbSet then
+        neg = { set = sbSet, names = {} }
+        runtime.unscribedCache = neg
+    end
+    if neg.names[strNm] then return false end
+    local function miss() neg.names[strNm] = true; return false end
+
     -- 2. Direct TLO Book query fallback
     local ok, res = pcall(function() return mq.TLO.Me.Book(strNm)() end)
     if ok and res ~= nil then
@@ -877,7 +894,7 @@ local function isScribed(nm)
         end
     end
 
-    return false
+    return miss()
 end
 
 local function isGemMatching(slotOrName, targetSpellName)
@@ -899,13 +916,23 @@ local function isGemMatching(slotOrName, targetSpellName)
     local normTarget = normalizeSpellName(targetSpellName)
     if normGem ~= '' and normGem == normTarget then return true end
 
-    local ok1, r1 = pcall(function() return mq.TLO.Spell(gemName).RankName() end)
-    local ok2, r2 = pcall(function() return mq.TLO.Spell(targetSpellName).RankName() end)
-    if ok1 and ok2 and r1 and r2 then
-        local str1, str2 = tostring(r1), tostring(r2)
-        if str1 ~= '' and str1 ~= 'NULL' and str1 == str2 then
-            return true
+    -- RankName is static per spell name; cache it for the session. This
+    -- runs in nested loops (checkGemSync: slots x entries, tryMem, the heal
+    -- pass) and each miss cost two Spell() lookups.
+    local rc = runtime.rankNameCache
+    if not rc then rc = {}; runtime.rankNameCache = rc end
+    local function rankOf(nm)
+        local v = rc[nm]
+        if v == nil then
+            local ok, r = pcall(function() return mq.TLO.Spell(nm).RankName() end)
+            v = (ok and r and tostring(r) ~= '' and tostring(r) ~= 'NULL') and tostring(r) or false
+            rc[nm] = v
         end
+        return v
+    end
+    local str1, str2 = rankOf(gemName), rankOf(targetSpellName)
+    if str1 and str2 and str1 == str2 then
+        return true
     end
     return false
 end
@@ -975,7 +1002,7 @@ local function parseClassLine(text)
 
     local noSpaces = up:gsub('[%s_%-]+', '')
     if MQSHORT[noSpaces] then return MQSHORT[noSpaces] end
-    if ALL_ABBR and idxOf(ALL_ABBR, cleaned) > 0 then return cleaned end
+    if ALL_ABBR and ALL_ABBR[idxOf(ALL_ABBR, cleaned)] == cleaned then return cleaned end
 
     for word in cleaned:gmatch('%a+') do
         local wup = word:upper()
@@ -1310,13 +1337,23 @@ end
 
 -- Drops tracked pets that are dead / gone / not ours, and resolves any ID that
 -- ended up under two classes (keeps the first in myClasses order).
-local function prunePetTracking()
+-- throttled: skip if it already ran in the last 0.25 s. getMultiPetList
+-- passes true because the Status/Pets tabs and the XTarget HUD call it every
+-- frame. The pets cache is only dropped when a tracked pet actually went
+-- away; unconditionally clearing it here made getAllMyPets' 0.25 s cache
+-- useless (a SpawnCount + NearestSpawn sweep every single frame).
+local function prunePetTracking(throttled)
+    local now = os.clock()
+    if throttled and petState.lastPruneAt and (now - petState.lastPruneAt) < 0.25 then return end
+    petState.lastPruneAt = now
+    local changed = false
     local seen = {}
     for _, c in ipairs(myClasses) do
         local pid = petState.myPets[c]
         if pid then
             if pid <= 0 or seen[pid] or not isSpawnAlive(pid) or not isSpawnMyPet(pid) then
                 petState.myPets[c] = nil
+                changed = true
             else
                 seen[pid] = true
             end
@@ -1325,9 +1362,9 @@ local function prunePetTracking()
     local inTrio = {}
     for _, c in ipairs(myClasses) do inTrio[c] = true end
     for c in pairs(petState.myPets) do -- classes that left the trio
-        if not inTrio[c] then petState.myPets[c] = nil end
+        if not inTrio[c] then petState.myPets[c] = nil; changed = true end
     end
-    petState.petsCache = nil
+    if changed then petState.petsCache = nil end
 end
 
 -- Assigns a pet to a class, removing it from any other class first. `learnName`
@@ -1361,7 +1398,9 @@ end
 local function getAllMyPets()
     local now = os.clock()
     local cache = petState.petsCache
-    if cache and (now - cache.at) < 0.25 then
+    -- 0.5 s TTL: a SpawnCount + NearestSpawn sweep with ~12 TLO calls per
+    -- candidate; pet arrivals/deaths are also caught by updatePetTracking.
+    if cache and (now - cache.at) < 0.5 then
         local copy = {}
         for i, id in ipairs(cache.ids) do copy[i] = id end
         return copy
@@ -1526,7 +1565,7 @@ local function getMultiPetList()
     local seenIds = {}
     local seenNames = {}
 
-    prunePetTracking()
+    prunePetTracking(true)
     local allLivingPets = getAllMyPets()
 
     for i = 1, 3 do
@@ -1995,6 +2034,22 @@ local function getPetSpawnInfo(petId)
     return info
 end
 
+-- Per pet per frame this read ~25 spawn fields plus a 30-slot pet buff walk
+-- (Status tab, Pets tab, mini window). Rebound with a 0.25 s cache per id.
+runtime.petInfoCache = {}
+do
+    local uncached = getPetSpawnInfo
+    getPetSpawnInfo = function(petId)
+        local nowPi = os.clock()
+        local key = petId or 0
+        local c = runtime.petInfoCache[key]
+        if c and (nowPi - c.at) < 0.25 then return c.info end
+        local info = uncached(petId)
+        runtime.petInfoCache[key] = { at = nowPi, info = info }
+        return info
+    end
+end
+
 -- Export to runtime for testability
 runtime.classToPetCmdScope = classToPetCmdScope
 runtime.sendPetCmd = sendPetCmd
@@ -2095,12 +2150,18 @@ local function sungKey(spellName, targetId)
     return string.format('%d_%s', targetId or 0, spellName or '')
 end
 
+-- Plugin-loaded probes. The bodies stay self-contained (the test suite
+-- extracts navLoaded / navMeshLoaded / stickLoaded by name); the locals are
+-- rebound below with a 2 s cache because each probe is 2-4 TLO calls and is
+-- asked dozens of times per tick and every frame from the header bar.
+-- MQ's Plugin lookup is case-insensitive, so one name per plugin is enough
+-- (the old `a or b or c` chains never got past the first TLO object anyway).
 local function navLoaded()
     local ok, loaded = pcall(function()
         if mq.TLO.Navigation and (mq.TLO.Navigation() ~= nil or mq.TLO.Navigation.MeshLoaded() ~= nil) then
             return true
         end
-        local p = mq.TLO.Plugin('mq2nav') or mq.TLO.Plugin('MQ2Nav') or mq.TLO.Plugin('nav')
+        local p = mq.TLO.Plugin('mq2nav')
         if p and p() and p.IsLoaded and p.IsLoaded() then return true end
         return false
     end)
@@ -2120,7 +2181,7 @@ local function stickLoaded()
         if mq.TLO.Stick and (mq.TLO.Stick() ~= nil or mq.TLO.Stick.Status() ~= nil) then
             return true
         end
-        local p = mq.TLO.Plugin('mq2moveutils') or mq.TLO.Plugin('MQ2MoveUtils') or mq.TLO.Plugin('moveutils')
+        local p = mq.TLO.Plugin('mq2moveutils')
         if p and p() and p.IsLoaded and p.IsLoaded() then return true end
         return false
     end)
@@ -2132,7 +2193,7 @@ function runtime.mapLoaded()
         if mq.TLO.Map and mq.TLO.Map() ~= nil then
             return true
         end
-        local p = mq.TLO.Plugin('mq2map') or mq.TLO.Plugin('MQ2Map') or mq.TLO.Plugin('map')
+        local p = mq.TLO.Plugin('mq2map')
         if p and p() and p.IsLoaded and p.IsLoaded() then return true end
         return false
     end)
@@ -2141,11 +2202,35 @@ end
 
 function runtime.fovLoaded()
     local ok, loaded = pcall(function()
-        local p = mq.TLO.Plugin('mq2fov') or mq.TLO.Plugin('MQ2FOV') or mq.TLO.Plugin('fov')
+        local p = mq.TLO.Plugin('mq2fov')
         if p and p() and p.IsLoaded and p.IsLoaded() then return true end
         return false
     end)
     return ok and (loaded == true)
+end
+
+runtime.pluginProbeCache = {}
+do
+    local function cached(key, fn)
+        return function()
+            local nowP = os.clock()
+            local c = runtime.pluginProbeCache[key]
+            if c and (nowP - c.at) < 2.0 then return c.loaded end
+            local loaded = fn() == true
+            runtime.pluginProbeCache[key] = { at = nowP, loaded = loaded }
+            return loaded
+        end
+    end
+    navLoaded = cached('nav', navLoaded)
+    navMeshLoaded = cached('navmesh', navMeshLoaded)
+    stickLoaded = cached('stick', stickLoaded)
+    runtime.mapLoaded = cached('map', runtime.mapLoaded)
+    runtime.fovLoaded = cached('fov', runtime.fovLoaded)
+end
+
+-- Called after '/plugin ...' from the UI so the buttons update immediately.
+function runtime.invalidatePluginProbes()
+    runtime.pluginProbeCache = {}
 end
 
 
@@ -2509,6 +2594,56 @@ local function hasActualNPCXtarget()
     return found
 end
 
+-- One XTarget walk per main-loop pass. isXTargetId / hasActualNPCXtarget /
+-- countNPCXtarget / anyXtarAlive / hasDowntimeAggroThreat were each
+-- re-walking every slot (with isHostileTarget's Spawn + pet/owner lookups
+-- per slot) several times per tick and per frame. The two locals above stay
+-- self-contained for the test suite and are rebound here; outside a
+-- main-loop pass (runtime.tickSerial == nil) the uncached versions run.
+-- Entries: { slot=, id=, name=, hostile=bool, ignored=bool, unreachable=bool }
+function runtime.xtSnapshot()
+    local snap = runtime.xtSnapshotCache
+    if snap and runtime.tickSerial and snap.tick == runtime.tickSerial then return snap end
+    local rows, byId, hostileCount = {}, {}, 0
+    pcall(function()
+        local slots = mq.TLO.Me.XTargetSlots() or 13
+        for i = 1, slots do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt and xt() then
+                local id = xt.ID() or 0
+                if id > 0 then
+                    local name = xt.CleanName() or ''
+                    local hostile = isHostileTarget(id)
+                    local ignored = isIgnored(name)
+                    local row = { slot = i, id = id, name = name, hostile = hostile, ignored = ignored,
+                        unreachable = (hostile and not ignored) and isUnreachable(id) or false }
+                    rows[#rows + 1] = row
+                    if not byId[id] then byId[id] = row end
+                    if hostile and not ignored then hostileCount = hostileCount + 1 end
+                end
+            end
+        end
+    end)
+    snap = { tick = runtime.tickSerial, rows = rows, byId = byId, hostileCount = hostileCount }
+    runtime.xtSnapshotCache = snap
+    return snap
+end
+
+do
+    local isXTargetIdUncached = isXTargetId
+    isXTargetId = function(id)
+        if not runtime.tickSerial then return isXTargetIdUncached(id) end
+        if not id or id <= 0 then return false end
+        local row = runtime.xtSnapshot().byId[id]
+        return (row ~= nil and row.hostile and not row.ignored) or false
+    end
+    local hasActualNPCXtargetUncached = hasActualNPCXtarget
+    hasActualNPCXtarget = function()
+        if not runtime.tickSerial then return hasActualNPCXtargetUncached() end
+        return runtime.xtSnapshot().hostileCount > 0
+    end
+end
+
 local function findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ, isBuffActiveFn)
     maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
     local myZ = mq.TLO.Me.Z() or 0
@@ -2656,6 +2791,28 @@ local function isDetrimentalSpell(name, targetId, kind, targetToken)
     end
 
     return false
+end
+
+-- Memoized front. The uncached path does 3 TLO lookups, walks every class
+-- list in DATA.spells and runs ~80 string.find heuristics; it is reached via
+-- isLockedOut for every gem / AA / clickie evaluation each tick and per row
+-- per frame in the loadout UI. targetId does not influence the result.
+-- The function above stays self-contained (tests extract it by name); the
+-- local is rebound here so every caller, including createCastTracker, gets
+-- the memoized version transparently.
+runtime.detrimentalCache = {}
+do
+    local uncached = isDetrimentalSpell
+    isDetrimentalSpell = function(name, targetId, kind, targetToken)
+        if not name or name == '' then return false end
+        local key = tostring(name) .. '|' .. tostring(kind or '') .. '|' .. tostring(targetToken or '')
+        local cached = runtime.detrimentalCache[key]
+        if cached ~= nil then return cached end
+        local ok, res = pcall(uncached, name, targetId, kind, targetToken)
+        res = ok and (res == true) or false
+        runtime.detrimentalCache[key] = res
+        return res
+    end
 end
 
 local function createCastTracker()
@@ -3034,6 +3191,33 @@ local function isCastingOrStarting()
     return false
 end
 runtime.isCastingOrStarting = isCastingOrStarting
+
+-- Can a cast aimed at ourselves go out with the current hostile mob still
+-- targeted? Only heals redirect onto the caster when an enemy is targeted.
+-- Everything else -- buffs, group spells, cures, AAs, clickies -- has to be
+-- cast with the caster targeted or it does not land, so those switch to self
+-- for the cast and restore the mob afterwards (restoreTargetId).
+local function castThroughHostileTarget(selfCast, hostileTarget, isHeal)
+    return selfCast == true and hostileTarget == true and isHeal == true
+end
+runtime.castThroughHostileTarget = castThroughHostileTarget
+
+-- A cast/AA/clickie was set up (target switched, castTracker armed) but never
+-- fired -- e.g. the character was still moving. Undo the bookkeeping so
+-- isCastingOrStarting() doesn't report a phantom 0.8 s cast and put the
+-- original combat target back if we switched away from it.
+function runtime.abortPendingCast(orig, id, keepHostile)
+    castTracker.activeSpell    = nil
+    castTracker.activeTargetId = nil
+    castTracker.activeKind     = nil
+    castTracker.targetRequired = nil
+    castTracker.castStartTime  = 0
+    if orig and orig > 0 and orig ~= id and not keepHostile then
+        if isSpawnAlive(orig) and (mq.TLO.Target.ID() or 0) ~= orig then
+            runtime.setTarget(orig)
+        end
+    end
+end
 
 local function getActiveTargetRequiredCastingId()
     if not isCastingOrStarting() then return nil end
@@ -3639,6 +3823,28 @@ local function mapTLOCategoryToKind(sp, name)
     end
 end
 
+-- Classification is deterministic per spell and was costing up to ~22
+-- checkHasSPA probes (each up to 3 Spell() lookups) per spell per rebuild
+-- (filteredSpells every 2 s on the render thread, spellClassInfo per tick).
+runtime.spellKindCache = {}
+do
+    local uncached = mapTLOCategoryToKind
+    mapTLOCategoryToKind = function(sp, name)
+        local key = nil
+        if sp and sp.ID then
+            local ok, sid = pcall(function() return sp.ID() end)
+            if ok and type(sid) == 'number' and sid > 0 then key = 'id:' .. sid end
+        end
+        if not key and name then key = 'nm:' .. tostring(name) end
+        if not key then return uncached(sp, name) end
+        local v = runtime.spellKindCache[key]
+        if v ~= nil then return v end
+        v = uncached(sp, name) or 'other'
+        runtime.spellKindCache[key] = v
+        return v
+    end
+end
+
 local function filteredSpells(abbr)
     if not abbr then
         return {}, {}
@@ -3672,9 +3878,18 @@ local function filteredSpells(abbr)
         end
     end
 
+    -- combo option list (placeholder first) and name -> option index, so the
+    -- gem rows don't rebuild a copy of the list per row per frame
+    local opts, indexOf = { '-- choose --' }, {}
+    for k, n in ipairs(names) do
+        opts[k + 1] = n
+        indexOf[lookup[k].name] = k + 1
+    end
     runtime.filteredSpellsCache[abbr] = {
         names = names,
         lookup = lookup,
+        opts = opts,
+        indexOf = indexOf,
         time = now,
         lvlMin = lvlMin,
         lvlMax = lvlMax,
@@ -4289,9 +4504,11 @@ local function getClientAbilities()
         pcall(function()
             local ab = mq.TLO.Me.Ability(i)
             if ab then
-                local rawVal = (type(ab) == 'function' and ab()) or (type(ab) == 'table' and type(ab.Name) == 'function' and ab.Name()) or ab
-                if type(rawVal) == 'table' and type(rawVal.Name) == 'function' then rawVal = rawVal.Name() end
-                local nm = (type(rawVal) == 'string' and rawVal) or nil
+                -- TLO members are userdata; they must be invoked to yield the
+                -- string (the old type() checks never matched, so this step
+                -- never added anything).
+                local rawVal = ab()
+                local nm = (type(rawVal) == 'string' and rawVal ~= '' and rawVal ~= 'NULL' and rawVal) or nil
                 if type(nm) == 'string' and nm ~= '' and nm ~= 'NULL' and nm ~= 'false' and not seen[nm] then
                     local curVal = 0
                     local s = mq.TLO.Me.Skill(nm)
@@ -4357,20 +4574,31 @@ end
 -- ============================================================================
 local function serialize(o, f, indent)
     local t = type(o)
-    if t == 'number' or t == 'boolean' then
+    if t == 'number' then
+        -- inf / nan serialize as 'inf' / 'nan' which loadfile cannot parse and
+        -- would make the whole loadout unreadable; write 0 instead.
+        if o ~= o or o == math.huge or o == -math.huge then o = 0 end
+        f:write(tostring(o))
+    elseif t == 'boolean' then
         f:write(tostring(o))
     elseif t == 'string' then
         f:write(string.format('%q', o))
     elseif t == 'table' then
         f:write('{\n')
         for k, v in pairs(o) do
-            f:write(string.rep('  ', indent))
-            if type(k) == 'string' then
-                f:write('[' .. string.format('%q', k) .. ']=')
-            else
-                f:write('[' .. tostring(k) .. ']=')
+            local kt, vt = type(k), type(v)
+            -- only string/number/boolean keys and serializable values; skip
+            -- functions / userdata a plugin may have left in its settings table
+            if (kt == 'string' or kt == 'number' or kt == 'boolean')
+                and (vt == 'string' or vt == 'number' or vt == 'boolean' or vt == 'table') then
+                f:write(string.rep('  ', indent))
+                if kt == 'string' then
+                    f:write('[' .. string.format('%q', k) .. ']=')
+                else
+                    f:write('[' .. tostring(k) .. ']=')
+                end
+                serialize(v, f, indent + 1); f:write(',\n')
             end
-            serialize(v, f, indent + 1); f:write(',\n')
         end
         f:write(string.rep('  ', indent - 1) .. '}')
     else
@@ -4382,6 +4610,33 @@ end
 -- Character storage and class detection
 -- ============================================================================
 local myName = nil
+
+tlog.init({
+    configDir      = mq.configDir,
+    version        = VERSION,
+    getFileEnabled = function() return ctrl and ctrl.log_to_file == true end,
+    getDebug       = function() return ctrl and ctrl.debug_mode == true end,
+    identity       = function()
+        local serverName = ''
+        pcall(function() serverName = mq.TLO.EverQuest.ServerName() or '' end)
+        if serverName == '' then pcall(function() serverName = mq.TLO.Zone.Server() or '' end) end
+        return serverName, myName or ''
+    end,
+    headerInfo     = function()
+        local cls, lvl, zone = '?', '?', '?'
+        pcall(function() cls = mq.TLO.Me.Class.ShortName() or '?' end)
+        pcall(function() lvl = tostring(mq.TLO.Me.Level() or '?') end)
+        pcall(function() zone = mq.TLO.Zone.ShortName() or '?' end)
+        return {
+            { 'class',    cls .. ' (' .. table.concat(myClasses or {}, '/') .. ')' },
+            { 'level',    lvl },
+            { 'zone',     zone },
+            { 'mode',     ctrl and tostring(ctrl.mode) or '?' },
+            { 'style',    ctrl and tostring(ctrl.combat_style) or '?' },
+            { 'debug',    ctrl and tostring(ctrl.debug_mode) or '?' },
+        }
+    end,
+})
 local ALLDATA = {} -- character name -> saved entry
 -- detectClasses, classesFromInventoryWindow, and classesFromTitle are defined in local helpers above
 
@@ -4476,12 +4731,16 @@ function runtime.importCurrentGems(targetGemsTable)
             })
         end
     end
-    -- If there were existing configured spells beyond the physical bar, retain them
-    if targetGemsTable then
-        for idx = numG + 1, #targetGemsTable do
-            if targetGemsTable[idx] then
-                table.insert(newGems, targetGemsTable[idx])
-            end
+    -- Retain configured entries bound to gem slots beyond the physical bar.
+    -- loadout.gems is a priority list (index ~= slot; several entries can share
+    -- a slot), so filter on the entry's own `gem`, not its list position.
+    if not targetGemsTable then
+        targetGemsTable = {}
+        loadout.gems = targetGemsTable
+    end
+    for _, e in ipairs(targetGemsTable) do
+        if type(e) == 'table' and (tonumber(e.gem) or 1) > numG then
+            table.insert(newGems, e)
         end
     end
     for k in pairs(targetGemsTable) do targetGemsTable[k] = nil end
@@ -4593,7 +4852,7 @@ function runtime.applyEntry(e)
             end
         end
     end
-    loadout.discs = e.discs or {}
+    loadout.discs = (type(e.discs) == 'table') and e.discs or {}
     loadout.actions = {}
     if type(e.actions) == 'table' then
         for k, v in pairs(e.actions) do
@@ -4869,7 +5128,7 @@ local function loadoutFilePath()
         pcall(function() serverName = mq.TLO.Zone.Server() or '' end)
     end
     local tag = (tostring(serverName or '') .. '_' .. tostring(myName or 'unknown')):gsub('[^%w%_-]', '_')
-    return cfg .. '/triune_loadout_' .. tag .. '.lua'
+    return mq.configDir .. '/triune_loadout_' .. tag .. '.lua'
 end
 
 function runtime.loadAll()
@@ -4883,7 +5142,7 @@ function runtime.loadAll()
     end
     if not t then
         -- Legacy shared file fallback (pre-per-character migration).
-        local fn = loadfile(cfg .. '/triune_loadout.lua')
+        local fn = loadfile(mq.configDir .. '/triune_loadout.lua')
         if fn then
             local ok, t2 = pcall(fn)
             if ok and type(t2) == 'table' then t = t2 end
@@ -4915,7 +5174,21 @@ function runtime.syncCurrentZoneWaypoints()
     }
 end
 
-runtime.saveLoadout = function(silent)
+-- silent: no chat line. force: bypass the debounce (shutdown / restart / the
+-- main-loop autosave flush). Slider `changed` handlers all over the Control
+-- and Settings tabs call saveLoadout(true) on every drag frame; each call is
+-- a full serialize + synchronous file write on the render thread. Rapid
+-- silent saves are therefore coalesced: the first one lands, the rest just
+-- mark the loadout dirty so the main loop's 1.5 s autosave writes the final
+-- value.
+runtime.saveLoadout = function(silent, force)
+    local nowSave = os.clock()
+    if silent and not force and runtime.lastSaveAt and (nowSave - runtime.lastSaveAt) < 0.5 then
+        runtime.autoDirty = true
+        runtime.autoDirtyAt = nowSave
+        return
+    end
+    runtime.lastSaveAt = nowSave
     if runtime.pluginManager and runtime.pluginManager.collectSettings then
         runtime.pluginManager.collectSettings()
     end
@@ -4926,9 +5199,29 @@ runtime.saveLoadout = function(silent)
     runtime.syncCurrentZoneWaypoints()
     ALLDATA.__zoneWaypoints = ctrl.zone_waypoints
     ALLDATA.__zoneWaypointPresets = ctrl.zone_waypoint_presets
-    local f = io.open(loadoutFilePath(), 'w')
+    -- Write to a temp file and rename over the real one so a serialize error
+    -- or a crash mid-write can never leave a truncated loadout behind.
+    local path = loadoutFilePath()
+    local tmpPath = path .. '.tmp'
+    local f = io.open(tmpPath, 'w')
     if not f then return end
-    f:write('return '); serialize(ALLDATA, f, 1); f:close()
+    local okWrite, werr = pcall(function()
+        f:write('return '); serialize(ALLDATA, f, 1)
+    end)
+    f:close()
+    if not okWrite then
+        os.remove(tmpPath)
+        print('\ar[Triune]\ax failed to save loadout: ' .. tostring(werr))
+        return
+    end
+    -- os.rename won't overwrite on Windows, so drop the old file first; if that
+    -- fails leave the temp file in place rather than losing the save.
+    os.remove(path)
+    local okMove, merr = os.rename(tmpPath, path)
+    if not okMove then
+        print('\ar[Triune]\ax failed to replace loadout file: ' .. tostring(merr))
+        return
+    end
     if runtime.pluginManager and runtime.pluginManager.onLoadoutSaved then
         runtime.pluginManager.onLoadoutSaved()
     end
@@ -5413,10 +5706,16 @@ function runtime.isPullAllowed(name)
     if cleanName == '' then return false end
     if isIgnored(cleanName) then return false end
     if not runtime.pullList or #runtime.pullList == 0 then return true end
+    local lowerName = cleanName:lower()
     for _, n in ipairs(runtime.pullList) do
         local strN = tostring(n)
-        if strN ~= '' and (cleanName == strN or cleanName:find(strN, 1, true)) then
-            return true
+        if strN ~= '' then
+            local ln = strN:lower()
+            -- exact, or the listed text followed by a word boundary ("a rat"
+            -- matches "a rat" and "a rat king" but not "a ratman")
+            if lowerName == ln or (lowerName:sub(1, #ln) == ln and lowerName:sub(#ln + 1, #ln + 1):match('^[%s%p]?$')) then
+                return true
+            end
         end
     end
     return false
@@ -5438,9 +5737,15 @@ function runtime.extractConName(line)
     return nil
 end
 
-function runtime.recordTargetCon(tier, line)
+-- `name` is the #1# capture from the anchored con patterns below; the line
+-- is only parsed as a fallback. The previous '#*#kindly#*#'-style patterns
+-- fired on any chat line containing the word and keyed the result to the
+-- current target, so a group member saying "kindly wait" could mark the pull
+-- target as Kindly.
+function runtime.recordTargetCon(tier, line, name)
     runtime.conCache = runtime.conCache or {}
-    local tgtName = mq.TLO.Target.CleanName()
+    local tgtName = name
+    if tgtName then tgtName = tostring(tgtName):gsub('^%s*(.-)%s*$', '%1') end
     if not tgtName or tgtName == '' then
         tgtName = runtime.extractConName(line)
     end
@@ -5451,15 +5756,15 @@ function runtime.recordTargetCon(tier, line)
     end
 end
 
-mq.event('TriuneConScowl', '#*#scowls#*#', function(line) runtime.recordTargetCon('Scowling', line) end)
-mq.event('TriuneConThreat', '#*#threateningly#*#', function(line) runtime.recordTargetCon('Threateningly', line) end)
-mq.event('TriuneConDubious', '#*#dubiously#*#', function(line) runtime.recordTargetCon('Dubious', line) end)
-mq.event('TriuneConApprehens', '#*#apprehensively#*#', function(line) runtime.recordTargetCon('Apprehensive', line) end)
-mq.event('TriuneConIndiff', '#*#indifferently#*#', function(line) runtime.recordTargetCon('Indifferent', line) end)
-mq.event('TriuneConAmiable', '#*#amiably#*#', function(line) runtime.recordTargetCon('Amiably', line) end)
-mq.event('TriuneConKindly', '#*#kindly#*#', function(line) runtime.recordTargetCon('Kindly', line) end)
-mq.event('TriuneConWarmly', '#*#warmly#*#', function(line) runtime.recordTargetCon('Warmly', line) end)
-mq.event('TriuneConAlly', '#*#an ally#*#', function(line) runtime.recordTargetCon('Ally', line) end)
+mq.event('TriuneConScowl', '#1# scowls at you#*#', function(line, n) runtime.recordTargetCon('Scowling', line, n) end)
+mq.event('TriuneConThreat', '#1# glares at you threateningly#*#', function(line, n) runtime.recordTargetCon('Threateningly', line, n) end)
+mq.event('TriuneConDubious', '#1# glowers at you dubiously#*#', function(line, n) runtime.recordTargetCon('Dubious', line, n) end)
+mq.event('TriuneConApprehens', '#1# looks your way apprehensively#*#', function(line, n) runtime.recordTargetCon('Apprehensive', line, n) end)
+mq.event('TriuneConIndiff', '#1# regards you indifferently#*#', function(line, n) runtime.recordTargetCon('Indifferent', line, n) end)
+mq.event('TriuneConAmiable', '#1# judges you amiably#*#', function(line, n) runtime.recordTargetCon('Amiably', line, n) end)
+mq.event('TriuneConKindly', '#1# kindly considers you#*#', function(line, n) runtime.recordTargetCon('Kindly', line, n) end)
+mq.event('TriuneConWarmly', '#1# looks upon you warmly#*#', function(line, n) runtime.recordTargetCon('Warmly', line, n) end)
+mq.event('TriuneConAlly', '#1# regards you as an ally#*#', function(line, n) runtime.recordTargetCon('Ally', line, n) end)
 
 
 function runtime.isConAllowed(s)
@@ -5484,8 +5789,14 @@ function runtime.isConAllowed(s)
     return true
 end
 
+-- Non-blocking: issues one /consider per name every 2 s until the con line
+-- lands and allows the target meanwhile; the pull loop re-checks each tick,
+-- so a blocked tier clears the target on the next pass. (The old version
+-- spun mq.delay for up to 400 ms per new target and sent /consider every
+-- tick, even with no con filter configured.)
 function runtime.verifyTargetCon(id, blockUntilCached)
     if not id or id <= 0 then return true end
+    if not ctrl or not ctrl.pull_con_filter then return true end
     if isXTargetId(id) then return true end
 
     local tgt = mq.TLO.Target
@@ -5496,18 +5807,13 @@ function runtime.verifyTargetCon(id, blockUntilCached)
 
     runtime.conCache = runtime.conCache or {}
     if not runtime.conCache[cname] then
-        mq.cmd('/consider')
-        if blockUntilCached then
-            local waited = 0
-            while waited < 400 do
-                mq.delay(20)
-                mq.doevents()
-                waited = waited + 20
-                if runtime.conCache[cname] then break end
-            end
-        else
-            mq.doevents()
+        runtime.conAskedAt = runtime.conAskedAt or {}
+        local nowCon = os.clock()
+        if (nowCon - (runtime.conAskedAt[cname] or 0)) >= 2.0 then
+            runtime.conAskedAt[cname] = nowCon
+            mq.cmd('/consider')
         end
+        mq.doevents()
     end
 
     local cachedTier = runtime.conCache[cname]
@@ -5628,7 +5934,7 @@ end
 -- through the normal shutdown path.
 runtime.SCRIPT_NAME = 'triune'
 function runtime.restartScript()
-    runtime.saveLoadout(true)
+    runtime.saveLoadout(true, true)
     print('\ag[Triune]\ax restarting (/lua stop ' .. runtime.SCRIPT_NAME .. ' -> /lua run ' .. runtime.SCRIPT_NAME .. ')...')
     mq.cmd('/timed 15 /lua run ' .. runtime.SCRIPT_NAME)
     mq.cmd('/lua stop ' .. runtime.SCRIPT_NAME)
@@ -5842,13 +6148,50 @@ function UI.drawWindowScaleControl(key, label, width)
 end
 
 -- UI: theme and style helpers
+-- The set of style ids this ImGui binding accepts never changes at runtime,
+-- so the ~36 pcall'd pushes (plus two closures) per window per frame are
+-- probed once; afterwards the recorded pushes are replayed directly.
 function UI.pushTheme()
+    local plan = runtime.themePlan
+    if plan then
+        local cCount, vCount = 0, 0
+        for i = 1, #plan.cols do
+            local c = plan.cols[i]
+            ImGui.PushStyleColor(c[1], c[2], c[3], c[4], c[5])
+            cCount = cCount + 1
+        end
+        for i = 1, #plan.vars do
+            local v = plan.vars[i]
+            if v[4] then
+                ImGui.PushStyleVar(v[1], v[4](v[2], v[3]))
+            elseif v[3] ~= nil then
+                ImGui.PushStyleVar(v[1], v[2], v[3])
+            else
+                ImGui.PushStyleVar(v[1], v[2])
+            end
+            vCount = vCount + 1
+        end
+        runtime.themeColStack = runtime.themeColStack or {}
+        runtime.themeVarStack = runtime.themeVarStack or {}
+        runtime.scaleStack = runtime.scaleStack or {}
+        table.insert(runtime.themeColStack, cCount)
+        table.insert(runtime.themeVarStack, vCount)
+        local sc = UI.clampScale(ctrl and ctrl.ui_scale) or 1.0
+        table.insert(runtime.scaleStack, sc)
+        runtime.curWindowScale = sc
+        runtime.colN = cCount
+        runtime.varN = vCount
+        return cCount, vCount
+    end
+
     local cCount, vCount = 0, 0
+    local cols, vars = {}, {}
     local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
     local SV = ImGuiStyleVar or _G.ImGuiStyleVar or (mq.imgui and mq.imgui.StyleVar)
     local function pCol(id, r, g, b, a)
         if id ~= nil and pcall(ImGui.PushStyleColor, id, r, g, b, a) then
             cCount = cCount + 1
+            cols[#cols + 1] = { id, r, g, b, a }
         end
     end
     local function pVar(id, a, b)
@@ -5858,11 +6201,14 @@ function UI.pushTheme()
             local ImVec2Type = _G.ImVec2 or ImVec2
             if type(ImVec2Type) == 'function' then
                 ok = pcall(ImGui.PushStyleVar, id, ImVec2Type(a, b))
+                if ok then vars[#vars + 1] = { id, a, b, ImVec2Type } end
             else
                 ok = pcall(ImGui.PushStyleVar, id, a, b)
+                if ok then vars[#vars + 1] = { id, a, b } end
             end
         else
             ok = pcall(ImGui.PushStyleVar, id, a)
+            if ok then vars[#vars + 1] = { id, a } end
         end
         if ok then vCount = vCount + 1 end
     end
@@ -5909,6 +6255,7 @@ function UI.pushTheme()
         pVar(SV.ItemSpacing, 8, 6)
         pVar(SV.WindowPadding, 12, 10)
     end
+    runtime.themePlan = { cols = cols, vars = vars }
 
     runtime.themeColStack = runtime.themeColStack or {}
     runtime.themeVarStack = runtime.themeVarStack or {}
@@ -6072,6 +6419,10 @@ function runtime.initPluginManager()
             mq                    = mq,
             ImGui                 = ImGui,
             runtime               = runtime,
+            -- core.log.debug('myplugin', 'fmt %d', n) etc. Debug lines only
+            -- go out while Debug Mode is on; all levels land in the log file
+            -- when Log To File is on. See triune_log.lua.
+            log                   = tlog,
             DATA                  = DATA,
             saveLoadout           = runtime.saveLoadout,
             colors                = { GOLD = GOLD, ARC = ARC, MUTED = MUTED, GOOD = GOOD, WARN = WARN, ERR = ERR },
@@ -6114,6 +6465,11 @@ function runtime.initPluginManager()
             getGemCooldownSec     = UI.getGemCooldownSec,
             drawSpellbookIcon     = UI.drawSpellbookIcon,
             delay                 = function(ms, cond) return pm.delay(ms, cond) end,
+            -- Queue work to run on the main script coroutine next tick. Any
+            -- plugin button that fires an ability / casts / targets (anything
+            -- that may mq.delay) must go through this instead of calling the
+            -- runtime function directly from onDrawUI.
+            defer                 = function(label, fn) return pm.defer(label, fn) end,
         }
         setmetatable(api, {
             __index = function(_, k)
@@ -6132,8 +6488,21 @@ function runtime.initPluginManager()
     -- without ever stalling the combat loop. Outside a fiber it degrades to
     -- mq.delay on the main coroutine. Returns true when the condition fired.
     pm.inFiber = false
+    pm.inDraw = false
     function pm.delay(ms, cond)
         ms = tonumber(ms) or 0
+        if pm.inDraw then
+            -- Called from an ImGui render callback (onDrawUI / onDrawSettings /
+            -- a button label evaluator). mq.delay here is a hard crash
+            -- ("Cannot delay from non-yieldable thread") that also corrupts the
+            -- ImGui Begin/End stack, so refuse and let the caller carry on.
+            -- Plugins that need to wait from a button must core.defer() the work.
+            if cond then
+                local ok, res = pcall(cond)
+                return ok and res == true
+            end
+            return false
+        end
         if not pm.inFiber then
             if mq and mq.delay then mq.delay(ms, cond) end
             if cond then
@@ -6154,15 +6523,27 @@ function runtime.initPluginManager()
     end
 
     -- Every plugin fiber is the same loop: run onTick, yield, repeat while enabled.
+    -- Flags a plugin as errored. Chat gets the one-line message; the log file
+    -- gets the full traceback (xpcall/debug.traceback output) so a bug report
+    -- has the stack without spamming chat with it.
+    -- `phase` is the hook name ('onDrawUI', 'onTick', 'fiber', ...), kept as
+    -- the errorMsg prefix the Plugins tab shows.
+    function pm.reportError(p, phase, err)
+        local full = tostring(err)
+        local first = full:match('^([^\n]*)') or full
+        p.status = 'Error'
+        p.errorMsg = phase .. ': ' .. first
+        print(string.format('\ar[Triune Plugin Error]\ax %s %s failed: %s', p.name, phase, first))
+        if full ~= first then tlog.error('plugin', '%s %s traceback:\n%s', p.name, phase, full) end
+    end
+
     function pm.createFiber(p)
         return coroutine.create(function()
             while p.enabled do
                 if p.instance.onTick then
-                    local ok, err = pcall(p.instance.onTick)
+                    local ok, err = xpcall(p.instance.onTick, debug.traceback)
                     if not ok then
-                        p.status = 'Error'
-                        p.errorMsg = 'fiber: ' .. tostring(err)
-                        print(string.format('\ar[Triune Plugin Error]\ax %s fiber crashed: %s', p.name, tostring(err)))
+                        pm.reportError(p, 'fiber', err)
                         break
                     end
                 end
@@ -6264,13 +6645,19 @@ function runtime.initPluginManager()
         return false, tostring(reason)
     end
 
-    function pm.isScriptRunning(entry)
+    -- Lua.Script() is a TLO call per script per frame from the header bar
+    -- and the Plugins page; poll it once per main-loop pass instead.
+    pm.scriptRunningCache = {}
+    function pm.isScriptRunning(entry, fresh)
         if not entry then return false end
+        local c = pm.scriptRunningCache[entry.runName]
+        if c and not fresh and runtime.tickSerial and c.tick == runtime.tickSerial then return c.v end
         local running = false
         pcall(function()
             local s = mq.TLO.Lua.Script(entry.runName)
             running = (s() and s.Status() == 'RUNNING') == true
         end)
+        pm.scriptRunningCache[entry.runName] = { tick = runtime.tickSerial, v = running }
         return running
     end
 
@@ -6278,7 +6665,8 @@ function runtime.initPluginManager()
     -- 'started' or 'stopped'.
     function pm.toggleScript(entry)
         if not entry then return nil end
-        if pm.isScriptRunning(entry) then
+        pm.scriptRunningCache[entry.runName] = nil -- re-poll after the toggle
+        if pm.isScriptRunning(entry, true) then
             mq.cmd('/lua stop ' .. entry.runName)
             return 'stopped'
         end
@@ -6307,6 +6695,7 @@ function runtime.initPluginManager()
     end
 
     function pm.setScriptHeaderButton(entry, val)
+        if pm.invalidateHeaderButtons then pm.invalidateHeaderButtons() end
         local c = scriptCfg(entry, true)
         if not c then return end
         c.headerButton = (val == true)
@@ -6485,6 +6874,7 @@ function runtime.initPluginManager()
     end
 
     function pm.enablePlugin(id)
+        if pm.invalidateHeaderButtons then pm.invalidateHeaderButtons() end
         local p = pm.plugins[id]
         if not p then return end
 
@@ -6497,17 +6887,18 @@ function runtime.initPluginManager()
 
         local coreApi = pm.getCoreApi()
         if p.instance.onInit then
-            local ok, err = pcall(p.instance.onInit, coreApi)
+            local ok, err = xpcall(p.instance.onInit, debug.traceback, coreApi)
             if not ok then
-                p.status = 'Error'
-                p.errorMsg = 'onInit: ' .. tostring(err)
-                print(string.format('\ar[Triune Plugin Error]\ax %s onInit failed: %s', p.name, tostring(err)))
+                pm.reportError(p, 'onInit', err)
                 return
             end
         end
 
         if p.instance.onLoadSettings and ctrl.plugins[id].settings then
-            pcall(p.instance.onLoadSettings, ctrl.plugins[id].settings)
+            local okLoad, loadErr = pcall(p.instance.onLoadSettings, ctrl.plugins[id].settings)
+            if not okLoad then
+                print(string.format('\ay[Triune Plugin]\ax %s onLoadSettings failed (using defaults): %s', p.name, tostring(loadErr)))
+            end
         end
 
         if p.hasThread then
@@ -6516,6 +6907,7 @@ function runtime.initPluginManager()
     end
 
     function pm.disablePlugin(id)
+        if pm.invalidateHeaderButtons then pm.invalidateHeaderButtons() end
         local p = pm.plugins[id]
         if not p then return end
 
@@ -6549,10 +6941,16 @@ function runtime.initPluginManager()
     end
 
     function pm.reloadAll()
+        if pm.invalidateHeaderButtons then pm.invalidateHeaderButtons() end
         for _, id in ipairs(pm.pluginOrder) do
             local p = pm.plugins[id]
             if p and p.enabled then
                 pm.disablePlugin(id)
+                -- disablePlugin persisted enabled=false; restore the user's real
+                -- choice so discover() -> loadPlugin re-enables it (same as reloadPlugin).
+                if ctrl.plugins and ctrl.plugins[id] then
+                    ctrl.plugins[id].enabled = true
+                end
             end
         end
         pm.plugins = {}
@@ -6627,16 +7025,20 @@ function runtime.initPluginManager()
 
         -- Method 1: LuaFileSystem (lfs)
         local okLfs, lfs = pcall(require, 'lfs')
+        local lfsListed = false
         if okLfs and lfs and lfs.dir then
             pcall(function()
                 for f in lfs.dir(dir) do
                     addFile(f)
+                    lfsListed = true
                 end
             end)
         end
 
-        -- Method 2: OS popen directory query (dynamically finds custom dropped plugins)
-        pcall(function()
+        -- Method 2: OS popen directory query (dynamically finds custom dropped
+        -- plugins). Only when lfs could not list the folder: on Windows this
+        -- spawns cmd.exe on every Rescan / Reload All.
+        if not lfsListed then pcall(function()
             local isWin = (package.config and package.config:sub(1, 1) == '\\')
             local cmd
             local dirStr = tostring(dir or '')
@@ -6654,7 +7056,7 @@ function runtime.initPluginManager()
                 end
                 p:close()
             end
-        end)
+        end) end
 
         -- Method 3: Core known plugins direct probe fallback
         local known = {
@@ -6719,9 +7121,12 @@ function runtime.initPluginManager()
         local ops = pm.deferred
         pm.deferred = {}
         for _, op in ipairs(ops) do
-            local ok, err = pcall(op.fn)
+            local ok, err = xpcall(op.fn, debug.traceback)
             if not ok then
-                print(string.format('\ar[Triune Plugin Error]\ax %s failed: %s', op.label, tostring(err)))
+                local full = tostring(err)
+                local first = full:match('^([^\n]*)') or full
+                print(string.format('\ar[Triune Plugin Error]\ax %s failed: %s', op.label, first))
+                if full ~= first then tlog.error('plugin', '%s traceback:\n%s', op.label, full) end
             end
         end
         return #ops
@@ -6754,16 +7159,12 @@ function runtime.initPluginManager()
                             local ok, err = coroutine.resume(p.thread)
                             pm.inFiber = false
                             if not ok then
-                                p.status = 'Error'
-                                p.errorMsg = 'resume: ' .. tostring(err)
-                                print(string.format('\ar[Triune Plugin Error]\ax %s fiber crashed: %s', p.name, tostring(err)))
+                                pm.reportError(p, 'fiber', debug.traceback(p.thread, tostring(err)))
                             end
                         elseif p.instance.onTick then
-                            local ok, err = pcall(p.instance.onTick)
+                            local ok, err = xpcall(p.instance.onTick, debug.traceback)
                             if not ok then
-                                p.status = 'Error'
-                                p.errorMsg = 'tick: ' .. tostring(err)
-                                print(string.format('\ar[Triune Plugin Error]\ax %s onTick error: %s', p.name, tostring(err)))
+                                pm.reportError(p, 'onTick', err)
                             end
                         end
 
@@ -6780,17 +7181,17 @@ function runtime.initPluginManager()
     -- ImGui.Begin and ImGui.End leaves the ImGui stack unbalanced, so we flag the
     -- plugin as Error (which stops drawing it) rather than retrying every frame.
     function pm.drawUI()
+        pm.inDraw = true
         for _, id in ipairs(pm.pluginOrder) do
             local p = pm.plugins[id]
             if p and p.enabled and p.status ~= 'Error' and p.instance.onDrawUI then
-                local ok, err = pcall(p.instance.onDrawUI)
+                local ok, err = xpcall(p.instance.onDrawUI, debug.traceback)
                 if not ok then
-                    p.status = 'Error'
-                    p.errorMsg = 'onDrawUI: ' .. tostring(err)
-                    print(string.format('\ar[Triune Plugin Error]\ax %s onDrawUI failed: %s', p.name, tostring(err)))
+                    pm.reportError(p, 'onDrawUI', err)
                 end
             end
         end
+        pm.inDraw = false
     end
 
     -- Draws one plugin's settings panel inline. Lets a core Settings sub-tab keep
@@ -6825,11 +7226,12 @@ function runtime.initPluginManager()
             ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'This plugin has no configurable settings.')
             return true
         end
-        local ok, err = pcall(p.instance.onDrawSettings)
+        local wasInDraw = pm.inDraw
+        pm.inDraw = true
+        local ok, err = xpcall(p.instance.onDrawSettings, debug.traceback)
+        pm.inDraw = wasInDraw
         if not ok then
-            p.status = 'Error'
-            p.errorMsg = 'onDrawSettings: ' .. tostring(err)
-            print(string.format('\ar[Triune Plugin Error]\ax %s onDrawSettings failed: %s', p.name, tostring(err)))
+            pm.reportError(p, 'onDrawSettings', err)
             return false
         end
         return true
@@ -6841,11 +7243,9 @@ function runtime.initPluginManager()
         for _, id in ipairs(pm.pluginOrder) do
             local p = pm.plugins[id]
             if p and p.enabled and p.status ~= 'Error' and p.instance[hookName] then
-                local ok, res = pcall(p.instance[hookName], ...)
+                local ok, res = xpcall(p.instance[hookName], debug.traceback, ...)
                 if not ok then
-                    p.status = 'Error'
-                    p.errorMsg = hookName .. ': ' .. tostring(res)
-                    print(string.format('\ar[Triune Plugin Error]\ax %s %s failed: %s', p.name, hookName, tostring(res)))
+                    pm.reportError(p, hookName, res)
                 elseif firstTrue and res then
                     return res
                 end
@@ -6938,6 +7338,7 @@ function runtime.initPluginManager()
     end
 
     function pm.setHeaderButton(id, val)
+        if pm.invalidateHeaderButtons then pm.invalidateHeaderButtons() end
         if not ctrl.plugins then ctrl.plugins = {} end
         if not ctrl.plugins[id] then ctrl.plugins[id] = {} end
         ctrl.plugins[id].headerButton = (val == true)
@@ -6969,9 +7370,18 @@ function runtime.initPluginManager()
     -- also wrap early when the header runs out of width. Returns the number
     -- of buttons drawn.
     pm.HEADER_BUTTONS_PER_ROW = 8
+    function pm.invalidateHeaderButtons() pm.headerButtonCache = nil end
     function pm.drawHeaderButtons(buttonsOnRow)
-        local entries = pm.windowPlugins(true)
-        local scripts = pm.headerScripts()
+        -- windowPlugins / headerScripts allocate and sort per call; rebuild
+        -- the ordered lists at most once a second (plugin enable/disable and
+        -- header toggles call pm.invalidateHeaderButtons for an instant refresh).
+        local nowHb = os.clock()
+        local hb = pm.headerButtonCache
+        if not hb or (nowHb - hb.at) >= 1.0 then
+            hb = { at = nowHb, entries = pm.windowPlugins(true), scripts = pm.headerScripts() }
+            pm.headerButtonCache = hb
+        end
+        local entries, scripts = hb.entries, hb.scripts
         if #entries == 0 and #scripts == 0 then return 0 end
         local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
         local perRow = tonumber(pm.HEADER_BUTTONS_PER_ROW) or 8
@@ -7012,23 +7422,30 @@ function runtime.initPluginManager()
             end
             if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
             if ImGui.IsItemHovered() then
-                ImGui.SetTooltip('%s', tostring(tip))
+                ImGui.SetTooltip('%s', tostring(type(tip) == 'function' and tip() or tip))
             end
             drawn = drawn + 1
             col = col + 1
         end
         for _, e in ipairs(entries) do
-            local label = tostring(e.window.label or e.id)
-            button(label, '##hdrPlg_' .. e.id, pm.isWindowOpen(e.id),
-                e.window.tooltip or ('Toggles the ' .. label .. ' window (' .. e.id .. ' plugin).'),
-                function() pm.toggleWindow(e.id) end)
+            -- labels / ids / tooltips are built once per entry and kept on it
+            if not e.hdrLabel then
+                e.hdrLabel = tostring(e.window.label or e.id)
+                e.hdrId = '##hdrPlg_' .. e.id
+                e.hdrTip = e.window.tooltip or ('Toggles the ' .. e.hdrLabel .. ' window (' .. e.id .. ' plugin).')
+                e.hdrClick = function() pm.toggleWindow(e.id) end
+            end
+            button(e.hdrLabel, e.hdrId, pm.isWindowOpen(e.id), e.hdrTip, e.hdrClick)
         end
         for _, sc in ipairs(scripts) do
             local running = pm.isScriptRunning(sc)
-            button(pm.scriptButtonLabel(sc), '##hdrScr_' .. tostring(sc.file), running,
-                running and string.format('Stops %s (/lua stop %s).', sc.name, tostring(sc.runName))
-                    or string.format('Runs %s as its own /lua script (/lua run %s).\nClick again while it is running to stop it.', sc.name, tostring(sc.runName)),
-                function() pm.toggleScript(sc) end)
+            if not sc.hdrId then
+                sc.hdrId = '##hdrScr_' .. tostring(sc.file)
+                sc.hdrClick = function() pm.toggleScript(sc) end
+                sc.hdrTipRun = string.format('Runs %s as its own /lua script (/lua run %s).\nClick again while it is running to stop it.', sc.name, tostring(sc.runName))
+                sc.hdrTipStop = string.format('Stops %s (/lua stop %s).', sc.name, tostring(sc.runName))
+            end
+            button(pm.scriptButtonLabel(sc), sc.hdrId, running, running and sc.hdrTipStop or sc.hdrTipRun, sc.hdrClick)
         end
         return drawn
     end
@@ -7574,6 +7991,11 @@ function UI.updateTracker()
     if not runtime.trackStartTime then
         runtime.trackStartTime = os.time()
     end
+    -- six TLO reads; the header bar and mini window call this every frame,
+    -- the tracker only needs 1 Hz
+    local nowTr = os.clock()
+    if runtime.lastTrackerAt and (nowTr - runtime.lastTrackerAt) < 1.0 then return end
+    runtime.lastTrackerAt = nowTr
     local aa = UI.getCurrentAA()
     if aa ~= nil then
         if runtime.startAA == nil then runtime.startAA = aa end
@@ -7616,7 +8038,9 @@ function UI.drawHeaderBar()
 
     -- Plugin window toggles (Spellbook, Map, DPS, Cursor, Cooldowns, HUDs, ...).
     -- Which plugins get a button here is chosen per plugin on Settings -> Plugins.
-    if not runtime.pluginManager then runtime.initPluginManager() end
+    -- initPluginManager runs plugin chunks / onInit and must never execute on
+    -- the render thread; it is always initialised before the first frame.
+    if not runtime.pluginManager then return end
     local pm = runtime.pluginManager
     if pm and type(pm.drawHeaderButtons) == 'function' then
         -- Compact Mode already occupies the first slot of the first row; the
@@ -7651,7 +8075,7 @@ function UI.drawHeaderBar()
             'MQ2Nav plugin is NOT loaded. Pathing, hunter roaming, chase, and return-to-camp require MQ2Nav.')
         ImGui.SameLine()
         if ImGui.Button('Load MQ2Nav##hdrLoadNav') then
-            mq.cmd('/plugin mq2nav')
+            mq.cmd('/plugin mq2nav'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
         end
         if ImGui.IsItemHovered() then
             UI.setTooltip('Executes /plugin mq2nav to load the MQ2Nav plugin.')
@@ -7662,7 +8086,7 @@ function UI.drawHeaderBar()
             string.format('No NavMesh loaded for zone "%s". Pathing, roaming, and chase require a zone mesh.', curZone))
         ImGui.SameLine()
         if ImGui.Button('Reload Mesh##hdrReloadMesh') then
-            mq.cmd('/nav reload')
+            mq.cmd('/nav reload'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
         end
         if ImGui.IsItemHovered() then
             UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
@@ -7673,7 +8097,7 @@ function UI.drawHeaderBar()
             'MQ2MoveUtils plugin is NOT loaded. Melee stick, combat positioning, and unstuck require MQ2MoveUtils.')
         ImGui.SameLine()
         if ImGui.Button('Load MQ2MoveUtils##hdrLoadMoveUtils') then
-            mq.cmd('/plugin mq2moveutils')
+            mq.cmd('/plugin mq2moveutils'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
         end
         if ImGui.IsItemHovered() then
             UI.setTooltip('Executes /plugin mq2moveutils to load the MQ2MoveUtils plugin.')
@@ -7701,11 +8125,14 @@ function UI.drawClassPicker()
             end
             local newIdx = ImGui.Combo('##cls' .. i, currentIdx, CLASS_PICKER_OPTIONS)
             if newIdx ~= currentIdx then
-                if newIdx == 1 then
-                    myClasses[i] = nil
-                else
-                    myClasses[i] = CLASS_PICKER_OPTIONS[newIdx]
+                -- Rebuild without holes: every consumer walks myClasses with
+                -- ipairs, so a nil in slot 1 or 2 silently hid the later classes.
+                local picked = {}
+                for j = 1, 3 do
+                    local v = (j == i) and (newIdx ~= 1 and CLASS_PICKER_OPTIONS[newIdx] or nil) or myClasses[j]
+                    if v then picked[#picked + 1] = v end
                 end
+                for j = 1, 3 do myClasses[j] = picked[j] end
                 runtime.saveLoadout()
             end
             ImGui.SameLine()
@@ -7716,6 +8143,85 @@ function UI.drawClassPicker()
         accent(MUTED, 'Detected from your in-game Inventory Window.')
     end
 end
+
+-- Help tab tables are static; hoisted so the tab doesn't allocate ~75
+-- entries per frame while open.
+UI.HELP_COMMANDS = {
+        { cmd = '/ac run / /ac start',                desc = 'Start / unpause auto-combat execution' },
+        { cmd = '/ac pause / /ac stop',               desc = 'Pause auto-combat execution, halt movement & disengage pet' },
+        { cmd = '/ac restart',                        desc = 'Stop and re-run the whole script (same as /lua stop triune, /lua run triune)' },
+        { cmd = '/ac burn [on|off]',                  desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
+        { cmd = '/ac memall',                         desc = 'Queue all missing or mismatched priority spells to memorization bar' },
+        { cmd = '/ac importbar / /ac import',         desc = 'Auto-populate spell lines from currently memorized spell gems' },
+        { cmd = '/ac status',                         desc = 'Print current running state and combat mode to chat' },
+        { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window mode' },
+        { cmd = '/ac scale [0.75-2.0|reset]',         desc = 'UI scale for every Triune window (per-window overrides on Settings -> Window Layout)' },
+        { cmd = '/ac hud / /ac uf',                   desc = 'Toggle popout Target & Player HUD unit frames window' },
+        { cmd = '/ac cd / /ac cooldowns',             desc = 'Toggle popout Cooldown & Ability Monitor window' },
+        { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
+        { cmd = '/ac spellbook',                      desc = 'Toggle the Spellbook Browser & mem-to-gem queue window' },
+        { cmd = '/ac cursorui',                       desc = 'Toggle the Cursor Item Manager window (cursor plugin)' },
+        { cmd = '/ac clearcursor',                    desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
+        { cmd = '/ac clear lockouts',                 desc = 'Clear all active spell lockouts, non-stacking buff backoffs, and mob immunities' },
+        { cmd = '/ac buffbot [on|off]',               desc = 'Toggle the Buffbot window; on/off starts or stops the buffbot station (buffbot plugin)' },
+        { cmd = '/ac map / /ac track / /ac zone',     desc = 'Toggle the Map, Zone Atlas & NPC Tracker window (map plugin)' },
+        { cmd = '/ac inv / /ac bank',                 desc = 'Toggle the Inventory & Bank Manager window (inventory plugin)' },
+        { cmd = '/ac dps / /dps',                     desc = 'Toggle the DPS Parser window (dps plugin)' },
+        { cmd = '/ac net [all|zone|group|Name] [command]', desc = 'Toggle the Box Network window, or run an /ac command on your other boxes (boxnet plugin)' },
+        { cmd = '/ac btn [n|new|exec <set> <index>|import bm]', desc = 'Toggle the Hot Buttons hotbars, show/hide hotbar n, or fire a button (buttons plugin; also /btn, /btnexec)' },
+        { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
+        { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
+        { cmd = '/dps reset',                         desc = 'Reset active combat damage counters' },
+        { cmd = '/ac zplane [5-100]',                 desc = 'Configure Hunter Tier 1 same-floor / Z plane height threshold (default 15)' },
+        { cmd = '/ac huntz [10-300]',                 desc = 'Configure Hunter Tier 2 max vertical height difference (default 75)' },
+        { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
+        { cmd = '/ac ma [target|clear|<name>|<id>]',  desc = 'Configure Main Assist by player ID or name, or set from current PC target' },
+        { cmd = '/ac style [melee|ranged|spell]',     desc = 'Set combat style: Melee (/attack at melee reach), Ranged (bow via server #attackmode), or Spell (never auto-attacks)' },
+        { cmd = '/ac range [dist]',                   desc = 'Set engagement distance for the active style (melee 5-50, ranged/spell 5-200); /ac meleerange and /ac rangeddist target a specific one' },
+        { cmd = '/ac xtardist [25-300]',              desc = 'Configure max XTarget / assist engagement chase distance (default 150)' },
+        { cmd = '/ac chasedist [5-100]',              desc = 'Configure following distance (how far to stay back) from Main Assist (default 15)' },
+        { cmd = '/ac selfdefense [on|off]',           desc = 'Toggle Assist mode self-defense when attacked while MA has no target' },
+        { cmd = '/ac assistbehind [on|off]',          desc = 'Toggle Assist mode positioning behind NPC in combat (default: on)' },
+        { cmd = '/ac manualstick [on|off]',           desc = 'Manual mode: stick to / chase the NPC being fought (default: on). Off = you drive.' },
+        { cmd = '/ac manualnav [on|off]',             desc = 'Manual mode: auto-navigate to a hostile NPC as soon as you select it (default: off)' },
+        { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
+        { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
+        { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
+        { cmd = '/triunerun',                         desc = 'Quick keybind command to toggle run / pause' },
+}
+UI.HELP_TARGETS = {
+        { opt = 'E: All Enemies',     color = ERR,  desc = 'Multi-Target mode: Evaluates ALL hostile enemies on your Extended Target (XTarget) window. For duration spells (DoTs, debuffs, snares, mes), sequentially casts on each enemy missing the effect and yields once all have it. For nukes/direct damage, round-robins casts evenly across all XTarget enemies. Honors per-mob max_casts and skips locked-out/immune mobs.' },
+        { opt = 'E: Current Target',  color = ERR,  desc = 'Casts directly on your currently active game target (Target TLO). Does not switch targets automatically.' },
+        { opt = 'E: Assist Target',   color = ERR,  desc = 'Targets the hostile mob currently targeted by your configured Main Assist. If MA has no target and Assist Self-Defense is on, falls back to your direct attacker.' },
+        { opt = 'E: Nearest Add',     color = ERR,  desc = 'Targets the first hostile NPC add on your Extended Target window within vertical height limits. If XTarget has no adds, falls back to the nearest hostile NPC within camp/hunt radius.' },
+        { opt = 'E: Unmezzed Add',    color = ERR,  desc = 'Targets the first hostile add on your Extended Target window that is NOT mesmerized. Ideal for Enchanter, Bard, or Necromancer crowd control (Mez) rotations.' },
+        { opt = 'F: Myself',          color = GOOD, desc = 'Always targets and casts on your own character. Standard for self-buffs, personal emergency heals, and Feign Death.' },
+        { opt = 'F: Main Assist',     color = GOOD, desc = 'Targets the designated Main Assist character for single-target buffs, heals, or utility.' },
+        { opt = 'F: Tank',            color = GOOD, desc = 'Targets the designated Tank character for targeted heals, protective buffs, or damage mitigation.' },
+        { opt = 'F: Lowest-HP Ally',  color = GOOD, desc = 'Scans yourself and all group members, automatically targeting the ally with the lowest current HP percentage. Ideal for reactive heals.' },
+        { opt = 'F: Whole Group',     color = GOOD, desc = 'Targets your character to cast group-wide spells (group heals, group buffs, group auras).' },
+        { opt = 'F: Pet',             color = GOOD, desc = 'Targets your summoned pet. On multi-class trio characters with multiple pets, prioritizes the pet class matching the spell, lowest HP pet, or pet missing the buff.' },
+}
+UI.HELP_CONDITIONS = {
+        { when = 'always',               desc = 'Casts whenever the spell gem or ability is ready and off cooldown (respects mana and reagent requirements).' },
+        { when = 'in combat',            desc = 'Casts whenever your character or group is actively engaged in combat.' },
+        { when = 'twist while fighting', desc = 'Continuously sings the song while in combat without waiting for buff duration to expire (Bard songs).' },
+        { when = 'target HP <=',         desc = 'Casts when the target\'s HP percentage drops to or below the configured slider threshold.' },
+        { when = 'target HP between',    desc = 'Casts only when target HP is between the configured minimum HP and percentage threshold (e.g. DoTs between 20% and 90%).' },
+        { when = 'my HP <=',             desc = 'Casts when your own character\'s HP percentage drops to or below threshold (heals, defensives, Feign Death, Mend).' },
+        { when = 'my Mana <=',           desc = 'Casts when your character\'s Mana percentage drops to or below threshold (Cannibalize, mana taps, rods).' },
+        { when = 'missing buff',         desc = 'Casts only when the target does not currently have this buff or debuff active.' },
+        { when = 'missing pet',          desc = 'Casts to summon a class pet when your pet is dead or missing.' },
+        { when = 'has Poison',           desc = 'Casts cure spells when the target is afflicted with poison counters.' },
+        { when = 'has Disease',          desc = 'Casts cure spells when the target is afflicted with disease counters.' },
+        { when = 'has Poison/Disease',   desc = 'Casts cure spells when the target is afflicted with either poison or disease counters (combined trigger).' },
+        { when = 'has Curse',            desc = 'Casts cure spells when the target is afflicted with curse counters.' },
+        { when = 'has Corruption',       desc = 'Casts cure spells when the target is afflicted with corruption counters.' },
+        { when = 'Aggro on Me',          desc = 'Casts when an enemy mob currently has primary aggro on your character.' },
+        { when = 'my Aggro >=',          desc = 'Casts when your secondary aggro percentage meets or exceeds threshold (fade, jolt, de-aggro).' },
+        { when = 'ally is Dead',         desc = 'Casts resurrection spells when a group member is dead/corpse.' },
+        { when = 'add is loose',         desc = 'Casts when an unmezzed or uncontrolled add is detected on your Extended Target list.' },
+}
 
 function UI.drawHelpTab()
     if not ImGui.BeginTabItem('Help') then return end
@@ -7728,49 +8234,7 @@ function UI.drawHelpTab()
             ImGui.TableSetupColumn('Description', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableHeadersRow()
 
-            local commands = {
-                { cmd = '/ac run / /ac start',                desc = 'Start / unpause auto-combat execution' },
-                { cmd = '/ac pause / /ac stop',               desc = 'Pause auto-combat execution, halt movement & disengage pet' },
-                { cmd = '/ac restart',                        desc = 'Stop and re-run the whole script (same as /lua stop triune, /lua run triune)' },
-                { cmd = '/ac burn [on|off]',                  desc = 'Toggle burn mode (enables "Burn Only" spells, AAs, discs)' },
-                { cmd = '/ac memall',                         desc = 'Queue all missing or mismatched priority spells to memorization bar' },
-                { cmd = '/ac importbar / /ac import',         desc = 'Auto-populate spell lines from currently memorized spell gems' },
-                { cmd = '/ac status',                         desc = 'Print current running state and combat mode to chat' },
-                { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window mode' },
-                { cmd = '/ac scale [0.75-2.0|reset]',         desc = 'UI scale for every Triune window (per-window overrides on Settings -> Window Layout)' },
-                { cmd = '/ac hud / /ac uf',                   desc = 'Toggle popout Target & Player HUD unit frames window' },
-                { cmd = '/ac cd / /ac cooldowns',             desc = 'Toggle popout Cooldown & Ability Monitor window' },
-                { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
-                { cmd = '/ac spellbook',                      desc = 'Toggle the Spellbook Browser & mem-to-gem queue window' },
-                { cmd = '/ac cursorui',                       desc = 'Toggle the Cursor Item Manager window (cursor plugin)' },
-                { cmd = '/ac clearcursor',                    desc = 'Clear item on cursor (autoinventory / drop / destroy per rules)' },
-                { cmd = '/ac clear lockouts',                 desc = 'Clear all active spell lockouts, non-stacking buff backoffs, and mob immunities' },
-                { cmd = '/ac buffbot [on|off]',               desc = 'Toggle the Buffbot window; on/off starts or stops the buffbot station (buffbot plugin)' },
-                { cmd = '/ac map / /ac track / /ac zone',     desc = 'Toggle the Map, Zone Atlas & NPC Tracker window (map plugin)' },
-                { cmd = '/ac inv / /ac bank',                 desc = 'Toggle the Inventory & Bank Manager window (inventory plugin)' },
-                { cmd = '/ac dps / /dps',                     desc = 'Toggle the DPS Parser window (dps plugin)' },
-                { cmd = '/ac net [all|zone|group|Name] [command]', desc = 'Toggle the Box Network window, or run an /ac command on your other boxes (boxnet plugin)' },
-                { cmd = '/ac btn [n|new|exec <set> <index>|import bm]', desc = 'Toggle the Hot Buttons hotbars, show/hide hotbar n, or fire a button (buttons plugin; also /btn, /btnexec)' },
-                { cmd = '/dps compact',                       desc = 'Toggle DPS parser auto-resizing compact mode' },
-                { cmd = '/dps report [chan]',                 desc = 'Report combat statistics to /group, /say, /guild, or /raid' },
-                { cmd = '/dps reset',                         desc = 'Reset active combat damage counters' },
-                { cmd = '/ac zplane [5-100]',                 desc = 'Configure Hunter Tier 1 same-floor / Z plane height threshold (default 15)' },
-                { cmd = '/ac huntz [10-300]',                 desc = 'Configure Hunter Tier 2 max vertical height difference (default 75)' },
-                { cmd = '/ac <mode> [submode]',               desc = 'Switch combat mode (e.g. /ac manual, /ac puller hunt, /ac puller camp, /ac assist chase, /ac backline, /ac tank)' },
-                { cmd = '/ac ma [target|clear|<name>|<id>]',  desc = 'Configure Main Assist by player ID or name, or set from current PC target' },
-                { cmd = '/ac style [melee|ranged|spell]',     desc = 'Set combat style: Melee (/attack at melee reach), Ranged (bow via server #attackmode), or Spell (never auto-attacks)' },
-                { cmd = '/ac range [dist]',                   desc = 'Set engagement distance for the active style (melee 5-50, ranged/spell 5-200); /ac meleerange and /ac rangeddist target a specific one' },
-                { cmd = '/ac xtardist [25-300]',              desc = 'Configure max XTarget / assist engagement chase distance (default 150)' },
-                { cmd = '/ac chasedist [5-100]',              desc = 'Configure following distance (how far to stay back) from Main Assist (default 15)' },
-                { cmd = '/ac selfdefense [on|off]',           desc = 'Toggle Assist mode self-defense when attacked while MA has no target' },
-                { cmd = '/ac assistbehind [on|off]',          desc = 'Toggle Assist mode positioning behind NPC in combat (default: on)' },
-                { cmd = '/ac manualstick [on|off]',           desc = 'Manual mode: stick to / chase the NPC being fought (default: on). Off = you drive.' },
-                { cmd = '/ac manualnav [on|off]',             desc = 'Manual mode: auto-navigate to a hostile NPC as soon as you select it (default: off)' },
-                { cmd = '/ac pullcon [tier] [on|off]',        desc = 'Configure Puller faction consideration filter (Scowling, Indifferent, etc.) or preset' },
-                { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
-                { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
-                { cmd = '/triunerun',                         desc = 'Quick keybind command to toggle run / pause' },
-            }
+            local commands = UI.HELP_COMMANDS
 
             for _, entry in ipairs(commands) do
                 ImGui.TableNextRow()
@@ -7822,19 +8286,7 @@ function UI.drawHelpTab()
             ImGui.TableSetupColumn('Targeting Behavior & Resolution', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableHeadersRow()
 
-            local targets = {
-                { opt = 'E: All Enemies',     color = ERR,  desc = 'Multi-Target mode: Evaluates ALL hostile enemies on your Extended Target (XTarget) window. For duration spells (DoTs, debuffs, snares, mes), sequentially casts on each enemy missing the effect and yields once all have it. For nukes/direct damage, round-robins casts evenly across all XTarget enemies. Honors per-mob max_casts and skips locked-out/immune mobs.' },
-                { opt = 'E: Current Target',  color = ERR,  desc = 'Casts directly on your currently active game target (Target TLO). Does not switch targets automatically.' },
-                { opt = 'E: Assist Target',   color = ERR,  desc = 'Targets the hostile mob currently targeted by your configured Main Assist. If MA has no target and Assist Self-Defense is on, falls back to your direct attacker.' },
-                { opt = 'E: Nearest Add',     color = ERR,  desc = 'Targets the first hostile NPC add on your Extended Target window within vertical height limits. If XTarget has no adds, falls back to the nearest hostile NPC within camp/hunt radius.' },
-                { opt = 'E: Unmezzed Add',    color = ERR,  desc = 'Targets the first hostile add on your Extended Target window that is NOT mesmerized. Ideal for Enchanter, Bard, or Necromancer crowd control (Mez) rotations.' },
-                { opt = 'F: Myself',          color = GOOD, desc = 'Always targets and casts on your own character. Standard for self-buffs, personal emergency heals, and Feign Death.' },
-                { opt = 'F: Main Assist',     color = GOOD, desc = 'Targets the designated Main Assist character for single-target buffs, heals, or utility.' },
-                { opt = 'F: Tank',            color = GOOD, desc = 'Targets the designated Tank character for targeted heals, protective buffs, or damage mitigation.' },
-                { opt = 'F: Lowest-HP Ally',  color = GOOD, desc = 'Scans yourself and all group members, automatically targeting the ally with the lowest current HP percentage. Ideal for reactive heals.' },
-                { opt = 'F: Whole Group',     color = GOOD, desc = 'Targets your character to cast group-wide spells (group heals, group buffs, group auras).' },
-                { opt = 'F: Pet',             color = GOOD, desc = 'Targets your summoned pet. On multi-class trio characters with multiple pets, prioritizes the pet class matching the spell, lowest HP pet, or pet missing the buff.' },
-            }
+            local targets = UI.HELP_TARGETS
 
             for _, entry in ipairs(targets) do
                 ImGui.TableNextRow()
@@ -7853,26 +8305,7 @@ function UI.drawHelpTab()
             ImGui.TableSetupColumn('Activation Criteria', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableHeadersRow()
 
-            local conditions = {
-                { when = 'always',               desc = 'Casts whenever the spell gem or ability is ready and off cooldown (respects mana and reagent requirements).' },
-                { when = 'in combat',            desc = 'Casts whenever your character or group is actively engaged in combat.' },
-                { when = 'twist while fighting', desc = 'Continuously sings the song while in combat without waiting for buff duration to expire (Bard songs).' },
-                { when = 'target HP <=',         desc = 'Casts when the target\'s HP percentage drops to or below the configured slider threshold.' },
-                { when = 'target HP between',    desc = 'Casts only when target HP is between the configured minimum HP and percentage threshold (e.g. DoTs between 20% and 90%).' },
-                { when = 'my HP <=',             desc = 'Casts when your own character\'s HP percentage drops to or below threshold (heals, defensives, Feign Death, Mend).' },
-                { when = 'my Mana <=',           desc = 'Casts when your character\'s Mana percentage drops to or below threshold (Cannibalize, mana taps, rods).' },
-                { when = 'missing buff',         desc = 'Casts only when the target does not currently have this buff or debuff active.' },
-                { when = 'missing pet',          desc = 'Casts to summon a class pet when your pet is dead or missing.' },
-                { when = 'has Poison',           desc = 'Casts cure spells when the target is afflicted with poison counters.' },
-                { when = 'has Disease',          desc = 'Casts cure spells when the target is afflicted with disease counters.' },
-                { when = 'has Poison/Disease',   desc = 'Casts cure spells when the target is afflicted with either poison or disease counters (combined trigger).' },
-                { when = 'has Curse',            desc = 'Casts cure spells when the target is afflicted with curse counters.' },
-                { when = 'has Corruption',       desc = 'Casts cure spells when the target is afflicted with corruption counters.' },
-                { when = 'Aggro on Me',          desc = 'Casts when an enemy mob currently has primary aggro on your character.' },
-                { when = 'my Aggro >=',          desc = 'Casts when your secondary aggro percentage meets or exceeds threshold (fade, jolt, de-aggro).' },
-                { when = 'ally is Dead',         desc = 'Casts resurrection spells when a group member is dead/corpse.' },
-                { when = 'add is loose',         desc = 'Casts when an unmezzed or uncontrolled add is detected on your Extended Target list.' },
-            }
+            local conditions = UI.HELP_CONDITIONS
 
             for _, entry in ipairs(conditions) do
                 ImGui.TableNextRow()
@@ -7888,10 +8321,23 @@ function UI.drawHelpTab()
     ImGui.EndTabItem()
 end
 
+-- Per gem row per frame this did ~8 TLO calls in fresh pcall closures;
+-- cache each row's badge for 0.3 s keyed by (row, slot, spell).
+runtime.gemBadgeCache = {}
 function UI.getGemStatusBadge(i, g)
     if not g or not g.spell or g.spell == '' then
         return MUTED, '[--]', 'Slot is empty. Select a class and spell to assign.'
     end
+    local key = tostring(i) .. '|' .. tostring(g.gem or '') .. '|' .. g.spell
+    local nowB = os.clock()
+    local cb = runtime.gemBadgeCache[key]
+    if cb and (nowB - cb.at) < 0.3 then return cb.c, cb.t, cb.tip end
+    local c, t, tip = UI.computeGemStatusBadge(i, g)
+    runtime.gemBadgeCache[key] = { at = nowB, c = c, t = t, tip = tip }
+    return c, t, tip
+end
+
+function UI.computeGemStatusBadge(i, g)
     local gemSlot = tonumber(g.gem) or i
     if runtime.isSwitchingSpells and runtime.switchingSlot == gemSlot and runtime.switchingSpellName == g.spell then
         return WARN, '[MEM*]', string.format('Currently memorizing "%s" into Gem %d...', g.spell, gemSlot)
@@ -7925,11 +8371,16 @@ function UI.getGemStatusBadge(i, g)
         return GOLD, '[CD]', 'Spell is recharging cooldown.'
     end
 
-    local spMana, curMana = 0, 0
-    pcall(function()
-        spMana = tonumber(mq.TLO.Spell(g.spell).Mana()) or 0
-        curMana = tonumber(mq.TLO.Me.CurrentMana()) or 0
-    end)
+    -- spell mana cost is static; look it up once per spell name
+    runtime.spellManaCache = runtime.spellManaCache or {}
+    local spMana = runtime.spellManaCache[g.spell]
+    if spMana == nil then
+        spMana = 0
+        pcall(function() spMana = tonumber(mq.TLO.Spell(g.spell).Mana()) or 0 end)
+        runtime.spellManaCache[g.spell] = spMana
+    end
+    local curMana = 0
+    pcall(function() curMana = tonumber(mq.TLO.Me.CurrentMana()) or 0 end)
     if curMana < spMana then
         return ERR, '[MANA]', string.format('Insufficient mana: requires %d mana (current: %d)', spMana, curMana)
     end
@@ -8050,13 +8501,10 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                             ImGui.SetTooltip(cls .. ' is a melee class without castable spell gems. Set up disciplines and abilities on the Abilities tab.')
                         end
                     else
-                        local names, lookup = filteredSpells(cls)
-                        local spOpts = { '-- choose --' }
-                        for _, n in ipairs(names) do spOpts[#spOpts + 1] = n end
-                        local curSi = 1
-                        if g.spell then
-                            for k, lu in pairs(lookup) do if lu.name == g.spell then curSi = k + 1 end end
-                        end
+                        local _, lookup = filteredSpells(cls)
+                        local fsc = runtime.filteredSpellsCache[cls]
+                        local spOpts = fsc.opts
+                        local curSi = (g.spell and fsc.indexOf[g.spell]) or 1
                         ImGui.SameLine(); ImGui.SetNextItemWidth(UI.px(180))
                         local si = ImGui.Combo('##s', curSi, spOpts)
                         if ImGui.IsItemHovered() then
@@ -8599,21 +9047,42 @@ function UI.drawAbilitiesTab()
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 4, 3)
 
     if ImGui.BeginChild('abilitieslist', 0, 0, false, ImGuiWindowFlags and ImGuiWindowFlags.HorizontalScrollbar or 0) then
-        local clientAbilities = getClientAbilities()
+        -- getClientAbilities does ~8 TLO calls per ability; rebuild it every
+        -- 3 s (skills train slowly) instead of every frame, and resolve
+        -- `isTrained` once per rebuild rather than per row.
+        local nowAb = os.clock()
+        local abCache = runtime.clientAbilitiesCache
+        local clsKey = table.concat(myClasses or {}, ',')
+        if not abCache or (nowAb - abCache.at) >= 3.0 or abCache.clsKey ~= clsKey then
+            local list = getClientAbilities()
+            for _, item in ipairs(list) do
+                if item.isTrained == nil and type(item.name) == 'string' then
+                    item.isTrained = hasActionSkill(item.name) or false
+                end
+            end
+            abCache = { at = nowAb, clsKey = clsKey, list = list }
+            runtime.clientAbilitiesCache = abCache
+        end
+        local clientAbilities = abCache.list
         local anyAction = false
         for _, item in ipairs(clientAbilities) do
             local nm = item.name
             local cls = item.cls or (myClasses and myClasses[1]) or 'War'
             if type(nm) == 'string' and nm ~= '' and nm ~= 'NULL' and nm ~= 'false' then
-                local isTrained = item.isTrained or hasActionSkill(nm)
+                local isTrained = item.isTrained
                 if not ctrl.action_trained_only or isTrained then
                     anyAction = true
                     ImGui.PushID('act_' .. tostring(cls) .. '_' .. tostring(nm))
-                local entry = loadout.actions[nm] or defaultActionEntry(nm, cls)
-                entry.cls = entry.cls or cls
-                entry.kind = entry.kind or (defaultActionEntry(nm, cls).kind)
-                if entry.autoskill == nil then
-                    entry.autoskill = defaultActionEntry(nm, cls).autoskill
+                local entry = loadout.actions[nm]
+                if not entry then
+                    entry = defaultActionEntry(nm, cls)
+                else
+                    entry.cls = entry.cls or cls
+                    if entry.kind == nil or entry.autoskill == nil then
+                        local d = defaultActionEntry(nm, cls)
+                        entry.kind = entry.kind or d.kind
+                        if entry.autoskill == nil then entry.autoskill = d.autoskill end
+                    end
                 end
 
                 entry.enabled = ImGui.Checkbox('##en', entry.enabled)
@@ -9186,8 +9655,12 @@ end
 
 -- UI: Action controls (Start / Pause, Burn)
 -- Engine start / pause behind the START / PAUSE buttons (the full window's
--- action bar and the compact window share these). Same steps as
--- runtime.setRunning, minus the chat echo.
+-- action bar and the compact window share these). runtime.setRunning (the
+-- /ac run|pause command) delegates here and adds the chat echo, so the two
+-- paths cannot drift. Pause clears runtime.wasRunning so the main loop does
+-- not run fullStop() a second time, and leaves the pet hold to fullStop
+-- (the separate hold-off that used to be issued here was overwritten by
+-- fullStop's hold a frame later).
 function UI.startEngine()
     if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
         runtime.setNearestWaypoint()
@@ -9209,12 +9682,8 @@ function UI.startEngine()
 end
 
 function UI.pauseEngine()
-    if ctrl.mode == 'Manual' then
-        setManualHunterPetHold(true, true)
-    else
-        setManualHunterPetHold(false, true)
-    end
     ctrl.running = false
+    runtime.wasRunning = false
     if runtime.fullStop then runtime.fullStop() end
 end
 
@@ -9643,13 +10112,32 @@ function UI.drawStatusTab()
                 tDist = mq.TLO.Target.Distance() or 0
                 tLoS = mq.TLO.Target.LineOfSight() or false
                 pcall(function() tHeading = mq.TLO.Target.Heading.Degrees() or 0 end)
-                tMyAggro = mq.TLO.Target.SecondaryPctAggro() or 0
-                tMySecAggro = mq.TLO.Me.SecondaryPctAggro() or 0
+                -- PctAggro is MY aggro on the target; SecondaryPctAggro is the
+                -- runner-up's. These were swapped so both rows showed secondary.
+                tMyAggro = mq.TLO.Target.PctAggro() or 0
+                tMySecAggro = mq.TLO.Target.SecondaryPctAggro() or 0
             end
         end)
 
-        local tTotName, _, _, myPctAggro = UI.resolveTargetOfTarget(tId)
-        tTotPct = myPctAggro
+        -- resolveTargetOfTarget (up to 3 Spawn lookups + 7 closures),
+        -- isHostileTarget and isXTargetId (13-slot walk) are the expensive
+        -- part of this card; refresh them 4x/s instead of every frame.
+        local cardNow = os.clock()
+        local cardSnap = runtime.statusTargetSnapshot
+        if not cardSnap or cardSnap.id ~= (tId or 0) or (cardNow - cardSnap.at) >= 0.25 then
+            local totName, _, _, myPctAggro = UI.resolveTargetOfTarget(tId)
+            cardSnap = {
+                at = cardNow,
+                id = tId or 0,
+                totName = totName,
+                myPctAggro = myPctAggro,
+                isHostile = (tId and tId > 0 and isHostileTarget and isHostileTarget(tId)) or false,
+                isXtar = (tId and tId > 0 and isXTargetId and isXTargetId(tId)) or false,
+            }
+            runtime.statusTargetSnapshot = cardSnap
+        end
+        local tTotName = cardSnap.totName
+        tTotPct = cardSnap.myPctAggro
 
         if tId and tId > 0 and tName then
             local conCol = UI.getConColorRgb(tCon)
@@ -9659,8 +10147,8 @@ function UI.drawStatusTab()
             ImGui.SameLine(); ImGui.TextDisabled('|')
             ImGui.SameLine(); ImGui.TextDisabled(string.format('Type: %s', tType or 'NPC'))
 
-            local isHostile = isHostileTarget and isHostileTarget(tId)
-            local isXtar = isXTargetId and isXTargetId(tId)
+            local isHostile = cardSnap.isHostile
+            local isXtar = cardSnap.isXtar
             ImGui.SameLine(); ImGui.TextDisabled('|')
             ImGui.SameLine()
             if isHostile then
@@ -9722,7 +10210,8 @@ function UI.drawStatusTab()
                     if isMe then
                         accent({ 1.0, 0.35, 0.35, 1.0 }, 'Tanking: YOU (' .. tostring(tTotPct or 100) .. '%)')
                     else
-                        accent(GOOD, string.format('Holding: %s (%d%%)', tTotName, tTotPct or 0))
+                        -- tTotPct is OUR aggro, not the holder's; label it as such
+                        accent(GOOD, string.format('Holding: %s (mine %d%%)', tTotName, tTotPct or 0))
                     end
                 else
                     ImGui.TextDisabled('Holding Aggro: None / Unknown')
@@ -9949,7 +10438,7 @@ function UI.drawStatusTab()
             else
                 accent(WARN, '• MQ2Nav: NOT LOADED')
                 if ImGui.Button('Load MQ2Nav##statBtnLoadNav') then
-                    mq.cmd('/plugin mq2nav')
+                    mq.cmd('/plugin mq2nav'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
                 end
             end
 
@@ -9958,7 +10447,7 @@ function UI.drawStatusTab()
             else
                 accent(WARN, string.format('• Zone Mesh: MISSING (%s)', curZoneShort))
                 if ImGui.Button('Reload Mesh##statBtnRelMesh') then
-                    mq.cmd('/nav reload')
+                    mq.cmd('/nav reload'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
                 end
             end
 
@@ -9973,7 +10462,7 @@ function UI.drawStatusTab()
             else
                 accent(WARN, '• MoveUtils: NOT LOADED')
                 if ImGui.Button('Load MQ2MoveUtils##statBtnLoadMoveUtils') then
-                    mq.cmd('/plugin mq2moveutils')
+                    mq.cmd('/plugin mq2moveutils'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
                 end
             end
 
@@ -10126,35 +10615,45 @@ function UI.drawStatusTab()
         -- Interactive Extended Target (XTarget) Table
         accent(GOLD, 'Extended Target (XTarget) Threat Monitor:')
 
-        local xtarSlots = 13
-        pcall(function() xtarSlots = mq.TLO.Me.XTargetSlots() or 13 end)
-
-        local activeXtargets = {}
-        for slot = 1, xtarSlots do
-            pcall(function()
-                local xt = mq.TLO.Me.XTarget(slot)
-                if xt and xt() and xt.ID() and xt.ID() > 0 and isSpawnAlive(xt.ID())
-                    and not isGroupOrRaidMember(xt.ID()) and not isSpawnPetOrPlayer(xt.ID()) then
+        -- Snapshot the XTarget rows at most 4x/s. Building this every frame
+        -- cost ~20 TLO calls per slot (isHostileTarget alone re-resolves the
+        -- spawn + pet/owner checks) plus a table and closure per slot.
+        local xtNow = os.clock()
+        local xtSnap = runtime.statusXtSnapshot
+        if not xtSnap or (xtNow - xtSnap.at) >= 0.25 then
+            local xtarSlots = 13
+            pcall(function() xtarSlots = mq.TLO.Me.XTargetSlots() or 13 end)
+            local rows = {}
+            for slot = 1, xtarSlots do
+                pcall(function()
+                    local xt = mq.TLO.Me.XTarget(slot)
+                    if not (xt and xt()) then return end
+                    local xid = xt.ID() or 0
+                    if xid <= 0 then return end
                     local stype = xt.Type() or ''
-                    if (stype == 'NPC' or stype == 'Pet') and not xt.Dead() and stype ~= 'Corpse'
-                        and not (isIgnored and isIgnored(xt.CleanName()))
-                        and (not isHostileTarget or isHostileTarget(xt.ID())) then
-                        table.insert(activeXtargets, {
-                            slot = slot,
-                            id = xt.ID(),
-                            name = xt.CleanName() or 'Unknown',
-                            level = xt.Level() or 0,
-                            class = xt.Class.ShortName() or '?',
-                            dist = xt.Distance() or 0,
-                            hpPct = xt.PctHPs() or 0,
-                            con = xt.ConColor() or 'White',
-                            tot = xt.TargetOfTarget.CleanName() or 'None',
-                            aggroPct = xt.PctAggro() or 0
-                        })
-                    end
-                end
-            end)
+                    if stype ~= 'NPC' and stype ~= 'Pet' then return end
+                    if xt.Dead() or not isSpawnAlive(xid) then return end
+                    if isIgnored and isIgnored(xt.CleanName()) then return end
+                    -- isHostileTarget already covers group/raid members and player pets
+                    if isHostileTarget and not isHostileTarget(xid) then return end
+                    rows[#rows + 1] = {
+                        slot = slot,
+                        id = xid,
+                        name = xt.CleanName() or 'Unknown',
+                        level = xt.Level() or 0,
+                        class = xt.Class.ShortName() or '?',
+                        dist = xt.Distance() or 0,
+                        hpPct = xt.PctHPs() or 0,
+                        con = xt.ConColor() or 'White',
+                        tot = xt.TargetOfTarget.CleanName() or 'None',
+                        aggroPct = xt.PctAggro() or 0
+                    }
+                end)
+            end
+            xtSnap = { at = xtNow, rows = rows }
+            runtime.statusXtSnapshot = xtSnap
         end
+        local activeXtargets = xtSnap.rows
 
         if #activeXtargets > 0 then
             local xtTableFlags = bit.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.SizingFixedFit)
@@ -10624,49 +11123,57 @@ function UI.drawControlTab()
             ImGui.SameLine()
             ImGui.SetNextItemWidth(UI.px(200))
 
-            local memGems = {}
-            local gemSlots = {}
-            for i = 1, NUM_GEMS do
-                local name
-                pcall(function() name = mq.TLO.Me.Gem(i).Name() end)
-                if not name or name == '' then
-                    name = runtime.getPrimarySpellForGem(i)
+            -- Gem names are polled 2x/s, not per frame (2x12 TLO calls +
+            -- string.format per gem every frame before).
+            local pgNow = os.clock()
+            local pg = runtime.pullGemCombo
+            if not pg or (pgNow - pg.at) >= 0.5 then
+                local memGems, gemSlots, gemNames = {}, {}, {}
+                for i = 1, getNumGems() do
+                    local name
+                    pcall(function() name = mq.TLO.Me.Gem(i).Name() end)
+                    if not name or name == '' then
+                        name = runtime.getPrimarySpellForGem(i)
+                    end
+                    if name and name ~= '' then
+                        memGems[#memGems + 1] = string.format('Gem %d: %s', i, name)
+                        gemSlots[#gemSlots + 1] = i
+                        gemNames[#gemNames + 1] = name
+                    end
                 end
-                if name and name ~= '' then
-                    table.insert(memGems, string.format('Gem %d: %s', i, name))
-                    table.insert(gemSlots, i)
+                if #memGems == 0 then
+                    memGems = { '(No Spells Memorized)' }
+                    gemSlots = { 1 }
+                    gemNames = { '' }
                 end
+                pg = { at = pgNow, labels = memGems, slots = gemSlots, names = gemNames }
+                runtime.pullGemCombo = pg
             end
 
-            if #memGems == 0 then
-                memGems = { '(No Spells Memorized)' }
-                gemSlots = { 1 }
-            end
-
-            local curIdx = 1
+            -- The saved spell NAME wins over the saved slot: if the user re-mems
+            -- and the spell moves, follow it (and re-sync the slot) instead of
+            -- silently overwriting ctrl.pull_spell with whatever now sits in the
+            -- old slot.
+            local curIdx = nil
             local curSpell = ctrl.pull_spell or ''
-            for idx, slotNum in ipairs(gemSlots) do
-                local gName
-                pcall(function() gName = mq.TLO.Me.Gem(slotNum).Name() end)
-                if not gName or gName == '' then
-                    gName = runtime.getPrimarySpellForGem(slotNum)
-                end
-                if gName == curSpell or slotNum == (ctrl.pull_spell_gem or 1) then
-                    curIdx = idx
-                    break
+            if curSpell ~= '' then
+                for idx, nm in ipairs(pg.names) do
+                    if nm == curSpell then curIdx = idx; break end
                 end
             end
-
-            local newIdx = ImGui.Combo('Pull Spell##pullSpellCombo', curIdx, memGems)
-            local chosenSlot = gemSlots[newIdx] or 1
-            ctrl.pull_spell_gem = chosenSlot
-
-            local chosenName
-            pcall(function() chosenName = mq.TLO.Me.Gem(chosenSlot).Name() end)
-            if not chosenName or chosenName == '' then
-                chosenName = runtime.getPrimarySpellForGem(chosenSlot)
+            if not curIdx then
+                for idx, slotNum in ipairs(pg.slots) do
+                    if slotNum == (ctrl.pull_spell_gem or 1) then curIdx = idx; break end
+                end
             end
-            ctrl.pull_spell = chosenName or ''
+            curIdx = curIdx or 1
+
+            local newIdx = ImGui.Combo('Pull Spell##pullSpellCombo', curIdx, pg.labels)
+            if newIdx ~= curIdx or ctrl.pull_spell_gem ~= pg.slots[curIdx] or (curSpell == '' and pg.names[curIdx] ~= '') then
+                local chosenSlot = pg.slots[newIdx] or 1
+                ctrl.pull_spell_gem = chosenSlot
+                ctrl.pull_spell = pg.names[newIdx] or ''
+            end
 
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Select the memorized spell gem to use for ranged pulling')
@@ -11313,11 +11820,21 @@ function UI.drawControlTab()
     -- Assist Mode Contextual Controls
     if ctrl.mode == 'Assist' then
         accent(GOLD, 'Main Assist Selection (by Player ID)')
-        local candidates = runtime.getAssistCandidates()
-        local comboLabels = {}
+        -- getAssistCandidates does Group.Member reads plus a Spawn('pc =')
+        -- search per custom entry; refresh it once a second, not per frame.
+        local nowAc = os.clock()
+        local acc = runtime.assistCandidatesCache
+        if not acc or (nowAc - acc.at) >= 1.0 or acc.customCount ~= #(ctrl.custom_ma_list or {}) then
+            local list = runtime.getAssistCandidates()
+            local labels = {}
+            for idx, c in ipairs(list) do labels[idx] = c.label end
+            acc = { at = nowAc, list = list, labels = labels, customCount = #(ctrl.custom_ma_list or {}) }
+            runtime.assistCandidatesCache = acc
+        end
+        local candidates = acc.list
+        local comboLabels = acc.labels
         local curIdx = 1
         for idx, c in ipairs(candidates) do
-            table.insert(comboLabels, c.label)
             if ctrl.ma_id and ctrl.ma_id > 0 and c.id == ctrl.ma_id then
                 curIdx = idx
             end
@@ -12067,13 +12584,17 @@ function UI.postBeginWindow(winKey)
         end
     end)
     if (px ~= 0 or py ~= 0 or pw ~= 0 or ph ~= 0) then
-        runtime.liveWindowPositions[winKey] = {
-            x = math.floor(px + 0.5),
-            y = math.floor(py + 0.5),
-            w = math.floor(pw + 0.5),
-            h = math.floor(ph + 0.5),
-            updated = os.clock(),
-        }
+        -- update in place: this runs for every window every frame
+        local live = runtime.liveWindowPositions[winKey]
+        if not live then
+            live = {}
+            runtime.liveWindowPositions[winKey] = live
+        end
+        live.x = math.floor(px + 0.5)
+        live.y = math.floor(py + 0.5)
+        live.w = math.floor(pw + 0.5)
+        live.h = math.floor(ph + 0.5)
+        live.updated = os.clock()
     end
 end
 
@@ -12247,14 +12768,11 @@ function UI.drawWindowSettings()
     ImGui.Separator()
 
     -- Primary Action Toolbar
-    local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
     local pushedColors = 0
 
-    if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.16, 0.50, 0.22, 1.0) then
-        pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.20, 0.62, 0.28, 1.0)
-        pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.12, 0.40, 0.18, 1.0)
-        pushedColors = pushedColors + 3
-    end
+    pushedColors = pushedColors + pushButtonColors({
+        { 'Button', 0.16, 0.50, 0.22 }, { 'ButtonHovered', 0.20, 0.62, 0.28 }, { 'ButtonActive', 0.12, 0.40, 0.18 },
+    })
     if ImGui.Button('Save Current Positions##winSaveAll', UI.px(180), UI.px(26)) then
         runtime.saveWindowPositions(false)
     end
@@ -12267,11 +12785,9 @@ function UI.drawWindowSettings()
     end
 
     ImGui.SameLine()
-    if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.18, 0.38, 0.62, 1.0) then
-        pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.22, 0.48, 0.78, 1.0)
-        pcall(ImGui.PushStyleColor, Col.ButtonActive, 0.14, 0.30, 0.50, 1.0)
-        pushedColors = pushedColors + 3
-    end
+    pushedColors = pushedColors + pushButtonColors({
+        { 'Button', 0.18, 0.38, 0.62 }, { 'ButtonHovered', 0.22, 0.48, 0.78 }, { 'ButtonActive', 0.14, 0.30, 0.50 },
+    })
     if ImGui.Button('Restore Saved Positions##winRestoreAll', UI.px(180), UI.px(26)) then
         local cnt = runtime.triggerRestoreWindows()
         print(string.format('\ag[Triune]\ax Restored positions for \ay%d\ax window(s).', cnt))
@@ -12608,7 +13124,7 @@ function UI.drawSettingsTab()
             accent(WARN, 'MQ2Nav is NOT loaded! Navigation and pathfinding require MQ2Nav.')
             ImGui.SameLine()
             if ImGui.Button('Load MQ2Nav##settingsLoadNav') then
-                mq.cmd('/plugin mq2nav')
+                mq.cmd('/plugin mq2nav'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
             end
             if ImGui.IsItemHovered() then
                 UI.setTooltip('Executes /plugin mq2nav to load the MQ2Nav plugin.')
@@ -12618,7 +13134,7 @@ function UI.drawSettingsTab()
             accent(WARN, string.format('No NavMesh loaded for zone "%s" (/nav reload).', curZone))
             ImGui.SameLine()
             if ImGui.Button('Reload Mesh##settingsReloadMesh') then
-                mq.cmd('/nav reload')
+                mq.cmd('/nav reload'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
             end
             if ImGui.IsItemHovered() then
                 UI.setTooltip('Executes /nav reload to attempt reloading the zone navmesh.')
@@ -12628,7 +13144,7 @@ function UI.drawSettingsTab()
             accent(WARN, 'MQ2MoveUtils is NOT loaded! Combat positioning and stick require MQ2MoveUtils.')
             ImGui.SameLine()
             if ImGui.Button('Load MQ2MoveUtils##settingsLoadMoveUtils') then
-                mq.cmd('/plugin mq2moveutils')
+                mq.cmd('/plugin mq2moveutils'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
             end
             if ImGui.IsItemHovered() then
                 UI.setTooltip('Executes /plugin mq2moveutils to load the MQ2MoveUtils plugin.')
@@ -12980,6 +13496,38 @@ function UI.drawSettingsTab()
                 'Prints extra diagnostic lines (e.g. Hunter\'s full targeting\n'
                 .. 'state every few seconds) to help track down a stuck/frozen\n'
                 .. 'report. Off by default -- noisy for normal use.')
+        end
+        local logVal = ImGui.Checkbox('Log To File', ctrl.log_to_file or false)
+        if logVal ~= (ctrl.log_to_file or false) then
+            ctrl.log_to_file = logVal
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Writes every Triune chat line, plugin message and (with Debug\n'
+                .. 'Diagnostic Logging on) every debug line to a per-character\n'
+                .. 'log file in the MacroQuest Logs folder. Plugin errors are\n'
+                .. 'recorded with full tracebacks. Rotates at 8 MB.')
+        end
+        ImGui.SameLine()
+        if ImGui.Button('Dump Diagnostics Now') then
+            -- runs on the main coroutine next tick: the dump reads TLOs and
+            -- writes a file, neither of which belongs in the render callback
+            runtime.pluginManager.defer('diagnostic dump', function() runtime.dumpDiagnostics() end)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'Writes a one-shot snapshot file (all settings, combat/pull state,\n'
+                .. 'plugin status and the last few hundred log lines) that you can\n'
+                .. 'attach to a bug report. Works even when Log To File is off.')
+        end
+        if ctrl.log_to_file then
+            local lp = tlog.currentFilePath()
+            if lp then
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Logging to: ' .. lp)
+            else
+                ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], 'Log file not open: ' .. tostring(tlog.lastOpenError() or 'waiting'))
+            end
         end
 
         accent(GOLD, 'Camera & Viewport:')
@@ -13472,7 +14020,9 @@ function UI.drawMiniTracker()
 end
 
 function UI.drawMiniButtons()
-    if not runtime.pluginManager then runtime.initPluginManager() end
+    -- initPluginManager runs plugin chunks / onInit and must never execute on
+    -- the render thread; it is always initialised before the first frame.
+    if not runtime.pluginManager then return end
     local pm = runtime.pluginManager
     if not (pm and type(pm.drawHeaderButtons) == 'function') then return end
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, 5, 2)
@@ -13496,7 +14046,7 @@ function UI.drawMiniWarnings()
         accent(WARN, '[!] MQ2Nav not loaded')
         if ImGui.IsItemHovered() then UI.setTooltip('MQ2Nav is required for pathing and navigation.') end
         ImGui.SameLine()
-        if ImGui.SmallButton('Load##miniLoadNav') then mq.cmd('/plugin mq2nav') end
+        if ImGui.SmallButton('Load##miniLoadNav') then mq.cmd('/plugin mq2nav'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end end
         if ImGui.IsItemHovered() then UI.setTooltip('/plugin mq2nav') end
         UI.miniMeasure()
     elseif not navMeshLoaded() then
@@ -13504,7 +14054,7 @@ function UI.drawMiniWarnings()
         accent(WARN, string.format('[!] No navmesh for %s', curZone))
         if ImGui.IsItemHovered() then UI.setTooltip('No navmesh loaded for %s. Pathing, roaming and chase need one.', curZone) end
         ImGui.SameLine()
-        if ImGui.SmallButton('Reload##miniReloadMesh') then mq.cmd('/nav reload') end
+        if ImGui.SmallButton('Reload##miniReloadMesh') then mq.cmd('/nav reload'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end end
         if ImGui.IsItemHovered() then UI.setTooltip('/nav reload') end
         UI.miniMeasure()
     end
@@ -13512,7 +14062,7 @@ function UI.drawMiniWarnings()
         accent(WARN, '[!] MQ2MoveUtils not loaded')
         if ImGui.IsItemHovered() then UI.setTooltip('MQ2MoveUtils is required for melee stick and positioning.') end
         ImGui.SameLine()
-        if ImGui.SmallButton('Load##miniLoadMoveUtils') then mq.cmd('/plugin mq2moveutils') end
+        if ImGui.SmallButton('Load##miniLoadMoveUtils') then mq.cmd('/plugin mq2moveutils'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end end
         if ImGui.IsItemHovered() then UI.setTooltip('/plugin mq2moveutils') end
         UI.miniMeasure()
     end
@@ -13569,8 +14119,11 @@ function UI.drawMiniGui()
     if ctrl.mini_lock then flags = bit.bor(flags, ImGuiWindowFlags.NoMove) end
     if ctrl.mini_titlebar == false and ImGuiWindowFlags.NoTitleBar then flags = bit.bor(flags, ImGuiWindowFlags.NoTitleBar) end
     local show
-    open, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', open, flags)
-    if not open then
+    -- The X on the mini window returns to the full window; it used to write
+    -- the script-level `open` flag and so terminated the whole script.
+    local miniOpen
+    miniOpen, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', true, flags)
+    if not miniOpen then
         ctrl.compact = false
         ImGui.End()
         UI.popTheme()
@@ -14152,39 +14705,45 @@ function runtime.isPetBuffActive(petId, name, minSec)
     if myPetId > 0 and petId == myPetId then
         local found = false
         local remSec = -1
-        local activeBuffNames = {}
-        local activeBuffDetails = {}
-
-        for b = 1, 30 do
-            pcall(function()
-                local pb = mq.TLO.Me.Pet.Buff(b)
-                if pb then
-                    local bName = nil
-                    if type(pb) == 'string' and pb ~= '' then
-                        bName = pb
-                    elseif pb() and type(pb()) == 'string' and pb() ~= '' then
-                        bName = pb()
-                    elseif pb.Name and pb.Name() and pb.Name() ~= '' then
-                        bName = pb.Name()
-                    end
-                    if bName and bName ~= '' and bName ~= 'NONE' then
-                        local durSec = -1
-                        pcall(function()
-                            local dur = mq.TLO.Me.Pet.BuffDuration(b) or 0
+        -- The 30-slot walk (2 TLO calls + a closure per slot) is done once per
+        -- main-loop pass and shared by every pet-buff entry evaluated that pass.
+        local scan = runtime.petBuffScanCache
+        if not scan or not runtime.tickSerial or scan.tick ~= runtime.tickSerial or scan.petId ~= myPetId then
+            local names, details = {}, {}
+            for b = 1, 30 do
+                pcall(function()
+                    local pb = mq.TLO.Me.Pet.Buff(b)
+                    if pb then
+                        local bName = nil
+                        local pv = pb()
+                        if type(pv) == 'string' and pv ~= '' then
+                            bName = pv
+                        elseif pb.Name and pb.Name() and pb.Name() ~= '' then
+                            bName = pb.Name()
+                        end
+                        if bName and bName ~= '' and bName ~= 'NONE' then
+                            local durSec = -1
+                            local dur = mq.TLO.Me.Pet.BuffDuration(b)() or 0
                             if type(dur) == 'number' and dur > 0 then
                                 durSec = math.floor(dur / 1000)
                             end
-                        end)
-                        table.insert(activeBuffNames, bName)
-                        table.insert(activeBuffDetails, { slot = b, name = bName, duration = durSec })
-
-                        if not found and isBuffNameMatch(bName) then
-                            found = true
-                            remSec = durSec
+                            names[#names + 1] = bName
+                            details[#details + 1] = { slot = b, name = bName, duration = durSec }
                         end
                     end
-                end
-            end)
+                end)
+            end
+            scan = { tick = runtime.tickSerial, petId = myPetId, names = names, details = details }
+            runtime.petBuffScanCache = scan
+        end
+        local activeBuffNames = scan.names
+        local activeBuffDetails = scan.details
+        for _, d in ipairs(activeBuffDetails) do
+            if isBuffNameMatch(d.name) then
+                found = true
+                remSec = d.duration
+                break
+            end
         end
 
         -- Update petState.cachedPetBuffs
@@ -14365,10 +14924,31 @@ local function buffActive(id, name, minSec)
         if minSec == 0 and tloTrue(function() return mq.TLO.Me.Song(name)() end) then return true end
         return false
     end
-    -- Pet buff detection: primary pet, player-owned pet, or any pet spawn
-    local myPetId = 0
-    pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
-    if (myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id) then
+    -- Pet buff detection: primary pet, player-owned pet, or any pet spawn.
+    -- The tracked-pet table is checked first (no TLO), and the expensive
+    -- isSpawnMyPet/isAnyPet classification (Spawn + Master + Owner reads) is
+    -- memoized per pass per id: buffActive runs per 'missing buff' entry per
+    -- tick and again inside castGem.
+    local isPetId = false
+    for _, petId in pairs(petState.myPets) do
+        if petId == id then isPetId = true; break end
+    end
+    if not isPetId then
+        local pc = runtime.petClassCache
+        if not pc or pc.tick ~= runtime.tickSerial then
+            pc = { tick = runtime.tickSerial, ids = {} }
+            runtime.petClassCache = pc
+        end
+        local v = pc.ids[id]
+        if v == nil then
+            local myPetId = 0
+            pcall(function() myPetId = mq.TLO.Me.Pet.ID() or 0 end)
+            v = (myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id) or false
+            if runtime.tickSerial then pc.ids[id] = v end
+        end
+        isPetId = v
+    end
+    if isPetId then
         return runtime.isPetBuffActive(id, name, minSec)
     end
     local total = 0
@@ -14380,11 +14960,6 @@ local function buffActive(id, name, minSec)
             if hasNamedBuff(m, name, false, minSec) then return true end
             if minSec == 0 and tloTrue(function() return m.Song(name)() end) then return true end ---@diagnostic disable-line: undefined-field
             return false
-        end
-    end
-    for _, petId in pairs(petState.myPets) do
-        if petId == id then
-            return runtime.isPetBuffActive(id, name, minSec)
         end
     end
     if mq.TLO.Target.ID() == id then
@@ -14493,20 +15068,28 @@ end
 -- Returns count of live, non-ignored NPCs occupying XTarget slots.
 function runtime.countNPCXtarget(includeUnreachable)
     local cnt = 0
-    pcall(function()
-        local slots = mq.TLO.Me.XTargetSlots() or 13
-        for i = 1, slots do
-            local xt = mq.TLO.Me.XTarget(i)
-            if xt() then
-                local id = xt.ID() or 0
-                if id > 0 and isHostileTarget(id)
-                    and not isIgnored(xt.CleanName())
-                    and (includeUnreachable or not isUnreachable(id)) then
-                    cnt = cnt + 1
-                end
+    if runtime.tickSerial then
+        for _, row in ipairs(runtime.xtSnapshot().rows) do
+            if row.hostile and not row.ignored and (includeUnreachable or not row.unreachable) then
+                cnt = cnt + 1
             end
         end
-    end)
+    else
+        pcall(function()
+            local slots = mq.TLO.Me.XTargetSlots() or 13
+            for i = 1, slots do
+                local xt = mq.TLO.Me.XTarget(i)
+                if xt() then
+                    local id = xt.ID() or 0
+                    if id > 0 and isHostileTarget(id)
+                        and not isIgnored(xt.CleanName())
+                        and (includeUnreachable or not isUnreachable(id)) then
+                        cnt = cnt + 1
+                    end
+                end
+            end
+        end)
+    end
     -- Fallback: if XTarget list is unpopulated or empty, but we have a valid live NPC target, count as at least 1
     if cnt == 0 and not includeUnreachable then
         pcall(function()
@@ -14533,8 +15116,12 @@ function runtime.isDetrimentalAction(name, targetToken, entry)
 end
 
 -- Returns true if an action (spell, AA, disc, skill, clickie) is a healing action.
-function runtime.isHealAction(name, targetToken, entry)
-    if not name or name == '' then return false end
+-- Memoized: called for every gem every tick (and again per entry in
+-- processHealPriority). The answer depends only on name / target / kind /
+-- when plus static spell data, and the uncached path scans all of
+-- DATA.spells for every non-heal entry.
+runtime.healActionCache = {}
+function runtime.computeIsHealAction(name, targetToken, entry)
     if runtime.isDetrimentalAction(name, targetToken, entry) then return false end
     if entry and entry.kind == 'heal' then return true end
     local k = entry and entry.kind
@@ -14604,6 +15191,18 @@ function runtime.isHealAction(name, targetToken, entry)
         end
     end
     return false
+end
+
+function runtime.isHealAction(name, targetToken, entry)
+    if not name or name == '' then return false end
+    local key = tostring(name) .. '|' .. tostring(targetToken or '') .. '|'
+        .. tostring(entry and entry.kind or '') .. '|' .. tostring(entry and entry.when or '')
+    local cached = runtime.healActionCache[key]
+    if cached ~= nil then return cached end
+    local ok, res = pcall(runtime.computeIsHealAction, name, targetToken, entry)
+    res = ok and (res == true) or false
+    runtime.healActionCache[key] = res
+    return res
 end
 
 function runtime.isTargetInRange(name, targetId)
@@ -14685,11 +15284,21 @@ end
 -- This computer's other Triune characters in our zone with a fresh
 -- heartbeat: { { name, id (0 if no spawn), hp, mana, counters, ... } }.
 -- Spawn IDs come from the local client so callers can target them.
+-- Cached for 0.5 s: called per Lowest-HP-Ally entry per tick and twice per
+-- targetIsEngaged() call, and each call did a name-based Spawn search per peer.
 function runtime.boxPeersInZone()
+    local bpc = runtime.boxPeersCache
+    if runtime.tickSerial and bpc and bpc.tick == runtime.tickSerial then return bpc.list end
     local bn = runtime.boxnetApi()
-    if not bn or type(bn.peersInZone) ~= 'function' then return {} end
+    if not bn or type(bn.peersInZone) ~= 'function' then
+        runtime.boxPeersCache = { tick = runtime.tickSerial, list = {} }
+        return runtime.boxPeersCache.list
+    end
     local ok, list = pcall(bn.peersInZone, runtime.BOXNET_FRESH_SEC or 3.0)
-    if not ok or type(list) ~= 'table' then return {} end
+    if not ok or type(list) ~= 'table' then
+        runtime.boxPeersCache = { tick = runtime.tickSerial, list = {} }
+        return runtime.boxPeersCache.list
+    end
     local out = {}
     for _, p in ipairs(list) do
         local id = 0
@@ -14707,6 +15316,7 @@ function runtime.boxPeersInZone()
         end
         out[#out + 1] = { name = p.name, id = id, hp = tonumber(hp) or 100, hb = p.hb }
     end
+    runtime.boxPeersCache = { tick = runtime.tickSerial, list = out }
     return out
 end
 
@@ -14916,30 +15526,41 @@ function runtime.nextBoxBuffCast()
     return nil
 end
 
+-- Memoized for 0.25 s: called from targetIsEngaged, maTargetId and every
+-- 'Main Assist'/'Tank' entry per tick, each time re-validating the spawn.
 function runtime.maPcId()
     if not ctrl then return nil end
-    -- 1. If ctrl.ma_id is set and > 0, verify it is a valid, living PC
-    if ctrl.ma_id and ctrl.ma_id > 0 then
-        local valid = false
-        pcall(function()
-            local s = mq.TLO.Spawn(ctrl.ma_id)
-            if s and s() and isSpawnAlive(ctrl.ma_id) and s.Type() == 'PC' then
-                if not ctrl.ma_name or ctrl.ma_name == '' or s.CleanName() == ctrl.ma_name then
-                    valid = true
+    local mc = runtime.maPcIdCache
+    if runtime.tickSerial and mc and mc.tick == runtime.tickSerial and mc.maId == ctrl.ma_id and mc.maName == ctrl.ma_name then
+        return mc.id
+    end
+    local function resolve()
+        -- 1. If ctrl.ma_id is set and > 0, verify it is a valid, living PC
+        if ctrl.ma_id and ctrl.ma_id > 0 then
+            local valid = false
+            pcall(function()
+                local s = mq.TLO.Spawn(ctrl.ma_id)
+                if s and s() and isSpawnAlive(ctrl.ma_id) and s.Type() == 'PC' then
+                    if not ctrl.ma_name or ctrl.ma_name == '' or s.CleanName() == ctrl.ma_name then
+                        valid = true
+                    end
                 end
-            end
-        end)
-        if valid then return ctrl.ma_id end
-    end
-    -- 2. Fallback: if character re-zoned and Spawn ID changed, re-locate by name and re-sync ma_id
-    if ctrl.ma_name and ctrl.ma_name ~= '' then
-        local id = findMaPcId(ctrl.ma_name)
-        if id and id > 0 then
-            ctrl.ma_id = id
-            return id
+            end)
+            if valid then return ctrl.ma_id end
         end
+        -- 2. Fallback: if character re-zoned and Spawn ID changed, re-locate by name and re-sync ma_id
+        if ctrl.ma_name and ctrl.ma_name ~= '' then
+            local id = findMaPcId(ctrl.ma_name)
+            if id and id > 0 then
+                ctrl.ma_id = id
+                return id
+            end
+        end
+        return nil
     end
-    return nil
+    local id = resolve()
+    runtime.maPcIdCache = { tick = runtime.tickSerial, id = id, maId = ctrl.ma_id, maName = ctrl.ma_name }
+    return id
 end
 
 function runtime.targetIsEngaged(id)
@@ -14948,7 +15569,10 @@ function runtime.targetIsEngaged(id)
     if isXTargetId(id) then return true end
     local s = mq.TLO.Spawn(id)
     if not s() or s.Dead() or s.Type() == 'Corpse' then return false end
-    if (s.PctHPs() or 100) < 100 then return true end
+    -- NOTE: "HP below 100%" used to count as engaged, which let Assist mode
+    -- pick up mobs some other group had damaged (or that were regenerating
+    -- after someone else's failed pull). Engagement now requires that its
+    -- target / aggro holder / the MA's attention is actually on our side.
 
     -- Check if target of target or aggro holder is player or group member
     local totId = 0
@@ -15024,63 +15648,99 @@ local function isCombat()
     return ok and res or false
 end
 
+-- isCombat() walks the target plus every XTarget slot; it was evaluated for
+-- every 'missing buff' entry (and every pet) per tick. One answer per pass.
+do
+    local isCombatUncached = isCombat
+    isCombat = function()
+        if not runtime.tickSerial then return isCombatUncached() end
+        local c = runtime.isCombatCache
+        if c and c.tick == runtime.tickSerial then return c.v end
+        local v = isCombatUncached()
+        runtime.isCombatCache = { tick = runtime.tickSerial, v = v }
+        return v
+    end
+end
+
 function runtime.anyNearbyEngagedNpc(radius)
     radius = radius or (ctrl and ctrl.xtar_nav_dist) or 150
     if firstNPCXtarget(false, nil, radius) then return true end
+    -- Radius sweep: each NearestSpawn(i) is a sorted spawn-list search, so cap
+    -- the candidates and only run it every 0.5 s (maTargetId is per-pass).
+    local nowSw = os.clock()
+    local sw = runtime.nearbyEngagedSweep
+    if sw and sw.radius == radius and (nowSw - sw.at) < 0.5 then return sw.v end
     local filt = string.format('npc radius %d', radius)
-    local n = mq.TLO.SpawnCount(filt)() or 0
+    local n = math.min(mq.TLO.SpawnCount(filt)() or 0, 25)
+    local v = false
     for i = 1, n do
         local s = mq.TLO.NearestSpawn(i, filt)
-        if s() and s.ID() > 0 and not isSpawnPetOrPlayer(s.ID()) and isHostileTarget(s.ID()) then
-            if runtime.targetIsEngaged(s.ID()) then return true end
+        local sid = s() and (s.ID() or 0) or 0
+        if sid > 0 and isHostileTarget(sid) and runtime.targetIsEngaged(sid) then
+            v = true
+            break
         end
     end
-    return false
+    runtime.nearbyEngagedSweep = { at = nowSw, radius = radius, v = v }
+    return v
 end
 
+-- Memoized per main-loop pass: every 'Assist Target' entry re-ran the full
+-- resolution, and without a boxnet feed that meant anyNearbyEngagedNpc's
+-- SpawnCount + NearestSpawn sweep per entry.
 function runtime.maTargetId()
-    local maId = runtime.maPcId()
-    if not maId then return nil end
-    local gated = (ctrl.mode == 'Assist')
-    local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
-    -- Box Network first: the MA's Triune reports its exact target (spawn IDs
-    -- are the same on every client in the zone), so no /assist peek, no
-    -- blocking delay, and our own target is left alone.
-    local fed = runtime.boxnetMaTarget(maId)
-    if fed ~= nil then
-        if not fed then return nil end -- MA has no target right now
-        local id = fed.id
-        local valid = false
-        pcall(function()
-            local sp = mq.TLO.Spawn(id)
-            valid = sp() and (sp.Type() == 'NPC' or sp.Type() == 'Pet') and not sp.Dead() and sp.Type() ~= 'Corpse'
-        end)
-        if not valid or isSpawnPetOrPlayer(id) or not isHostileTarget(id) then return nil end
-        if gated and not runtime.targetIsEngaged(id) then return nil end
-        if gated and distToId(id) > maxNav then return nil end
-        return id
-    end
-    if gated and not runtime.anyNearbyEngagedNpc(maxNav) then
-        return nil -- nothing nearby is actually being fought -- don't even peek via /assist
-    end
-    local now = os.clock()
-    if (now - runtime.lastAssistCmdAt) >= 1.0 then
-        runtime.lastAssistCmdAt = now
-        local nm = mq.TLO.Spawn(maId).CleanName()
-        if nm and nm ~= '' then
-            mq.cmdf('/assist %s', nm)
-            mq.delay(150)
+    -- One resolution per main-loop pass (runtime.tickSerial); UI frames
+    -- between passes share it too.
+    local mtc = runtime.maTargetCache
+    if runtime.tickSerial and mtc and mtc.tick == runtime.tickSerial then return mtc.id end
+    local function resolve()
+        local maId = runtime.maPcId()
+        if not maId then return nil end
+        local gated = (ctrl.mode == 'Assist')
+        local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+        -- Box Network first: the MA's Triune reports its exact target (spawn IDs
+        -- are the same on every client in the zone), so no /assist peek, no
+        -- blocking delay, and our own target is left alone.
+        local fed = runtime.boxnetMaTarget(maId)
+        if fed ~= nil then
+            if not fed then return nil end -- MA has no target right now
+            local id = fed.id
+            local valid = false
+            pcall(function()
+                local sp = mq.TLO.Spawn(id)
+                valid = sp() and (sp.Type() == 'NPC' or sp.Type() == 'Pet') and not sp.Dead() and sp.Type() ~= 'Corpse'
+            end)
+            if not valid or isSpawnPetOrPlayer(id) or not isHostileTarget(id) then return nil end
+            if gated and not runtime.targetIsEngaged(id) then return nil end
+            if gated and distToId(id) > maxNav then return nil end
+            return id
         end
+        if gated and not runtime.anyNearbyEngagedNpc(maxNav) then
+            return nil -- nothing nearby is actually being fought -- don't even peek via /assist
+        end
+        local now = os.clock()
+        if (now - runtime.lastAssistCmdAt) >= 1.0 then
+            runtime.lastAssistCmdAt = now
+            local nm = mq.TLO.Spawn(maId).CleanName()
+            if nm and nm ~= '' then
+                mq.cmdf('/assist %s', nm)
+                -- No mq.delay here: the target this /assist produces is read on
+                -- the next pass; below we read whatever the previous one gave us.
+            end
+        end
+        local t = mq.TLO.Target
+        if not (t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse' and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())) then return nil end
+        if gated and not runtime.targetIsEngaged(t.ID()) then
+            return nil
+        end
+        if gated and distToId(t.ID()) > maxNav then
+            return nil
+        end
+        return t.ID()
     end
-    local t = mq.TLO.Target
-    if not (t() and (t.Type() == 'NPC' or t.Type() == 'Pet') and not t.Dead() and t.Type() ~= 'Corpse' and not isSpawnPetOrPlayer(t.ID()) and isHostileTarget(t.ID())) then return nil end
-    if gated and not runtime.targetIsEngaged(t.ID()) then
-        return nil
-    end
-    if gated and distToId(t.ID()) > maxNav then
-        return nil
-    end
-    return t.ID()
+    local id = resolve()
+    runtime.maTargetCache = { tick = runtime.tickSerial, id = id }
+    return id
 end
 
 -- Finds a hostile NPC actively attacking the character (self-defense).
@@ -15633,9 +16293,44 @@ function runtime.resolveAllEnemiesTargetId(spellName, when, pct, cls, extra)
     return nil
 end
 
+-- Resurrection support: the nearest corpse of a dead group member (or box
+-- peer). Returns nil when nobody is dead.
+function runtime.deadAllyCorpseId(maxDist)
+    maxDist = maxDist or 100
+    local bestId, bestDist = nil, maxDist + 1
+    local function consider(name)
+        if not name or name == '' then return end
+        local ok, cid, dist = pcall(function()
+            local c = mq.TLO.Spawn(string.format('pccorpse %s', name))
+            if c and c() and (c.ID() or 0) > 0 then return c.ID(), c.Distance3D() or 9999 end
+            return nil, nil
+        end)
+        if ok and cid and dist and dist < bestDist then bestId, bestDist = cid, dist end
+    end
+    pcall(function()
+        local n = mq.TLO.Group.Members() or 0
+        for i = 1, n do
+            local m = mq.TLO.Group.Member(i)
+            if m and m() and m.Dead() then consider(m.CleanName()) end
+        end
+    end)
+    if not bestId and runtime.boxPeersInZone then
+        pcall(function()
+            for _, p in ipairs(runtime.boxPeersInZone()) do
+                if p.dead or (p.hp and p.hp <= 0) then consider(p.name) end
+            end
+        end)
+    end
+    return bestId
+end
+
 function runtime.resolveTargetId(token, cls, when, spellName, pct, extra)
     local b = baseTok(token)
     local id
+    if when == 'ally is Dead' then
+        -- a rez has to target the corpse, which every other branch rejects
+        return runtime.deadAllyCorpseId(100)
+    end
     if b == 'Myself' or b == 'Whole Group' then
         id = mq.TLO.Me.ID()
     elseif b == 'Main Assist' or b == 'Tank' then
@@ -15710,7 +16405,8 @@ end)
 local function reconcileSungBuffs()
     local found = 0
     local function scanGemTable(gemsTable)
-        for i = 1, NUM_GEMS do
+        -- gems is a priority list that can hold more than NUM_GEMS entries
+        for i = 1, #gemsTable do
             local g = gemsTable[i]
             local gpct = g and tonumber(g.pct)
             if gpct == nil then gpct = 100 end
@@ -15784,7 +16480,8 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
         return isPetMissingForClass(cls)
     end
     if when == 'ally is Dead' then
-        local s = mq.TLO.Spawn(targetId); return s() and s.Dead()
+        local s = mq.TLO.Spawn(targetId)
+        return (s() and (s.Dead() or s.Type() == 'Corpse')) == true
     end
     local afflictionCheck = ({
         ['has Poison']         = isPoisoned,
@@ -15948,8 +16645,9 @@ function runtime.castGem(i, g, id)
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
-    local needsTarget = (orig ~= id) and not (selfCast and hostileTarget)
+    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig)) == true
+    local keepHostile = castThroughHostileTarget(selfCast, hostileTarget, isHeal)
+    local needsTarget = (orig ~= id) and not keepHostile
     if needsTarget and not runtime.setTarget(id) then return false end
 
     local pauseAttack = isFD and wasAttacking
@@ -15965,10 +16663,11 @@ function runtime.castGem(i, g, id)
     castTracker.activeSpell    = g.spell
     castTracker.activeTargetId = id
     castTracker.activeKind     = g.kind
-    if selfCast and hostileTarget then
+    if keepHostile then
         castTracker.targetRequired = false
     else
-        castTracker.targetRequired = isDet or isTargetRequiredSpell(g.spell)
+        -- a self-cast that had to leave the mob keeps self targeted until it lands
+        castTracker.targetRequired = isDet or isTargetRequiredSpell(g.spell) or selfCast
     end
     castTracker.castStartTime  = os.clock()
     clearCursor()
@@ -15984,6 +16683,7 @@ function runtime.castGem(i, g, id)
             if ctrl.debug_mode then
                 print(string.format('\ao[DEBUG cast]\ax Gem %d "%s" aborted: character is still moving', i, g.spell))
             end
+            runtime.abortPendingCast(orig, id, keepHostile)
             return false
         end
     end
@@ -16023,37 +16723,25 @@ function runtime.castGem(i, g, id)
         beginPetSummon(g.cls, g.spell)
     end
     if g.cls == 'Brd' then
-        if sp.Beneficial() then
-            local waited = 0
-            while waited < 4000 do
-                mq.delay(200); waited = waited + 200
-                if buffActive(id, g.spell) then break end
-                if not isCasting() then break end
-            end
-            mq.cmd('/stopsong')
-            runtime.sungBuffs[sungKey(g.spell, id)] = true
-            local bb, ss
-            pcall(function() bb = mq.TLO.Me.Buff(g.spell)() end)
-            pcall(function() ss = mq.TLO.Me.Song(g.spell)() end)
-            print(string.format(
-                '\ay[Triune bard]\ax %s  Buff=%s  Song=%s  (marked sung -- wont resing until zone/death)', g.spell,
-                tostring(bb), tostring(ss)))
-        else
-            local castMs = 0
-            pcall(function() castMs = sp.CastTime() or 0 end)
-            castMs = tonumber(castMs) or 0
-            if castMs <= 0 or castMs > 6000 then castMs = 2000 end
-            mq.delay(castMs + 300)
-            mq.cmd('/stopsong')
-        end
+        -- Songs used to block the loop (up to 4 s waiting for a beneficial
+        -- song to land, or castMs+300 for others). The stop is now a pending
+        -- record serviced by the main loop (runtime.tickPendingBardSong);
+        -- meanwhile isCasting() keeps other gems from firing, as before.
+        local castMs = 0
+        pcall(function() castMs = sp.CastTime() or 0 end)
+        castMs = tonumber(castMs) or 0
+        if castMs <= 0 or castMs > 6000 then castMs = 2000 end
+        runtime.pendingBardSong = {
+            spell = g.spell, id = id, beneficial = sp.Beneficial() == true,
+            since = os.clock(), deadline = os.clock() + (sp.Beneficial() and 4.0 or ((castMs + 300) / 1000)),
+        }
     end
-    if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
+    if orig ~= id and orig > 0 and not keepHostile then
         if g.cls ~= 'Brd' then
             -- Spell has a cast time: keep target on ally until cast finishes, then restore combat target!
             runtime.restoreTargetId = orig
         else
-            mq.delay(60)
-            if mq.TLO.Target.ID() ~= orig then mq.cmdf('/target id %d', orig) end
+            mq.cmdf('/timed 1 /target id %d', orig)
         end
     end
     if g.cls == 'Brd' and wasAttacking and not mq.TLO.Me.Combat() then
@@ -16098,8 +16786,9 @@ function runtime.fireAA(name, a, id)
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
-    local needsTarget = (orig ~= id) and not (selfCast and hostileTarget)
+    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig)) == true
+    local keepHostile = castThroughHostileTarget(selfCast, hostileTarget, runtime.isHealAction(name, a and a.target, a))
+    local needsTarget = (orig ~= id) and not keepHostile
     if needsTarget and not runtime.setTarget(id) then return false end
     clearCursor()
 
@@ -16113,7 +16802,10 @@ function runtime.fireAA(name, a, id)
         runtime.stopMovementForCast(a and a.cls, name)
         local stillMoving = false
         pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
-        if stillMoving then return false end
+        if stillMoving then
+            runtime.abortPendingCast(orig, id, keepHostile)
+            return false
+        end
     end
 
     local isDet = runtime.isDetrimentalAction(name, a and a.target, a)
@@ -16123,10 +16815,10 @@ function runtime.fireAA(name, a, id)
     castTracker.activeSpell    = name
     castTracker.activeTargetId = id
     castTracker.activeKind     = a and a.kind
-    if selfCast and hostileTarget then
+    if keepHostile then
         castTracker.targetRequired = false
     else
-        castTracker.targetRequired = isDet or isTargetRequiredSpell(name)
+        castTracker.targetRequired = isDet or isTargetRequiredSpell(name) or selfCast
     end
     castTracker.castStartTime  = now
     mq.cmdf('/alt act %d', aa.ID())
@@ -16139,7 +16831,9 @@ function runtime.fireAA(name, a, id)
             local rt = aaObj.ReuseTime and aaObj.ReuseTime()
             aaReuse = tonumber(mrt or rt or 0) or 0
             if aaReuse == 0 and aaObj.Spell and aaObj.Spell() then
-                aaReuse = tonumber(aaObj.Spell.RecastTime() or 0) or 0
+                -- Spell.RecastTime is in milliseconds (see parseSpellRecastTime);
+                -- treating it as seconds locked a 30 s AA out for ~8 hours.
+                aaReuse = parseSpellRecastTime(aaObj.Spell) or 0
             end
         end
     end)
@@ -16151,7 +16845,7 @@ function runtime.fireAA(name, a, id)
     runtime.lastCast[key] = now + aaReuse
 
     print('\ag[Triune]\ax AA fired: ' .. name)
-    if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
+    if orig ~= id and orig > 0 and not keepHostile then
         if castMs > 0 then
             runtime.restoreTargetId = orig
         else
@@ -16460,8 +17154,9 @@ runtime.useClickie = function(c, id)
     local selfCast = (id == mq.TLO.Me.ID())
     local orig = mq.TLO.Target.ID() or 0
     local wasAttacking = mq.TLO.Me.Combat()
-    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig))
-    local needsTarget = (orig ~= id) and not (selfCast and hostileTarget)
+    local hostileTarget = (orig > 0 and isHostileTarget and isHostileTarget(orig)) == true
+    local keepHostile = castThroughHostileTarget(selfCast, hostileTarget, runtime.isHealAction(effName, c.target, c))
+    local needsTarget = (orig ~= id) and not keepHostile
     if needsTarget and not runtime.setTarget(id) then return false end
 
     local isDet = runtime.isDetrimentalAction(effName, c.target, c)
@@ -16471,10 +17166,10 @@ runtime.useClickie = function(c, id)
     castTracker.activeSpell    = effName
     castTracker.activeTargetId = id
     castTracker.activeKind     = c.kind
-    if selfCast and hostileTarget then
+    if keepHostile then
         castTracker.targetRequired = false
     else
-        castTracker.targetRequired = isDet or isTargetRequiredSpell(effName)
+        castTracker.targetRequired = isDet or isTargetRequiredSpell(effName) or selfCast
     end
     castTracker.castStartTime  = os.clock()
 
@@ -16486,7 +17181,10 @@ runtime.useClickie = function(c, id)
         runtime.stopMovementForCast(c.cls, effName)
         local stillMoving = false
         pcall(function() stillMoving = mq.TLO.Me.Moving() or false end)
-        if stillMoving then return false end
+        if stillMoving then
+            runtime.abortPendingCast(orig, id, keepHostile)
+            return false
+        end
     end
     mq.cmdf('/useitem "%s"', c.name)
     runtime.lastCast[key] = os.clock()
@@ -16521,14 +17219,18 @@ runtime.useClickie = function(c, id)
     if id and id > 0 and ((myPetId > 0 and id == myPetId) or isSpawnMyPet(id) or isAnyPet(id)) then
         local cSpell = (c.spell and c.spell ~= '' and c.spell) or effName
         local durSec = 0
+        local bene = false
         pcall(function()
-            local d = mq.TLO.Spell(cSpell).Duration() or 0
+            local sp = mq.TLO.Spell(cSpell)
+            local d = sp.Duration() or 0
             if d and tonumber(d) then durSec = math.floor(tonumber(d) * 6) end
+            bene = sp.Beneficial() == true
         end)
-        runtime.recordPetBuff(id, cSpell, durSec)
+        -- detrimental clickies on a pet target were being cached as pet buffs
+        if bene then runtime.recordPetBuff(id, cSpell, durSec) end
     end
 
-    if orig ~= id and orig > 0 and not (selfCast and hostileTarget) then
+    if orig ~= id and orig > 0 and not keepHostile then
         if castMs > 0 then
             runtime.restoreTargetId = orig
         else
@@ -16559,10 +17261,19 @@ function runtime.processHealPriority()
             local g = loadout.gems[i]
             if g and g.spell and g.spell ~= '' then
                 if runtime.isHealAction(g.spell, g.target, g) then
+                    local pctVal = tonumber(g.pct) or 75
+                    -- Cheap checks first: the HP-threshold condition rejects
+                    -- almost every heal on almost every tick, so evaluate it
+                    -- before the gem-match (Spell().RankName lookups) and the
+                    -- range check (Spell TLO + distance).
+                    local id = (pctVal > 0) and runtime.resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal, g) or nil
+                    local wanted = id and isSpawnAlive(id)
+                        and runtime.conditionMet(g.when, pctVal, g.spell, id, g.cls, g.target, g)
+                        and not (castTracker and castTracker.isLockedOut(g.spell, id, g.kind))
                     local assignedGem = tonumber(g.gem) or math.min(i, 12)
                     local actualGem = assignedGem
-                    local isMemmed = isGemMatching(assignedGem, g.spell)
-                    if not isMemmed then
+                    local isMemmed = wanted and isGemMatching(assignedGem, g.spell)
+                    if wanted and not isMemmed then
                         local otherSlot = nil
                         pcall(function() otherSlot = mq.TLO.Me.Gem(g.spell)() end)
                         if otherSlot and otherSlot > 0 then
@@ -16571,14 +17282,11 @@ function runtime.processHealPriority()
                         end
                     end
                     if isMemmed then
-                        local pctVal = tonumber(g.pct) or 75
                         if pctVal > 0 then
-                            local id = runtime.resolveTargetId(g.target, g.cls, g.when, g.spell, pctVal, g)
                             if id and isSpawnAlive(id) then
                                 local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(g.spell, id)
                                 if rangeOk then
-                                    local lockedOut = castTracker and castTracker.isLockedOut(g.spell, id, g.kind)
-                                    if not lockedOut and runtime.conditionMet(g.when, pctVal, g.spell, id, g.cls, g.target, g) then
+                                    if true then
                                         local sp = mq.TLO.Spell(g.spell)
                                         local spMana = (sp and sp() and tonumber(sp.Mana() or 0)) or 0
                                         local curMana = tonumber(mq.TLO.Me.CurrentMana() or 0) or 0
@@ -18088,16 +18796,6 @@ end
 -- Movement: stuck/recovery helpers
 
 function runtime.performUnstuck()
-    if runtime.tryOpenNearbyDoor(true) then
-        print('\ay[Triune]\ax stuck -- tried opening a nearby door.')
-        mq.delay(600)
-        stuckState.counter = 0
-        stuckState.lastStuckRecoveryAt = os.clock()
-        pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil
-        if runtime.clearDetour then runtime.clearDetour() end
-        return
-    end
-
     local now = os.clock()
     -- Increment attempt sequence for recurring stuck events near the same obstacle.
     -- If previous recovery was > 20s ago, reset attempts counter to 1.
@@ -18110,6 +18808,19 @@ function runtime.performUnstuck()
         end
     end
     stuckState.lastStuckRecoveryAt = now
+
+    -- A closed door within reach is the most likely cause, so try it once at
+    -- the start of each stuck sequence. It must NOT short-circuit every event:
+    -- doing so kept clicking the (already open) door forever and the backing
+    -- up / strafe / mark-unreachable steps below were never reached.
+    if stuckState.attempts == 1 and runtime.tryOpenNearbyDoor(true) then
+        print('\ay[Triune]\ax stuck -- tried opening a nearby door.')
+        mq.delay(600)
+        stuckState.counter = 0
+        pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil
+        if runtime.clearDetour then runtime.clearDetour() end
+        return
+    end
 
     local me = mq.TLO.Me
     if me() and ctrl.nav_hazard_avoidance then
@@ -18143,33 +18854,36 @@ function runtime.performUnstuck()
     end)
     pcall(function() mq.cmd('/keypress forward') end)
 
+    -- The key holds are released with '/timed N <cmd>' (N in tenths of a
+    -- second) instead of sleeping in the tick: the old mq.delay chain stalled
+    -- the whole loop (heals, plugins, boxnet) for 1.2-2.2 s per attempt.
+    -- stuckState.maneuverUntil keeps checkStuck from stacking a second
+    -- maneuver on top while the keys are still held.
     if stuckState.attempts == 1 then
         -- Step 1: back up and jump
         print('\ay[Triune]\ax stuck (Attempt 1) -- backing up.' .. tgtNote)
         mq.cmd('/keypress back hold')
-        mq.delay(1200)
-        mq.cmd('/keypress back')
-        mq.cmd('/keypress jump')
+        mq.cmd('/timed 12 /keypress back')
+        mq.cmd('/timed 12 /keypress jump')
+        stuckState.maneuverUntil = now + 1.4
     elseif stuckState.attempts == 2 then
         -- Step 2: back up briefly then step left
         print('\ay[Triune]\ax stuck (Attempt 2) -- stepping left.' .. tgtNote)
         mq.cmd('/keypress back hold')
-        mq.delay(400)
-        mq.cmd('/keypress back')
-        mq.cmd('/keypress strafe_left hold')
-        mq.delay(1000)
-        mq.cmd('/keypress strafe_left')
-        mq.cmd('/keypress jump')
+        mq.cmd('/timed 4 /keypress back')
+        mq.cmd('/timed 4 /keypress strafe_left hold')
+        mq.cmd('/timed 14 /keypress strafe_left')
+        mq.cmd('/timed 14 /keypress jump')
+        stuckState.maneuverUntil = now + 1.6
     elseif stuckState.attempts == 3 then
         -- Step 3: back up briefly then step right past initial position
         print('\ay[Triune]\ax stuck (Attempt 3) -- stepping right past initial position.' .. tgtNote)
         mq.cmd('/keypress back hold')
-        mq.delay(400)
-        mq.cmd('/keypress back')
-        mq.cmd('/keypress strafe_right hold')
-        mq.delay(1800)
-        mq.cmd('/keypress strafe_right')
-        mq.cmd('/keypress jump')
+        mq.cmd('/timed 4 /keypress back')
+        mq.cmd('/timed 4 /keypress strafe_right hold')
+        mq.cmd('/timed 22 /keypress strafe_right')
+        mq.cmd('/timed 22 /keypress jump')
+        stuckState.maneuverUntil = now + 2.4
     elseif stuckState.attempts >= 4 then
         -- Step 4: All directional unstuck attempts failed; mark target unreachable & search for a new target
         local currentTgtId = nil
@@ -18220,6 +18934,8 @@ function runtime.checkStuck()
     local now = os.clock()
     if (now - stuckState.checkAt) < 1.0 then return end
     stuckState.checkAt = now
+    -- a scheduled unstuck maneuver is still moving the character
+    if stuckState.maneuverUntil and now < stuckState.maneuverUntil then return end
 
     -- Stuck detection MUST only evaluate when movement is actively running
     -- (i.e. MQ2Nav or MQ2MoveUtils is active). If neither plugin is moving,
@@ -18382,40 +19098,41 @@ runtime.handleCannotSeeTarget = function()
     end
     stuckState.lastCannotSeeAt = now
 
-    -- Pause stick if active so it doesn't fight our reposition
+    -- Pause stick if active so it doesn't fight our reposition. Remember that
+    -- we did, so it is unpaused once the maneuver is done: nothing else in a
+    -- melee-only fight ever unpauses it.
+    local stickPaused = false
     if stickLoaded() then
         pcall(function()
             if mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON' then
                 mq.cmd('/stick pause')
+                stickPaused = true
             end
         end)
     end
     pcall(function() mq.cmd('/keypress forward') end)
 
+    -- Key releases are scheduled with /timed (tenths of a second) rather
+    -- than slept in the tick.
     if stuckState.cannotSeeAttempts == 1 then
         print(string.format('\ay[Triune]\ax "Cannot see target" in melee (Attempt 1) -- stepping back (dist=%.1f).', d))
         mq.cmd('/keypress back hold')
-        mq.delay(250)
-        mq.cmd('/keypress back')
-        mq.cmd('/face fast')
+        mq.cmd('/timed 3 /keypress back')
+        mq.cmd('/timed 3 /face fast')
     elseif stuckState.cannotSeeAttempts == 2 then
         print(string.format('\ay[Triune]\ax "Cannot see target" in melee (Attempt 2) -- backing up & strafing left (dist=%.1f).', d))
         mq.cmd('/keypress back hold')
-        mq.delay(250)
-        mq.cmd('/keypress back')
-        mq.cmd('/keypress strafe_left hold')
-        mq.delay(200)
-        mq.cmd('/keypress strafe_left')
-        mq.cmd('/face fast')
+        mq.cmd('/timed 3 /keypress back')
+        mq.cmd('/timed 3 /keypress strafe_left hold')
+        mq.cmd('/timed 5 /keypress strafe_left')
+        mq.cmd('/timed 5 /face fast')
     elseif stuckState.cannotSeeAttempts == 3 then
         print(string.format('\ay[Triune]\ax "Cannot see target" in melee (Attempt 3) -- backing up & strafing right (dist=%.1f).', d))
         mq.cmd('/keypress back hold')
-        mq.delay(250)
-        mq.cmd('/keypress back')
-        mq.cmd('/keypress strafe_right hold')
-        mq.delay(200)
-        mq.cmd('/keypress strafe_right')
-        mq.cmd('/face fast')
+        mq.cmd('/timed 3 /keypress back')
+        mq.cmd('/timed 3 /keypress strafe_right hold')
+        mq.cmd('/timed 5 /keypress strafe_right')
+        mq.cmd('/timed 5 /face fast')
     else
         -- Attempt 4+: Obstacle or wall blocking sight line
         if runtime.tryOpenNearbyDoor(true) then
@@ -18426,11 +19143,22 @@ runtime.handleCannotSeeTarget = function()
             runtime.markUnreachable(tid)
             stopMoving()
             clearTarget()
+            stickPaused = false -- stopMoving turned stick off outright
+            -- Drop the pull too: leaving pullState = FIGHTING with no target
+            -- was a dead-end (attack spam, no new pull until the mob despawned).
+            if runtime.pullTargetId == tid or runtime.pullState == 'FIGHTING' then
+                runtime.pullTargetId = 0
+                runtime.pullState = 'IDLE'
+                runtime.clearBreadcrumbs()
+            end
         else
             print(string.format('\ay[Triune]\ax Target #%d still cannot be seen (dist=%.1f) -- performing unstuck recovery.', tid, d))
             runtime.performUnstuck()
         end
         stuckState.cannotSeeAttempts = 0
+    end
+    if stickPaused then
+        pcall(function() mq.cmd('/stick unpause') end)
     end
 end
 
@@ -18494,9 +19222,27 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
     end
 
+    -- An empty scan is expensive (up to 100 NearestSpawn searches x2 tiers,
+    -- each candidate paying con / hostile / navmesh checks) and the idle
+    -- puller asks every 0.4 s. After a miss, don't rescan for a second.
+    local nowScan = os.clock()
+    local emptyKey = string.format('%s|%s|%s|%s', tostring(searchRadius), tostring(searchMaxZ), tostring(minLv), tostring(maxLv))
+    local lastEmpty = runtime.roamScanEmpty
+    if lastEmpty and lastEmpty.key == emptyKey and (nowScan - lastEmpty.at) < 1.0 then return nil end
+
     local playerOffMesh = runtime.isPlayerOffMesh()
     -- Mobs the other boxes hold (Box Network); one lookup per scan.
     local claimed = runtime.boxnetClaimedTargets()
+    -- PathExists is a navmesh query per candidate; remember answers for 3 s.
+    runtime.pathExistsCache = runtime.pathExistsCache or {}
+    local function pathExists(sid)
+        local c = runtime.pathExistsCache[sid]
+        if c and (nowScan - c.at) < 3.0 then return c.ok, c.v end
+        local v = false
+        local ok = pcall(function() v = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
+        runtime.pathExistsCache[sid] = { at = nowScan, ok = ok, v = v }
+        return ok, v
+    end
 
     local function scanSpawns(maxZ)
         local radius = searchRadius or 100
@@ -18517,7 +19263,8 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                     state = s.State() or ''
                 end)
                 local isDead = dead or stype == 'Corpse' or state == 'DEAD'
-                if not isDead and runtime.isPullAllowed(sname) and runtime.isConAllowed(s) and not isSpawnPetOrPlayer(sid) and not isUnreachable(sid) then
+                -- (isHostileTarget below already covers isSpawnPetOrPlayer)
+                if not isDead and runtime.isPullAllowed(sname) and runtime.isConAllowed(s) and not isUnreachable(sid) then
                     local sy = s.Y() or 0
                     local sx = s.X() or 0
                     if not outsideAnchor(sy, sx) then
@@ -18536,8 +19283,7 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                                 local dist = s.Distance3D() or 999
                                                 local closeReach = desiredRange(sid) or 14
                                                 if dist > closeReach or not hasLoS(sid) then
-                                                    local hasPath = false
-                                                    local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
+                                                    local ok, hasPath = pathExists(sid)
                                                     if ok and not hasPath then
                                                         pathOk = false
                                                     elseif ok and hasPath then
@@ -18578,6 +19324,7 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
         if targetId then return targetId end
     end
 
+    runtime.roamScanEmpty = { key = emptyKey, at = nowScan }
     return nil
 end
 
@@ -18845,8 +19592,9 @@ function runtime.pullerTick()
         end
     end
 
-    local s = mq.TLO.Spawn(runtime.pullTargetId)
-    local alive = s() and s.Type() == 'NPC' and not s.Dead() and s.Type() ~= 'Corpse'
+    -- IDLE accepts Pet-type hostiles too, so the alive check must as well or a
+    -- hostile pet target bounces FIGHTING -> IDLE -> FIGHTING every tick.
+    local alive = isHostileTarget(runtime.pullTargetId)
     if not alive then
         local maxCampZ = ctrl.camp_z or 75
         local addId = firstNPCXtarget(false, maxCampZ)
@@ -18897,7 +19645,14 @@ function runtime.pullerTick()
 
                 if pullStyle == 'Melee' then
                     if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-                    tagged = true
+                    -- Confirm the tag like the other styles do: the mob is on
+                    -- XTarget or has us as its target. Turning around on the
+                    -- same tick as /attack on left the puller walking home alone.
+                    local totId = 0
+                    pcall(function() totId = mq.TLO.Spawn(tid).TargetOfTarget.ID() or 0 end)
+                    if isXTargetId(tid) or totId == (mq.TLO.Me.ID() or -1) then
+                        tagged = true
+                    end
                 elseif pullStyle == 'Ranged' then
                     mq.cmd('/face fast')
                     if ctrl.combat_style == 'Ranged' then
@@ -18998,15 +19753,26 @@ function runtime.pullerTick()
         else
             if c and runtime.moveTowardLoc(c.x, c.y, c.z, 15) then runtime.pullState = 'FIGHTING' end
         end
-        if c and distToLoc(c.x, c.y, c.z) <= (ctrl.camp_radius or 15) then
+        -- Arrival is a small fixed radius (matching moveTowardLoc's 15), NOT
+        -- ctrl.camp_radius: that is the pull-search radius (default 100) and
+        -- every roam candidate is already inside it, so using it here flipped
+        -- straight to FIGHTING and the drag-home leg never happened.
+        if c and distToLoc(c.x, c.y, c.z) <= 15 then
             runtime.clearBreadcrumbs()
             runtime.pullState = 'FIGHTING'
         end
     elseif runtime.pullState == 'FIGHTING' then
         runtime.clearBreadcrumbs()
         -- Ranged/Spell styles are engaged by combatTick's own style block.
+        -- Only re-issue /attack while the pull target is actually our target
+        -- and in reach; otherwise this spammed the command every tick.
         if ctrl.mode == 'Puller' and (ctrl.combat_style or 'Melee') == 'Melee' and not mq.TLO.Me.Combat() then
-            mq.cmd('/attack on')
+            local ptId = runtime.pullTargetId or 0
+            local tgtId = 0
+            pcall(function() tgtId = mq.TLO.Target.ID() or 0 end)
+            if ptId > 0 and tgtId == ptId and distToId(ptId) <= (desiredRange() + 4) then
+                mq.cmd('/attack on')
+            end
         end
     end
 end
@@ -19158,6 +19924,13 @@ runtime.fullStop = function()
     pursuit.cycleTargetIds = {}
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
+    -- drop any half-finished downtime gem swap so the next start is clean
+    runtime.pendingDowntimeReady = nil
+    runtime.pendingBardSong = nil
+    runtime.interruptedSwap = nil
+    runtime.isSwitchingSpells = false
+    runtime.switchingSlot = 0
+    runtime.switchingSpellName = nil
     if runtime.clearDetour then runtime.clearDetour() end
     runtime.clearBreadcrumbs()
     if runtime.pullHpRest then
@@ -19282,7 +20055,6 @@ function runtime.hasDowntimeAggroThreat()
     if (mq.TLO.Me.XTHaterCount() or 0) > 0 then return true end
     if (mq.TLO.Me.XTAggroCount() or 0) > 0 then return true end
     if runtime.anyXtarAlive and runtime.anyXtarAlive(true) then return true end
-    if runtime.countNPCXtarget and runtime.countNPCXtarget() > 0 then return true end
     local isAggroed = false
     pcall(function()
         local t = mq.TLO.Target
@@ -19296,8 +20068,76 @@ function runtime.hasDowntimeAggroThreat()
     return false
 end
 
+-- Waiting for a freshly memorized gem to become ready used to be a blocking
+-- `while ... mq.delay(100)` spin of up to 6 s inside the tick, during which no
+-- heals, plugins, boxnet or /ac handling ran. It is now a pending record
+-- checked on every tick: { slot, spell, targetId, entry, since, castAfter }.
+-- castAfter == true means cast the spell once ready (missing-buff swap);
+-- false means it was a priority-spell restore and just needs to finish.
+function runtime.tickPendingBardSong()
+    local pend = runtime.pendingBardSong
+    if not pend then return end
+    local nowB = os.clock()
+    local done = false
+    if pend.beneficial then
+        if buffActive(pend.id, pend.spell) or not isCasting() or nowB >= pend.deadline then done = true end
+    else
+        if nowB >= pend.deadline then done = true end
+    end
+    if not done then return end
+    runtime.pendingBardSong = nil
+    mq.cmd('/stopsong')
+    if pend.beneficial then
+        runtime.sungBuffs[sungKey(pend.spell, pend.id)] = true
+        local bb, ss
+        pcall(function() bb = mq.TLO.Me.Buff(pend.spell)() end)
+        pcall(function() ss = mq.TLO.Me.Song(pend.spell)() end)
+        print(string.format(
+            '\ay[Triune bard]\ax %s  Buff=%s  Song=%s  (marked sung -- wont resing until zone/death)', pend.spell,
+            tostring(bb), tostring(ss)))
+    end
+end
+
+function runtime.tickPendingDowntimeReady()
+    local pend = runtime.pendingDowntimeReady
+    if not pend then return false end
+    local function finish()
+        runtime.pendingDowntimeReady = nil
+        runtime.isSwitchingSpells = false
+        runtime.switchingSlot = 0
+        runtime.switchingSpellName = nil
+        if mq.TLO.Window('SpellBookWnd').Open() then mq.cmd('/book 0') end
+    end
+    if runtime.hasDowntimeAggroThreat() then
+        finish()
+        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+        if pend.castAfter then
+            runtime.interruptedSwap = { slot = pend.slot, spell = pend.spell, targetId = pend.targetId, entry = pend.entry }
+            print(string.format('\ar[Triune]\ax Aggro threat detected while waiting for "%s" to ready! Aborting to engage combat.', pend.spell))
+        end
+        return true
+    end
+    local rdy = false
+    pcall(function() rdy = mq.TLO.Me.SpellReady(pend.slot)() end)
+    if not rdy and (os.clock() - pend.since) < 6.0 then
+        return true -- still waiting; keep the tick otherwise idle
+    end
+    finish()
+    if pend.castAfter then
+        runtime.lastDowntimeSwapAt = runtime.lastDowntimeSwapAt or {}
+        runtime.lastDowntimeSwapAt[pend.spell] = os.clock()
+        if rdy then
+            runtime.castGem(pend.slot, pend.entry, pend.targetId)
+        else
+            print(string.format('\ay[Triune]\ax "%s" did not become ready within 6 s after memorizing; will retry on a later pass.', pend.spell))
+        end
+    end
+    return true
+end
+
 function runtime.processDowntimeBuffing()
     if not ctrl.running then return end
+    if runtime.tickPendingDowntimeReady() then return end
     if runtime.hasDowntimeAggroThreat() then return end
     if isCasting() or isCastingOrStarting() or isMoveActive() then return end
     if runtime.medBreakActive then return end
@@ -19417,32 +20257,12 @@ function runtime.processDowntimeBuffing()
                 return
             end
 
-            -- Spell is now memorized; wait for recharge / ready cooldown
-            local rdyStartTime = os.clock()
-            while (os.clock() - rdyStartTime) < 6.0 do
-                local rdy = false
-                pcall(function() rdy = mq.TLO.Me.SpellReady(targetGem)() end)
-                if rdy then break end
-                mq.delay(100)
-                if runtime.hasDowntimeAggroThreat() then
-                    runtime.isSwitchingSpells = false
-                    runtime.switchingSlot = 0
-                    runtime.switchingSpellName = nil
-                    if mq.TLO.Window('SpellBookWnd').Open() then mq.cmd('/book 0') end
-                    if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-                    runtime.interruptedSwap = { slot = targetGem, spell = candidate.spell, targetId = candidateTargetId, entry = candidate }
-                    print(string.format('\ar[Triune]\ax Aggro threat detected while waiting for "%s" to ready! Aborting to engage combat.', candidate.spell))
-                    return
-                end
-            end
-
-            runtime.isSwitchingSpells = false
-            runtime.switchingSlot = 0
-            runtime.switchingSpellName = nil
-            runtime.lastDowntimeSwapAt[candidate.spell] = os.clock()
-
-            -- Cast the buff
-            runtime.castGem(targetGem, candidate, candidateTargetId)
+            -- Spell is now memorized; the ready wait and the cast happen on
+            -- later ticks (see tickPendingDowntimeReady) so the loop stays live.
+            runtime.pendingDowntimeReady = {
+                slot = targetGem, spell = candidate.spell, targetId = candidateTargetId,
+                entry = candidate, since = os.clock(), castAfter = true,
+            }
             return
         end
     end
@@ -19498,20 +20318,11 @@ function runtime.processDowntimeBuffing()
                     return
                 end
 
-                -- Wait for recharge cooldown on restored combat spell
-                local rdyStartTime = os.clock()
-                while (os.clock() - rdyStartTime) < 6.0 do
-                    local rdy = false
-                    pcall(function() rdy = mq.TLO.Me.SpellReady(slot)() end)
-                    if rdy then break end
-                    mq.delay(100)
-                    if runtime.hasDowntimeAggroThreat() then break end
-                end
-
-                runtime.isSwitchingSpells = false
-                runtime.switchingSlot = 0
-                runtime.switchingSpellName = nil
-                if mq.TLO.Window('SpellBookWnd').Open() then mq.cmd('/book 0') end
+                -- Ready wait happens on later ticks (see tickPendingDowntimeReady).
+                runtime.pendingDowntimeReady = {
+                    slot = slot, spell = primarySpell, targetId = 0,
+                    entry = nil, since = os.clock(), castAfter = false,
+                }
                 return
             end
         end
@@ -19583,6 +20394,12 @@ local function combatTick()
             print('\ar[Triune]\ax character is dead -- paused. Will resume automatically once alive again.')
         end
         return
+    end
+    -- Alive again: re-arm the guard so the next death gets the same full stop
+    -- (it was previously set once and never cleared).
+    if runtime.deathGuardFired then
+        runtime.deathGuardFired = false
+        print('\ag[Triune]\ax character is alive again -- resuming.')
     end
     local isFeigning = false
     pcall(function() isFeigning = mq.TLO.Me.Feigning() or false end)
@@ -19851,7 +20668,7 @@ local function combatTick()
             end
             pullerTick()
             local pt = mq.TLO.Target
-            haveNPC = pt() and pt.Type() == 'NPC' and not pt.Dead() and pt.Type() ~= 'Corpse'
+            haveNPC = pt() and (pt.Type() == 'NPC' or pt.Type() == 'Pet') and not pt.Dead() and pt.Type() ~= 'Corpse'
             if haveNPC and (isUnreachable(pt.ID()) or isIgnored(pt.CleanName())) then
                 haveNPC = false
                 clearTarget()
@@ -20280,7 +21097,11 @@ local function combatTick()
     -- If we have an active target but cannot get in striking range or establish LoS after 15s,
     -- mark it unreachable and switch to a different mob.
     local inCombatNow = mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')
-    if haveNPC and not manualHold and (ctrl.mode ~= 'Manual' or isXTargetId(mq.TLO.Target.ID() or 0) or inCombatNow) then
+    -- Assist Backline never closes on the mob, so "not in reach after 15 s" is
+    -- its normal state; the watchdog would mark every target unreachable and
+    -- flap. Skip it there.
+    local noApproachMode = (ctrl.mode == 'Assist' and ctrl.submode == 'Backline')
+    if haveNPC and not manualHold and not noApproachMode and (ctrl.mode ~= 'Manual' or isXTargetId(mq.TLO.Target.ID() or 0) or inCombatNow) then
         local tid = mq.TLO.Target.ID() or 0
         if tid > 0 then
             if pursuit.approachTargetId ~= tid then
@@ -20515,9 +21336,13 @@ local function combatTick()
         end)
     end
 
-    -- Puller Hunt Pet Pull: don't re-hold pets while navigating to mob
-    local isHuntPetApproach = (ctrl.mode == 'Puller' and ctrl.submode == 'Hunt'
-        and (ctrl.pull_style or 'Melee') == 'Pet' and haveNPC and not engage)
+    -- Puller Pet Pull: don't re-hold pets while the pet is being sent at the
+    -- mob. Covers Hunt (any pre-engage state) and Camp while in TO_MOB; before
+    -- Camp was included, pullerTick sent "attack all" and this block sent
+    -- "hold all" on the same tick, flip-flopping the pets until the tag landed.
+    local isHuntPetApproach = (ctrl.mode == 'Puller' and (ctrl.pull_style or 'Melee') == 'Pet'
+        and haveNPC and not engage
+        and (ctrl.submode == 'Hunt' or (ctrl.submode == 'Camp' and runtime.pullState == 'TO_MOB')))
 
     if petHoldEnabled and (not (haveNPC and engage) or isPullingToCamp) and not isHuntPetApproach then
         if not petState.petHoldActive then
@@ -20854,6 +21679,11 @@ local function combatTick()
             tostring(isCasting()), tostring(navLoaded() and mq.TLO.Navigation.Active()), tostring(stickOn)))
     end
 
+    -- A downtime swap waiting on SpellReady must be serviced even when combat
+    -- starts, so the aggro branch can hand it to interruptedSwap.
+    if runtime.pendingDowntimeReady then
+        runtime.tickPendingDowntimeReady()
+    end
     -- If out of combat and no spell was cast, process downtime buff swapping & priority spell restoration
     if not gemCasted and not inRealCombat and not isCasting() and not isCastingOrStarting() and not isMoveActive() and not runtime.medBreakActive then
         runtime.processDowntimeBuffing()
@@ -20917,9 +21747,22 @@ local function setTriuneMode(arg1, arg2)
         setManualHunterPetHold(false, false)
     end
 
+    local modeChanged = (ctrl.mode ~= newMode) or (ctrl.submode ~= newSubmode)
     ctrl.mode = newMode
     ctrl.submode = newSubmode
     if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
+    if modeChanged then
+        -- A mid-pull mode switch used to leave nav running toward the old mob
+        -- and a stale pullState suppressing auto-attack / holding pets.
+        stopMoving()
+        runtime.pullState = 'IDLE'
+        runtime.pullTargetId = 0
+        pursuit.id = 0; pursuit.lastNavTargetId = 0; pursuit.lastNavLoc = nil; pursuit.wanderLoc = nil
+        pursuit.approachTargetId = 0; pursuit.approachStartedAt = 0
+        runtime.clearBreadcrumbs()
+        if runtime.pullHpRest then runtime.pullHpRest = false end
+        if runtime.medBreakActive then runtime.medBreakActive = false end
+    end
 
     if MODES.SUBMODES[ctrl.mode] then
         print(string.format('\ag[Triune]\ax mode set to %s (%s).', ctrl.mode, ctrl.submode))
@@ -20936,36 +21779,14 @@ function runtime.setRunning(enable)
             print('\ay[Triune]\ax already running.')
             return
         end
-        if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
-            runtime.setNearestWaypoint()
-        end
-        ctrl.running = true
-        runtime.wasRunning = true
         print('\ag[Triune]\ax running.')
-        if not navLoaded() and ctrl.mode ~= 'Manual' then
-            mq.cmd('/popup [Triune] WARNING: MQ2Nav is NOT loaded!')
-            print('\ar[Triune WARNING]\ax MQ2Nav plugin is not loaded! Movement and navigation require MQ2Nav (/plugin mq2nav).')
-        elseif not navMeshLoaded() and ctrl.mode ~= 'Manual' then
-            local curZone = mq.TLO.Zone.ShortName() or 'current zone'
-            mq.cmdf('/popup [Triune] WARNING: No NavMesh for %s!', curZone)
-            print(string.format('\ar[Triune WARNING]\ax No NavMesh loaded for zone "%s"! Movement and pathing require a zone navmesh.', curZone))
-        end
-        if not stickLoaded() and ctrl.mode ~= 'Manual' then
-            mq.cmd('/popup [Triune] WARNING: MQ2MoveUtils is NOT loaded!')
-            print('\ar[Triune WARNING]\ax MQ2MoveUtils plugin is not loaded! Target stick and melee positioning require MQ2MoveUtils (/plugin mq2moveutils).')
-        end
+        UI.startEngine()
     else
         if not ctrl.running then
             print('\ay[Triune]\ax already paused.')
             return
         end
-        if ctrl.mode == 'Manual' then
-            setManualHunterPetHold(true, true)
-        else
-            setManualHunterPetHold(false, true)
-        end
-        ctrl.running = false
-        if runtime.fullStop then runtime.fullStop() end
+        UI.pauseEngine()
         print('\ag[Triune]\ax paused.')
     end
 end
@@ -20979,6 +21800,11 @@ local function triuneCommand(...)
     local cmd = ''
     if #args > 0 then
         cmd = normalizeCommandKey(args[1])
+    end
+    -- normalizeCommandKey strips punctuation, so '/ac ?' arrives as ''; route
+    -- it to help instead of toggling run/pause.
+    if cmd == '' and args and args[1] and tostring(args[1]):find('?', 1, true) then
+        cmd = 'help'
     end
     if cmd == '' then
         if runtime.triuneToggle then runtime.triuneToggle() end
@@ -21010,6 +21836,30 @@ local function triuneCommand(...)
     elseif cmd == 'debug' or cmd == 'debugmode' or cmd == 'diag' then
         ctrl.debug_mode = not ctrl.debug_mode
         print(string.format('\ag[Triune]\ax Debug Mode: %s', ctrl.debug_mode and '\agENABLED (live combat telemetry)\ax' or '\arDISABLED\ax'))
+    elseif cmd == 'log' or cmd == 'logfile' then
+        local sub = args[2] and string.lower(args[2]) or ''
+        if sub == 'on' or sub == '1' then
+            ctrl.log_to_file = true
+        elseif sub == 'off' or sub == '0' then
+            ctrl.log_to_file = false
+        elseif sub == 'path' or sub == 'where' then
+            print('\ag[Triune]\ax Log file: \ay' .. (tlog.currentFilePath() or tlog.filePath()) .. '\ax'
+                .. (tlog.isFileOpen() and '' or ' (not open)'))
+            return
+        else
+            ctrl.log_to_file = not ctrl.log_to_file
+        end
+        tlog.tick()
+        if ctrl.log_to_file then
+            print('\ag[Triune]\ax File logging \agENABLED\ax -> \ay' .. (tlog.currentFilePath() or tlog.filePath()) .. '\ax')
+            if not tlog.isFileOpen() then
+                print('\ar[Triune]\ax Could not open log file: ' .. tostring(tlog.lastOpenError()))
+            end
+        else
+            print('\ag[Triune]\ax File logging \arDISABLED\ax')
+        end
+    elseif cmd == 'dump' or cmd == 'dumpstate' or cmd == 'snapshot' then
+        runtime.dumpDiagnostics()
     elseif cmd == 'help' or cmd == 'h' or cmd == '?' then
         print('\ag[Triune]\ax --- Slash Commands (/ac or /triune) ---')
         print('  \ag/ac run | start\ax - Start autocombat execution')
@@ -21018,6 +21868,8 @@ local function triuneCommand(...)
         print('  \ag/ac memall | mem\ax - Memorize priority spells to gem bar')
         print('  \ag/ac importbar | import\ax - Auto-populate spell lines from current spell gems')
         print('  \ag/ac debug\ax - Toggle live combat debug telemetry in chat')
+        print('  \ag/ac log [on|off|path]\ax - Write all Triune chat + debug output to a log file')
+        print('  \ag/ac dump\ax - Write a one-shot diagnostic snapshot file (settings, state, recent log)')
         print('  \ag/ac status\ax - Print running state and mode')
         print('  \ag/ac compact | mini\ax - Toggle compact mini-window mode')
         print('  \ag/ac scale [0.75-2.0|reset]\ax - Scale every Triune window (per-window overrides on Settings -> Window Layout)')
@@ -21144,7 +21996,8 @@ local function triuneCommand(...)
         ctrl.show_effects_window = not ctrl.show_effects_window
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Popout Effects & Songs Window %s.', ctrl.show_effects_window and 'OPENED' or 'CLOSED'))
-    elseif cmd == 'xtar' or cmd == 'xt' or cmd == 'xtarget' or cmd == 'xtargetwin' or cmd == 'xtwin' then
+    elseif (cmd == 'xtar' or cmd == 'xt' or cmd == 'xtarget' or cmd == 'xtargetwin' or cmd == 'xtwin') and not tonumber(args[2]) then
+        -- '/ac xtar 200' falls through to the xtardist branch below
         ctrl.show_xtarget_window = not ctrl.show_xtarget_window
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Popout Extended Target Window %s.', ctrl.show_xtarget_window and 'OPENED' or 'CLOSED'))
@@ -21317,7 +22170,9 @@ local function triuneCommand(...)
                 ctrl.fov or 100, ctrl.fov_enabled and '\agENABLED\ax' or '\arDISABLED\ax',
                 runtime.fovLoaded() and '' or ' -- \arMQ2FOV NOT LOADED\ax'))
         end
-    elseif cmd == 'chasedist' or cmd == 'chase' or cmd == 'chaserange' or cmd == 'followdist' then
+    elseif cmd == 'chasedist' or cmd == 'chaserange' or cmd == 'followdist'
+        or (cmd == 'chase' and args[2] and args[2] ~= '') then
+        -- bare '/ac chase' is the Assist/Chase mode switch (handled by setTriuneMode below)
         local arg2 = args[2] and string.lower(args[2]) or ''
         local val = tonumber(arg2)
         if val then
@@ -21591,11 +22446,11 @@ mq.bind('/ac', triuneCommand)
 function runtime.autoloadRequiredPlugins()
     local needWait = false
     if not navLoaded() then
-        mq.cmd('/plugin mq2nav')
+        mq.cmd('/plugin mq2nav'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
         needWait = true
     end
     if not stickLoaded() then
-        mq.cmd('/plugin mq2moveutils')
+        mq.cmd('/plugin mq2moveutils'); if runtime.invalidatePluginProbes then runtime.invalidatePluginProbes() end
         needWait = true
     end
     if needWait and mq.delay then
@@ -21816,8 +22671,97 @@ end
 -- ============================================================================
 -- Main loop
 -- ============================================================================
+-- Diagnostic snapshot: everything a bug report needs in one file. Runtime
+-- scalars are swept automatically so new state fields show up without
+-- maintenance; the big tables are summarised rather than serialised.
+function runtime.buildDiagnosticDump()
+    local pm = runtime.pluginManager
+    local live = {}
+    for _, tlo in ipairs({ 'Me.Class.ShortName', 'Me.Level', 'Me.PctHPs', 'Me.PctMana', 'Me.PctEndurance', 'Me.Combat',
+        'Me.Casting', 'Me.Moving', 'Me.Sitting', 'Me.Invis', 'Me.Standing', 'Me.Grouped', 'Me.GroupSize', 'Me.XTarget',
+        'Me.AutoFire', 'Me.Pet.ID', 'Target.ID', 'Target.CleanName', 'Target.Type', 'Target.PctHPs', 'Target.Distance',
+        'Target.LineOfSight', 'Zone.ShortName', 'Zone.ID', 'Navigation.MeshLoaded', 'Navigation.Active',
+        'Stick.Active', 'Stick.Status', 'MacroQuest.GameState' }) do
+        local v = '<n/a>'
+        pcall(function()
+            local cur = mq.TLO
+            for seg in tlo:gmatch('[^%.]+') do cur = cur[seg] end
+            v = cur()
+        end)
+        live[tlo] = v
+    end
+    local runtimeScalars = {}
+    for k, v in pairs(runtime) do
+        local tv = type(v)
+        if tv == 'string' or tv == 'number' or tv == 'boolean' then runtimeScalars[k] = v end
+    end
+    local plugins = {}
+    if pm and pm.plugins then
+        for _, id in ipairs(pm.pluginOrder or {}) do
+            local p = pm.plugins[id]
+            if p then
+                plugins[id] = {
+                    name = p.name, version = p.version, enabled = p.enabled, status = p.status,
+                    errorMsg = p.errorMsg, hasThread = p.hasThread, runOutOfCombatOnly = p.runOutOfCombatOnly,
+                    lastExecMs = p.lastExecMs, avgExecMs = p.avgExecMs,
+                }
+            end
+        end
+        for fname, e in pairs(pm.loadErrors or {}) do
+            plugins['LOAD FAILED: ' .. fname] = e.msg
+        end
+    end
+    local function mapSummary(m)
+        local out = {}
+        for name, e in pairs(m or {}) do
+            out[name] = string.format('cls=%s target=%s when=%s enabled=%s pct=%s',
+                tostring(e.cls), tostring(e.target), tostring(e.when), tostring(e.enabled), tostring(e.pct))
+        end
+        return out
+    end
+    local gems = {}
+    for i, g in ipairs(loadout.gems or {}) do
+        if g then gems[i] = string.format('%s "%s" target=%s when=%s pct=%s', tostring(g.cls), tostring(g.spell), tostring(g.target), tostring(g.when), tostring(g.pct)) end
+    end
+    return {
+        { title = 'Live TLO snapshot', value = live },
+        { title = 'Identity',          value = { name = myName, classes = myClasses, version = VERSION, dataEra = DATA.era_expansion } },
+        { title = 'ctrl',              value = ctrl, depth = 4 },
+        { title = 'runtime (scalars)', value = runtimeScalars },
+        { title = 'petState',          value = petState, depth = 2 },
+        { title = 'pursuit',           value = pursuit, depth = 2 },
+        { title = 'stuckState',        value = stuckState, depth = 2 },
+        { title = 'loadout.gems',      value = gems },
+        { title = 'loadout.aas',       value = mapSummary(loadout.aas) },
+        { title = 'loadout.discs',     value = mapSummary(loadout.discs) },
+        { title = 'loadout.actions',   value = mapSummary(loadout.actions) },
+        { title = 'loadout.clickies',  value = mapSummary(loadout.clickies) },
+        { title = 'plugins',           value = plugins },
+        { title = 'logger',            value = tlog.stats() },
+    }
+end
+
+function runtime.dumpDiagnostics(quiet)
+    local ok, sections = pcall(runtime.buildDiagnosticDump)
+    if not ok then
+        sections = { { title = 'buildDiagnosticDump failed', value = tostring(sections) } }
+    end
+    local path, err = tlog.dump(sections)
+    if path then
+        if not quiet then print('\ag[Triune]\ax Diagnostics written to \ay' .. path .. '\ax') end
+    else
+        print('\ar[Triune]\ax Diagnostic dump failed: ' .. tostring(err))
+    end
+    return path, err
+end
+
 local function runMainLoop()
     while open do
+        tlog.tick()
+        -- per-pass cache key for memoized resolvers (maTargetId, maPcId,
+        -- boxPeersInZone, the XTarget snapshot); UI frames between passes
+        -- share the same value.
+        runtime.tickSerial = (runtime.tickSerial or 0) + 1
         mq.doevents()
         local nm = mq.TLO.Me.CleanName()
         if nm and nm ~= '' and nm ~= myName then
@@ -21863,19 +22807,25 @@ local function runMainLoop()
             runtime.pendingCursorClearAt = nil
             clearCursor()
         end
+        if runtime.pendingBardSong then runtime.tickPendingBardSong() end
         if runtime.pendingFovAt and os.clock() >= runtime.pendingFovAt then
             runtime.pendingFovAt = nil
             if ctrl.fov_enabled and runtime.applyFov then
                 runtime.applyFov()
             end
         end
-        runtime.updateMapRadiusVisuals()
+        -- Map overlays: the key rebuild (a string.format per waypoint) only
+        -- needs to happen ~1x/s; mutators call updateMapRadiusVisuals directly.
+        if (os.clock() - (runtime.lastMapVisualsAt or 0)) >= 1.0 then
+            runtime.lastMapVisualsAt = os.clock()
+            runtime.updateMapRadiusVisuals()
+        end
         if runtime.pluginManager and runtime.pluginManager.tick then
             runtime.pluginManager.tick()
         end
         -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting
         local memmed = false
-        if not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not (runtime.hasDowntimeAggroThreat and runtime.hasDowntimeAggroThreat()) then
+        if next(runtime.pendingMem) ~= nil and not isCasting() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not (runtime.hasDowntimeAggroThreat and runtime.hasDowntimeAggroThreat()) then
             local maxG = getNumGems()
             local slot = nil
             for s = 1, maxG do
@@ -21912,6 +22862,35 @@ local function runMainLoop()
             end
         end
 
+        -- Housekeeping once a minute: the unreachable-target and cached pet
+        -- buff tables were only ever trimmed when a specific id was queried
+        -- again, so they grew for the whole session.
+        if (os.clock() - (runtime.lastHousekeepAt or 0)) >= 60.0 then
+            runtime.lastHousekeepAt = os.clock()
+            local nowHk = os.clock()
+            if pursuit.unreachableIds then
+                local ttl = 60 -- matches isUnreachable()'s expiry
+                for id, at in pairs(pursuit.unreachableIds) do
+                    if type(at) ~= 'number' or (nowHk - at) > ttl then pursuit.unreachableIds[id] = nil end
+                end
+            end
+            if petState.cachedPetBuffs then
+                for id, rec in pairs(petState.cachedPetBuffs) do
+                    if type(rec) ~= 'table' or (nowHk - (rec.time or 0)) > 300 then petState.cachedPetBuffs[id] = nil end
+                end
+            end
+            if runtime.pathExistsCache then
+                for id, rec in pairs(runtime.pathExistsCache) do
+                    if (nowHk - (rec.at or 0)) > 30 then runtime.pathExistsCache[id] = nil end
+                end
+            end
+            if runtime.conAskedAt then
+                for conName, at in pairs(runtime.conAskedAt) do
+                    if (nowHk - at) > 600 then runtime.conAskedAt[conName] = nil end
+                end
+            end
+        end
+
         -- auto-save: persist the loadout ~1.5s after any change (no Save click needed).
         -- loadoutSig() walks every gem/AA/disc/action and all ~250 ctrl keys, so only
         -- re-check it once a second; the save itself is debounced 1.5s anyway.
@@ -21924,13 +22903,26 @@ local function runMainLoop()
             end
         end
         if runtime.autoDirty and (os.clock() - runtime.autoDirtyAt) > 1.5 then
-            runtime.saveLoadout(true); runtime.autoDirty = false
+            runtime.saveLoadout(true, true); runtime.autoDirty = false
         end
 
         mq.delay(memmed and 200 or 150)
     end
 end
 
-runMainLoop()
+-- Any uncaught error in the main loop is written to the log (with a full
+-- traceback and a diagnostic dump) before being re-raised so MQ still reports
+-- it in chat the way it always has.
+function runtime.onMainLoopError(err)
+    runtime.lastCrash = debug.traceback(tostring(err), 2)
+    tlog.error('crash', 'main loop error:\n%s', runtime.lastCrash)
+    pcall(runtime.dumpDiagnostics, true)
+    tlog.close('crash')
+    if runtime.fullStop then pcall(runtime.fullStop) end
+    return runtime.lastCrash
+end
+if not xpcall(runMainLoop, runtime.onMainLoopError) then error(runtime.lastCrash, 0) end
 if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
-runtime.saveLoadout(true)
+if runtime.fullStop then pcall(runtime.fullStop) end -- attack / nav / stick were left running on window close
+runtime.saveLoadout(true, true)
+tlog.close('script exit')

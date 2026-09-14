@@ -290,48 +290,59 @@ function plugin.onInit(coreApi)
         table.insert(registeredEvents, name)
     end
 
-    reg('TacCritHit', '#*#You score a critical hit!#*#(#1#)#*#', function(_, dmgStr)
+    -- Self-only patterns: anchored at the start of the line on the first-person
+    -- wording so other people's crits ("Bob delivers a critical blast!") and
+    -- quoted chat never spawn a floater.
+    reg('TacCritHit', 'You score a critical hit!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('CRITICAL!', 'crit', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacCripBlow', '#*#You land a Crippling Blow!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacCripBlow', 'You land a Crippling Blow!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('CRIPPLING BLOW!', 'crip', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacDeadlyStrike', '#*#You score a Deadly Strike!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacDeadlyStrike', 'You score a Deadly Strike!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('DEADLY STRIKE!', 'deadly', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacSlayUndead', '#*#You slay#*#undead!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacSlayUndead', 'You slay#*#undead!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('SLAY UNDEAD!', 'slay', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacFinishBlow', '#*#You land a Finishing Blow!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacFinishBlow', 'You land a Finishing Blow!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('FINISHING BLOW!', 'finish', tonumber(dmgStr) or 0)
     end)
 
     -- Instant kills carry no number, so they get the top tier outright.
-    reg('TacAssassinate', '#*#You assassinate#*#', function()
+    reg('TacAssassinate', 'You assassinate#*#', function()
         spawnFloater('ASSASSINATE!', 'assassin', 0, { tier = 1 })
     end)
 
-    reg('TacHeadshot', '#*#You headshotted#*#', function()
+    reg('TacHeadshot', 'You headshotted#*#', function()
         spawnFloater('HEADSHOT!', 'headshot', 0, { tier = 1 })
     end)
 
-    reg('TacFlurry', '#*#You flurry#*#', function()
+    reg('TacFlurry', 'You flurry#*#', function()
         spawnFloater('FLURRY!', 'flurry', 0)
     end)
 
-    reg('TacSpellCrit', '#*#critical blast!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacSpellCrit', 'You deliver a critical blast!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('SPELL CRIT!', 'spellcrit', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacHealCrit', '#*#critical heal#*#(#1#)#*#', function(_, dmgStr)
+    -- Emu wording first; the older "critical heal" wording kept as a fallback
+    -- (both first-person: "You ..." / "Your ...").
+    reg('TacHealCrit', 'You perform an exceptional heal!#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('CRIT HEAL!', 'holy', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacDotCrit', '#*#critical dot#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacHealCrit2', 'You#*#critical heal#*#(#1#)#*#', function(_, dmgStr)
+        spawnFloater('CRIT HEAL!', 'holy', tonumber(dmgStr) or 0)
+    end)
+
+    -- DoT crits name the caster's spell ("... from your <spell> ..."), so
+    -- "your" is required to keep other casters' ticks out.
+    reg('TacDotCrit', '#*#your#*#critical dot#*#(#1#)#*#', function(_, dmgStr)
         spawnFloater('CRIT DOT!', 'spellcrit', tonumber(dmgStr) or 0)
     end)
 end
@@ -383,33 +394,73 @@ end
 -- ----------------------------------------------------------------------------
 -- Rendering
 -- ----------------------------------------------------------------------------
-local function textWidth(ImGui, text, fontSize)
-    local base = 13
-    local okF, fs = pcall(ImGui.GetFontSize)
-    if okF and type(fs) == 'number' and fs > 0 then base = fs end
-    local ok, w = pcall(ImGui.CalcTextSize, text)
-    if ok and type(w) == 'number' and w > 0 then return w * (fontSize / base) end
-    return #text * fontSize * 0.55
+-- Base font size (ImGui.GetFontSize) read once per frame in onDrawUI.
+local frameFontBase = 13
+
+-- Width of `text` at the base font size, memoized per string (tier stamps,
+-- combo labels and finished numbers repeat every frame). Bounded: cleared
+-- when it grows past WIDTH_CACHE_MAX entries (the count-up churns numbers).
+local WIDTH_CACHE_MAX = 512
+local widthCache, widthCacheN = {}, 0
+local function baseTextWidth(ImGui, text)
+    local w = widthCache[text]
+    if w then return w end
+    local ok, cw = pcall(ImGui.CalcTextSize, text)
+    if ok and type(cw) == 'number' and cw > 0 then
+        w = cw
+    else
+        w = #text * frameFontBase * 0.55
+    end
+    if widthCacheN >= WIDTH_CACHE_MAX then
+        widthCache, widthCacheN = {}, 0
+    end
+    widthCache[text] = w
+    widthCacheN = widthCacheN + 1
+    return w
+end
+
+-- ImVec2 pool: the draw list copies coordinates on every Add* call, so a
+-- handful of mutable vectors can be rewritten instead of allocating 9-13
+-- per drawText. When the binding's ImVec2 is not writable (probed once) it
+-- falls back to allocating.
+local vecPool = {}
+local vecMutable = nil
+local function vec(i, x, y)
+    local v = vecPool[i]
+    if v and vecMutable then
+        v.x = x
+        v.y = y
+        return v
+    end
+    v = ImVec2(x, y)
+    if vecMutable == nil then
+        local ok = pcall(function() v.x = x + 1 end)
+        vecMutable = (ok and v.x == x + 1) or false
+        if vecMutable then v.x = x end
+    end
+    if vecMutable then vecPool[i] = v end
+    return v
 end
 
 -- Centred text with an 8-direction dark stroke and an optional coloured glow.
-local function drawText(dl, ImGui, text, cx, cy, fontSize, r, g, b, alpha, glow)
-    local w = textWidth(ImGui, text, fontSize)
+-- `baseW` is the text width at the base font size when the caller cached it.
+local function drawText(dl, ImGui, text, cx, cy, fontSize, r, g, b, alpha, glow, baseW)
+    local w = (baseW or baseTextWidth(ImGui, text)) * (fontSize / frameFontBase)
     local x, y = cx - w / 2, cy - fontSize / 2
     local o = math.max(1, fontSize / 14)
     if glow then
         local gc = col32(r, g, b, alpha * 0.28)
         local go = o * 2.5
-        dl:AddText(nil, fontSize, ImVec2(x - go, y), gc, text)
-        dl:AddText(nil, fontSize, ImVec2(x + go, y), gc, text)
-        dl:AddText(nil, fontSize, ImVec2(x, y - go), gc, text)
-        dl:AddText(nil, fontSize, ImVec2(x, y + go), gc, text)
+        dl:AddText(nil, fontSize, vec(1, x - go, y), gc, text)
+        dl:AddText(nil, fontSize, vec(2, x + go, y), gc, text)
+        dl:AddText(nil, fontSize, vec(3, x, y - go), gc, text)
+        dl:AddText(nil, fontSize, vec(4, x, y + go), gc, text)
     end
     local oc = col32(0, 0, 0, alpha * 0.9)
-    for _, d in ipairs(OUTLINE_DIRS) do
-        dl:AddText(nil, fontSize, ImVec2(x + d[1] * o, y + d[2] * o), oc, text)
+    for i, d in ipairs(OUTLINE_DIRS) do
+        dl:AddText(nil, fontSize, vec(4 + i, x + d[1] * o, y + d[2] * o), oc, text)
     end
-    dl:AddText(nil, fontSize, ImVec2(x, y), col32(r, g, b, alpha), text)
+    dl:AddText(nil, fontSize, vec(13, x, y), col32(r, g, b, alpha), text)
 end
 
 local function drawFloater(dl, ImGui, f, ax, ay, now)
@@ -467,7 +518,7 @@ local function drawFloater(dl, ImGui, f, ax, ay, now)
                 local sy = oy + math.sin(p.ang) * p.speed * age + 0.5 * FX.GRAVITY * age * age
                 local pa = alpha * (1 - k) * (1 - k)
                 local pc = p.hot and col32(1, 1, 0.85, pa) or col32(p.r, p.g, p.b, pa)
-                dl:AddCircleFilled(ImVec2(sx, sy), p.size * (1 - k * 0.6), pc, 6)
+                dl:AddCircleFilled(vec(14, sx, sy), p.size * (1 - k * 0.6), pc, 6)
             end
         end
     end
@@ -480,7 +531,7 @@ local function drawFloater(dl, ImGui, f, ax, ay, now)
             local k = ra / FX.RING_TIME
             local radius = (12 + 150 * easeOutCubic(k)) * (0.6 + 0.4 * cfg.intensity)
             local thick = 1 + 5 * (1 - k)
-            dl:AddCircle(ImVec2(ax + f.xOff, ay + f.yOff), radius, col32(c[1], c[2], c[3], alpha * 0.85 * (1 - k)), 0, thick)
+            dl:AddCircle(vec(15, ax + f.xOff, ay + f.yOff), radius, col32(c[1], c[2], c[3], alpha * 0.85 * (1 - k)), 0, thick)
         end
     end
 
@@ -494,13 +545,28 @@ local function drawFloater(dl, ImGui, f, ax, ay, now)
         text = f.label .. ' ' .. fmtNum(shown)
     end
     local glow = (not f.callout and (tierDef.rings or 0) > 0) or f.type == 'record'
-    drawText(dl, ImGui, text, px, py, fontSize, r, g, b, alpha, glow)
+    -- The label only changes while the number rolls up; cache its base width per floater.
+    if f.twText ~= text then
+        f.twText = text
+        f.twBase = baseTextWidth(ImGui, text)
+    end
+    drawText(dl, ImGui, text, px, py, fontSize, r, g, b, alpha, glow, f.twBase)
 
     -- Tier stamp above the number: "HUGE HIT" / "BIG HEAL".
     if tierDef.label and not f.callout then
         local stamp = tierDef.label .. ((f.kind == 'heal') and ' HEAL' or ' HIT')
         drawText(dl, ImGui, stamp, px, py - fontSize * 0.78, fontSize * 0.45, 1, 1, 1, alpha * 0.95, false)
     end
+end
+
+-- Draw failures are printed once per DRAW_ERR_INTERVAL instead of vanishing
+-- inside the per-floater pcall.
+local DRAW_ERR_INTERVAL = 30
+local lastDrawErrAt = -DRAW_ERR_INTERVAL
+local function reportDrawError(what, err, now)
+    if (now - lastDrawErrAt) < DRAW_ERR_INTERVAL then return end
+    lastDrawErrAt = now
+    print(string.format('\ar[Triune Floating Damage]\ax %s failed: %s', what, tostring(err)))
 end
 
 local function drawCombo(dl, ImGui, ax, ay, now)
@@ -534,8 +600,8 @@ local function drawCombo(dl, ImGui, ax, ay, now)
     -- Thin timer bar shows how long the streak has left.
     local barW, barH = 120 * cfg.textScale, 4
     local x0, y0 = ax - barW / 2, cy + fontSize * 0.6
-    dl:AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y0 + barH), col32(0, 0, 0, alpha * 0.6))
-    dl:AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW * remain, y0 + barH), col32(r, g, b, alpha * 0.9))
+    dl:AddRectFilled(vec(16, x0, y0), vec(17, x0 + barW, y0 + barH), col32(0, 0, 0, alpha * 0.6))
+    dl:AddRectFilled(vec(18, x0, y0), vec(19, x0 + barW * remain, y0 + barH), col32(r, g, b, alpha * 0.9))
 end
 
 function plugin.onDrawUI()
@@ -578,12 +644,16 @@ function plugin.onDrawUI()
     if show then
         local dl = ImGui.GetWindowDrawList()
         if dl then
+            -- Base font size once per frame (drawText scales widths off it).
+            local okF, fs = pcall(ImGui.GetFontSize)
+            frameFontBase = (okF and type(fs) == 'number' and fs > 0) and fs or 13
+
             -- Screen flash: a brief wash in the hit colour, on top of nothing else.
             if flashLive then
                 local k = (now - state.flash.at) / FX.FLASH_TIME
                 local fa = 0.22 * (1 - k) * clamp(cfg.intensity, 0, 1)
                 pcall(function()
-                    dl:AddRectFilled(ImVec2(0, 0), ImVec2(screenW, screenH), col32(state.flash.r, state.flash.g, state.flash.b, fa))
+                    dl:AddRectFilled(vec(20, 0, 0), vec(21, screenW, screenH), col32(state.flash.r, state.flash.g, state.flash.b, fa))
                 end)
             end
 
@@ -602,9 +672,11 @@ function plugin.onDrawUI()
             end
 
             for _, f in ipairs(floaters) do
-                pcall(drawFloater, dl, ImGui, f, anchorX, anchorY, now)
+                local okD, errD = pcall(drawFloater, dl, ImGui, f, anchorX, anchorY, now)
+                if not okD then reportDrawError('drawFloater', errD, now) end
             end
-            pcall(drawCombo, dl, ImGui, anchorX, anchorY, now)
+            local okC, errC = pcall(drawCombo, dl, ImGui, anchorX, anchorY, now)
+            if not okC then reportDrawError('drawCombo', errC, now) end
         end
     end
     ImGui.End()

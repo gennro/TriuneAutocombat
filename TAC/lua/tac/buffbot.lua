@@ -39,6 +39,25 @@ local ctrl, ImGui, mq = nil, nil, nil
 
 local VERSION      = '1.7'
 
+-- Guild Priority aging: a public (non-guild) job that has been pushed back by
+-- guild-priority inserts more than MAX_PUBLIC_BUMPS times is treated as
+-- guild-tier for queue placement so it cannot starve behind a steady stream
+-- of guild requests. (enqueueBuffJob / requeuePreemptedJob count the bumps.)
+local MAX_PUBLIC_BUMPS = 3
+
+-- A requester who already holds a menu offer younger than this is not sent
+-- the full menu again for every non-selection tell (chit-chat, "brb", ...).
+local MENU_RESEND_SEC = 60
+
+-- Idle upkeep (auto-med / anti-AFK TLO polling) runs at most once per second;
+-- tell dispatch and queue processing stay on the 50 ms tick.
+local UPKEEP_INTERVAL_SEC = 1
+
+-- Controls tab caches: the memorized-gem list (~100 TLO reads) and own guild
+-- name are refreshed on these TTLs instead of every frame.
+local GEMS_UI_TTL_SEC = 0.75
+local GUILD_UI_TTL_SEC = 5
+
 local function refresh()
     ctrl = core.ctrl
     ImGui = core.ImGui
@@ -92,6 +111,7 @@ local rt = {
     lastAntiAfkTime    = os.time(),
     lastSitAttemptTime = 0,
     lastTablePruneTime = os.time(),
+    lastUpkeepTime     = 0,      -- idle auto-med / anti-AFK polling (1 Hz)
     currentRequester   = nil,
     currentJob         = nil,    -- currently active request being cast
     preemptRequested   = false,  -- flag: set to true when guild priority interrupts non-guild casting
@@ -147,9 +167,11 @@ end
 local function getSpellCooldownSec(gemNum, spellName)
     local sec = 0
     pcall(function()
+        local answered = false
         if gemNum and gemNum > 0 then
             local gt = mq.TLO.Me.GemTimer(gemNum)
             if gt and gt() then
+                answered = true
                 local ts = gt.TotalSeconds()
                 if ts and ts > 0 then
                     sec = ts
@@ -159,7 +181,9 @@ local function getSpellCooldownSec(gemNum, spellName)
                 end
             end
         end
-        if sec == 0 and spellName and spellName ~= '' then
+        -- The by-name timer is only a fallback for when the gem timer gave no
+        -- answer at all; a gem timer that answered 0 means "ready".
+        if not answered and sec == 0 and spellName and spellName ~= '' then
             local gt = mq.TLO.Me.GemTimer(spellName)
             if gt and gt() then
                 local ts = gt.TotalSeconds()
@@ -208,6 +232,18 @@ local function getAvailableGems()
         end
     end
     return list
+end
+
+-- Cached copy of getAvailableGems() for the Controls tab (GEMS_UI_TTL_SEC).
+local gemsUiCache = { list = {}, at = -1 }
+local function getAvailableGemsCached()
+    local now = os.clock()
+    if gemsUiCache.at >= 0 and (now - gemsUiCache.at) < GEMS_UI_TTL_SEC then
+        return gemsUiCache.list
+    end
+    gemsUiCache.list = getAvailableGems()
+    gemsUiCache.at = now
+    return gemsUiCache.list
 end
 
 -- ============================================================================
@@ -410,6 +446,19 @@ local function getMyGuild()
     return myGuild
 end
 
+-- Cached own guild name for the Controls tab (GUILD_UI_TTL_SEC); the engine
+-- paths keep calling getMyGuild() directly.
+local guildUiCache = { name = nil, at = -1 }
+local function getMyGuildCached()
+    local now = os.clock()
+    if guildUiCache.at >= 0 and (now - guildUiCache.at) < GUILD_UI_TTL_SEC then
+        return guildUiCache.name
+    end
+    guildUiCache.name = getMyGuild()
+    guildUiCache.at = now
+    return guildUiCache.name
+end
+
 local function getSpawnGuild(spawn)
     if not spawn or not spawn() then return nil end
     local gName = nil
@@ -453,14 +502,22 @@ end
 local function enqueueBuffJob(job)
     if not job then return end
     if cfg.guildMode == 'Guild Priority' and job.isGuild then
-        -- Find position after the last guild job in the active queue
+        -- Find position after the last guild-tier job in the active queue.
+        -- Public jobs bumped more than MAX_PUBLIC_BUMPS times count as
+        -- guild-tier (aging) so they cannot starve.
+        local bumpLimit = MAX_PUBLIC_BUMPS or 3
         local insertIdx = 1
         for i = 1, #rt.activeQueue do
-            if rt.activeQueue[i].isGuild then
+            local q = rt.activeQueue[i]
+            if q.isGuild or (q.bumps or 0) > bumpLimit then
                 insertIdx = i + 1
             else
                 break
             end
+        end
+        for i = insertIdx, #rt.activeQueue do
+            local q = rt.activeQueue[i]
+            if not q.isGuild then q.bumps = (q.bumps or 0) + 1 end
         end
         table.insert(rt.activeQueue, insertIdx, job)
         return insertIdx
@@ -472,14 +529,21 @@ end
 
 local function requeuePreemptedJob(job)
     if not job then return end
-    -- Insert at the first non-guild position (right after all queued guild jobs)
+    -- Insert at the first public position (right after all queued guild-tier
+    -- jobs; aged public jobs count as guild-tier, see enqueueBuffJob).
+    local bumpLimit = MAX_PUBLIC_BUMPS or 3
     local insertIdx = 1
     for i = 1, #rt.activeQueue do
-        if rt.activeQueue[i].isGuild then
+        local q = rt.activeQueue[i]
+        if q.isGuild or (q.bumps or 0) > bumpLimit then
             insertIdx = i + 1
         else
             break
         end
+    end
+    for i = insertIdx, #rt.activeQueue do
+        local q = rt.activeQueue[i]
+        if not q.isGuild then q.bumps = (q.bumps or 0) + 1 end
     end
     table.insert(rt.activeQueue, insertIdx, job)
     return insertIdx
@@ -588,10 +652,34 @@ local function parseBuffRequest(msg, gemList)
         mode = 'pet'
     end
 
+    -- A selection must consist only of numbers and known keywords (target
+    -- mode words, polite filler, separators) once trimmed: "1 3", "pet 2",
+    -- "both 1, 3 please". Free text that merely contains a digit ("be there
+    -- in 5 min") is NOT a selection, so it can never cast gem 5.
+    local KEYWORDS = {
+        pet = true, pets = true, p = true, both = true, b = true,
+        ['and'] = true, please = true, pls = true, plz = true, thanks = true, thx = true, ty = true,
+        me = true, my = true, on = true, ['for'] = true, the = true, buff = true, buffs = true,
+    }
+    local onlyTokens = true
+    local hasNumber = false
+    local normalized = lowerMsg:gsub("[,;&+/#%.!?]", " ")
+    for token in normalized:gmatch("%S+") do
+        if token:match("^%d+$") then
+            hasNumber = true
+        elseif not KEYWORDS[token] then
+            onlyTokens = false
+            break
+        end
+    end
+    if not onlyTokens or not hasNumber then
+        return mode, nil
+    end
+
     -- Check for specific numbers (e.g. '1', '2', '1 3', '1, 2', '1 2 3')
     local selected = {}
     local seen = {}
-    for numStr in lowerMsg:gmatch("%d+") do
+    for numStr in normalized:gmatch("%d+") do
         local idx = tonumber(numStr)
         if idx and gemList[idx] and not seen[idx] then
             seen[idx] = true
@@ -709,16 +797,73 @@ local function isThankYou(msg)
     return false
 end
 
+-- Sender name from the event capture: strips timestamps / channel prefixes /
+-- server tags. Returns nil for NPC or multi-word senders ("Guard Hamon",
+-- "a rat") so they are never truncated to their first word and messaged.
+local function cleanSenderName(sender)
+    local raw = tostring(sender or ''):gsub("%b[]", ""):gsub("%b()", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if raw == '' then raw = tostring(sender or ''):gsub("^%s+", ""):gsub("%s+$", "") end
+    if raw == '' then return nil end
+    if raw:find("%s") then return nil, raw end
+    local clean = raw:match("([%a%d]+)")
+    if not clean or clean == '' then return nil, raw end
+    return clean
+end
+
+-- Guild Priority: when a guild member queues while a non-guild job is being
+-- cast, interrupt that cast once and tell the paused requester.
+local function preemptForGuild(cleanSender, isGuildMember)
+    if cfg.guildMode ~= 'Guild Priority' or not isGuildMember then return end
+    if not rt.currentJob or rt.currentJob.isGuild or rt.preemptRequested then return end
+    rt.preemptRequested = true
+    pcall(function()
+        mq.cmd('/stopcast')
+        mq.cmd('/interrupt')
+    end)
+    local pauseMsg = (cfg.guildPriorityPauseMsg and cfg.guildPriorityPauseMsg ~= '')
+        and cfg.guildPriorityPauseMsg
+        or "Pausing your buffs momentarily for a guild member priority request. Will resume shortly!"
+    queueTell(rt.currentJob.sender, pauseMsg)
+    logMsg(string.format("Preempting active buffs on non-guild player '%s' for guild member '%s'.", rt.currentJob.sender, cleanSender), true, false)
+    print(string.format('\ay[Triune Buffbot]\ax Preempting non-guild player \aw%s\ax for guild member \ag%s\ax...', rt.currentJob.sender, cleanSender))
+end
+
+-- The "Queued ... you are #N in line" reply ladder shared by the player /
+-- pet / both request paths. `what` describes the queued work in the
+-- requester's terms ("3 buff(s)", "buffs for you AND your pet (Fluffy)");
+-- `castNow` is the "#1 in line, casting" wording (guild-priority variant in
+-- castNowGuild). Behaviour matches the three copies it replaces.
+local function tellQueued(cleanSender, what, totalAhead, pctMana, isGuildMember, castNow, castNowGuild)
+    local lineNum = totalAhead + 1
+    if totalAhead > 0 then
+        if pctMana < cfg.minManaPct then
+            queueTell(cleanSender, string.format('Queued %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', what, lineNum, totalAhead, pctMana, cfg.minManaPct))
+        else
+            queueTell(cleanSender, string.format('Queued %s! You are #%d in line (%d ahead). Please stand by!', what, lineNum, totalAhead))
+        end
+    else
+        if pctMana < cfg.minManaPct then
+            queueTell(cleanSender, string.format('Queued %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', what, pctMana, cfg.minManaPct))
+        elseif isGuildMember and cfg.guildMode == 'Guild Priority' then
+            queueTell(cleanSender, castNowGuild)
+        else
+            queueTell(cleanSender, castNow)
+        end
+    end
+end
+
 local function onTellReceived(line, sender, msg)
     if not cfg.enabled then return end
     if not sender or sender == '' or not msg then return end
 
     -- Strip timestamps, channel prefixes, or server names from sender
-    local cleanSender = tostring(sender):gsub("%b[]", ""):gsub("%b()", ""):match("([%a%d]+)")
+    local cleanSender, rawSender = cleanSenderName(sender)
     if not cleanSender or cleanSender == '' then
-        cleanSender = tostring(sender):match("([%a%d]+)")
+        if rawSender and rawSender ~= '' then
+            logMsg(string.format("Ignored tell from NPC / multi-word sender '%s'.", rawSender))
+        end
+        return
     end
-    if not cleanSender or cleanSender == '' then return end
 
     -- Ignore outbound / echo tells and ignore tells from self
     if cleanSender:lower() == 'you' then return end
@@ -781,7 +926,17 @@ local function onTellReceived(line, sender, msg)
     local spawn = nil
     pcall(function() spawn = mq.TLO.Spawn(string.format('pc =%s', cleanSender)) end)
     if not spawn or not spawn() or (spawn.ID() or 0) <= 0 then
-        pcall(function() spawn = mq.TLO.Spawn(string.format('pc %s', cleanSender)) end)
+        -- Fallback is a substring search; only accept an exact CleanName match
+        -- so "Bob" can never resolve to "Bobbette".
+        local fb = nil
+        pcall(function() fb = mq.TLO.Spawn(string.format('pc %s', cleanSender)) end)
+        local fbName = nil
+        pcall(function() fbName = fb and fb() and fb.CleanName() or nil end)
+        if type(fbName) == 'string' and fbName:lower() == cleanSender:lower() then
+            spawn = fb
+        else
+            spawn = nil
+        end
     end
 
     local myLocStr = "0, 0, 0"
@@ -902,22 +1057,7 @@ local function onTellReceived(line, sender, msg)
                 })
             end
 
-            -- Check Guild Priority Preemption: if a non-guild player is currently being buffed
-            if cfg.guildMode == 'Guild Priority' and isGuildMember then
-                if rt.currentJob and not rt.currentJob.isGuild and not rt.preemptRequested then
-                    rt.preemptRequested = true
-                    pcall(function()
-                        mq.cmd('/stopcast')
-                        mq.cmd('/interrupt')
-                    end)
-                    local pauseMsg = (cfg.guildPriorityPauseMsg and cfg.guildPriorityPauseMsg ~= '')
-                        and cfg.guildPriorityPauseMsg
-                        or "Pausing your buffs momentarily for a guild member priority request. Will resume shortly!"
-                    queueTell(rt.currentJob.sender, pauseMsg)
-                    logMsg(string.format("Preempting active buffs on non-guild player '%s' for guild member '%s'.", rt.currentJob.sender, cleanSender), true, false)
-                    print(string.format('\ay[Triune Buffbot]\ax Preempting non-guild player \aw%s\ax for guild member \ag%s\ax...', rt.currentJob.sender, cleanSender))
-                end
-            end
+            preemptForGuild(cleanSender, isGuildMember)
 
             local totalAhead = getQueuePosition(cleanSender)
             local lineNum = totalAhead + 1
@@ -930,21 +1070,9 @@ local function onTellReceived(line, sender, msg)
             logMsg(string.format("Requester '%s' queued %d buff(s) for %s (%s, Line #%d): %s", cleanSender, #requestedGems, petDesc, isGuildMember and "Guild" or "Public", lineNum, spellsText))
             print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (%s, %s) (Line #%d): %s', #requestedGems, cleanSender, petDesc, isGuildMember and "Guild" or "Public", lineNum, spellsText))
 
-            if totalAhead > 0 then
-                if pctMana < cfg.minManaPct then
-                    queueTell(cleanSender, string.format('Queued %d buff(s) for %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', #requestedGems, petDesc, lineNum, totalAhead, pctMana, cfg.minManaPct))
-                else
-                    queueTell(cleanSender, string.format('Queued %d buff(s) for %s! You are #%d in line (%d ahead). Please stand by!', #requestedGems, petDesc, lineNum, totalAhead))
-                end
-            else
-                if pctMana < cfg.minManaPct then
-                    queueTell(cleanSender, string.format('Queued %d buff(s) for %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', #requestedGems, petDesc, pctMana, cfg.minManaPct))
-                elseif isGuildMember and cfg.guildMode == 'Guild Priority' then
-                    queueTell(cleanSender, string.format('Stand by, prioritizing your guild request! Preparing to cast %d buff(s) on %s! (You are #1 in line)', #requestedGems, petDesc))
-                else
-                    queueTell(cleanSender, string.format('Stand by, preparing to cast %d buff(s) on %s! (You are #1 in line)', #requestedGems, petDesc))
-                end
-            end
+            tellQueued(cleanSender, string.format('%d buff(s) for %s', #requestedGems, petDesc), totalAhead, pctMana, isGuildMember,
+                string.format('Stand by, preparing to cast %d buff(s) on %s! (You are #1 in line)', #requestedGems, petDesc),
+                string.format('Stand by, prioritizing your guild request! Preparing to cast %d buff(s) on %s! (You are #1 in line)', #requestedGems, petDesc))
 
         elseif mode == 'both' then
             -- Validate level restrictions for player character (<= 46 check), while allowing all requested buffs for pet
@@ -1011,22 +1139,7 @@ local function onTellReceived(line, sender, msg)
                 return
             end
 
-            -- Check Guild Priority Preemption: if a non-guild player is currently being buffed
-            if cfg.guildMode == 'Guild Priority' and isGuildMember then
-                if rt.currentJob and not rt.currentJob.isGuild and not rt.preemptRequested then
-                    rt.preemptRequested = true
-                    pcall(function()
-                        mq.cmd('/stopcast')
-                        mq.cmd('/interrupt')
-                    end)
-                    local pauseMsg = (cfg.guildPriorityPauseMsg and cfg.guildPriorityPauseMsg ~= '')
-                        and cfg.guildPriorityPauseMsg
-                        or "Pausing your buffs momentarily for a guild member priority request. Will resume shortly!"
-                    queueTell(rt.currentJob.sender, pauseMsg)
-                    logMsg(string.format("Preempting active buffs on non-guild player '%s' for guild member '%s'.", rt.currentJob.sender, cleanSender), true, false)
-                    print(string.format('\ay[Triune Buffbot]\ax Preempting non-guild player \aw%s\ax for guild member \ag%s\ax...', rt.currentJob.sender, cleanSender))
-                end
-            end
+            preemptForGuild(cleanSender, isGuildMember)
 
             local totalAhead = getQueuePosition(cleanSender)
             local lineNum = totalAhead + 1
@@ -1049,21 +1162,9 @@ local function onTellReceived(line, sender, msg)
                     print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for %s (%s, %s, Line #%d): %s', #requestedGems, cleanSender, petDesc, isGuildMember and "Guild" or "Public", lineNum, spellsText))
                 end
 
-                if totalAhead > 0 then
-                    if pctMana < cfg.minManaPct then
-                        queueTell(cleanSender, string.format('Queued buffs for you AND your %s! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.', petDesc, lineNum, totalAhead, pctMana, cfg.minManaPct))
-                    else
-                        queueTell(cleanSender, string.format('Queued buffs for you AND your %s! You are #%d in line (%d ahead). Please stand by!', petDesc, lineNum, totalAhead))
-                    end
-                else
-                    if pctMana < cfg.minManaPct then
-                        queueTell(cleanSender, string.format('Queued buffs for you AND your %s! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.', petDesc, pctMana, cfg.minManaPct))
-                    elseif isGuildMember and cfg.guildMode == 'Guild Priority' then
-                        queueTell(cleanSender, string.format('Stand by, prioritizing your guild request! Preparing to cast buffs on you and your %s! (You are #1 in line)', petDesc))
-                    else
-                        queueTell(cleanSender, string.format('Stand by, preparing to cast buffs on you and your %s! (You are #1 in line)', petDesc))
-                    end
-                end
+                tellQueued(cleanSender, string.format('buffs for you AND your %s', petDesc), totalAhead, pctMana, isGuildMember,
+                    string.format('Stand by, preparing to cast buffs on you and your %s! (You are #1 in line)', petDesc),
+                    string.format('Stand by, prioritizing your guild request! Preparing to cast buffs on you and your %s! (You are #1 in line)', petDesc))
             else
                 logMsg(string.format("Requester '%s' requested both, but no pet found in range. Queued player buffs only (%s, Line #%d): %s", cleanSender, isGuildMember and "Guild" or "Public", lineNum, spellsText), true, false)
                 print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (No pet in range, %s, Line #%d): %s', #playerGems, cleanSender, isGuildMember and "Guild" or "Public", lineNum, spellsText))
@@ -1120,22 +1221,7 @@ local function onTellReceived(line, sender, msg)
                 isResumed  = false,
             })
 
-            -- Check Guild Priority Preemption: if a non-guild player is currently being buffed
-            if cfg.guildMode == 'Guild Priority' and isGuildMember then
-                if rt.currentJob and not rt.currentJob.isGuild and not rt.preemptRequested then
-                    rt.preemptRequested = true
-                    pcall(function()
-                        mq.cmd('/stopcast')
-                        mq.cmd('/interrupt')
-                    end)
-                    local pauseMsg = (cfg.guildPriorityPauseMsg and cfg.guildPriorityPauseMsg ~= '')
-                        and cfg.guildPriorityPauseMsg
-                        or "Pausing your buffs momentarily for a guild member priority request. Will resume shortly!"
-                    queueTell(rt.currentJob.sender, pauseMsg)
-                    logMsg(string.format("Preempting active buffs on non-guild player '%s' for guild member '%s'.", rt.currentJob.sender, cleanSender), true, false)
-                    print(string.format('\ay[Triune Buffbot]\ax Preempting non-guild player \aw%s\ax for guild member \ag%s\ax...', rt.currentJob.sender, cleanSender))
-                end
-            end
+            preemptForGuild(cleanSender, isGuildMember)
 
             local totalAhead = getQueuePosition(cleanSender)
             local lineNum = totalAhead + 1
@@ -1143,42 +1229,24 @@ local function onTellReceived(line, sender, msg)
             logMsg(string.format("Requester '%s' (Lvl %d) selected %d buff(s) (%s, Line #%d): %s", cleanSender, requesterLevel, #requestedGems, isGuildMember and "Guild" or "Public", lineNum, spellsText))
             print(string.format('\ag[Triune Buffbot]\ax Queued %d buff(s) for \aw%s\ax (Lvl %d, %s, Line #%d): %s', #requestedGems, cleanSender, requesterLevel, isGuildMember and "Guild" or "Public", lineNum, spellsText))
 
-            if totalAhead > 0 then
-                if pctMana < cfg.minManaPct then
-                    queueTell(cleanSender,
-                        string.format(
-                            'Queued %d buff(s)! You are #%d in line (%d ahead). Mana is low (%d%% < %d%%) - meditating before buffing.',
-                            #requestedGems, lineNum, totalAhead, pctMana, cfg.minManaPct))
-                else
-                    queueTell(cleanSender,
-                        string.format('Queued %d buff(s)! You are #%d in line (%d ahead). Please stand by!',
-                            #requestedGems, lineNum, totalAhead))
-                end
+            local castNow, castNowGuild
+            if #requestedGems == 1 then
+                castNow = string.format('Stand by, casting %s! (You are #1 in line)', requestedGems[1].name)
+                castNowGuild = string.format('Stand by, prioritizing your guild request! Casting %s! (You are #1 in line)', requestedGems[1].name)
             else
-                if pctMana < cfg.minManaPct then
-                    queueTell(cleanSender,
-                        string.format(
-                            'Queued %d buff(s)! You are #1 in line. Mana is low (%d%% < %d%%) - meditating for a moment before buffing.',
-                            #requestedGems, pctMana, cfg.minManaPct))
-                elseif isGuildMember and cfg.guildMode == 'Guild Priority' then
-                    if #requestedGems == 1 then
-                        queueTell(cleanSender,
-                            string.format('Stand by, prioritizing your guild request! Casting %s! (You are #1 in line)', requestedGems[1].name))
-                    else
-                        queueTell(cleanSender,
-                            string.format('Stand by, prioritizing your guild request! Preparing to cast %d selected buffs! (You are #1 in line)', #requestedGems))
-                    end
-                elseif #requestedGems == 1 then
-                    queueTell(cleanSender,
-                        string.format('Stand by, casting %s! (You are #1 in line)', requestedGems[1].name))
-                else
-                    queueTell(cleanSender,
-                        string.format('Stand by, preparing to cast %d selected buffs! (You are #1 in line)', #requestedGems))
-                end
+                castNow = string.format('Stand by, preparing to cast %d selected buffs! (You are #1 in line)', #requestedGems)
+                castNowGuild = string.format('Stand by, prioritizing your guild request! Preparing to cast %d selected buffs! (You are #1 in line)', #requestedGems)
             end
+            tellQueued(cleanSender, string.format('%d buff(s)', #requestedGems), totalAhead, pctMana, isGuildMember, castNow, castNowGuild)
         end
     else
-        -- If requester sent a tell that wasn't a choice, send the numbered menu with level annotations
+        -- Not a selection. Send the numbered menu only when the requester has
+        -- no live offer yet (or it is older than MENU_RESEND_SEC); chit-chat
+        -- after the menu was sent does not re-send it.
+        if pending and pending.timestamp and (now - pending.timestamp) < MENU_RESEND_SEC then
+            logMsg(string.format("Tell from '%s' was not a selection; menu already sent %ds ago, not re-sending.", cleanSender, now - pending.timestamp))
+            return
+        end
         local requesterLevel = 1
         pcall(function() requesterLevel = spawn.Level() or 1 end)
         rt.pendingOffers[cleanSender] = { timestamp = now, spawnID = spawn.ID(), gems = currentGems, level = requesterLevel }
@@ -1197,10 +1265,8 @@ local function onHailReceived(line, sender, targetName)
     if not cfg.enabled then return end
     if not sender or sender == '' then return end
 
-    local cleanSender = tostring(sender):gsub("%b[]", ""):gsub("%b()", ""):match("([%a%d]+)")
-    if not cleanSender or cleanSender == '' then
-        cleanSender = tostring(sender):match("([%a%d]+)")
-    end
+    -- NPC / multi-word hailers ("Guard Hamon says, 'Hail, Bob'") are ignored.
+    local cleanSender = cleanSenderName(sender)
     if not cleanSender or cleanSender == '' then return end
     if cleanSender:lower() == 'you' then return end
 
@@ -1271,18 +1337,24 @@ local function unregisterEvents()
     registeredEvents = {}
 end
 
+-- One hail handler: `rest` is whatever followed "Hail" inside the quotes
+-- (", Bob", ", Bob!", "!", "." or nothing); the target name is the first
+-- word of it, if any. EQ says-lines are single-quoted, so only those forms
+-- are registered ('Hail, #2#' already covers the "!" / "." variants through
+-- the #2# capture, which used to fire the handler two or three times per line).
+local function onHailLine(line, sender, rest)
+    local target = nil
+    if rest and rest ~= '' then
+        target = tostring(rest):match("([%a%d]+)")
+    end
+    onHailReceived(line, sender, target)
+end
+
 local function registerEvents()
     regEvent('BuffbotTell', '#*##1# tells you, #2#', onTellReceived)
-    regEvent('BuffbotHail1', '#*##1# says, \'Hail, #2#\'', onHailReceived)
-    regEvent('BuffbotHail2', '#*##1# says, "#2#"', onHailReceived)
-    regEvent('BuffbotHail3', '#*##1# says, \'Hail, #2#!\'', onHailReceived)
-    regEvent('BuffbotHail4', '#*##1# says, "#2#!"', onHailReceived)
-    regEvent('BuffbotHail5', '#*##1# says, \'Hail, #2#.\'', onHailReceived)
-    regEvent('BuffbotHail6', '#*##1# says, "#2#."', onHailReceived)
-    regEvent('BuffbotHailPlain1', '#*##1# says, \'Hail\'', function(line, sender) onHailReceived(line, sender, nil) end)
-    regEvent('BuffbotHailPlain2', '#*##1# says, \'Hail!\'', function(line, sender) onHailReceived(line, sender, nil) end)
-    regEvent('BuffbotHailPlain3', '#*##1# says, "Hail"', function(line, sender) onHailReceived(line, sender, nil) end)
-    regEvent('BuffbotHailPlain4', '#*##1# says, "Hail!"', function(line, sender) onHailReceived(line, sender, nil) end)
+    regEvent('BuffbotHail', '#*##1# says, \'Hail, #2#\'', onHailLine)
+    regEvent('BuffbotHailPlain', '#*##1# says, \'Hail\'', function(line, sender) onHailLine(line, sender, nil) end)
+    regEvent('BuffbotHailPlainBang', '#*##1# says, \'Hail!\'', function(line, sender) onHailLine(line, sender, nil) end)
 end
 
 -- ============================================================================
@@ -1450,6 +1522,14 @@ local function processBuffQueue()
         return
     end
 
+    -- Station stopped during mana wait: drop the job without targeting or telling.
+    if not cfg.enabled then
+        rt.currentJob = nil
+        rt.currentRequester = nil
+        rt.state = 'STOPPED'
+        return
+    end
+
     -- Initial target lock
     local targetValid = acquireTarget(targetID, targetName, isPet, ownerName)
     if not targetValid then
@@ -1485,10 +1565,20 @@ local function processBuffQueue()
         local currentGemSpell = nil
         pcall(function() currentGemSpell = mq.TLO.Me.Gem(gemNum).Name() end)
         if currentGemSpell ~= expectedName then
-            pcall(function() gemNum = mq.TLO.Me.Gem(expectedName)() end)
+            gemNum = nil
+            pcall(function() gemNum = tonumber(mq.TLO.Me.Gem(expectedName)()) end)
         end
 
         local castSuccess = false
+
+        if not gemNum or gemNum <= 0 then
+            -- The spell was un-memorized since the menu was offered: say so
+            -- instead of silently dropping it.
+            logMsg(string.format("Skipping [%s] on %s: no longer memorized.", expectedName, targetLabel), true, false)
+            queueTell(ownerName, string.format("[%s] skipped: no longer memorized on my spell bar.", expectedName))
+            gemNum = 0
+            castSuccess = true -- handled (explicitly skipped)
+        end
 
         if gemNum and gemNum > 0 then
             -- Pre-cast landing check for player targets
@@ -1548,7 +1638,34 @@ local function processBuffQueue()
 
             if rt.preemptRequested then break end
 
+            -- Pre-cast range check: skip (and tell the requester) if the target is
+            -- farther than the spell's range so a refused /cast is never counted as cast.
+            local outOfRange = false
             if isSpellReady(gemNum, expectedName) then
+                local spellRange, tDist = 0, 0
+                pcall(function()
+                    local sp = mq.TLO.Spell(expectedName)
+                    if sp and sp() then
+                        spellRange = sp.Range() or 0
+                        if spellRange <= 0 then spellRange = sp.AERange() or 0 end
+                    end
+                    tDist = mq.TLO.Target.Distance() or 0
+                end)
+                local curTid = 0
+                pcall(function() curTid = mq.TLO.Target.ID() or 0 end)
+                local myId = 0
+                pcall(function() myId = mq.TLO.Me.ID() or 0 end)
+                if spellRange > 0 and curTid ~= myId and tDist > spellRange then
+                    outOfRange = true
+                    logMsg(string.format("Skipping [%s] on %s: target is %.0f away (spell range %.0f).", expectedName, targetLabel, tDist, spellRange), true, false)
+                    queueTell(ownerName, string.format("[%s] skipped: %s too far away (%.0f > %.0f range). Please come closer.", expectedName, isPet and "your pet is" or "you are", tDist, spellRange))
+                end
+            end
+
+            if outOfRange then
+                -- Not cast; leave castSuccess false (no retry).
+                castSuccess = false
+            elseif isSpellReady(gemNum, expectedName) then
                 -- Cast the spell on the target
                 logMsg(string.format("Casting [%s] on %s (Gem %d)", expectedName, targetLabel, gemNum))
                 pcall(function() mq.cmdf('/cast %d', gemNum) end)
@@ -1595,7 +1712,10 @@ local function processBuffQueue()
                         castSuccess = true
                     end
                 elseif not castStarted and not rt.preemptRequested then
-                    castSuccess = true
+                    -- /cast was refused (out of range, stunned, no mana, ...): the spell
+                    -- never started, so do not count it as cast. No retry.
+                    castSuccess = false
+                    logMsg(string.format("Cast of [%s] on %s never started (refused by client). Not counted as cast.", expectedName, targetLabel), true, false)
                 end
 
                 if rt.preemptRequested then break end
@@ -1618,9 +1738,10 @@ local function processBuffQueue()
         end
 
         if castSuccess then
-            -- Remove this spell from remainingGems
+            -- Remove this spell from remainingGems (same entry object; the gem
+            -- number may have been re-resolved or zeroed for a skip above).
             for idx, remSp in ipairs(request.remainingGems) do
-                if remSp.name == expectedName and remSp.gem == gemNum then
+                if remSp == spellInfo then
                     table.remove(request.remainingGems, idx)
                     break
                 end
@@ -1642,6 +1763,14 @@ local function processBuffQueue()
         return
     end
 
+    -- Station stopped mid-sequence: do not send the completion tell or change state.
+    if not cfg.enabled then
+        rt.currentJob = nil
+        rt.currentRequester = nil
+        rt.state = 'STOPPED'
+        return
+    end
+
     -- Sequence finished normally!
     rt.currentJob = nil
 
@@ -1655,7 +1784,11 @@ local function processBuffQueue()
     end
 
     if not hasMoreJobsForSender then
-        if isPet then
+        local uncast = #(request.remainingGems or {})
+        if uncast > 0 then
+            logMsg(string.format("Finished sequence for '%s' with %d spell(s) not cast.", ownerName, uncast), true, false)
+            queueTell(ownerName, string.format("Finished, but %d buff(s) could not be cast (see earlier tells). Send another tell to retry.", uncast))
+        elseif isPet then
             logMsg(string.format("Completed all buffs for '%s' (last pet '%s'). Sending completion tell.", ownerName, petName))
             queueTell(ownerName, string.format("All buffs cast on your pet (%s)! Enjoy!", petName))
         else
@@ -1741,8 +1874,8 @@ local function drawControlTab()
     end
     ImGui.Spacing()
 
-    -- Status Indicator
-    local myGuild = getMyGuild()
+    -- Status Indicator (guild name cached; see GUILD_UI_TTL_SEC)
+    local myGuild = getMyGuildCached()
     local guildStatusTag = ""
     if cfg.guildMode == 'Guild Only' then
         if myGuild and myGuild ~= '' then
@@ -1774,7 +1907,7 @@ local function drawControlTab()
     ImGui.Separator()
     ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "Active Memorized Buff Spells (Tell Menu)")
 
-    local gems = getAvailableGems()
+    local gems = getAvailableGemsCached()
     if #gems == 0 then
         ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "No spells currently memorized on your spell bar!")
     else
@@ -1862,53 +1995,45 @@ local function drawControlTab()
 
     ImGui.Spacing()
     local rangeVal, rangeChanged = ImGui.SliderInt("Max Requester Range", cfg.maxRange, 20, 300)
-    if rangeChanged then
-        cfg.maxRange = rangeVal; saveConfig(true)
-    end
+    if rangeChanged then cfg.maxRange = rangeVal end
+    if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
     local timeoutVal, timeoutChanged = ImGui.SliderInt("Offer Expiration (sec)", cfg.timeoutSec, 10, 120)
-    if timeoutChanged then
-        cfg.timeoutSec = timeoutVal; saveConfig(true)
-    end
+    if timeoutChanged then cfg.timeoutSec = timeoutVal end
+    if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
     local manaVal, manaChanged = ImGui.SliderInt("Min Mana % Threshold", cfg.minManaPct, 5, 50)
-    if manaChanged then
-        cfg.minManaPct = manaVal; saveConfig(true)
-    end
+    if manaChanged then cfg.minManaPct = manaVal end
+    if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
     local delayVal, delayChanged = ImGui.SliderInt("Tell Dispatch Delay (ms)", cfg.tellDelayMs or 2500, 1000, 5000)
-    if delayChanged then
-        cfg.tellDelayMs = delayVal; saveConfig(true)
-    end
+    if delayChanged then cfg.tellDelayMs = delayVal end
+    if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
     ImGui.Spacing()
     ImGui.Text("Completion Tell (Sent after all selected buffs cast):")
     local newComp, compChanged = ImGui.InputText("##completionMsg", cfg.completionMsg or "All buffs cast! Enjoy!", 256)
-    if compChanged then
-        cfg.completionMsg = newComp; saveConfig(true)
-    end
+    if compChanged then cfg.completionMsg = newComp end
+    if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
     if cfg.guildMode == 'Guild Only' then
         ImGui.Spacing()
         ImGui.Text("Guild Restriction Tell (Sent when non-guild member requests buffs):")
         local newGuildMsg, guildMsgChanged = ImGui.InputText("##guildOnlyMsg", cfg.guildOnlyMsg or "Buffing is currently restricted to guild members only.", 256)
-        if guildMsgChanged then
-            cfg.guildOnlyMsg = newGuildMsg; saveConfig(true)
-        end
+        if guildMsgChanged then cfg.guildOnlyMsg = newGuildMsg end
+        if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
     elseif cfg.guildMode == 'Guild Priority' then
         ImGui.Spacing()
         ImGui.Text("Guild Priority Pause Tell (Sent to non-guild player when paused for guild member):")
         local newPauseMsg, pauseMsgChanged = ImGui.InputText("##guildPriorityPauseMsg", cfg.guildPriorityPauseMsg or "Pausing your buffs momentarily for a guild member priority request. Will resume shortly!", 256)
-        if pauseMsgChanged then
-            cfg.guildPriorityPauseMsg = newPauseMsg; saveConfig(true)
-        end
+        if pauseMsgChanged then cfg.guildPriorityPauseMsg = newPauseMsg end
+        if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
         ImGui.Spacing()
         ImGui.Text("Guild Priority Resume Tell (Sent when resuming paused non-guild player):")
         local newResumeMsg, resumeMsgChanged = ImGui.InputText("##guildPriorityResumeMsg", cfg.guildPriorityResumeMsg or "Resuming your remaining buffs now! Thank you for waiting.", 256)
-        if resumeMsgChanged then
-            cfg.guildPriorityResumeMsg = newResumeMsg; saveConfig(true)
-        end
+        if resumeMsgChanged then cfg.guildPriorityResumeMsg = newResumeMsg end
+        if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
     end
 
     ImGui.Spacing()
@@ -1987,10 +2112,8 @@ local function drawIgnoreTab()
 
     ImGui.Text("Ban Notification Tell Message:")
     local newBanMsg, banMsgChanged = ImGui.InputText("##banMsg", cfg.banMsg or "You are banned from getting buffs.", 256)
-    if banMsgChanged then
-        cfg.banMsg = newBanMsg
-        saveConfig(true)
-    end
+    if banMsgChanged then cfg.banMsg = newBanMsg end
+    if ImGui.IsItemDeactivatedAfterEdit() then saveConfig(true) end
 
     ImGui.Spacing()
     ImGui.Separator()
@@ -2088,7 +2211,7 @@ local function renderGUI()
 
     core.pushTheme()
     core.preBeginWindow('buffbot')
-    local visible, open = ImGui.Begin(string.format("Triune Buffbot v%s###TriuneBuffbotWin", VERSION), ctrl.show_buffbot)
+    local open, visible = ImGui.Begin(string.format("Triune Buffbot v%s###TriuneBuffbotWin", VERSION), ctrl.show_buffbot)
     if not open then
         ctrl.show_buffbot = false
         ImGui.End()
@@ -2153,8 +2276,13 @@ local function tick()
             end
         end
 
+        -- Idle upkeep (auto-med / anti-AFK) polls 5-6 TLOs; run it at 1 Hz,
+        -- not every 50 ms tick. Tells and the buff queue stay on the fast tick.
+        local doUpkeep = (now - (rt.lastUpkeepTime or 0)) >= UPKEEP_INTERVAL_SEC
+        if doUpkeep then rt.lastUpkeepTime = now end
+
         -- Auto-meditate idle upkeep (throttled to avoid rapid /sit packet spam)
-        if cfg.enabled and cfg.autoMed and #rt.activeQueue == 0 and rt.state ~= 'CASTING' and rt.state ~= 'STOPPED' then
+        if doUpkeep and cfg.enabled and cfg.autoMed and #rt.activeQueue == 0 and rt.state ~= 'CASTING' and rt.state ~= 'STOPPED' then
             local pctMana = getMyPctMana()
             if pctMana < 100 then
                 local isSitting = false
@@ -2172,7 +2300,7 @@ local function tick()
         end
 
         -- Anti-AFK upkeep: simulates hardware keypress to reset EQ native idle timer without disturbing sit state
-        if cfg.enabled and cfg.antiAfk and #rt.activeQueue == 0 and rt.state ~= 'CASTING' and rt.state ~= 'STOPPED' then
+        if doUpkeep and cfg.enabled and cfg.antiAfk and #rt.activeQueue == 0 and rt.state ~= 'CASTING' and rt.state ~= 'STOPPED' then
             local isAfk = false
             pcall(function() isAfk = mq.TLO.Me.AFK() or false end)
             if isAfk then

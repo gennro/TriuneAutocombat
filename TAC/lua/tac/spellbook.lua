@@ -40,6 +40,7 @@ local NON_CASTER = { WAR = true, MNK = true, ROG = true, BER = true }
 -- Global State & Data Store
 local state = {
     myClasses = {},                      -- mirrored from core.myClasses each frame
+    classSig = nil,                      -- myClasses joined; casterClasses is rebuilt only when this changes
     casterClasses = {},                  -- myClasses minus pure melee (the classes that actually get tabs)
     activeClassTab = 1,                  -- Selected index into casterClasses
     lvlMin = 1,
@@ -71,13 +72,20 @@ local function refresh()
         state.myClasses = mine
     end
     -- Only classes with a spellbook get a tab; melee-only classes are dropped.
-    local casters = {}
-    for _, cls in ipairs(state.myClasses) do
-        if not NON_CASTER[tostring(cls):upper()] then
-            table.insert(casters, cls)
+    -- Rebuilt only when the class list actually changes (this runs every
+    -- tick and every frame).
+    local sig = table.concat(state.myClasses, '/')
+    if sig ~= state.classSig then
+        state.classSig = sig
+        local casters = {}
+        for _, cls in ipairs(state.myClasses) do
+            if not NON_CASTER[tostring(cls):upper()] then
+                table.insert(casters, cls)
+            end
         end
+        state.casterClasses = casters
     end
-    state.casterClasses = casters
+    local casters = state.casterClasses
     if state.activeClassTab > #casters then
         state.activeClassTab = math.max(1, #casters)
         state.selectedSpell = nil
@@ -129,39 +137,50 @@ end
 -- Core Character Inspection Utilities
 -- ============================================================================
 
-local function checkHasSPA(tloSpell, name, sp, spaId)
-    local hasIt = false
+-- Probes one HasSPA source; returns true/false when the source answered with
+-- a boolean (or 0/1), nil when it errored or gave no usable answer.
+local function probeSPA(tloSpell, spaId)
+    if not tloSpell then return nil end
+    local answer = nil
     pcall(function()
-        if tloSpell then
-            local res = tloSpell.HasSPA(spaId)
-            if res == true or res == 1 then hasIt = true end
-            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
-                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
-                if ok and (r2 == true or r2 == 1) then hasIt = true end
-            end
+        local res = tloSpell.HasSPA(spaId)
+        if type(res) == 'function' or type(res) == 'userdata' then
+            local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
+            if ok then res = r2 end
+        end
+        if res == true or res == 1 then
+            answer = true
+        elseif res == false or res == 0 then
+            answer = false
         end
     end)
-    if not hasIt and sp and sp.ID and sp.ID() > 0 then
-        pcall(function()
-            local res = mq.TLO.Spell(sp.ID()).HasSPA(spaId)
-            if res == true or res == 1 then hasIt = true end
-            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
-                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
-                if ok and (r2 == true or r2 == 1) then hasIt = true end
+    return answer
+end
+
+-- A successful boolean from any source is final: a legitimate `false` is not
+-- retried against the ID / name lookups (that tripled the TLO cost of every
+-- negative probe).
+local function checkHasSPA(tloSpell, name, sp, spaId)
+    local answer = probeSPA(tloSpell, spaId)
+    if answer ~= nil then return answer end
+    if sp and sp.ID then
+        local okId, id = pcall(function() return sp.ID() end)
+        if okId and type(id) == 'number' and id > 0 then
+            local okS, tlo = pcall(function() return mq.TLO.Spell(id) end)
+            if okS then
+                answer = probeSPA(tlo, spaId)
+                if answer ~= nil then return answer end
             end
-        end)
+        end
     end
-    if not hasIt and name and name ~= "" then
-        pcall(function()
-            local res = mq.TLO.Spell(name).HasSPA(spaId)
-            if res == true or res == 1 then hasIt = true end
-            if not hasIt and (type(res) == 'function' or type(res) == 'userdata') then
-                local ok, r2 = pcall(res) ---@diagnostic disable-line: param-type-mismatch
-                if ok and (r2 == true or r2 == 1) then hasIt = true end
-            end
-        end)
+    if name and name ~= "" then
+        local okS, tlo = pcall(function() return mq.TLO.Spell(name) end)
+        if okS then
+            answer = probeSPA(tlo, spaId)
+            if answer ~= nil then return answer end
+        end
     end
-    return hasIt
+    return false
 end
 
 local function mapTLOCategoryToKind(sp, name)
@@ -213,14 +232,6 @@ local function mapTLOCategoryToKind(sp, name)
 
     local nmLower = name and name:lower() or ""
 
-    -- Check specific pet subcategories/categories, pet spell names, or pet buff spells (e.g. Burnout, Pet Haste, Pet Power)
-    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility')) 
-        or subcatStr:find('burnout') or nmLower:find('burnout')
-        or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant')
-        or subcatStr:find('companion') or catStr:find('companion') or subcatStr:find('minion') or catStr:find('minion') then
-        return 'pet'
-    end
-
     -- Extract Beneficial status early
     local bene = true
     pcall(function()
@@ -233,34 +244,8 @@ local function mapTLOCategoryToKind(sp, name)
         end
     end)
 
-    -- Check player buffs / damage shields / haste spells (Celerity, Alacrity, Haste, Swift, Shield of Lava, etc.)
-    if bene then
-        if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') 
-            or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield')
-            or subcatStr:find('haste') or catStr:find('haste')
-            or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste') or nmLower:find('swift') then
-            return 'buff'
-        end
-    end
-
-    -- Debuff Check for resist debuffs (Mala, Malo, Malosi, Tash, etc.)
-    if not bene then
-        if catStr:find('debuff') or subcatStr:find('debuff') or catStr:find('slow') or subcatStr:find('slow')
-            or catStr:find('dispel') or subcatStr:find('dispel') or catStr:find('blind') or subcatStr:find('blind')
-            or nmLower:find('mala') or nmLower:find('malo') or nmLower:find('tash') or nmLower:find('incapacitate') or nmLower:find('listless') or nmLower:find('disempower') then
-            return 'debuff'
-        end
-    end
-
-    -- Utility Check (Gate, Bind Affinity, Invisibility, Camouflage, Teleports, Illusions, Item Summons)
-    if nmLower:find('gate') or nmLower:find('bind affinity') or nmLower:find('invisib') or nmLower:find('camouflage') or nmLower:find('translocate')
-        or catStr:find('transport') or catStr:find('travel') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') or catStr:find('invis')
-        or subcatStr:find('transport') or subcatStr:find('travel') or subcatStr:find('teleport') or subcatStr:find('gate') or subcatStr:find('illusion') or subcatStr:find('invis')
-        or (catStr:find('utility') and not catStr:find('debuff')) or (subcatStr:find('utility') and not subcatStr:find('debuff')) then
-        return 'util'
-    end
-
-    -- 2. SPA-based checks (most authoritative for non-beneficial SPA mechanics)
+    -- 1. SPA-based checks first (authoritative); the category / name
+    --    heuristics below are only a fallback when no SPA matched.
     -- SPA 103: SE_SummonPet
     if checkHasSPA(tloSpell, name, sp, 103) then
         return 'pet'
@@ -292,6 +277,42 @@ local function mapTLOCategoryToKind(sp, name)
             or checkHasSPA(tloSpell, name, sp, 4) or checkHasSPA(tloSpell, name, sp, 5) or checkHasSPA(tloSpell, name, sp, 6) or checkHasSPA(tloSpell, name, sp, 7) then
             return 'debuff'
         end
+    end
+
+    -- 2. Heuristic fallbacks (category / subcategory / name keywords)
+    -- Check specific pet subcategories/categories, pet spell names, or pet buff spells (e.g. Burnout, Pet Haste, Pet Power)
+    if subcatStr:find('pet') or (catStr:find('pet') and not catStr:find('utility')) 
+        or subcatStr:find('burnout') or nmLower:find('burnout')
+        or nmLower:find('elemental') or nmLower:find('companion') or nmLower:find('minion') or nmLower:find('servant')
+        or subcatStr:find('companion') or catStr:find('companion') or subcatStr:find('minion') or catStr:find('minion') then
+        return 'pet'
+    end
+
+    -- Check player buffs / damage shields / haste spells (Celerity, Alacrity, Haste, Swift, Shield of Lava, etc.)
+    if bene then
+        if catStr:find('buff') or catStr:find('stat') or catStr:find('resist') or catStr:find('shield') 
+            or subcatStr:find('buff') or catStr:find('aura') or subcatStr:find('aura') or subcatStr:find('shield')
+            or subcatStr:find('haste') or catStr:find('haste')
+            or nmLower:find('shield') or nmLower:find('celerity') or nmLower:find('alacrity') or nmLower:find('haste') or nmLower:find('swift') then
+            return 'buff'
+        end
+    end
+
+    -- Debuff Check for resist debuffs (Mala, Malo, Malosi, Tash, etc.)
+    if not bene then
+        if catStr:find('debuff') or subcatStr:find('debuff') or catStr:find('slow') or subcatStr:find('slow')
+            or catStr:find('dispel') or subcatStr:find('dispel') or catStr:find('blind') or subcatStr:find('blind')
+            or nmLower:find('mala') or nmLower:find('malo') or nmLower:find('tash') or nmLower:find('incapacitate') or nmLower:find('listless') or nmLower:find('disempower') then
+            return 'debuff'
+        end
+    end
+
+    -- Utility Check (Gate, Bind Affinity, Invisibility, Camouflage, Teleports, Illusions, Item Summons)
+    if nmLower:find('gate') or nmLower:find('bind affinity') or nmLower:find('invisib') or nmLower:find('camouflage') or nmLower:find('translocate')
+        or catStr:find('transport') or catStr:find('travel') or catStr:find('teleport') or catStr:find('gate') or catStr:find('illusion') or catStr:find('invis')
+        or subcatStr:find('transport') or subcatStr:find('travel') or subcatStr:find('teleport') or subcatStr:find('gate') or subcatStr:find('illusion') or subcatStr:find('invis')
+        or (catStr:find('utility') and not catStr:find('debuff')) or (subcatStr:find('utility') and not subcatStr:find('debuff')) then
+        return 'util'
     end
 
     -- 3. Match non-beneficial attack / damage / buff categories
@@ -397,114 +418,224 @@ local function getSpellLevelForClassID(sp, name, cls)
     return lvl
 end
 
+-- ============================================================================
+-- Scribed-slot scan + per-class list build (run from onTick, read by the UI)
+-- ============================================================================
+-- The old code rescanned all 720 Me.Book(slot) entries and re-classified
+-- every spell (getSpellLevelForClassID + mapTLOCategoryToKind, up to ~20 SPA
+-- probes each) on the ImGui thread every 3 s. Now:
+--   * spellMeta memoizes classification (kind / beneficial) per spell name and
+--     the level per (class, name) for the session;
+--   * bookScan walks the 720 slots in BOOK_SLOTS_PER_TICK chunks from onTick
+--     and repeats a full pass every BOOK_RESCAN_SEC while the window is open;
+--   * listBuild classifies the scribed + database spells for the active class
+--     tab in BUILD_SPELLS_PER_TICK chunks, then publishes the sorted list;
+--   * getActiveClassSpells(cls) only returns the published list (and asks
+--     for a build when the class tab changed).
+local BOOK_SLOT_MAX = 720
+local BOOK_SLOTS_PER_TICK = 120
+local BOOK_RESCAN_SEC = 3
+local BUILD_SPELLS_PER_TICK = 40
+
+local spellMeta = {}    -- [name] = { kind = ..., bene = true/false/nil }
+local spellLevel = {}   -- [cls .. '|' .. name] = level (0 when the TLO had none)
+
+local bookScan = {
+    slots = {},         -- [slot] = spell name or false (from the last completed pass)
+    work = {},          -- [slot] = spell name or false (pass in progress)
+    cursor = 0,         -- next slot to read; 0 = no pass in progress
+    gen = 0,            -- bumped when a completed pass differs from the previous one
+    completedAt = nil,  -- os.clock() of the last completed pass (nil = never)
+    lastPassAt = 0,
+}
+
+local listBuild = {
+    cls = nil,          -- class the in-progress build is for
+    gen = nil,          -- bookScan.gen the build is based on
+    queue = nil,        -- work items { slot=, name= } (scribed) / { row= } (database)
+    cursor = 0,
+    out = nil,
+    scribedNorm = nil,
+    dbLookup = nil,
+    dbSpells = nil,
+}
+
 local activeSpellsCache = {}
-local lastActiveSpellsTime = 0
-local lastActiveSpellsClass = ""
+local activeSpellsClass = nil   -- class the published list belongs to
+local activeSpellsGen = nil     -- bookScan.gen the published list was built from
+local requestedClass = nil      -- class tab the UI wants (set by getActiveClassSpells)
 
-local function getActiveClassSpells(cls)
-    local now = os.time()
-    if lastActiveSpellsClass == cls and (now - lastActiveSpellsTime) < 3 and #activeSpellsCache > 0 then
-        return activeSpellsCache
+local function readBookSlotName(slot)
+    local sp = mq.TLO.Me.Book(slot)
+    local name = nil
+    pcall(function()
+        local res = sp()
+        if type(res) == "string" and res ~= "" and res ~= "NULL" then name = res end
+    end)
+    if not name then
+        pcall(function()
+            local rawName = sp.Name
+            local res = (type(rawName) == 'function' or type(rawName) == 'userdata') and rawName() or rawName
+            if type(res) == "string" and res ~= "" and res ~= "NULL" then name = res end
+        end)
     end
+    return name
+end
 
-    local outList = {}
-    local scribedNormMap = {}
+-- One chunk of the scribed-slot scan. Starts a new pass when none is in
+-- progress and the last one is older than BOOK_RESCAN_SEC.
+local function stepBookScan()
+    local now = os.clock()
+    if bookScan.cursor == 0 then
+        if bookScan.completedAt and (now - bookScan.lastPassAt) < BOOK_RESCAN_SEC then return end
+        bookScan.cursor = 1
+        bookScan.work = {}
+        bookScan.lastPassAt = now
+    end
+    local last = math.min(BOOK_SLOT_MAX, bookScan.cursor + BOOK_SLOTS_PER_TICK - 1)
+    for slot = bookScan.cursor, last do
+        local name = readBookSlotName(slot)
+        bookScan.work[slot] = name or false
+    end
+    bookScan.cursor = last + 1
+    if bookScan.cursor > BOOK_SLOT_MAX then
+        local changed = (bookScan.completedAt == nil)
+        if not changed then
+            for slot = 1, BOOK_SLOT_MAX do
+                if bookScan.slots[slot] ~= bookScan.work[slot] then changed = true break end
+            end
+        end
+        bookScan.slots = bookScan.work
+        bookScan.work = {}
+        bookScan.cursor = 0
+        bookScan.completedAt = now
+        if changed then bookScan.gen = bookScan.gen + 1 end
+    end
+end
 
+-- Memoized classification of one spell (kind + beneficial). `sp` is the
+-- Me.Book(slot) accessor for scribed spells (nil for database rows).
+local function classifySpell(sp, name, dbEntry)
+    local meta = spellMeta[name]
+    if not meta then
+        meta = { kind = nil, bene = nil }
+        local kind = mapTLOCategoryToKind(sp, name)
+        if kind and kind ~= 'other' then meta.kind = kind end
+        pcall(function()
+            local tloS = (sp and sp.ID and sp.ID() > 0) and mq.TLO.Spell(sp.ID()) or mq.TLO.Spell(name)
+            if tloS then
+                local b = tloS.Beneficial
+                if type(b) == 'function' or type(b) == 'userdata' then b = b() end
+                if type(b) == 'boolean' then meta.bene = b end
+            end
+        end)
+        spellMeta[name] = meta
+    end
+    local kind = meta.kind or (dbEntry and dbEntry.kind) or 'other'
+    local bene
+    if dbEntry then
+        bene = dbEntry.bene
+    elseif meta.bene ~= nil then
+        bene = meta.bene
+    else
+        bene = true
+    end
+    return kind, bene
+end
+
+local function memoSpellLevel(sp, name, cls)
+    local key = cls .. '|' .. name
+    local lvl = spellLevel[key]
+    if lvl == nil then
+        lvl = getSpellLevelForClassID(sp, name, cls)
+        spellLevel[key] = lvl
+    end
+    return lvl
+end
+
+local function startListBuild(cls)
     local dbSpells = getClassSpells(cls) or {}
     local dbLookup = {}
     for _, row in ipairs(dbSpells) do
         local dName, dLvl, dBene, dKind = row[1], row[2], row[3], row[4]
-        dbLookup[core.normalizeSpellName(dName)] = {
+        local entry = {
             level = tonumber(dLvl) or 1,
             bene = (dBene == 1 or dBene == true),
             kind = dKind or 'other'
         }
-        dbLookup[dName:lower()] = dbLookup[core.normalizeSpellName(dName)]
-        dbLookup[core.cleanSpellName(dName):lower()] = dbLookup[core.normalizeSpellName(dName)]
+        dbLookup[core.normalizeSpellName(dName)] = entry
+        dbLookup[dName:lower()] = entry
+        dbLookup[core.cleanSpellName(dName):lower()] = entry
     end
-
-    for slot = 1, 720 do
-        local sp = mq.TLO.Me.Book(slot)
-        local name = nil
-
-        pcall(function()
-            local res = sp()
-            if type(res) == "string" and res ~= "" and res ~= "NULL" then name = res end
-        end)
-        if not name then
-            pcall(function()
-                local rawName = sp.Name
-                local res = (type(rawName) == 'function' or type(rawName) == 'userdata') and rawName() or rawName
-                if type(res) == "string" and res ~= "" and res ~= "NULL" then name = res end
-            end)
-        end
-
-        if name and name ~= "" and name ~= "NULL" then
-            local lvl = getSpellLevelForClassID(sp, name, cls)
-
-            local dbEntry = nil
-            if lvl == 0 then
-                dbEntry = dbLookup[core.normalizeSpellName(name)]
-                    or dbLookup[name:lower()]
-                    or dbLookup[core.cleanSpellName(name):lower()]
-                if dbEntry then lvl = dbEntry.level end
-            end
-
-            if lvl > 0 then
-                local bene = true
-                if dbEntry then
-                    bene = dbEntry.bene
-                else
-                    pcall(function()
-                        local tloS = (sp and sp.ID and sp.ID() > 0) and mq.TLO.Spell(sp.ID()) or mq.TLO.Spell(name)
-                        if tloS then
-                            local b = tloS.Beneficial
-                            if type(b) == 'function' or type(b) == 'userdata' then b = b() end
-                            if type(b) == 'boolean' then bene = b end
-                        end
-                    end)
-                end
-
-                local kind = mapTLOCategoryToKind(sp, name)
-                if not kind or kind == 'other' then kind = (dbEntry and dbEntry.kind) or 'other' end
-
-                local normName = core.normalizeSpellName(name)
-                scribedNormMap[normName] = true
-                scribedNormMap[name:lower()] = true
-                scribedNormMap[core.cleanSpellName(name):lower()] = true
-
-                table.insert(outList, {
-                    name = name,
-                    level = lvl,
-                    bene = bene,
-                    kind = kind or 'other',
-                    scribed = true,
-                    slot = slot
-                })
-            end
-        end
+    local queue = {}
+    for slot = 1, BOOK_SLOT_MAX do
+        local name = bookScan.slots[slot]
+        if name then queue[#queue + 1] = { slot = slot, name = name } end
     end
-
     for _, row in ipairs(dbSpells) do
-        local dName, dLvl, dBene, dKind = row[1], row[2], row[3], row[4]
-        local dNorm = core.normalizeSpellName(dName)
-        local dLower = dName:lower()
-        local dCleanLower = core.cleanSpellName(dName):lower()
-
-        if not scribedNormMap[dNorm] and not scribedNormMap[dLower] and not scribedNormMap[dCleanLower] then
-            local dynamicKind = mapTLOCategoryToKind(nil, dName)
-            if dynamicKind == 'other' or not dynamicKind then dynamicKind = dKind or 'other' end
-            table.insert(outList, {
-                name = dName,
-                level = tonumber(dLvl) or 1,
-                bene = (dBene == 1 or dBene == true),
-                kind = dynamicKind,
-                scribed = false,
-                slot = nil
-            })
-        end
+        queue[#queue + 1] = { row = row }
     end
+    listBuild.cls = cls
+    listBuild.gen = bookScan.gen
+    listBuild.queue = queue
+    listBuild.cursor = 1
+    listBuild.out = {}
+    listBuild.scribedNorm = {}
+    listBuild.dbLookup = dbLookup
+    listBuild.dbSpells = dbSpells
+end
 
+local function buildScribedEntry(item)
+    local name, slot = item.name, item.slot
+    -- The Me.Book(slot) accessor is only needed on a memo miss.
+    local sp = nil
+    if spellLevel[listBuild.cls .. '|' .. name] == nil or spellMeta[name] == nil then
+        sp = mq.TLO.Me.Book(slot)
+    end
+    local lvl = memoSpellLevel(sp, name, listBuild.cls)
+    local dbEntry = nil
+    if lvl == 0 then
+        dbEntry = listBuild.dbLookup[core.normalizeSpellName(name)]
+            or listBuild.dbLookup[name:lower()]
+            or listBuild.dbLookup[core.cleanSpellName(name):lower()]
+        if dbEntry then lvl = dbEntry.level end
+    end
+    if lvl <= 0 then return end
+    local kind, bene = classifySpell(sp, name, dbEntry)
+    local scribedNorm = listBuild.scribedNorm
+    scribedNorm[core.normalizeSpellName(name)] = true
+    scribedNorm[name:lower()] = true
+    scribedNorm[core.cleanSpellName(name):lower()] = true
+    table.insert(listBuild.out, {
+        name = name,
+        level = lvl,
+        bene = bene,
+        kind = kind or 'other',
+        scribed = true,
+        slot = slot
+    })
+end
+
+local function buildDatabaseEntry(item)
+    local row = item.row
+    local dName, dLvl, dBene, dKind = row[1], row[2], row[3], row[4]
+    local scribedNorm = listBuild.scribedNorm
+    if scribedNorm[core.normalizeSpellName(dName)] or scribedNorm[dName:lower()] or scribedNorm[core.cleanSpellName(dName):lower()] then
+        return
+    end
+    local kind = classifySpell(nil, dName, { kind = dKind or 'other', bene = (dBene == 1 or dBene == true) })
+    table.insert(listBuild.out, {
+        name = dName,
+        level = tonumber(dLvl) or 1,
+        bene = (dBene == 1 or dBene == true),
+        kind = kind,
+        scribed = false,
+        slot = nil
+    })
+end
+
+local function publishList()
+    local outList = listBuild.out
     table.sort(outList, function(a, b)
         local lvlA = tonumber(a.level) or 1
         local lvlB = tonumber(b.level) or 1
@@ -513,11 +644,67 @@ local function getActiveClassSpells(cls)
         end
         return lvlA < lvlB
     end)
-
     activeSpellsCache = outList
-    lastActiveSpellsTime = now
-    lastActiveSpellsClass = cls
-    return outList
+    activeSpellsClass = listBuild.cls
+    activeSpellsGen = listBuild.gen
+    listBuild.queue = nil
+    listBuild.out = nil
+    listBuild.scribedNorm = nil
+    listBuild.dbLookup = nil
+    listBuild.dbSpells = nil
+    listBuild.cls = nil
+end
+
+-- One chunk of the list build for the class tab the UI asked for. A build
+-- (re)starts when the requested class changed or the scribed slots changed
+-- since the published list.
+local function stepListBuild()
+    local cls = requestedClass
+    if not cls or not bookScan.completedAt then return end
+    if listBuild.queue then
+        if listBuild.cls ~= cls then
+            startListBuild(cls)
+        end
+    elseif activeSpellsClass ~= cls or activeSpellsGen ~= bookScan.gen then
+        startListBuild(cls)
+    else
+        return
+    end
+    local q = listBuild.queue
+    local last = math.min(#q, listBuild.cursor + BUILD_SPELLS_PER_TICK - 1)
+    for i = listBuild.cursor, last do
+        local item = q[i]
+        if item.row then
+            buildDatabaseEntry(item)
+        else
+            buildScribedEntry(item)
+        end
+    end
+    listBuild.cursor = last + 1
+    if listBuild.cursor > #q then publishList() end
+end
+
+-- Runs from onTick while the window is open.
+local function stepSpellScan()
+    if not ctrl or not ctrl.show_spellbook then return end
+    stepBookScan()
+    stepListBuild()
+end
+
+-- Draw-side accessor: returns the published list for `cls` (empty until the
+-- first build for that class finishes) and records the class the UI wants
+-- so onTick builds it. Never touches TLOs.
+local function getActiveClassSpells(cls)
+    requestedClass = cls
+    if activeSpellsClass == cls then
+        return activeSpellsCache
+    end
+    return {}
+end
+
+-- True while the list for `cls` is (re)building and nothing is published yet.
+local function isListPending(cls)
+    return activeSpellsClass ~= cls
 end
 
 local function showSpellInfo(name)
@@ -716,6 +903,11 @@ local function drawWindow()
 
             local activeClass = state.casterClasses[state.activeClassTab]
             local classSpells = activeClass and getActiveClassSpells(activeClass) or {}
+            if activeClass and #classSpells == 0 and isListPending(activeClass) then
+                ImGui.TableNextRow()
+                ImGui.TableSetColumnIndex(2)
+                ImGui.TextDisabled("Scanning spellbook...")
+            end
 
             local minLvl = tonumber(state.lvlMin) or 1
             local maxLvl = tonumber(state.lvlMax) or 125
@@ -906,12 +1098,22 @@ end
 
 function plugin.onDestroy()
     state.pendingQueue = {}
+    bookScan.slots = {}
+    bookScan.work = {}
+    bookScan.cursor = 0
+    bookScan.completedAt = nil
+    listBuild.queue = nil
+    activeSpellsCache = {}
+    activeSpellsClass = nil
+    activeSpellsGen = nil
+    requestedClass = nil
 end
 
 function plugin.onTick()
     if not core then return end
     refresh()
     processQueue()
+    stepSpellScan()
 end
 
 function plugin.onDrawUI()

@@ -10,6 +10,9 @@
 -- Vitals are snapshotted at most every 50ms into a cache shared by the fiber
 -- (main loop) and the render pass; the render pass refreshes when the main
 -- loop is blocked (casting, mq.delay) so the HUD never freezes mid-fight.
+-- The heavier reads (target buffs, target-of-target, pet spawn info) run on
+-- a separate, slower timer (SLOW_REFRESH_INTERVAL) and immediately when the
+-- target changes.
 -- ============================================================================
 
 local plugin = {
@@ -29,7 +32,14 @@ local plugin = {
 local core = nil
 local snap = nil
 local lastRefreshAt = 0
-local REFRESH_INTERVAL = 0.05 -- seconds; matches tickInterval
+local REFRESH_INTERVAL = 0.05 -- seconds; matches tickInterval (vitals)
+local lastSlowRefreshAt = 0
+local SLOW_REFRESH_INTERVAL = 0.33 -- seconds; target buffs, ToT, pet info
+-- Target buffs are slot-indexed and slots can have gaps, so the slot range
+-- is walked and empties skipped. Resolved once from Target.MaxBuffSlots when
+-- the binding has it, else this fallback (same as hud_effects' long buffs).
+local TARGET_BUFF_SLOT_FALLBACK = 42
+local targetBuffSlotMax = nil
 
 function plugin.onInit(coreApi)
     core = coreApi
@@ -50,43 +60,109 @@ end
 function plugin.onDestroy()
     snap = nil
     lastRefreshAt = 0
+    lastSlowRefreshAt = 0
+    targetBuffSlotMax = nil
 end
 
-local function drawProgressBar(fraction, w, h, text, r, g, b, a)
-    if core and core.drawStatusProgressBar then
-        core.drawStatusProgressBar(fraction, w, h, text, r, g, b, a)
-        return
+local function resolveTargetBuffSlotMax(mq)
+    if targetBuffSlotMax then return targetBuffSlotMax end
+    local n = nil
+    pcall(function()
+        local v = mq.TLO.Target.MaxBuffSlots
+        if v then n = tonumber(v()) end
+    end)
+    if n and n > 0 and n <= 120 then
+        targetBuffSlotMax = n
+    else
+        targetBuffSlotMax = TARGET_BUFF_SLOT_FALLBACK
     end
-    if not core or not core.ImGui then return end
-    local ImGui = core.ImGui
-    local Col = ImGuiCol or _G.ImGuiCol or (core.mq and core.mq.imgui and core.mq.imgui.Col)
-    local pCount = 0
-    if Col and Col.PlotHistogram and r and g and b then
-        if pcall(ImGui.PushStyleColor, Col.PlotHistogram, r, g, b, a or 1.0) then
-            pCount = pCount + 1
+    return targetBuffSlotMax
+end
+
+-- Slow snapshot: target-of-target, target buffs and pet spawn info. These are
+-- the expensive reads (resolveTargetOfTarget, one Buff(slot) walk, a spawn
+-- info lookup per pet), so they run every SLOW_REFRESH_INTERVAL and when the
+-- target changes, not at the 20 Hz vitals rate. `snap` must already exist.
+local function refreshSlow(force)
+    local s = snap
+    if not s or not core or not core.mq or not core.ctrl then return end
+    local now = os.clock()
+    if not force and (now - lastSlowRefreshAt) < SLOW_REFRESH_INTERVAL then return end
+    lastSlowRefreshAt = now
+    local mq = core.mq
+    local ctrl = core.ctrl
+    s.slowForTid = s.tId
+
+    -- Target of Target (ToT)
+    if s.hasTarget and core.resolveTargetOfTarget then
+        s.tTotName, s.tTotId, s.tTotHpPct, s.myPctAggro = core.resolveTargetOfTarget(s.tId)
+    else
+        s.tTotName, s.tTotId, s.tTotHpPct, s.myPctAggro = nil, nil, nil, nil
+    end
+
+    -- Target Buffs: Target.Buff(n) is slot-indexed and slots can have gaps,
+    -- so walk the slot range (stopping once BuffCount entries were found) and
+    -- skip empties instead of reading slots 1..BuffCount.
+    local targetBuffs = {}
+    if s.hasTarget then
+        local tbc = 0
+        pcall(function() tbc = mq.TLO.Target.BuffCount() or 0 end)
+        local maxShown = ctrl.uf_buff_max or 30
+        local slotMax = resolveTargetBuffSlotMax(mq)
+        local found = 0
+        local b = 1
+        while b <= slotMax and found < tbc and #targetBuffs < maxShown do
+            pcall(function()
+                local tbObj = mq.TLO.Target.Buff(b)
+                if tbObj and tbObj() then
+                    local bName = (tbObj.Name and tbObj.Name()) or tbObj()
+                    if bName and bName ~= '' and bName ~= 'NONE' then
+                        found = found + 1
+                        local durSec = 0
+                        local isBeneficial = false
+                        if tbObj.Duration and tbObj.Duration.TotalSeconds then
+                            durSec = tbObj.Duration.TotalSeconds() or 0
+                        end
+                        if tbObj.Spell and tbObj.Spell.Beneficial then
+                            isBeneficial = tbObj.Spell.Beneficial() or false
+                        end
+                        table.insert(targetBuffs, {
+                            slot = b,
+                            name = bName,
+                            duration = durSec,
+                            beneficial = isBeneficial
+                        })
+                    end
+                end
+            end)
+            b = b + 1
         end
     end
-    local clamped = math.max(0.0, math.min(1.0, fraction or 0.0))
-    ImGui.ProgressBar(clamped, w or -1, h or 16, text or '')
-    if pCount > 0 then
-        pcall(ImGui.PopStyleColor, pCount)
-    end
-end
+    s.targetBuffs = targetBuffs
 
-local function getConRgb(conName)
-    if core and core.getConColorRgb then
-        return core.getConColorRgb(conName)
+    -- Multi-Pet Vitals
+    local activePets = {}
+    local seenPetIds = {}
+    if core.getMultiPetList and core.getPetSpawnInfo and core.isSpawnAlive then
+        local petSlots, extraPets = core.getMultiPetList()
+        for _, slot in ipairs(petSlots or {}) do
+            if slot.petId and slot.petId > 0 and not seenPetIds[slot.petId] and core.isSpawnAlive(slot.petId) then
+                seenPetIds[slot.petId] = true
+                local info = core.getPetSpawnInfo(slot.petId)
+                table.insert(activePets, { id = slot.petId, cls = slot.cls, slotNum = slot.slotNum, info = info })
+            end
+        end
+        for _, extraPid in ipairs(extraPets or {}) do
+            if extraPid and extraPid > 0 and not seenPetIds[extraPid] and core.isSpawnAlive(extraPid) then
+                seenPetIds[extraPid] = true
+                local info = core.getPetSpawnInfo(extraPid)
+                table.insert(activePets, { id = extraPid, cls = 'Pet', slotNum = nil, info = info })
+            end
+        end
     end
-    local c = tostring(conName or ''):upper()
-    if c == 'GREY' or c == 'GRAY' then return { 0.60, 0.60, 0.60, 1.0 }
-    elseif c == 'GREEN' then return { 0.25, 0.90, 0.35, 1.0 }
-    elseif c == 'LIGHT BLUE' or c == 'LIGHTBLUE' then return { 0.35, 0.75, 1.0, 1.0 }
-    elseif c == 'BLUE' then return { 0.20, 0.50, 1.0, 1.0 }
-    elseif c == 'WHITE' then return { 0.95, 0.95, 0.95, 1.0 }
-    elseif c == 'YELLOW' then return { 1.0, 0.85, 0.20, 1.0 }
-    elseif c == 'RED' then return { 1.0, 0.28, 0.28, 1.0 }
-    end
-    return { 0.75, 0.75, 0.75, 1.0 }
+    -- Me.Pet is always part of getMultiPetList (slot or extra), and the list is
+    -- deduplicated by pet name, so it is not appended separately here.
+    s.activePets = activePets
 end
 
 -- Snapshot every TLO the window needs. Called from both the fiber (main loop)
@@ -113,6 +189,7 @@ local function refreshVitals(force)
 
     -- 2. Target Vitals
     s.hasTarget = false
+    s.tId = nil
     pcall(function()
         local tId = mq.TLO.Target.ID()
         if tId and tId > 0 then
@@ -130,44 +207,8 @@ local function refreshVitals(force)
         end
     end)
 
-    -- Target of Target (ToT)
-    if s.hasTarget and core.resolveTargetOfTarget then
-        s.tTotName, s.tTotId, s.tTotHpPct, s.myPctAggro = core.resolveTargetOfTarget(s.tId)
-    else
-        s.tTotName, s.tTotId, s.tTotHpPct, s.myPctAggro = nil, nil, nil, nil
-    end
-
-    -- Target Buffs
-    s.targetBuffs = {}
-    if s.hasTarget then
-        local tbc = 0
-        pcall(function() tbc = mq.TLO.Target.BuffCount() or 0 end)
-        local maxB = math.min(tbc or 0, ctrl.uf_buff_max or 30)
-        for b = 1, maxB do
-            pcall(function()
-                local tbObj = mq.TLO.Target.Buff(b)
-                if tbObj and tbObj() then
-                    local bName = (tbObj.Name and tbObj.Name()) or tbObj()
-                    if bName and bName ~= '' and bName ~= 'NONE' then
-                        local durSec = 0
-                        local isBeneficial = false
-                        if tbObj.Duration and tbObj.Duration.TotalSeconds then
-                            durSec = tbObj.Duration.TotalSeconds() or 0
-                        end
-                        if tbObj.Spell and tbObj.Spell.Beneficial then
-                            isBeneficial = tbObj.Spell.Beneficial() or false
-                        end
-                        table.insert(s.targetBuffs, {
-                            slot = b,
-                            name = bName,
-                            duration = durSec,
-                            beneficial = isBeneficial
-                        })
-                    end
-                end
-            end)
-        end
-    end
+    -- Target change: refresh ToT / buffs / pets right away, not on the slow timer.
+    if s.tId ~= s.slowForTid then lastSlowRefreshAt = 0 end
 
     -- 3. Player Vitals
     pcall(function()
@@ -190,30 +231,8 @@ local function refreshVitals(force)
         s.aaTotal = mq.TLO.Me.AAPointsTotal() or 0
     end)
 
-    -- 4. Multi-Pet Vitals
-    s.activePets = {}
-    local seenPetIds = {}
-    if core.getMultiPetList and core.getPetSpawnInfo and core.isSpawnAlive then
-        local petSlots, extraPets = core.getMultiPetList()
-        for _, slot in ipairs(petSlots or {}) do
-            if slot.petId and slot.petId > 0 and not seenPetIds[slot.petId] and core.isSpawnAlive(slot.petId) then
-                seenPetIds[slot.petId] = true
-                local info = core.getPetSpawnInfo(slot.petId)
-                table.insert(s.activePets, { id = slot.petId, cls = slot.cls, slotNum = slot.slotNum, info = info })
-            end
-        end
-        for _, extraPid in ipairs(extraPets or {}) do
-            if extraPid and extraPid > 0 and not seenPetIds[extraPid] and core.isSpawnAlive(extraPid) then
-                seenPetIds[extraPid] = true
-                local info = core.getPetSpawnInfo(extraPid)
-                table.insert(s.activePets, { id = extraPid, cls = 'Pet', slotNum = nil, info = info })
-            end
-        end
-    end
-    -- Me.Pet is always part of getMultiPetList (slot or extra), and the list is
-    -- deduplicated by pet name, so it is not appended separately here.
-
     snap = s
+    refreshSlow(force)
 end
 
 -- Fiber Worker: keeps the snapshot warm from the main loop (throttled)
@@ -343,7 +362,7 @@ function plugin.onDrawUI()
 
         -- 1. Target & ToT
         if snap.hasTarget and snap.tName then
-            local conCol = getConRgb(snap.tCon)
+            local conCol = core.getConColorRgb(snap.tCon)
             ImGui.TextColored(conCol[1], conCol[2], conCol[3], conCol[4], string.format('[Lvl %d %s] %s', snap.tLvl or 0, snap.tClass or '?', snap.tName))
             ImGui.SameLine()
             ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format('%.0fft', snap.tDist or 0))
@@ -372,7 +391,7 @@ function plugin.onDrawUI()
             local hpStr = string.format('Target: %d%% (%s / %s)', snap.tHpPct or 0,
                 (snap.tCurHp and snap.tCurHp > 0) and tostring(snap.tCurHp) or '?',
                 (snap.tMaxHp and snap.tMaxHp > 0) and tostring(snap.tMaxHp) or '?')
-            drawProgressBar((snap.tHpPct or 0) / 100.0, -1, barH, hpStr, tr, tg, tb, 1.0)
+            core.drawStatusProgressBar((snap.tHpPct or 0) / 100.0, -1, barH, hpStr, tr, tg, tb, 1.0)
 
             if isAtk then
                 pcall(function()
@@ -427,7 +446,7 @@ function plugin.onDrawUI()
                         totr, totg, totb = 0.95, 0.75, 0.20
                     end
                     local totBarStr = string.format('%s HP: %d%%', isMe and 'YOU' or snap.tTotName, snap.tTotHpPct)
-                    drawProgressBar(snap.tTotHpPct / 100.0, -1, math.max(10, barH - 3), totBarStr, totr, totg, totb, 1.0)
+                    core.drawStatusProgressBar(snap.tTotHpPct / 100.0, -1, math.max(10, barH - 3), totBarStr, totr, totg, totb, 1.0)
                     if ImGui.IsItemClicked() then
                         if snap.tTotId and snap.tTotId > 0 then
                             core.mq.cmdf('/target id %d', snap.tTotId)
@@ -494,7 +513,7 @@ function plugin.onDrawUI()
             end
         else
             ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Target: No Target Selected')
-            drawProgressBar(0, -1, barH, 'No Target', 0.25, 0.25, 0.25, 0.5)
+            core.drawStatusProgressBar(0, -1, barH, 'No Target', 0.25, 0.25, 0.25, 0.5)
         end
 
         -- 2. Player Vitals
@@ -506,24 +525,24 @@ function plugin.onDrawUI()
             pr, pg, pb = 0.95, 0.75, 0.20
         end
         local myHpStr = string.format('Player HP: %d%% (%d / %d)', snap.myHpPct or 0, snap.myCurHp or 0, snap.myMaxHp or 0)
-        drawProgressBar((snap.myHpPct or 0) / 100.0, -1, barH, myHpStr, pr, pg, pb, 1.0)
+        core.drawStatusProgressBar((snap.myHpPct or 0) / 100.0, -1, barH, myHpStr, pr, pg, pb, 1.0)
 
         if (snap.myMaxMana or 0) > 0 then
             local manaStr = string.format('Mana: %d%% (%d / %d)', snap.myManaPct or 0, snap.myCurMana or 0, snap.myMaxMana or 0)
-            drawProgressBar((snap.myManaPct or 0) / 100.0, -1, barH, manaStr, 0.25, 0.60, 0.95, 1.0)
+            core.drawStatusProgressBar((snap.myManaPct or 0) / 100.0, -1, barH, manaStr, 0.25, 0.60, 0.95, 1.0)
         end
 
         if ctrl.uf_show_endurance ~= false and (snap.myMaxEnd or 0) > 0 then
             local endStr = string.format('End: %d%% (%d / %d)', snap.myEndPct or 0, snap.myCurEnd or 0, snap.myMaxEnd or 0)
-            drawProgressBar((snap.myEndPct or 0) / 100.0, -1, barH, endStr, 0.95, 0.60, 0.25, 1.0)
+            core.drawStatusProgressBar((snap.myEndPct or 0) / 100.0, -1, barH, endStr, 0.95, 0.60, 0.25, 1.0)
         end
 
         if ctrl.uf_show_xp ~= false then
             local xpStr = string.format('XP (Lvl %d): %.2f%%', snap.myLvl or 1, snap.myExpPct or 0)
-            drawProgressBar((snap.myExpPct or 0) / 100.0, -1, barH, xpStr, 0.85, 0.70, 0.20, 1.0)
+            core.drawStatusProgressBar((snap.myExpPct or 0) / 100.0, -1, barH, xpStr, 0.85, 0.70, 0.20, 1.0)
 
             local aaxpStr = string.format('AAXP: %.2f%% (%d Banked)', snap.myAAExpPct or 0, snap.myBankedAA or 0)
-            drawProgressBar((snap.myAAExpPct or 0) / 100.0, -1, barH, aaxpStr, 0.65, 0.35, 0.90, 1.0)
+            core.drawStatusProgressBar((snap.myAAExpPct or 0) / 100.0, -1, barH, aaxpStr, 0.65, 0.35, 0.90, 1.0)
         end
 
         -- 3. Multi-Pet Vitals
@@ -542,7 +561,7 @@ function plugin.onDrawUI()
                 local pClsTag = (pData.cls and pData.cls ~= '' and pData.cls ~= 'Pet') and string.format('[%s] ', pData.cls) or ''
                 local pTargetStr = (pInfo.targetName and pInfo.targetName ~= '' and pInfo.targetName ~= 'None') and (' -> ' .. pInfo.targetName) or ''
                 local pBarStr = string.format('Pet %s%s: %d%%%s', pClsTag, pInfo.cleanName or 'Pet', pHp, pTargetStr)
-                drawProgressBar(pHp / 100.0, -1, barH, pBarStr, petR, petG, petB, 1.0)
+                core.drawStatusProgressBar(pHp / 100.0, -1, barH, pBarStr, petR, petG, petB, 1.0)
                 if ImGui.IsItemHovered() and core.setTooltip then
                     core.setTooltip('%s', string.format('Pet: %s\nClass: %s\nLevel: %d\nHP: %d%%\nTarget: %s\nBuff Count: %d',
                         pInfo.cleanName or 'Pet', pData.cls or 'Pet', pInfo.level or 0, pHp, pInfo.targetName or 'None', #(pInfo.buffs or {})))

@@ -9,8 +9,13 @@
 --
 -- Read-only against combat state: it only inspects runtime.lastCast /
 -- discExpires / discCooldown / timerGroupCooldown / last*FiredAt and the cast
--- tracker, and fires abilities through the same runtime.fire* / castGem /
--- useClickie entry points the combat loop uses.
+-- tracker (never writes them), and fires abilities through the same
+-- runtime.fire* / castGem / useClickie entry points the combat loop uses --
+-- always via core.defer(), since those entry points mq.delay and the "Use"
+-- buttons are pressed on the ImGui render thread.
+--
+-- The TLO scan runs from onTick (0.25 s) into a module-level cache; onDrawUI
+-- renders from that cache and derives per-item countdowns from timestamps.
 -- ============================================================================
 
 local plugin = {
@@ -20,7 +25,7 @@ local plugin = {
     author             = 'Triune',
     description        = 'Popout Cooldown & Ability Monitor window with live timers, filters, and click-to-fire.',
     defaultEnabled     = true,
-    tickInterval       = 1.0,
+    tickInterval       = 0.25,
     runOutOfCombatOnly = false,
     hasThread          = false,
     -- Window owned by this plugin (drives the main-window header button)
@@ -31,6 +36,57 @@ local core = nil
 local rt, ctrl, ImGui, mq, accent = nil, nil, nil, nil, nil
 local GOLD, ARC, MUTED, GOOD, WARN = nil, nil, nil, nil, nil
 local M = { cooldownSearch = '' }
+
+-- ---------------------------------------------------------------------------
+-- TLO snapshot cache. The full loadout scan (hundreds of TLO calls) runs from
+-- refreshItems(), which is shared by onTick and onDrawUI and throttled by a
+-- timestamp (same pattern as hud_unitframes.refreshVitals): whichever runs
+-- first does the work, so the HUD stays live while the main loop is blocked
+-- without hammering TLOs at frame rate. Items carry readyAt / activeUntil
+-- timestamps so the per-item countdown still animates smoothly in draw.
+-- ---------------------------------------------------------------------------
+local REFRESH_INTERVAL = 0.25
+local lastRefreshAt = 0
+local cache = { items = {}, gen = 0 }
+-- Filtered + sorted view of cache.items; rebuilt only when the underlying
+-- list (gen), the filter settings, the sort mode, or the search text change.
+local view = { items = {}, gen = -1, cat = nil, status = nil, sort = nil, search = nil }
+-- HUD-side estimate of a running disc's expiry when the game gives no
+-- duration. Kept local so the render/scan path never writes runtime.discExpires
+-- (which runtime.isDiscReady consults for combat decisions).
+local estDiscExpires = {}
+
+-- Constant tables (hoisted so the render pass does not re-allocate them).
+local STATUS_RANK = {
+    ACTIVE = 1,
+    COOLDOWN = 2,
+    ['LOW END'] = 3,
+    ['LOW MANA'] = 4,
+    ['NEED BURN'] = 5,
+    ['NEED BOSS'] = 6,
+    ['MIN XTAR'] = 7,
+    LOCKED = 8,
+    BLOCKED = 9,
+    READY = 10,
+}
+local CAT_OPTS = { 'All', 'Skills', 'AAs', 'Discs', 'Spells', 'Items' }
+local CAT_MAP = { All = 'All', Skills = 'Abilities', AAs = 'AAs', Discs = 'Disciplines', Spells = 'Spells', Items = 'Items' }
+local REV_CAT = { All = 'All', Abilities = 'Skills', AAs = 'AAs', Disciplines = 'Discs', Spells = 'Spells', Items = 'Items' }
+local STATUS_OPTS = { 'All', 'Ready', 'CD', 'Active' }
+local STATUS_MAP = { All = 'All', Ready = 'Ready', CD = 'Cooldown', Active = 'Active' }
+local REV_STATUS = { All = 'All', Ready = 'Ready', Cooldown = 'CD', Active = 'Active' }
+local SORT_LABELS = { 'Time', 'Status', 'Pri', 'Cls', 'Type', 'A-Z' }
+local SORT_KEYS = { 'time', 'status', 'priority', 'class', 'type', 'alpha' }
+-- Colours for the [B] burn marker; hoisted for the same reason.
+local BURN_RED = { 1.0, 0.35, 0.35, 1.0 }
+
+-- Resolve the fire target at click time (runs on the main loop via core.defer).
+local function currentTargetOrSelf()
+    local tid = 0
+    pcall(function() tid = tonumber(mq.TLO.Target.ID() or 0) or 0 end)
+    if tid > 0 then return tid end
+    return mq.TLO.Me.ID()
+end
 
 local function refresh()
     ctrl = core.ctrl
@@ -131,13 +187,13 @@ function M.getTrackedCooldownItems()
                     isReady = false
                 end
 
+                -- Read-only: an expired lastSkillFiredAt entry is simply ignored
+                -- (the combat loop owns that table; the HUD never clears it).
                 if rt.lastSkillFiredAt and rt.lastSkillFiredAt[nm] then
                     local elapsed = now - rt.lastSkillFiredAt[nm]
                     if elapsed < totalSec then
                         local sRem = totalSec - elapsed
                         if sRem > timerSec then timerSec = sRem end
-                    else
-                        rt.lastSkillFiredAt[nm] = nil
                     end
                 end
 
@@ -179,6 +235,7 @@ function M.getTrackedCooldownItems()
                     activeSec = 0,
                     activeTotalSec = 0,
                     timeLeft = timerSec,
+                    readyAt = (timerSec > 0) and (now + timerSec) or nil,
                     totalSec = totalSec,
                     status = status,
                     reason = reason,
@@ -280,7 +337,7 @@ function M.getTrackedCooldownItems()
                     end
                 end)
 
-                -- Check software timer if lastAAFiredAt exists
+                -- Check software timer if lastAAFiredAt exists (read-only; expired entries are ignored)
                 if rt.lastAAFiredAt and rt.lastAAFiredAt[nm] then
                     local elapsed = now - rt.lastAAFiredAt[nm]
                     if totalSec <= 0 and rt.aaCooldownTotal and rt.aaCooldownTotal[nm] then
@@ -289,8 +346,6 @@ function M.getTrackedCooldownItems()
                     if totalSec > 0 and elapsed < totalSec then
                         local rem = totalSec - elapsed
                         if rem > timerSec then timerSec = rem end
-                    else
-                        rt.lastAAFiredAt[nm] = nil
                     end
                 end
 
@@ -347,6 +402,8 @@ function M.getTrackedCooldownItems()
                     activeSec = activeSec,
                     activeTotalSec = activeTotalSec,
                     timeLeft = timerSec,
+                    readyAt = (timerSec > 0) and (now + timerSec) or nil,
+                    activeUntil = (isActive and activeSec > 0) and (now + activeSec) or nil,
                     totalSec = totalSec,
                     status = status,
                     reason = reason,
@@ -356,7 +413,7 @@ function M.getTrackedCooldownItems()
                     min_xtar = minXt,
                     entry = entry,
                     conditionText = condText,
-                    use = function() rt.fireAA(nm, entry, targetId > 0 and targetId or mq.TLO.Me.ID()) end,
+                    use = function() rt.fireAA(nm, entry, currentTargetOrSelf()) end,
                 })
             end
         end
@@ -424,14 +481,17 @@ function M.getTrackedCooldownItems()
                     if rem > activeSec then activeSec = rem end
                 end
 
-                -- If active but activeSec is 0, estimate from base duration and initialize software expiry
+                -- If active but activeSec is 0, estimate from base duration using a
+                -- HUD-local software expiry (never written back into runtime.discExpires,
+                -- which the combat loop's isDiscReady consults).
                 if isActive and activeSec <= 0 then
                     local baseDur = activeTotalSec > 0 and activeTotalSec or 18
-                    if not rt.discExpires then rt.discExpires = {} end
-                    if not rt.discExpires[nm] or rt.discExpires[nm] <= now then
-                        rt.discExpires[nm] = now + baseDur
+                    if not estDiscExpires[nm] or estDiscExpires[nm] <= now then
+                        estDiscExpires[nm] = now + baseDur
                     end
-                    activeSec = math.max(1, rt.discExpires[nm] - now)
+                    activeSec = math.max(1, estDiscExpires[nm] - now)
+                elseif not isActive then
+                    estDiscExpires[nm] = nil
                 end
 
                 if rt.discCooldown and rt.discCooldown[nm] and rt.discCooldown[nm] > now then
@@ -451,13 +511,12 @@ function M.getTrackedCooldownItems()
                     isReady = false
                 end
 
+                -- Read-only; expired lastDiscFiredAt entries are ignored, never cleared here.
                 if rt.lastDiscFiredAt and rt.lastDiscFiredAt[nm] then
                     local elapsed = now - rt.lastDiscFiredAt[nm]
                     if totalSec > 0 and elapsed < totalSec then
                         local rem = totalSec - elapsed
                         if rem > timerSec then timerSec = rem end
-                    else
-                        rt.lastDiscFiredAt[nm] = nil
                     end
                 end
 
@@ -507,6 +566,8 @@ function M.getTrackedCooldownItems()
                     activeSec = activeSec,
                     activeTotalSec = activeTotalSec,
                     timeLeft = timerSec,
+                    readyAt = (timerSec > 0) and (now + timerSec) or nil,
+                    activeUntil = (isActive and activeSec > 0) and (now + activeSec) or nil,
                     totalSec = totalSec,
                     status = status,
                     reason = reason,
@@ -517,7 +578,7 @@ function M.getTrackedCooldownItems()
                     min_xtar = minXt,
                     entry = entry,
                     conditionText = condText,
-                    use = function() rt.fireDisc(nm, entry, targetId > 0 and targetId or mq.TLO.Me.ID()) end,
+                    use = function() rt.fireDisc(nm, entry, currentTargetOrSelf()) end,
                 })
             end
         end
@@ -553,6 +614,7 @@ function M.getTrackedCooldownItems()
                     activeSec = 0,
                     activeTotalSec = 0,
                     timeLeft = timerSec,
+                    readyAt = (timerSec > 0) and (now + timerSec) or nil,
                     totalSec = math.max(timerSec, 5),
                     status = isReady and 'READY' or 'COOLDOWN',
                     reason = '',
@@ -600,6 +662,7 @@ function M.getTrackedCooldownItems()
                     activeSec = 0,
                     activeTotalSec = 0,
                     timeLeft = timerSec,
+                    readyAt = (timerSec > 0) and (now + timerSec) or nil,
                     totalSec = math.max(timerSec, 30),
                     status = isReady and 'READY' or 'COOLDOWN',
                     reason = '',
@@ -618,9 +681,185 @@ function M.getTrackedCooldownItems()
     return items
 end
 
+-- Rebuild the item cache at most every REFRESH_INTERVAL seconds. Shared by
+-- onTick and the render pass (see the note by `cache` above). Returns true
+-- when a rebuild happened.
+function M.refreshItems(force)
+    if not core or not mq or not rt or not ctrl then return false end
+    local now = os.clock()
+    if not force and (now - lastRefreshAt) < REFRESH_INTERVAL then return false end
+    lastRefreshAt = now
+    local ok, items = pcall(M.getTrackedCooldownItems)
+    if ok and type(items) == 'table' then
+        cache.items = items
+        cache.gen = cache.gen + 1
+        return true
+    end
+    return false
+end
+
+-- Force the next refreshItems() call to rebuild (used when a filter that gates
+-- which loadout sections are scanned changes).
+local function invalidateItems()
+    lastRefreshAt = 0
+end
+
+-- Sort comparator for the filtered view (no allocations per compare).
+local function makeSorter(sortKey)
+    return function(a, b)
+        if sortKey == 'time' then
+            -- 1. Active items first (running stances / active duration buffs)
+            if a.active ~= b.active then
+                return a.active
+            end
+            if a.active and b.active then
+                return (a.activeSec or 0) < (b.activeSec or 0)
+            end
+
+            -- 2. Items on Cooldown NEXT at the top of the list
+            local aInCd = (not a.ready)
+            local bInCd = (not b.ready)
+            if aInCd ~= bInCd then
+                return aInCd
+            end
+
+            -- Both are on cooldown: sort by time remaining ascending (soonest to become ready first)
+            if aInCd and bInCd then
+                if math.abs((a.timeLeft or 0) - (b.timeLeft or 0)) > 0.05 then
+                    return (a.timeLeft or 0) < (b.timeLeft or 0)
+                end
+                return (a.priority or 50) < (b.priority or 50)
+            end
+
+            -- 3. Both are Ready: sort by priority ascending (pri 1 before pri 50)
+            if (a.priority or 50) ~= (b.priority or 50) then
+                return (a.priority or 50) < (b.priority or 50)
+            end
+            return (a.name or '') < (b.name or '')
+        elseif sortKey == 'status' then
+            local rA = STATUS_RANK[a.status] or 11
+            local rB = STATUS_RANK[b.status] or 11
+            if rA ~= rB then return rA < rB end
+            return (a.timeLeft or 0) < (b.timeLeft or 0)
+        elseif sortKey == 'priority' then
+            return (a.priority or 50) < (b.priority or 50)
+        elseif sortKey == 'class' then
+            if (a.cls or '') ~= (b.cls or '') then return (a.cls or '') < (b.cls or '') end
+            return (a.name or '') < (b.name or '')
+        elseif sortKey == 'type' then
+            if (a.kind or '') ~= (b.kind or '') then return (a.kind or '') < (b.kind or '') end
+            return (a.name or '') < (b.name or '')
+        elseif sortKey == 'alpha' then
+            return (a.name or ''):lower() < (b.name or ''):lower()
+        end
+        return false
+    end
+end
+
+-- Returns the filtered + sorted item list, re-deriving it only when the cached
+-- item list, the filter settings, the sort mode, or the search text changed.
+local function getFilteredItems()
+    local cat = ctrl.cooldown_category or 'All'
+    local statusF = ctrl.cooldown_status_filter or 'All'
+    local sortKey = ctrl.cooldown_sort_by or 'time'
+    local searchStr = (M.cooldownSearch or ''):lower()
+    if view.gen == cache.gen and view.cat == cat and view.status == statusF
+        and view.sort == sortKey and view.search == searchStr then
+        return view.items
+    end
+
+    local filteredItems = {}
+    for _, itm in ipairs(cache.items) do
+        local passCat = true
+        if cat == 'Abilities' then passCat = (itm.kind == 'Skill')
+        elseif cat == 'AAs' then passCat = (itm.kind == 'AA')
+        elseif cat == 'Disciplines' then passCat = (itm.kind == 'Disc')
+        elseif cat == 'Spells' then passCat = (itm.kind == 'Spell')
+        elseif cat == 'Items' then passCat = (itm.kind == 'Item')
+        end
+
+        local passStatus = true
+        if statusF == 'Ready' then passStatus = itm.ready
+        elseif statusF == 'Cooldown' then passStatus = (not itm.ready and not itm.active)
+        elseif statusF == 'Active' then passStatus = itm.active
+        end
+
+        local passSearch = true
+        if searchStr ~= '' then
+            passSearch = string.find(itm.name:lower(), searchStr, 1, true) ~= nil
+        end
+
+        if passCat and passStatus and passSearch then
+            table.insert(filteredItems, itm)
+        end
+    end
+
+    table.sort(filteredItems, makeSorter(sortKey))
+
+    view.items = filteredItems
+    view.gen = cache.gen
+    view.cat = cat
+    view.status = statusF
+    view.sort = sortKey
+    view.search = searchStr
+    return filteredItems
+end
+
+-- Live countdown values derived from the cached timestamps so bars animate
+-- between cache refreshes without touching any TLO.
+local function liveTimeLeft(itm, now)
+    if itm.readyAt then return math.max(0, itm.readyAt - now) end
+    return itm.timeLeft or 0
+end
+
+local function liveActiveSec(itm, now)
+    if itm.activeUntil then return math.max(0, itm.activeUntil - now) end
+    return itm.activeSec or 0
+end
+
+-- Draws the status / timer progress bar for one item (shared by table + cards).
+local function drawItemStatusBar(itm, now, barW)
+    if itm.active then
+        local activeSec = liveActiveSec(itm, now)
+        local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
+        local frac = math.min(1.0, math.max(0.0, activeSec / actTotal))
+        local tStr = (activeSec > 0) and string.format('ACT: %s', core.fmtSec(math.ceil(activeSec))) or 'ACTIVE'
+        core.drawStatusProgressBar(frac, barW, core.px(15), tStr, ARC[1], ARC[2], ARC[3], 1.0)
+    elseif itm.ready then
+        if itm.status ~= 'READY' then
+            -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR, BLOCKED)
+            core.drawStatusProgressBar(1.0, barW, core.px(15), itm.status, 0.85, 0.55, 0.15, 1.0)
+        else
+            core.drawStatusProgressBar(1.0, barW, core.px(15), 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
+        end
+    else
+        local timeLeft = liveTimeLeft(itm, now)
+        local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(timeLeft, 30)
+        local frac = math.max(0.0, math.min(1.0, 1.0 - (timeLeft / cdTotal)))
+        local tStr = core.fmtSec(math.ceil(timeLeft))
+        core.drawStatusProgressBar(frac, barW, core.px(15), tStr, WARN[1], WARN[2], WARN[3], 1.0)
+    end
+end
+
+-- Queue an item's fire closure onto the main loop. Every use closure ends in
+-- runtime.fire* / castGem / useClickie, which mq.delay -- never run those from
+-- the render thread.
+local function deferUse(itm)
+    if not itm or not itm.use then return end
+    if core.defer then
+        core.defer('cooldown use ' .. tostring(itm.name), itm.use)
+    else
+        print(string.format('\ar[Triune]\ax Cooldown Monitor: core.defer unavailable; cannot fire %s from the HUD.', tostring(itm.name)))
+    end
+end
+
 function M.renderCooldownContent(idSuffix, isPopout)
     idSuffix = idSuffix or ''
-    local allItems = M.getTrackedCooldownItems()
+    -- Throttled: normally a no-op because onTick already refreshed this cycle;
+    -- only does the scan itself when the main loop is blocked.
+    M.refreshItems(false)
+    local allItems = cache.items
+    local now = os.clock()
 
     -- Count totals
     local countReady = 0
@@ -689,24 +928,20 @@ function M.renderCooldownContent(idSuffix, isPopout)
     -- Header Line 2: Streamlined Filters & Search
     -- Category Dropdown
     ImGui.SetNextItemWidth(core.px(72))
-    local CAT_OPTS = { 'All', 'Skills', 'AAs', 'Discs', 'Spells', 'Items' }
-    local CAT_MAP = { All = 'All', Skills = 'Abilities', AAs = 'AAs', Discs = 'Disciplines', Spells = 'Spells', Items = 'Items' }
-    local REV_CAT = { All = 'All', Abilities = 'Skills', AAs = 'AAs', Disciplines = 'Discs', Spells = 'Spells', Items = 'Items' }
     local curCatLabel = REV_CAT[ctrl.cooldown_category or 'All'] or 'All'
     local curCatIdx = core.idxOf(CAT_OPTS, curCatLabel)
     local newCatIdx = ImGui.Combo('##cdCat' .. idSuffix, curCatIdx, CAT_OPTS)
     if newCatIdx ~= curCatIdx then
         ctrl.cooldown_category = CAT_MAP[CAT_OPTS[newCatIdx]] or 'All'
         core.saveLoadout(true)
+        -- The category gates which loadout sections the scan visits (Spells / Items).
+        invalidateItems()
     end
     if ImGui.IsItemHovered() then core.setTooltip('Filter by ability category') end
 
     ImGui.SameLine()
     -- Status Filter Dropdown
     ImGui.SetNextItemWidth(core.px(68))
-    local STATUS_OPTS = { 'All', 'Ready', 'CD', 'Active' }
-    local STATUS_MAP = { All = 'All', Ready = 'Ready', CD = 'Cooldown', Active = 'Active' }
-    local REV_STATUS = { All = 'All', Ready = 'Ready', Cooldown = 'CD', Active = 'Active' }
     local curStatusLabel = REV_STATUS[ctrl.cooldown_status_filter or 'All'] or 'All'
     local curStatusIdx = core.idxOf(STATUS_OPTS, curStatusLabel)
     local newStatusIdx = ImGui.Combo('##cdStatusFilter' .. idSuffix, curStatusIdx, STATUS_OPTS)
@@ -719,8 +954,6 @@ function M.renderCooldownContent(idSuffix, isPopout)
     ImGui.SameLine()
     -- Sort Selector
     ImGui.SetNextItemWidth(core.px(70))
-    local SORT_LABELS = { 'Time', 'Status', 'Pri', 'Cls', 'Type', 'A-Z' }
-    local SORT_KEYS = { 'time', 'status', 'priority', 'class', 'type', 'alpha' }
     local curSortIdx = core.idxOf(SORT_KEYS, ctrl.cooldown_sort_by or 'time')
     local newSortIdx = ImGui.Combo('##cdSortBy' .. idSuffix, curSortIdx, SORT_LABELS)
     if newSortIdx ~= curSortIdx then
@@ -747,96 +980,8 @@ function M.renderCooldownContent(idSuffix, isPopout)
 
     ImGui.Separator()
 
-    -- Filter items based on active criteria
-    local filteredItems = {}
-    local searchStr = (M.cooldownSearch or ''):lower()
-    for _, itm in ipairs(allItems) do
-        local passCat = true
-        if ctrl.cooldown_category == 'Abilities' then passCat = (itm.kind == 'Skill')
-        elseif ctrl.cooldown_category == 'AAs' then passCat = (itm.kind == 'AA')
-        elseif ctrl.cooldown_category == 'Disciplines' then passCat = (itm.kind == 'Disc')
-        elseif ctrl.cooldown_category == 'Spells' then passCat = (itm.kind == 'Spell')
-        elseif ctrl.cooldown_category == 'Items' then passCat = (itm.kind == 'Item')
-        end
-
-        local passStatus = true
-        if ctrl.cooldown_status_filter == 'Ready' then passStatus = itm.ready
-        elseif ctrl.cooldown_status_filter == 'Cooldown' then passStatus = (not itm.ready and not itm.active)
-        elseif ctrl.cooldown_status_filter == 'Active' then passStatus = itm.active
-        end
-
-        local passSearch = true
-        if searchStr ~= '' then
-            passSearch = string.find(itm.name:lower(), searchStr, 1, true) ~= nil
-        end
-
-        if passCat and passStatus and passSearch then
-            table.insert(filteredItems, itm)
-        end
-    end
-
-    -- Sort filtered items
-    local sortKey = ctrl.cooldown_sort_by or 'time'
-    table.sort(filteredItems, function(a, b)
-        if sortKey == 'time' then
-            -- 1. Active items first (running stances / active duration buffs)
-            if a.active ~= b.active then
-                return a.active
-            end
-            if a.active and b.active then
-                return (a.activeSec or 0) < (b.activeSec or 0)
-            end
-
-            -- 2. Items on Cooldown NEXT at the top of the list
-            local aInCd = (not a.ready)
-            local bInCd = (not b.ready)
-            if aInCd ~= bInCd then
-                return aInCd
-            end
-
-            -- Both are on cooldown: sort by time remaining ascending (soonest to become ready first)
-            if aInCd and bInCd then
-                if math.abs((a.timeLeft or 0) - (b.timeLeft or 0)) > 0.05 then
-                    return (a.timeLeft or 0) < (b.timeLeft or 0)
-                end
-                return (a.priority or 50) < (b.priority or 50)
-            end
-
-            -- 3. Both are Ready: sort by priority ascending (pri 1 before pri 50)
-            if (a.priority or 50) ~= (b.priority or 50) then
-                return (a.priority or 50) < (b.priority or 50)
-            end
-            return (a.name or '') < (b.name or '')
-        elseif sortKey == 'status' then
-            local statusRank = {
-                ACTIVE = 1,
-                COOLDOWN = 2,
-                ['LOW END'] = 3,
-                ['LOW MANA'] = 4,
-                ['NEED BURN'] = 5,
-                ['NEED BOSS'] = 6,
-                ['MIN XTAR'] = 7,
-                LOCKED = 8,
-                BLOCKED = 9,
-                READY = 10,
-            }
-            local rA = statusRank[a.status] or 11
-            local rB = statusRank[b.status] or 11
-            if rA ~= rB then return rA < rB end
-            return (a.timeLeft or 0) < (b.timeLeft or 0)
-        elseif sortKey == 'priority' then
-            return (a.priority or 50) < (b.priority or 50)
-        elseif sortKey == 'class' then
-            if (a.cls or '') ~= (b.cls or '') then return (a.cls or '') < (b.cls or '') end
-            return (a.name or '') < (b.name or '')
-        elseif sortKey == 'type' then
-            if (a.kind or '') ~= (b.kind or '') then return (a.kind or '') < (b.kind or '') end
-            return (a.name or '') < (b.name or '')
-        elseif sortKey == 'alpha' then
-            return (a.name or ''):lower() < (b.name or ''):lower()
-        end
-        return false
-    end)
+    -- Filtered + sorted view (cached; re-derived only when inputs change)
+    local filteredItems = getFilteredItems()
 
     -- Render Items in Table View or Cards HUD View
     if #filteredItems == 0 then
@@ -917,7 +1062,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     ImGui.TableNextColumn()
                     ImGui.Text(itm.conditionText or '')
                     if itm.burn_only then
-                        ImGui.SameLine(); accent({ 1.0, 0.35, 0.35, 1.0 }, '[B]')
+                        ImGui.SameLine(); accent(BURN_RED, '[B]')
                     end
                     if itm.boss_only then
                         ImGui.SameLine(); accent(GOLD, '[Boss]')
@@ -926,49 +1071,47 @@ function M.renderCooldownContent(idSuffix, isPopout)
 
                 -- 3. Status Bar & Timer
                 ImGui.TableNextColumn()
-                if itm.active then
-                    local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
-                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 0) / actTotal))
-                    local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', core.fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
-                    core.drawStatusProgressBar(frac, core.px(110), core.px(15), tStr, ARC[1], ARC[2], ARC[3], 1.0)
-                elseif itm.ready then
-                    if itm.status ~= 'READY' then
-                        -- Gated ready (e.g. LOW END, NEED BURN, MIN XTAR, BLOCKED)
-                        core.drawStatusProgressBar(1.0, core.px(110), core.px(15), itm.status, 0.85, 0.55, 0.15, 1.0)
-                    else
-                        core.drawStatusProgressBar(1.0, core.px(110), core.px(15), 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
-                    end
-                else
-                    local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(itm.timeLeft or 0, 30)
-                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / cdTotal)))
-                    local tStr = core.fmtSec(math.ceil(itm.timeLeft or 0))
-                    core.drawStatusProgressBar(frac, core.px(110), core.px(15), tStr, WARN[1], WARN[2], WARN[3], 1.0)
-                end
+                drawItemStatusBar(itm, now, core.px(110))
                 if itm.reason and itm.reason ~= '' and ImGui.IsItemHovered() then
                     core.setTooltip(itm.reason)
                 end
 
-                -- Optional In-Place Tuning Column
+                -- Optional In-Place Tuning Column (writes + saves only on an actual change)
                 if ctrl.cooldown_show_inline_edit then
                     ImGui.TableNextColumn()
                     if itm.entry then
-                        local enVal = ImGui.Checkbox('##tblEn', itm.entry.enabled or false)
-                        itm.entry.enabled = enVal
+                        local curEn = itm.entry.enabled or false
+                        local enVal = ImGui.Checkbox('##tblEn', curEn)
+                        if enVal ~= curEn then
+                            itm.entry.enabled = enVal
+                            core.saveLoadout(true)
+                            invalidateItems()
+                        end
                         if itm.entry.pct ~= nil then
                             ImGui.SameLine(); ImGui.SetNextItemWidth(core.px(55))
-                            local spVal = ImGui.SliderInt('##tblPct', tonumber(itm.entry.pct) or 100, 0, 100, '%d%%')
-                            itm.entry.pct = spVal
+                            local curPct = tonumber(itm.entry.pct) or 100
+                            local spVal = ImGui.SliderInt('##tblPct', curPct, 0, 100, '%d%%')
+                            if spVal ~= curPct then
+                                itm.entry.pct = spVal
+                                core.saveLoadout(true)
+                                invalidateItems()
+                            end
                         end
                         if itm.entry.burn_only ~= nil then
                             ImGui.SameLine()
-                            local boVal = ImGui.Checkbox('B##tblBo', itm.entry.burn_only or false)
-                            itm.entry.burn_only = boVal
+                            local curBo = itm.entry.burn_only or false
+                            local boVal = ImGui.Checkbox('B##tblBo', curBo)
+                            if boVal ~= curBo then
+                                itm.entry.burn_only = boVal
+                                core.saveLoadout(true)
+                                invalidateItems()
+                            end
                             if ImGui.IsItemHovered() then core.setTooltip('Burn Only toggle') end
                         end
                     end
                 end
 
-                -- 4. Direct Action Button
+                -- 4. Direct Action Button (queued to the main loop; never fired from the render thread)
                 ImGui.TableNextColumn()
                 if itm.ready and not itm.active then
                     local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
@@ -977,7 +1120,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     if Col and pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.18, 0.70, 0.28, 1.0) then pCount = pCount + 1 end
                     if Col and pcall(ImGui.PushStyleColor, Col.Text, 1.0, 1.0, 1.0, 1.0) then pCount = pCount + 1 end
                     if ImGui.Button('Use##cdBtnUse', core.px(34), core.px(16)) then
-                        if itm.use then itm.use() end
+                        deferUse(itm)
                     end
                     if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
                     if ImGui.IsItemHovered() then core.setTooltip(string.format('Click to execute %s', itm.name)) end
@@ -1007,23 +1150,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                 end
 
                 ImGui.SameLine(); ImGui.SetNextItemWidth(core.px(105))
-                if itm.active then
-                    local actTotal = (itm.activeTotalSec and itm.activeTotalSec > 0) and itm.activeTotalSec or (itm.totalSec > 0 and itm.totalSec or 18)
-                    local frac = math.min(1.0, math.max(0.0, (itm.activeSec or 0) / actTotal))
-                    local tStr = (itm.activeSec and itm.activeSec > 0) and string.format('ACT: %s', core.fmtSec(math.ceil(itm.activeSec))) or 'ACTIVE'
-                    core.drawStatusProgressBar(frac, core.px(105), core.px(15), tStr, ARC[1], ARC[2], ARC[3], 1.0)
-                elseif itm.ready then
-                    if itm.status ~= 'READY' then
-                        core.drawStatusProgressBar(1.0, core.px(105), core.px(15), itm.status, 0.85, 0.55, 0.15, 1.0)
-                    else
-                        core.drawStatusProgressBar(1.0, core.px(105), core.px(15), 'READY', GOOD[1], GOOD[2], GOOD[3], 1.0)
-                    end
-                else
-                    local cdTotal = (itm.totalSec and itm.totalSec > 0) and itm.totalSec or math.max(itm.timeLeft or 0, 30)
-                    local frac = math.max(0.0, math.min(1.0, 1.0 - ((itm.timeLeft or 0) / cdTotal)))
-                    local tStr = core.fmtSec(math.ceil(itm.timeLeft or 0))
-                    core.drawStatusProgressBar(frac, core.px(105), core.px(15), tStr, WARN[1], WARN[2], WARN[3], 1.0)
-                end
+                drawItemStatusBar(itm, now, core.px(105))
 
                 if itm.ready and not itm.active then
                     ImGui.SameLine()
@@ -1031,7 +1158,7 @@ function M.renderCooldownContent(idSuffix, isPopout)
                     local pCount = 0
                     if Col and pcall(ImGui.PushStyleColor, Col.Button, 0.12, 0.55, 0.22, 1.0) then pCount = pCount + 1 end
                     if ImGui.Button('Use##cardUse', core.px(34), core.px(15)) then
-                        if itm.use then itm.use() end
+                        deferUse(itm)
                     end
                     if pCount > 0 then pcall(ImGui.PopStyleColor, pCount) end
                 end
@@ -1079,6 +1206,22 @@ function M.drawCooldownWindow()
     ImGui.End()
     ImGui.PopStyleVar(3)
     core.popTheme()
+end
+
+-- Main-loop tick (every tickInterval = 0.25 s): does the TLO scan so the
+-- render pass only reads the cache. Skipped while the window is closed.
+function plugin.onTick()
+    if not core then return end
+    refresh()
+    if not ctrl or not ctrl.show_cooldowns then
+        if #cache.items > 0 then
+            cache.items = {}
+            cache.gen = cache.gen + 1
+        end
+        lastRefreshAt = 0
+        return
+    end
+    M.refreshItems(false)
 end
 
 -- Popout window

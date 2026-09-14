@@ -32,6 +32,12 @@ local ctrl, ImGui, mq = nil, nil, nil
 
 local MAX_CLEAR_ATTEMPTS = 255
 local MAX_HISTORY = 50
+-- After an auto-clear sequence fails (the item cannot be inventoried), wait
+-- this long before auto-clearing anything again and never retry the same
+-- item id until something else lands on the cursor.
+local AUTO_CLEAR_BACKOFF_SEC = 5
+-- Cursor.* TLO snapshot for the window (shared by tick and draw, throttled).
+local SNAP_INTERVAL = 0.1
 
 local state = {
     confirmDestroy  = false,
@@ -40,8 +46,16 @@ local state = {
     statusMsg       = '',
     sessionHistory  = {},  -- newest first: { time, name, qty, action }
     -- In-flight /autoinventory sequence (one command per tick)
-    clearing        = nil, -- { name, qty, action, attempts }
+    clearing        = nil, -- { name, qty, action, attempts, itemId }
+    -- Auto-clear backoff after a failed sequence (see AUTO_CLEAR_BACKOFF_SEC)
+    autoClearBlockedId = nil,
+    autoClearRetryAt   = 0,
 }
+
+-- Snapshot of the cursor item for the window (7 Cursor.* reads at most every
+-- SNAP_INTERVAL instead of every frame).
+local cursorSnap = { hasItem = false, name = nil, id = 0, qty = 0, lore = false, nodrop = false }
+local lastSnapAt = 0
 
 local function refresh()
     ctrl = core.ctrl
@@ -53,6 +67,28 @@ local function cursorItem()
     local item = mq.TLO.Cursor
     if item() and (item.ID() or 0) > 0 then return item end
     return nil
+end
+
+local function refreshCursorSnap(force)
+    local now = os.clock()
+    if not force and (now - lastSnapAt) < SNAP_INTERVAL then return end
+    lastSnapAt = now
+    local item = cursorItem()
+    if item then
+        cursorSnap.hasItem = true
+        cursorSnap.name = tostring(item.Name() or 'Unknown Item')
+        cursorSnap.id = item.ID() or 0
+        cursorSnap.qty = item.Stack() or 1
+        cursorSnap.lore = item.Lore() and true or false
+        cursorSnap.nodrop = item.NoDrop() and true or false
+    else
+        cursorSnap.hasItem = false
+        cursorSnap.name = nil
+        cursorSnap.id = 0
+        cursorSnap.qty = 0
+        cursorSnap.lore = false
+        cursorSnap.nodrop = false
+    end
 end
 
 local function logSession(name, qty, action)
@@ -72,6 +108,7 @@ local function beginClear(action)
         qty      = item.Stack() or 1,
         action   = action,
         attempts = 0,
+        itemId   = item.ID() or 0,
     }
     return true
 end
@@ -96,6 +133,11 @@ local function stepClear()
     if c.attempts >= MAX_CLEAR_ATTEMPTS then
         state.clearing = nil
         state.statusMsg = 'Failed or cursor empty.'
+        -- Back off: do not hammer /autoinventory on an item that cannot be
+        -- inventoried; auto-clear resumes for a different item after the wait.
+        state.autoClearBlockedId = c.itemId
+        state.autoClearRetryAt = os.clock() + AUTO_CLEAR_BACKOFF_SEC
+        print(string.format('\ay[Triune Cursor]\ax Could not inventory [%s] after %d attempts; auto-clear paused for %ds and not retried for this item.', c.name, c.attempts, AUTO_CLEAR_BACKOFF_SEC))
         return true
     end
     c.attempts = c.attempts + 1
@@ -135,6 +177,14 @@ local function tick()
         state.pendingAction = nil
         destroyCursor()
     elseif state.autoClearOnPick then
+        if os.clock() < (state.autoClearRetryAt or 0) then return end
+        local item = cursorItem()
+        if not item then return end
+        local id = item.ID() or 0
+        if state.autoClearBlockedId then
+            if id == state.autoClearBlockedId then return end
+            state.autoClearBlockedId = nil
+        end
         if beginClear('Auto-Cleared (Auto)') then stepClear() end
     end
 end
@@ -181,17 +231,18 @@ local function drawWindow()
     ImGui.Separator()
     ImGui.Dummy(0, core.px(4))
 
-    -- Current active cursor item inspection
-    local item = cursorItem()
-    local hasItem = item ~= nil
-    local itemName = hasItem and tostring(item.Name() or 'Unknown Item') or nil
-    local itemId = hasItem and (item.ID() or 0) or 0
-    local stackQty = hasItem and (item.Stack() or 1) or 0
+    -- Current active cursor item inspection (from the throttled snapshot;
+    -- normally a no-op because onTick already refreshed it this cycle)
+    refreshCursorSnap(false)
+    local hasItem = cursorSnap.hasItem
+    local itemName = cursorSnap.name
+    local itemId = cursorSnap.id
+    local stackQty = cursorSnap.qty
 
     local flags = {}
     if hasItem then
-        if item.Lore() then table.insert(flags, 'Lore') end
-        if item.NoDrop() then table.insert(flags, 'NoDrop') end
+        if cursorSnap.lore then table.insert(flags, 'Lore') end
+        if cursorSnap.nodrop then table.insert(flags, 'NoDrop') end
     end
 
     ImGui.TextDisabled('Active Cursor Item:')
@@ -309,6 +360,9 @@ function plugin.onInit(coreApi)
     state.pendingAction = nil
     state.clearing = nil
     state.statusMsg = ''
+    state.autoClearBlockedId = nil
+    state.autoClearRetryAt = 0
+    lastSnapAt = 0
 end
 
 function plugin.onDestroy()
@@ -320,6 +374,7 @@ function plugin.onTick()
     if not core then return end
     refresh()
     tick()
+    if ctrl.show_cursor then refreshCursorSnap(false) end
 end
 
 function plugin.onDrawUI()

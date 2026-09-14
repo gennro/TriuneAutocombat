@@ -26,7 +26,7 @@
 local plugin = {
     id                 = 'chat',
     name               = 'Chat Windows',
-    version            = '1.5.0',
+    version            = '1.6.0',
     author             = 'Triune',
     description        = 'Chat window replacement: channel-filtered tabs, multiple windows, colors, timestamps, an input line and keyword filters.',
     defaultEnabled     = true,
@@ -130,6 +130,13 @@ local PRESETS = {
     triune = { 'triune', 'mq' },
 }
 
+-- Channels whose sender is another player (the name on the line is
+-- clickable: it opens that person's tab in the Tells window).
+local PLAYER_CHANNELS = {}
+for _, id in ipairs({ 'say', 'tell_in', 'tell_out', 'group', 'guild', 'raid', 'ooc', 'auction', 'shout', 'emote', 'channel' }) do
+    PLAYER_CHANNELS[id] = true
+end
+
 -- Send channels for the input line.
 local SEND_CHANNELS = {
     { id = 'say',     label = 'Say',     cmd = '/say' },
@@ -160,17 +167,17 @@ local cfg = {
     highlights = {},          -- { { text, color = 'RRGGBB', beep, flash }, ... }
     muted = {},               -- [lowercase sender] = true
     windows = {},             -- { id, title, open, opacity, tabs = { { id, name, channels, include, exclude, send, tellTarget, logToFile } } }
-    tellPopouts = false,      -- open a small window per tell conversation, like the game's tell windows
+    tellPopouts = false,      -- incoming tells open the Tells window (one window, a tab per person)
     enterFocus = true,        -- Enter (when not typing anywhere) focuses the chat input; Enter sends and hands the keys back
     recentTells = {},         -- last few people you exchanged tells with, most recent first
 }
 local RECENT_TELLS = 5
 
 local chatCommand -- defined with the commands below; the settings pages call it
-local saveConfig  -- defined with the config persistence below; the draw guard calls it
-local noteTeller, tellPopout -- defined with distribution below; ingest calls them
+local saveConfig  -- defined with the config persistence below (only the tick / destroy paths call it)
+local noteTeller, openTellTab -- defined with distribution below; ingest calls them
 local resolveTellTarget      -- defined with ingest below; the classifier's self-echo tells use it
-local uniqueId    -- defined with the window management below; tell popouts use it
+local uniqueId    -- defined with the window management below; the Tells window uses it
 
 local rt = {
     queue = {},               -- raw lines from the event callback, drained in onTick
@@ -186,7 +193,9 @@ local rt = {
     sentTells = {},           -- { to, text } for tells sent from here, matched against echoed lines
     lastTellTo = nil,         -- last recipient of a tell sent from here
     lastTellFrom = nil,       -- last player who sent a tell
-    trace = { steps = {}, n = 0, frame = 0 }, -- draw trace ring, on by default (written to disk only on error)
+    tellReq = nil,            -- player name clicked in a line: opened as a Tells tab before the next draw
+    selectReq = nil,          -- [window id] = tab id to select programmatically on the next draw
+    trace = nil,              -- draw trace ring (/tacchat trace on); off by default: trace() is a no-op
     editor = nil,             -- { kind = 'tab'|'global', winId, tabId } while the settings window is open
     tabMenuReq = nil,         -- { win, ti } set while drawing tabs, opened at window scope
     fonts = nil,              -- probed once: { list = { font objects }, err = '...' }
@@ -203,7 +212,7 @@ local rt = {
     captureFile = nil,
     capturePath = nil,
     reportPath = nil,
-    input = '',
+    input = '',               -- legacy; the input draft lives per tab in rt.tabs[key].input
     inputRefocus = 0,
     history = {},
     historyIdx = 0,
@@ -291,12 +300,14 @@ local function echo(msg)
 end
 
 -- Draw trace (/tacchat trace on): the last TRACE_MAX scope steps, dumped to
--- logs/tac_chat_trace_<Name>.txt when a draw error happens.
+-- logs/tac_chat_trace_<Name>.txt when a draw error happens. Takes a format
+-- string plus arguments so nothing is built while the trace is off.
 local TRACE_MAX = 300
-local function trace(step)
-    if not rt.trace then return end
+local function trace(fmt, ...)
     local t = rt.trace
+    if not t then return end
     t.n = t.n + 1
+    local step = (select('#', ...) > 0) and string.format(fmt, ...) or fmt
     t.steps[(t.n - 1) % TRACE_MAX + 1] = string.format('%d %s', t.frame or 0, step)
 end
 
@@ -334,18 +345,18 @@ local function guarded(where, fn, ...)
     if not ok then
         rt.stats.drawErr = string.format('%s: %s', tostring(where), tostring(err))
         rt.frameFailed = true
-        trace('ERROR ' .. rt.stats.drawErr)
+        trace('ERROR %s', rt.stats.drawErr)
         if not rt.stats.drawErrShown then
             rt.stats.drawErrShown = true
             print('\ar[Triune Chat]\ax draw error (window kept alive): ' .. rt.stats.drawErr)
             -- The diagnostics themselves must never throw out of the guard.
             local okDiag, errDiag = pcall(function()
                 traceDump(rt.stats.drawErr)
-                -- Remembered so the next start comes up in safe mode even if
-                -- the overlay dies before the next frame.
+                -- Remembered so the next start comes up in safe mode; the
+                -- tick saver writes it (no file I/O on the draw thread).
                 if not cfg.lastDrawFailed then
                     cfg.lastDrawFailed = true
-                    saveConfig()
+                    rt.dirty = true
                 end
             end)
             if not okDiag then rt.stats.diagErr = tostring(errDiag) end
@@ -487,8 +498,11 @@ local function classify(raw, ctx)
     if text:find('^%d+$') or text == 'miss' then return result('melee_num', nil, text) end
 
     -- Tells / social (checked before combat so quoted text cannot fool the verbs)
+    -- The tell sender may not contain a quote: a say / shout / group line
+    -- quoting a tell ("Bob says, 'Joe tells you, ...'") would otherwise be
+    -- classified as a tell from "Bob says, 'Joe".
     local s, msg
-    s, msg = text:match("^(.-) tells you, '(.*)$")
+    s, msg = text:match("^([^']-) tells you, '(.*)$")
     if s then
         if petish(s, msg) then return result('petchat', s, text, false, false) end
         -- With the game's tell windows on, your own tells come back as
@@ -764,6 +778,7 @@ local function sanitizeConfig(c)
         if type(h) == 'table' and type(h.text) == 'string' and h.text ~= '' then
             hl[#hl + 1] = {
                 text = h.text,
+                lower = h.text:lower(),   -- matched against the lowercased line in ingest
                 color = (type(h.color) == 'string' and h.color:match('^%x%x%x%x%x%x$')) and h.color or 'FFD700',
                 beep = (h.beep == true),
                 flash = (h.flash ~= false),
@@ -784,11 +799,12 @@ local function sanitizeConfig(c)
     end
     c.recentTells = recent
     if type(c.windows) ~= 'table' then c.windows = {} end
-    -- Tell popouts are per-session (the game's close on camp too); the next
-    -- tell recreates one.
+    -- The Tells window is per-session (the game's tell windows close on camp
+    -- too); the next tell or name click recreates it. Pre-1.6 configs had a
+    -- popout window per person (tellWith on the window): dropped the same way.
     for wi = #c.windows, 1, -1 do
         local w = c.windows[wi]
-        if type(w) == 'table' and type(w.tellWith) == 'string' and w.tellWith ~= '' then table.remove(c.windows, wi) end
+        if type(w) == 'table' and (w.tellWindow == true or (type(w.tellWith) == 'string' and w.tellWith ~= '')) then table.remove(c.windows, wi) end
     end
     if #c.windows == 0 then c.windows = defaultWindows() end
     local seenWin = {}
@@ -802,7 +818,9 @@ local function sanitizeConfig(c)
         if w.opacity ~= nil then w.opacity = math.max(0.1, math.min(1.0, tonumber(w.opacity) or c.opacity)) end
         w.fontScale = math.max(0.6, math.min(2.5, tonumber(w.fontScale) or 1.0))
         w.font = nil -- font selection removed: pushing atlas fonts from Lua crashed imgui.dll
-        w.tellWith = (type(w.tellWith) == 'string' and w.tellWith ~= '') and w.tellWith or nil
+        w.tellWith = nil
+        w.tellWindow = nil
+
         if type(w.tabs) ~= 'table' or #w.tabs == 0 then w.tabs = { newTab('all', 'All', 'all', 'say') } end
         local seenTab = {}
         for ti, t in ipairs(w.tabs) do
@@ -937,7 +955,12 @@ local function renderLine(entry, withTimestamp)
     if cfg.appendMode == 'unformatted' then
         return prefix .. entry.text
     end
-    return prefix .. '\a#' .. channelColor(entry.channel) .. (entry.display or entry.text) .. '\ax'
+    -- Built on first use: only the console renderer needs the \a# form (the
+    -- inline renderer tokenizes from raw).
+    if entry.display == nil then
+        entry.display = entry.raw and (resolveLinks(convertColors(entry.raw))) or entry.text
+    end
+    return prefix .. '\a#' .. channelColor(entry.channel) .. entry.display .. '\ax'
 end
 
 -- Opening links. MQ's link parser expects stock RoF2 links (56 bytes of link
@@ -1146,6 +1169,18 @@ local function setActiveTab(win, ti)
     if (tab.pane or 1) == 1 then win.activeTab = ti end
 end
 
+-- Makes a tab the selected one from code (a command, a name click): the
+-- ImGui tab bar owns the selection, so the tab item is drawn once with
+-- SetSelected on the next frame; setActiveTab alone would be overridden by
+-- whatever the bar still had selected.
+local function selectTab(win, ti)
+    local tab = win.tabs[ti]
+    if not tab then return end
+    setActiveTab(win, ti)
+    rt.selectReq = rt.selectReq or {}
+    rt.selectReq[win.id] = tab.id
+end
+
 local function paneTabCount(win, pane)
     local n = 0
     for _, t in ipairs(win.tabs) do if (t.pane or 1) == pane then n = n + 1 end end
@@ -1211,6 +1246,7 @@ local function tabLogWrite(win, tab, st, entry)
         if not st.logFile then return end
     end
     st.logFile:write(string.format('[%s] %s\n', entry.hms, entry.text))
+    rt.logDirty = true
 end
 
 local function closeTabLogs()
@@ -1233,45 +1269,76 @@ function noteTeller(name)
     markDirty()
 end
 
--- Finds the popout window for a tell conversation (nil when there is none).
-local function findTellWindow(name)
-    name = name:lower()
+-- The Tells window: one window with a tab per conversation, like the game's
+-- tell windows folded into one. Nil when there is none this session.
+local function findTellWindow()
     for _, w in ipairs(cfg.windows) do
-        if w.tellWith and w.tellWith:lower() == name then return w end
+        if w.tellWindow then return w end
     end
     return nil
 end
 
--- Opens (or re-opens) the small per-person window for a tell conversation,
--- the way the game's own tell windows do. Runs on the plugin tick (never
--- mid-draw), so the window list is stable while drawing.
-function tellPopout(name)
-    local win = findTellWindow(name)
-    if win then
-        if not win.open then win.open = true; markDirty() end
-        return win
+-- The conversation tab for a person in the Tells window: tab, index (nil
+-- when there is none).
+local function findTellTab(win, name)
+    name = name:lower()
+    for ti, t in ipairs(win.tabs) do
+        if t.tellWith and t.tellWith:lower() == name then return t, ti end
     end
-    local taken = {}
-    for _, w in ipairs(cfg.windows) do taken[w.id] = true end
-    local tab = newTab('tell', name, 'tells', 'tell')
-    tab.tellTarget = name
-    tab.tellWith = name
-    tab.pane = 1
-    win = {
-        id = uniqueId('tell', taken),
-        title = name,
-        open = true,
-        activeTab = 1,
-        panes = 1,
-        splitDir = 'h',
-        paneSizes = { 1 },
-        activeByPane = { 'tell' },
-        tellWith = name,
-        tabs = { tab },
-    }
-    cfg.windows[#cfg.windows + 1] = win
+    return nil
+end
+
+-- Opens (or re-opens) the Tells window and the conversation tab for `name`,
+-- creating either as needed. With `focus`, the tab is selected and its input
+-- takes the keyboard (a name click); without, an arriving tell just adds the
+-- tab and lets its unread badge show. Runs on the plugin tick or before the
+-- windows are drawn (never mid-draw), so the window list is stable while
+-- drawing. Returns the window and the tab.
+function openTellTab(name, focus)
+    local win = findTellWindow()
+    if not win then
+        win = {
+            id = 'tells',
+            title = 'Tells',
+            open = true,
+            activeTab = 1,
+            panes = 1,
+            splitDir = 'h',
+            paneSizes = { 1 },
+            activeByPane = {},
+            tellWindow = true,
+            tabs = {},
+        }
+        cfg.windows[#cfg.windows + 1] = win
+    end
+    if not win.open then win.open = true end
+    local tab, ti = findTellTab(win, name)
+    if not tab then
+        local taken = {}
+        for _, t in ipairs(win.tabs) do taken[t.id] = true end
+        tab = newTab(uniqueId('tell', taken), name, 'tells', 'tell')
+        tab.tellTarget = name
+        tab.tellWith = name
+        tab.pane = 1
+        win.tabs[#win.tabs + 1] = tab
+        ti = #win.tabs
+        if ti == 1 then setActiveTab(win, 1) end
+    end
+    if focus then
+        ctrl.show_chat = true
+        selectTab(win, ti)
+        rt.focusRequested = true
+        rt.focusKey = tabKey(win, tab)
+    end
     markDirty()
-    return win
+    return win, tab
+end
+
+-- A player name clicked in a line (or picked from its menu): the Tells tab
+-- opens before the next draw, not mid-draw.
+local function requestTell(name)
+    if type(name) ~= 'string' or name == '' then return end
+    rt.tellReq = name
 end
 
 local function distribute(entry)
@@ -1283,9 +1350,20 @@ local function distribute(entry)
                 if not st.rebuild then
                     st.last = st.last + 1
                     st.entries[st.last] = entry
+                    -- Bounded here, not only when drawn: inactive tabs, closed
+                    -- windows and hidden chat must not grow for the session.
+                    local cap = cfg.maxLines
+                    while st.last - st.first + 1 > cap do
+                        st.entries[st.first] = nil
+                        st.first = st.first + 1
+                    end
                     if cfg.renderer == 'console' then
                         st.pendingLast = st.pendingLast + 1
                         st.pending[st.pendingLast] = entry
+                        while st.pendingLast - st.pendingFirst + 1 > cap do
+                            st.pending[st.pendingFirst] = nil
+                            st.pendingFirst = st.pendingFirst + 1
+                        end
                     end
                 end
                 if not (win.open and ctrl.show_chat and isTabActive(win, ti)) then
@@ -1460,7 +1538,7 @@ local function ingest(raw)
         sender = r.sender,
         outgoing = r.outgoing,
         text = r.text,
-        display = (resolveLinks(convertColors(raw))),
+        display = nil,            -- console form, built lazily by renderLine
         raw = raw,
     }
     if r.sender and cfg.muted[r.sender:lower()] and not r.outgoing then entry.muted = true end
@@ -1468,7 +1546,7 @@ local function ingest(raw)
         local lower = r.text:lower()
         entry.lower = lower
         for _, h in ipairs(cfg.highlights) do
-            if lower:find(h.text:lower(), 1, true) then
+            if lower:find(h.lower or h.text:lower(), 1, true) then
                 entry.hl = h.color
                 if h.flash then entry.flash = true end
                 if h.beep and os.time() - rt.lastBeepAt >= 1 then
@@ -1491,27 +1569,48 @@ local function ingest(raw)
     end
     if rt.captureFile then
         rt.captureFile:write(string.format('%-12s | %s\n', r.channel, escapeLine(raw)))
+        rt.logDirty = true
     end
     if r.channel == 'tell_in' and r.sender and not entry.muted then rt.lastTellFrom = r.sender end
     if (r.channel == 'tell_in' or r.channel == 'tell_out') and r.sender and not entry.muted then
         noteTeller(r.sender)
-        if cfg.tellPopouts then tellPopout(r.sender) end
+        if cfg.tellPopouts then openTellTab(r.sender, false) end
+    end
+    -- The name of another player on a social line is clickable (opens their
+    -- Tells tab). NPC names carry spaces and pets have their own channel; my
+    -- own name is on outgoing lines, except that an outgoing tell's sender
+    -- is its recipient.
+    if r.sender and PLAYER_CHANNELS[r.channel] and r.sender ~= rt.me and not r.sender:find(' ', 1, true)
+        and (not r.outgoing or r.channel == 'tell_out') then
+        entry.player = r.sender
     end
     distribute(entry)
+
 end
 
+-- Classifies and distributes queued lines. Runs from the tick and, while the
+-- windows are shown, from the draw (see pumpEvents): it only appends to the
+-- ring and the tab queues. File flushes happen on the tick (flushLogs).
 local function drainQueue()
     local q = rt.queue
     if #q == 0 then return end
     rt.queue = {}
     local t0 = nowMs()
     for i = 1, #q do ingest(q[i]) end
-    if rt.captureFile then rt.captureFile:flush() end
+    local ms = nowMs() - t0
+    if ms > rt.stats.drainMaxMs then rt.stats.drainMaxMs = ms end
+end
+
+-- Flushes the capture and per-tab log files when something was written
+-- since the last flush. Called from onTick (about every 150-200 ms), never
+-- per frame.
+local function flushLogs()
+    if not rt.logDirty then return end
+    rt.logDirty = false
+    if rt.captureFile then pcall(function() rt.captureFile:flush() end) end
     for _, st in pairs(rt.tabs) do
         if st.logFile then pcall(function() st.logFile:flush() end) end
     end
-    local ms = nowMs() - t0
-    if ms > rt.stats.drainMaxMs then rt.stats.drainMaxMs = ms end
 end
 
 -- ----------------------------------------------------------------------------
@@ -1524,11 +1623,12 @@ local function sendText(tab, text)
     if #rt.history > 50 then table.remove(rt.history, 1) end
     rt.historyIdx = 0
     if text:sub(1, 1) == '/' then
-        local to, msg = text:match('^/te?l?l? (%S+) (.*)$')
+        local to, msg = text:match('^/t (%S+) (.*)$')
+        if not to then to, msg = text:match('^/tell (%S+) (.*)$') end
         if to then
             noteSentTell(to, msg)
         else
-            msg = text:match('^/re?p?l?y? (.*)$')
+            msg = text:match('^/r (.*)$') or text:match('^/reply (.*)$')
             if msg then noteSentTell(rt.lastTellFrom or cfg.recentTells[1], msg) end
         end
         pcall(mq.cmd, text)
@@ -1575,6 +1675,7 @@ end
 local function tokenize(entry)
     if entry.tokens then return entry.tokens end
     local tokens, links = {}, {}
+    local who = entry.player   -- set by ingest: the other player's name on this line
     local raw = stripColors(entry.raw or entry.text or '')
     local carrySpace = false
     local function addWords(text, link)
@@ -1603,24 +1704,36 @@ local function tokenize(entry)
         end
         pos = b + 1
     end
+    -- The player's name is one of the first words ("Bob tells you, ...",
+    -- "You told Bob, ..."), possibly with punctuation stuck to it.
+    if who then
+        for i = 1, math.min(4, #tokens) do
+            local tok = tokens[i]
+            if not tok.link and tok.t:match('^%a+') == who then
+                tok.name = true
+                break
+            end
+        end
+    end
     entry.tokens = tokens
     entry.links = links
     return tokens
 end
 
 -- Walks the tokens for one wrap width. `measure(text)` returns a width.
--- With `emit`, calls emit(lineIndex, runText, link, isTs, gapBefore) per
--- run (gapBefore = pixels between this run and the previous one on the same
--- line); returns the number of visual lines either way.
+-- With `emit`, calls emit(lineIndex, runText, link, isTs, gapBefore, isName)
+-- per run (gapBefore = pixels between this run and the previous one on the
+-- same line; isName marks the clickable player name); returns the number of
+-- visual lines either way.
 local function layoutEntry(entry, wrapW, spaceW, tsOn, measure, fontKey, emit)
     local tokens = tokenize(entry)
     local line, x = 1, 0
-    local runText, runLink, runIsTs, runGap = nil, nil, false, 0
+    local runText, runLink, runIsTs, runGap, runName = nil, nil, false, 0, false
     local function flush()
-        if runText and emit then emit(line, runText, runLink, runIsTs, runGap) end
-        runText, runLink, runIsTs, runGap = nil, nil, false, 0
+        if runText and emit then emit(line, runText, runLink, runIsTs, runGap, runName) end
+        runText, runLink, runIsTs, runGap, runName = nil, nil, false, 0, false
     end
-    local function place(text, w, sp, link, isTs)
+    local function place(text, w, sp, link, isTs, isName)
         local gap = (x > 0 and sp) and spaceW or 0
         if x > 0 and x + gap + w > wrapW then
             flush()
@@ -1628,24 +1741,24 @@ local function layoutEntry(entry, wrapW, spaceW, tsOn, measure, fontKey, emit)
             x = 0
             gap = 0
         end
-        if runText and runLink == link and runIsTs == isTs then
+        if runText and runLink == link and runIsTs == isTs and runName == isName then
             runText = runText .. (gap > 0 and ' ' or '') .. text
         else
             flush()
-            runText, runLink, runIsTs, runGap = text, link, isTs, gap
+            runText, runLink, runIsTs, runGap, runName = text, link, isTs, gap, isName
         end
         x = x + gap + w
     end
     if tsOn then
         local ts = '[' .. entry.hms .. ']'
-        place(ts, measure(ts), false, nil, true)
+        place(ts, measure(ts), false, nil, true, false)
     end
     for idx, tok in ipairs(tokens) do
         if tok.wk ~= fontKey then
             tok.w = measure(tok.t)
             tok.wk = fontKey
         end
-        place(tok.t, tok.w, tok.sp or (tsOn and idx == 1), tok.link, false)
+        place(tok.t, tok.w, tok.sp or (tsOn and idx == 1), tok.link, false, tok.name == true)
     end
     flush()
     return line
@@ -1658,8 +1771,61 @@ local function measureText(text)
     return #text * 7
 end
 
-local function drawRun(text, link, isTs, entry, r, g, b)
-    if link then
+-- Memoized RRGGBB -> r, g, b: the same handful of channel / highlight
+-- colours are looked up for every visible line every frame.
+local RGB_CACHE = {}
+local function rgbOf(hex)
+    local c = RGB_CACHE[hex]
+    if not c then
+        local r, g, b = hexToRgb(hex)
+        c = { r, g, b }
+        RGB_CACHE[hex] = c
+    end
+    return c[1], c[2], c[3]
+end
+
+-- Layout of one entry for one wrap width / font / timestamp key:
+-- { nlines, runs = { { line, text, link, isTs, gap }, ... } }. Cached on the
+-- entry per hkey (the last LAYOUT_KEEP keys), so panes and windows of
+-- different widths share the tokens and do not relayout each other's lines
+-- every frame; the draw walks the cached runs instead of re-running the
+-- layout with a closure per entry.
+local LAYOUT_KEEP = 3
+local function entryLayout(e, hkey, wrapW, spaceW, tsOn, fontKey)
+    local layouts = e.layouts
+    local lay = layouts and layouts[hkey]
+    if lay then return lay end
+    local runs = {}
+    local n = layoutEntry(e, wrapW, spaceW, tsOn, measureText, fontKey, function(lineIdx, text, link, isTs, gap, isName)
+        runs[#runs + 1] = { lineIdx, text, link, isTs, gap, isName }
+    end)
+    lay = { nlines = n, runs = runs }
+    if not layouts then
+        layouts = {}
+        e.layouts = layouts
+        e.layoutKeys = {}
+    end
+    local keys = e.layoutKeys
+    keys[#keys + 1] = hkey
+    if #keys > LAYOUT_KEEP then layouts[table.remove(keys, 1)] = nil end
+    layouts[hkey] = lay
+    -- Last layout used, kept for diagnostics (and the tests).
+    e.hkey, e.nlines = hkey, n
+    return lay
+end
+
+local function drawRun(text, link, isTs, entry, r, g, b, isName)
+    if isName then
+        -- The other player's name: click to open their Tells tab. Drawn in
+        -- the line's colour; the cursor and tooltip say it is clickable.
+        ImGui.TextColored(r, g, b, 1, text)
+        if ImGui.IsItemHovered and ImGui.IsItemHovered() then
+            local MC = ImGuiMouseCursor or _G.ImGuiMouseCursor
+            if MC and MC.Hand and ImGui.SetMouseCursor then pcall(ImGui.SetMouseCursor, MC.Hand) end
+            if core.setTooltip then core.setTooltip('Tell ' .. entry.player .. ' (opens their tab in the Tells window)') end
+            if ImGui.IsMouseClicked and ImGui.IsMouseClicked(0) then requestTell(entry.player) end
+        end
+    elseif link then
         local l = entry.links[link]
         local clicked = false
         if ImGui.TextLink then
@@ -1705,8 +1871,11 @@ local function drawLineContextMenuBody(win, tab)
         end
     end
     local sender = e.sender
-    if sender and not e.outgoing and sender ~= rt.me then
-        if ImGui.MenuItem('Reply to ' .. sender) then
+    -- An outgoing tell's sender is its recipient: as good a person to talk
+    -- to as one who wrote to me.
+    if sender and (not e.outgoing or e.channel == 'tell_out') and sender ~= rt.me then
+        if ImGui.MenuItem('Tell ' .. sender .. ' (Tells window)') then requestTell(sender) end
+        if ImGui.MenuItem('Reply to ' .. sender .. ' here') then
             tab.send = 'tell'
             tab.tellTarget = sender
             rt.focusRequested = true
@@ -1791,53 +1960,69 @@ local function drawInlineLogBody(win, tab, st, logH)
     local viewTop, viewBottom = scrollY - lineH, scrollY + logH + lineH
     local lineClicked = false
 
-    local y = 0
-    local skipAbove, skipBelow = 0, 0
+    -- Prefix sums of entry heights: st.cum[i] = height of entries up to i
+    -- (relative to st.cum[base]), so the first visible entry is a binary
+    -- search and the walk below is O(visible). Rebuilt when the layout key
+    -- or line height changes or the queue table is replaced (rebuild, clear,
+    -- heal, compaction); extended in place as lines arrive.
     local holes = 0
-    for i = st.first, st.last do
+    local cum = st.cum
+    if not cum or st.cumKey ~= hkey or st.cumEntries ~= st.entries or st.cumLineH ~= lineH or st.cumLast < st.first - 1 then
+        cum = { [st.first - 1] = 0 }
+        st.cum, st.cumKey, st.cumEntries, st.cumLineH, st.cumLast = cum, hkey, st.entries, lineH, st.first - 1
+    end
+    for i = st.cumLast + 1, st.last do
+        local e = st.entries[i]
+        local h = 0
+        if e then
+            h = entryLayout(e, hkey, wrapW, spaceW, tsOn, fontKey).nlines * lineH
+        else
+            holes = holes + 1
+        end
+        cum[i] = cum[i - 1] + h
+    end
+    st.cumLast = st.last
+    local base = cum[st.first - 1]
+    local total = cum[st.last] - base
+
+    -- First entry whose bottom edge reaches the top of the view.
+    local lo, hi = st.first, st.last + 1
+    while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        if cum[mid] - base < viewTop then lo = mid + 1 else hi = mid end
+    end
+    local skipAbove = cum[lo - 1] - base
+    if skipAbove > 0 then ImGui.Dummy(0, skipAbove) end
+    local i = lo
+    while i <= st.last do
+        if cum[i - 1] - base > viewBottom then break end
         local e = st.entries[i]
         if not e then
-            holes = holes + 1
-            e = false
-        end
-        if e and e.hkey ~= hkey then
-            e.nlines = layoutEntry(e, wrapW, spaceW, tsOn, measureText, fontKey, nil)
-            e.hkey = hkey
-        end
-        local h = e and (e.nlines * lineH) or 0
-        if not e then
-            -- skip the empty slot; healed after the loop
-        elseif y + h < viewTop then
-            skipAbove = skipAbove + h
-        elseif y > viewBottom then
-            skipBelow = skipBelow + h
+            holes = holes + 1   -- empty slot; healed after the loop
         else
-            if skipAbove > 0 then
-                ImGui.Dummy(0, skipAbove)
-                skipAbove = 0
-            end
-            local r, g, b = hexToRgb(e.hl or channelColor(e.channel))
+            local r, g, b = rgbOf(e.hl or channelColor(e.channel))
             ImGui.PushID(e.id)
-            local curLine, first = 1, true
-            layoutEntry(e, wrapW, spaceW, tsOn, measureText, fontKey, function(lineIdx, text, link, isTs, gap)
-                if lineIdx == curLine and not first then
-                    ImGui.SameLine(0, gap)
-                end
+            local runs = entryLayout(e, hkey, wrapW, spaceW, tsOn, fontKey).runs
+            local curLine = 1
+            for ri = 1, #runs do
+                local run = runs[ri]
+                local lineIdx = run[1]
+                if ri > 1 and lineIdx == curLine then ImGui.SameLine(0, run[5]) end
                 curLine = lineIdx
-                first = false
-                drawRun(text, link, isTs, e, r, g, b)
+                drawRun(run[2], run[3], run[4], e, r, g, b, run[6])
+
                 if ImGui.IsItemHovered and ImGui.IsItemHovered() and ImGui.IsMouseClicked and ImGui.IsMouseClicked(1) then
                     rt.ctxEntry = e
                     rt.ctxTab = tab
                     lineClicked = true
                     ImGui.OpenPopup('##tacchatLineCtx_' .. tabKey(win, tab))
                 end
-            end)
+            end
             ImGui.PopID()
         end
-        y = y + h
+        i = i + 1
     end
-    if skipAbove > 0 then ImGui.Dummy(0, skipAbove) end
+    local skipBelow = total - (cum[i - 1] - base)
     if skipBelow > 0 then ImGui.Dummy(0, skipBelow) end
     if holes > 0 then healQueue(st, 'draw') end
     if wasAtBottom then
@@ -1854,7 +2039,7 @@ end
 -- The child scope is protected: whatever fails inside the body, EndChild
 -- (and the font pop) still run, so an error cannot unbalance ImGui.
 local function drawInlineLog(win, tab, st, logH)
-    trace('BeginChild log ' .. tab.name)
+    trace('BeginChild log %s', tab.name)
     if not ImGui.BeginChild('##tacchatLog_' .. tabKey(win, tab), 0, logH, false) then
         ImGui.EndChild()
         trace('EndChild log (clipped)')
@@ -2000,7 +2185,13 @@ local function unsplit(win)
 end
 
 local function closeWindow(win)
-    if #cfg.windows <= 1 and not win.tellWith then
+    -- The last real window is hidden, never removed. The Tells window does
+    -- not count: with main + Tells, closing main must not delete its config.
+    local real = 0
+    for _, w in ipairs(cfg.windows) do
+        if not w.tellWindow then real = real + 1 end
+    end
+    if real <= 1 and not win.tellWindow then
         win.open = false
         ctrl.show_chat = false
         core.saveLoadout(true)
@@ -2015,6 +2206,17 @@ local function closeWindow(win)
         end
     end
     markDirty()
+end
+
+-- Closes a tab from its menu or a middle-click. A Tells window tab is one
+-- conversation: closing the last one closes the window (the next tell or
+-- name click brings it back).
+local function closeTab(win, ti)
+    if win.tellWindow and #win.tabs <= 1 then
+        closeWindow(win)
+        return true
+    end
+    return removeTab(win, ti)
 end
 
 local function findWindow(name)
@@ -2217,7 +2419,8 @@ local function drawHighlightsPage()
     if c then rt.hlColor = c end
     ImGui.SameLine()
     if ImGui.SmallButton('Add##hlAdd') and trim(rt.hlInput) ~= '' then
-        cfg.highlights[#cfg.highlights + 1] = { text = trim(rt.hlInput), color = rt.hlColor, beep = false, flash = true }
+        local hlText = trim(rt.hlInput)
+        cfg.highlights[#cfg.highlights + 1] = { text = hlText, lower = hlText:lower(), color = rt.hlColor, beep = false, flash = true }
         rt.hlInput = ''
         markDirty()
     end
@@ -2280,18 +2483,27 @@ local function drawGeneralPage()
         markDirty()
     end
     ImGui.SetNextItemWidth(core.px(160))
-    local ml = ImGui.SliderInt('Buffer lines##genMax', cfg.maxLines, 200, 20000)
-    if type(ml) == 'number' and ml ~= cfg.maxLines then
-        cfg.maxLines = ml
-        rt.ring.cap = ml
+    -- The slider edits a draft; the ring resize and tab rebuild only happen
+    -- once the slider is released (not on every drag frame).
+    local ml = ImGui.SliderInt('Buffer lines##genMax', rt.maxLinesDraft or cfg.maxLines, 200, 20000)
+    if type(ml) == 'number' then rt.maxLinesDraft = ml end
+    local dragging = ImGui.IsItemActive and ImGui.IsItemActive() == true
+    if not dragging and rt.maxLinesDraft and rt.maxLinesDraft ~= cfg.maxLines then
+        cfg.maxLines = rt.maxLinesDraft
+        rt.ring.cap = cfg.maxLines
         invalidateTabs()
         markDirty()
     end
+    if not dragging then rt.maxLinesDraft = nil end
     ImGui.SetNextItemWidth(core.px(160))
     local op = ImGui.SliderFloat('Default opacity##genOpacity', cfg.opacity, 0.1, 1.0, '%.2f')
     if type(op) == 'number' and math.abs(op - cfg.opacity) > 0.001 then cfg.opacity = op; markDirty() end
-    local po = ImGui.Checkbox('Pop out tells into their own windows (like the game)##genPopout', cfg.tellPopouts)
+    local po = ImGui.Checkbox('Incoming tells open the Tells window (one window, a tab per person)##genPopout', cfg.tellPopouts)
     if po ~= cfg.tellPopouts then cfg.tellPopouts = po; markDirty() end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('Like the game\'s tell windows, folded into one: each person gets a tab with only that conversation and the input set to reply.\nClicking a player name in any chat line opens their tab whether this is on or off.')
+    end
+
     local ef = ImGui.Checkbox('Enter opens the chat input; Enter sends and hands the keys back (like the game)##genEnter', cfg.enterFocus)
     if ef ~= cfg.enterFocus then cfg.enterFocus = ef; markDirty() end
     if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
@@ -2437,7 +2649,7 @@ local function drawTabMenuBody(win, tab, ti)
         if st.console then pcall(function() st.console:Clear() end) end
     end
     if ImGui.MenuItem('Jump to bottom') then tabState(win, tab).forceBottom = true end
-    if ImGui.MenuItem('Close tab', nil, false, #win.tabs > 1) then removeTab(win, ti) end
+    if ImGui.MenuItem('Close tab', nil, false, #win.tabs > 1 or win.tellWindow == true) then closeTab(win, ti) end
     ImGui.Separator()
     if ImGui.BeginMenu('Window') then
         ImGui.SetNextItemWidth(core.px(140))
@@ -2484,7 +2696,7 @@ local function drawTabMenuBody(win, tab, ti)
     end
     ImGui.Separator()
     if ImGui.MenuItem('Timestamps', nil, cfg.timestamps) then cfg.timestamps = not cfg.timestamps; invalidateTabs(); markDirty() end
-    if ImGui.MenuItem('Pop out tells into their own windows', nil, cfg.tellPopouts) then cfg.tellPopouts = not cfg.tellPopouts; markDirty() end
+    if ImGui.MenuItem('Incoming tells open the Tells window', nil, cfg.tellPopouts) then cfg.tellPopouts = not cfg.tellPopouts; markDirty() end
     if ImGui.MenuItem('Enter opens the input (like the game)', nil, cfg.enterFocus) then cfg.enterFocus = not cfg.enterFocus; markDirty() end
     if ImGui.MenuItem('Colours...') then openEditor('colors', win, tab) end
     if ImGui.MenuItem('Highlights...') then openEditor('highlights', win, tab) end
@@ -2582,17 +2794,21 @@ local function drawInput(win, tab)
         rt.focusKey = nil
         if rt.inputRefocus > 0 then rt.inputRefocus = rt.inputRefocus - 1 end
     end
+    -- The draft is per tab (st.input): typing in one window or pane must not
+    -- show up in every other input line.
+    local st = tabState(win, tab)
+    local draft = st.input or ''
     ImGui.PushItemWidth(-1)
-    local ok, text, entered = pcall(ImGui.InputText, '##tacchatInput', rt.input, flags, inputCallback)
+    local ok, text, entered = pcall(ImGui.InputText, '##tacchatInput', draft, flags, inputCallback)
     if not ok then
-        text, entered = ImGui.InputText('##tacchatInput', rt.input, (F and F.EnterReturnsTrue) or 0)
+        text, entered = ImGui.InputText('##tacchatInput', draft, (F and F.EnterReturnsTrue) or 0)
     end
     ImGui.PopItemWidth()
     if ImGui.IsItemActive and ImGui.IsItemActive() then rt.lastInputKey = key end
-    if type(text) == 'string' then rt.input = text end
+    if type(text) == 'string' then st.input = text end
     if entered == true then
-        sendText(tab, rt.input)
-        rt.input = ''
+        sendText(tab, st.input or '')
+        st.input = ''
         rt.lastInputKey = key
         -- Like the game: Enter sends and hands the keyboard back; the next
         -- Enter re-opens the input. Otherwise keep typing.
@@ -2654,7 +2870,7 @@ local function drawTabContents(win, tab, ti)
             for i = math.max(ring.first, ring.last - 300), ring.last do
                 local e = ring.items[i]
                 if e and tabAccepts(tab, e) then
-                    local r, g, b = hexToRgb(channelColor(e.channel))
+                    local r, g, b = rgbOf(channelColor(e.channel))
                     ImGui.TextColored(r, g, b, 1, (cfg.timestamps and ('[' .. e.hms .. '] ') or '') .. e.text)
                 end
             end
@@ -2696,27 +2912,37 @@ local function tabLabel(win, tab, ti)
     return string.format('%s###tacchatTab_%s', tab.name, tabKey(win, tab))
 end
 
+-- A tab item, drawn with SetSelected when code asked for this tab (selectTab):
+-- the flagged call takes (label, nil, flags); if the binding refuses it, the
+-- plain form keeps the bar working and the request is dropped.
+local function beginTabItem(label, select)
+    local TIF = ImGuiTabItemFlags or _G.ImGuiTabItemFlags
+    local flags = (select and TIF and TIF.SetSelected) or 0
+    if flags == 0 then return ImGui.BeginTabItem(label) == true end
+    local ok, a, b = pcall(ImGui.BeginTabItem, label, nil, flags)
+    if not ok then return ImGui.BeginTabItem(label) == true end
+    if type(a) ~= 'boolean' and type(b) == 'boolean' then return b end
+    return a == true
+end
+
 -- One pane: a tab bar over the tabs assigned to it.
 local function drawPaneTabs(win, pane)
-    if win.tellWith and #win.tabs == 1 and pane == 1 then
-        -- A tell popout is one conversation: no tab bar, the title says who.
-        -- Right-click in the log still opens the tab menu.
-        if not isTabActive(win, 1) then setActiveTab(win, 1) end
-        guarded('tab ' .. win.tabs[1].name, drawTabContents, win, win.tabs[1], 1)
-        return
-    end
-    trace('BeginTabBar pane ' .. pane)
+    trace('BeginTabBar pane %d', pane)
     if not ImGui.BeginTabBar('##tacchatTabs_' .. win.id .. '_' .. pane) then
         trace('BeginTabBar returned false')
         return
     end
+    local want = rt.selectReq and rt.selectReq[win.id]
+    local closeTi = nil
     for ti, tab in ipairs(win.tabs) do
         if (tab.pane or 1) == pane then
-            local selected = ImGui.BeginTabItem(tabLabel(win, tab, ti))
-            trace(string.format('BeginTabItem %s -> %s', tab.name, tostring(selected)))
-            -- Right-click on the tab (selected or not) opens its menu.
-            if ImGui.IsItemHovered and ImGui.IsItemHovered() and ImGui.IsMouseClicked and ImGui.IsMouseClicked(1) then
-                rt.tabMenuReq = { win = win, ti = ti }
+            local selected = beginTabItem(tabLabel(win, tab, ti), want == tab.id)
+            trace('BeginTabItem %s -> %s', tab.name, tostring(selected))
+            if ImGui.IsItemHovered and ImGui.IsItemHovered() and ImGui.IsMouseClicked then
+                -- Right-click on the tab (selected or not) opens its menu;
+                -- middle-click closes a conversation in the Tells window.
+                if ImGui.IsMouseClicked(1) then rt.tabMenuReq = { win = win, ti = ti } end
+                if win.tellWindow and ImGui.IsMouseClicked(2) then closeTi = ti end
             end
             if selected then
                 if not isTabActive(win, ti) then
@@ -2725,12 +2951,13 @@ local function drawPaneTabs(win, pane)
                 end
                 guarded('tab ' .. tab.name, drawTabContents, win, tab, ti)
                 ImGui.EndTabItem()
-                trace('EndTabItem ' .. tab.name)
+                trace('EndTabItem %s', tab.name)
             end
         end
     end
     ImGui.EndTabBar()
-    trace('EndTabBar pane ' .. pane)
+    trace('EndTabBar pane %d', pane)
+    if closeTi then closeTab(win, closeTi) end
 end
 
 local function mouseDelta()
@@ -2763,16 +2990,16 @@ local function drawPanes(win)
         local frac = sizes[pn] or (1 / panes)
         local size = math.max(core.px(40), math.floor(total * frac))
         local okChild
-        trace(string.format('BeginChild pane %d size %d', pn, size))
+        trace('BeginChild pane %d size %d', pn, size)
         if horizontal then
             okChild = ImGui.BeginChild('##tacchatPane_' .. win.id .. '_' .. pn, size, 0, false)
         else
             okChild = ImGui.BeginChild('##tacchatPane_' .. win.id .. '_' .. pn, 0, size, false)
         end
-        trace('  pane child -> ' .. tostring(okChild))
+        trace('  pane child -> %s', tostring(okChild))
         if okChild then guarded('pane ' .. pn, drawPaneTabs, win, pn) end
         ImGui.EndChild()
-        trace('EndChild pane ' .. pn)
+        trace('EndChild pane %d', pn)
         if pn < panes then
             if horizontal then
                 ImGui.SameLine(0, 0)
@@ -2815,8 +3042,8 @@ local function drawWindow(win, wi)
         pv(SV.FramePadding, core.px(4), core.px(2))
         pv(SV.ItemSpacing, core.px(4), core.px(2))
     end
-    if win.tellWith then
-        pcall(ImGui.SetNextWindowSize, core.px(380), core.px(200), (ImGuiCond and ImGuiCond.FirstUseEver) or 4)
+    if win.tellWindow then
+        pcall(ImGui.SetNextWindowSize, core.px(420), core.px(240), (ImGuiCond and ImGuiCond.FirstUseEver) or 4)
     else
         pcall(ImGui.SetNextWindowSize, core.px(620), core.px(380), (ImGuiCond and ImGuiCond.FirstUseEver) or 4)
     end
@@ -2826,12 +3053,13 @@ local function drawWindow(win, wi)
         flags = (ImGuiWindowFlags.NoMove or 0) + (ImGuiWindowFlags.NoResize or 0)
     end
     local title = string.format('%s###TriuneChat_%s', win.title, win.id)
-    trace('Begin window ' .. win.title)
+    trace('Begin window %s', win.title)
     local open, draw = ImGui.Begin(title, true, flags)
-    trace('  window -> ' .. tostring(draw))
+    trace('  window -> %s', tostring(draw))
     if open == false then
-        if win.tellWith then
-            -- Tell popouts go away when closed; the next tell brings one back.
+        if win.tellWindow then
+            -- The Tells window goes away when closed (every conversation with
+            -- it); the next tell or name click brings it back.
             rt.closeReq = rt.closeReq or {}
             rt.closeReq[#rt.closeReq + 1] = win
         else
@@ -2859,8 +3087,10 @@ local function drawWindow(win, wi)
             drawTabMenu(win, win.tabs[ti], ti)
         end
     end
+    -- A programmatic tab selection is a one-frame flag (drawn or not).
+    if rt.selectReq then rt.selectReq[win.id] = nil end
     local okEnd, errEnd = pcall(ImGui.End)
-    trace('End window ' .. win.title .. (okEnd and '' or (' FAILED ' .. tostring(errEnd))))
+    trace('End window %s%s', win.title, okEnd and '' or (' FAILED ' .. tostring(errEnd)))
     if pushedVars > 0 then pcall(ImGui.PopStyleVar, pushedVars) end
     core.popTheme()
     if not okEnd then
@@ -2869,7 +3099,7 @@ local function drawWindow(win, wi)
         traceDump(rt.stats.drawErr)
         if not cfg.lastDrawFailed then
             cfg.lastDrawFailed = true
-            saveConfig()
+            markDirty()   -- written by the tick saver, not from the draw thread
         end
     end
 end
@@ -2949,6 +3179,13 @@ local function drawWindows()
         print('\ay[Triune Chat]\ax switched to safe mode (one pane, default font) after a draw error; /tacchat safemode off to retry.')
     end
     rt.frameFailed = false
+    -- A name clicked in a line last frame: open that conversation now, before
+    -- the windows are walked, so the list is stable while drawing.
+    if rt.tellReq then
+        local name = rt.tellReq
+        rt.tellReq = nil
+        openTellTab(name, true)
+    end
     -- Iterate over a snapshot: menu actions may add or remove windows.
     local list = {}
     for i, w in ipairs(cfg.windows) do list[i] = w end
@@ -3017,6 +3254,13 @@ function chatCommand(sub, arg1, arg2)
     elseif sub == 'focus' then
         ctrl.show_chat = true
         rt.focusRequested = true
+    elseif sub == 'tell' then
+        local name = trim(tostring(arg1 or ''))
+        if name == '' then
+            print('\ay[Triune Chat]\ax /tacchat tell <name> opens that person\'s tab in the Tells window')
+            return
+        end
+        openTellTab(name, true)
     elseif sub == 'clear' then
         rt.ring = newRing(cfg.maxLines)
         for _, s in pairs(rt.tabs) do s.rebuild = true end
@@ -3028,7 +3272,7 @@ function chatCommand(sub, arg1, arg2)
     elseif sub == 'tab' then
         local win, ti = findTab(arg1)
         if win then
-            setActiveTab(win, ti)
+            selectTab(win, ti)
             win.open = true
             ctrl.show_chat = true
         else
@@ -3065,6 +3309,7 @@ function chatCommand(sub, arg1, arg2)
         markDirty()
         return
     elseif sub == 'reset' then
+        closeTabLogs()   -- the old tab states own open log handles
         cfg.windows = defaultWindows()
         rt.tabs = {}
         markDirty()
@@ -3122,7 +3367,8 @@ function chatCommand(sub, arg1, arg2)
         end
         return
     else
-        print('\ay[Triune Chat]\ax /tacchat [show|hide|toggle|focus|settings|clear|capture on|off|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|trace on|off|dump|safemode on|off|unsplit|reset]')
+        print('\ay[Triune Chat]\ax /tacchat [show|hide|toggle|focus|settings|clear|capture on|off|tab <name>|tell <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|trace on|off|dump|safemode on|off|unsplit|reset]')
+
         return
     end
     core.saveLoadout(true)
@@ -3196,6 +3442,7 @@ function plugin.onTick()
     rt.stats.lastTickAt = os.time()
     refreshNames(false)
     drainQueue()
+    flushLogs()
     runPendingLink()
     if rt.dirty and os.time() - rt.lastSave >= 2 then saveConfig() end
 end
@@ -3207,7 +3454,8 @@ end
 -- windows are shown it asks MQ for just this plugin's event (other events
 -- stay with the core) and drains the queue straight away: a line is on
 -- screen the frame after the client printed it. The handler only pushes
--- onto rt.queue, so nothing here can yield or block.
+-- onto rt.queue, so nothing here can yield or block. The drain here only
+-- appends to the ring / tab queues; log files are flushed on the tick.
 local function pumpEvents()
     if not rt.drawEvents or type(mq.doevents) ~= 'function' then return end
     local before = #rt.queue
@@ -3298,8 +3546,13 @@ plugin.noteTeller = noteTeller
 plugin.focusTargetKey = focusTargetKey
 plugin.pumpEvents = pumpEvents
 plugin.pollEnter = pollEnter
-plugin.tellPopout = tellPopout
+plugin.openTellTab = openTellTab
+plugin.requestTell = requestTell
 plugin.findTellWindow = findTellWindow
+plugin.findTellTab = findTellTab
+plugin.closeTab = closeTab
+plugin.selectTab = selectTab
+
 plugin.layoutEntry = layoutEntry
 plugin.runPendingLink = runPendingLink
 plugin.sanitizeConfig = sanitizeConfig

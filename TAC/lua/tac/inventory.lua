@@ -95,6 +95,33 @@ local function textWidth(str)
     return #(tostring(str or '')) * 7
 end
 
+-- Visualizer slot colors (ImU32), computed once instead of per slot per frame.
+local SLOT_COL = {
+    invBgActive   = col32(0.35, 0.55, 0.85, 0.9),
+    invBgHover    = col32(0.20, 0.40, 0.65, 0.8),
+    invBg         = col32(0.08, 0.12, 0.18, 0.85),
+    invEmptyHover = col32(0.12, 0.16, 0.22, 0.6),
+    invEmpty      = col32(0.04, 0.06, 0.09, 0.5),
+    invBdrPlace   = col32(1.0, 0.85, 0.30, 1.0),
+    invBdrHover   = col32(0.50, 0.70, 1.0, 0.9),
+    invBdr        = col32(0.25, 0.40, 0.60, 0.7),
+    invBdrEmpty   = col32(0.18, 0.22, 0.28, 0.5),
+    invNum        = col32(0.85, 0.90, 0.95, 0.9),
+    bankBgActive   = col32(0.55, 0.45, 0.15, 0.9),
+    bankBgHover    = col32(0.40, 0.30, 0.10, 0.8),
+    bankBg         = col32(0.16, 0.13, 0.07, 0.85),
+    bankEmptyHover = col32(0.12, 0.12, 0.14, 0.6),
+    bankEmpty      = col32(0.05, 0.05, 0.07, 0.5),
+    bankBdrPlace   = col32(1.0, 0.90, 0.40, 1.0),
+    bankBdrHover   = col32(0.90, 0.75, 0.30, 0.9),
+    bankBdr        = col32(0.60, 0.45, 0.20, 0.7),
+    bankBdrEmpty   = col32(0.20, 0.18, 0.15, 0.5),
+    bankNum        = col32(0.95, 0.90, 0.80, 0.9),
+    numEmpty       = col32(0.35, 0.40, 0.45, 0.5),
+    badgeBg        = col32(0, 0, 0, 0.75),
+    badgeText      = col32(1.0, 0.95, 0.5, 1.0),
+}
+
 -- ============================================================================
 -- Icon textures (EQ texture animations via 'A_DragItem' / 'eq' / TextureAnimation)
 -- ============================================================================
@@ -250,6 +277,9 @@ local state = {
     statusMsg = 'System Ready.',
     pendingAction = nil, -- Table: { type = '...', ... }
     combineAllActive = false,
+    combineMoveCount = 0,
+    combineNoProgress = 0,
+    combineLastKey = nil,
     dragSource = nil,
     itemDefs = {},
     tableCache = {
@@ -266,10 +296,20 @@ local state = {
         lastSortAsc = true,
         filtered = {},
     },
+    -- Organizer tab results (duplicate stacks / heaviest items), recomputed
+    -- only when the item data changes (dataGen) or the bank goes live/cached.
+    orgCache = { gen = -1, bankLive = nil, dups = {}, heavies = {}, canCombineAny = false },
+    dataGen = 0,          -- bumped whenever state.items / containers change
     lastScanTime = 0,
     autoScan = false,
-    autoScanInterval = 15, -- seconds
+    autoScanInterval = 15, -- seconds (slider range 5..60)
 }
+
+-- Marks the filtered table and organizer caches stale.
+local function markDirty()
+    state.tableCache.dirty = true
+    state.dataGen = (state.dataGen or 0) + 1
+end
 
 
 -- Module for pure logic functions
@@ -352,6 +392,21 @@ function invLogic.formatAugs(item)
     return table.concat(names, ', ')
 end
 
+-- Display strings the item list shows per row, computed once per item
+-- (at scan time / cache load) instead of per visible row per frame.
+function invLogic.decorateItem(it)
+    if not it then return it end
+    it.augText = invLogic.formatAugs(it)
+    it.valueText = invLogic.formatMoney(it.value or 0)
+    it.weightText = string.format('%.1f', tonumber(it.weight) or 0)
+    if it.stackable then
+        it.qtyText = string.format('%d/%d', it.count or 1, it.stackSize or 1)
+    else
+        it.qtyText = nil
+    end
+    return it
+end
+
 function invLogic.parseAugs(value)
     if type(value) == 'table' then
         return value
@@ -420,6 +475,8 @@ function invLogic.planBagAlphaSort(bag, packKind, mode)
                 fromCmd = cmd(src),
                 toCmd = cmd(dest),
                 completeSwap = destOccupied,
+                fromId = tonumber(wanted.id) or nil,
+                destId = destOccupied and tonumber(layout[dest].id) or nil,
             })
             layout[src], layout[dest] = layout[dest], layout[src]
             if not destOccupied then
@@ -529,12 +586,19 @@ function invLogic.findDuplicateStacks(items)
     return consolidations
 end
 
-function invLogic.findNextCombineMove(item)
+-- allowBank: pass false while the bank window is closed so cached BANK stacks
+-- (which cannot be clicked) are never selected. Defaults to true for callers
+-- that do not know about the bank state.
+function invLogic.findNextCombineMove(item, allowBank)
     if not item or not item.stacks or #item.stacks < 2 then return nil end
+    if allowBank == nil then allowBank = true end
     local stacks = {}
     for _, s in ipairs(item.stacks) do
-        table.insert(stacks, s)
+        if allowBank or s.location ~= 'BANK' then
+            table.insert(stacks, s)
+        end
     end
+    if #stacks < 2 then return nil end
     table.sort(stacks, function(a, b) return (a.count or 1) > (b.count or 1) end)
     local stackSize = item.stackSize or 1
     for i = 2, #stacks do
@@ -667,6 +731,7 @@ function scanner.loadBankCache()
         if data.items then
             for _, it in ipairs(data.items) do
                 it.augs = invLogic.parseAugs(it.augs)
+                invLogic.decorateItem(it)
                 if it.id and it.id > 0 and not state.itemDefs[it.id] then
                     state.itemDefs[it.id] = it
                 end
@@ -677,14 +742,31 @@ function scanner.loadBankCache()
     return nil
 end
 
-local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName, notifyPrefix)
+-- Item instances share their static definition: the returned table holds only
+-- the per-instance fields (location, slot, count, augs, display strings) and
+-- resolves everything else (stats, flags, name, icon, ...) through
+-- `__index = def`, so the ~90 definition fields are not copied per stack.
+local ITEM_INSTANCE_MT_CACHE = setmetatable({}, { __mode = 'k' })
+local function instanceMeta(def)
+    local mt = ITEM_INSTANCE_MT_CACHE[def]
+    if not mt then
+        mt = { __index = def }
+        ITEM_INSTANCE_MT_CACHE[def] = mt
+    end
+    return mt
+end
+
+-- `knownId` lets scanAll pass the id it already read for the presence check.
+local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName, notifyPrefix, knownId)
     if not itemObj then return nil end
-    local itemId = 0
-    local okId = pcall(function()
-        if not itemObj() then return end
-        itemId = tonumber(itemObj.ID()) or 0
-    end)
-    if not okId or itemId <= 0 then return nil end
+    local itemId = tonumber(knownId) or 0
+    if itemId <= 0 then
+        local okId = pcall(function()
+            if not itemObj() then return end
+            itemId = tonumber(itemObj.ID()) or 0
+        end)
+        if not okId or itemId <= 0 then return nil end
+    end
 
     local def = state.itemDefs[itemId]
     if not def then
@@ -901,32 +983,44 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         notifyCmd = ''
     end
 
+    -- Augment slots: only walked when the item can actually hold augments
+    -- (Augs() > 0 on the accessor; items with no aug slots skip the 6-slot loop).
     local augs = {}
+    local augSlots = 0
     pcall(function()
-        for i = 1, 6 do
-            local slot = itemObj.AugSlot(i)
-            if slot then
-                local n = nil
-                pcall(function()
-                    if slot.Empty and slot.Empty() then return end
-                    n = slot.Name()
-                end)
-                if (not n or n == '') and slot.Item then
-                    pcall(function()
-                        local augItem = slot.Item
-                        if augItem and augItem() then
-                            n = augItem.Name()
-                        end
-                    end)
-                end
-                if n and n ~= '' then
-                    table.insert(augs, { slot = i, name = tostring(n) })
-                end
-            end
+        local a = itemObj.Augs
+        if a then
+            local n = (type(a) == 'function' or type(a) == 'userdata') and a() or a
+            augSlots = tonumber(n) or 0
         end
     end)
+    if augSlots > 0 then
+        pcall(function()
+            for i = 1, math.min(6, augSlots) do
+                local slot = itemObj.AugSlot(i)
+                if slot then
+                    local n = nil
+                    pcall(function()
+                        if slot.Empty and slot.Empty() then return end
+                        n = slot.Name()
+                    end)
+                    if (not n or n == '') and slot.Item then
+                        pcall(function()
+                            local augItem = slot.Item
+                            if augItem and augItem() then
+                                n = augItem.Name()
+                            end
+                        end)
+                    end
+                    if n and n ~= '' then
+                        table.insert(augs, { slot = i, name = tostring(n) })
+                    end
+                end
+            end
+        end)
+    end
 
-    return {
+    local it = setmetatable({
         id = def.id,
         icon = def.icon,
         name = def.name,
@@ -938,55 +1032,26 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         displayLocation = dispLoc,
         notifyCmd = notifyCmd,
         count = stackCount,
-        stackable = def.stackable,
-        stackSize = def.stackSize,
-        container = def.container,
-        weight = def.weight,
-        value = def.value,
-        type = def.type,
-        category = def.category,
-        lore = def.lore,
-        nodrop = def.nodrop,
-        tradeskill = def.tradeskill,
-        clicky = def.clicky,
-        ac = def.ac,
-        hp = def.hp,
-        mana = def.mana,
-        damage = def.damage,
-        delay = def.delay,
-        augType = def.augType,
         augs = augs,
-        -- Extended stats
-        endurance = def.endurance,
-        norent = def.norent,
-        magic = def.magic,
-        attunable = def.attunable,
-        range = def.range,
-        str = def.str, sta = def.sta, agi = def.agi, dex = def.dex,
-        wis = def.wis, int = def.int, cha = def.cha,
-        heroicStr = def.heroicStr, heroicSta = def.heroicSta,
-        heroicAgi = def.heroicAgi, heroicDex = def.heroicDex,
-        heroicWis = def.heroicWis, heroicInt = def.heroicInt, heroicCha = def.heroicCha,
-        svMagic = def.svMagic, svFire = def.svFire, svCold = def.svCold,
-        svDisease = def.svDisease, svPoison = def.svPoison, svCorruption = def.svCorruption,
-        hpRegen = def.hpRegen, manaRegen = def.manaRegen, endRegen = def.endRegen,
-        attack = def.attack, haste = def.haste,
-        accuracy = def.accuracy, avoidance = def.avoidance,
-        combatEffects = def.combatEffects, shielding = def.shielding,
-        spellShield = def.spellShield, strikeThrough = def.strikeThrough,
-        stunResist = def.stunResist, damShield = def.damShield,
-        dotShielding = def.dotShielding, dsm = def.dsm,
-        healAmount = def.healAmount, spellDamage = def.spellDamage,
-        clairvoyance = def.clairvoyance, purity = def.purity,
-        requiredLevel = def.requiredLevel,
-        instrumentMod = def.instrumentMod, tribute = def.tribute,
-        dmgBonusType = def.dmgBonusType,
-        wornEffect = def.wornEffect,
-        focusEffect = def.focusEffect,
-    }
+    }, instanceMeta(def))
+    return invLogic.decorateItem(it)
 end
 
-function scanner.scanAll()
+-- opts.yield: true when called from the plugin fiber (onTick); the scan then
+-- yields back to the main loop (core.delay) whenever one time slice of
+-- container reads exceeds SCAN_SLICE_SEC so a big bank never stalls a tick.
+local SCAN_SLICE_SEC = 0.02
+function scanner.scanAll(opts)
+    local canYield = (type(opts) == 'table' and opts.yield == true) and plugin.hasThread and core and core.delay
+    local sliceStart = os.clock()
+    local function breathe()
+        if not canYield then return end
+        if (os.clock() - sliceStart) >= SCAN_SLICE_SEC then
+            delay(1)
+            sliceStart = os.clock()
+        end
+    end
+
     local scannedItems = {}
     local invContainers = {}
     local bankContainers = {}
@@ -1001,8 +1066,9 @@ function scanner.scanAll()
     local wornCount = 0
     for slot = 0, 22 do
         local ok, itemObj = pcall(function() return mq.TLO.Me.Inventory(slot) end)
-        if ok and itemObj and itemObj() and (itemObj.ID() or 0) > 0 then
-            local it = extractItemData(itemObj, 'WORN', slot, nil, 'Worn', nil)
+        local wornId = (ok and itemObj and itemObj() and itemObj.ID()) or 0
+        if wornId > 0 then
+            local it = extractItemData(itemObj, 'WORN', slot, nil, 'Worn', nil, wornId)
             if it then
                 table.insert(scannedItems, it)
                 wornCount = wornCount + 1
@@ -1010,11 +1076,14 @@ function scanner.scanAll()
         end
     end
 
+    breathe()
+
     -- 2. Scan Inventory Bags (pack1..pack10, slots 23..32)
     local invCount = 0
     for p = 1, 10 do
         local ok, packObj = pcall(function() return mq.TLO.Me.Inventory('pack' .. p) end)
-        if ok and packObj and packObj() and (packObj.ID() or 0) > 0 then
+        local packId = (ok and packObj and packObj() and packObj.ID()) or 0
+        if packId > 0 then
             local bagCap = 0
             pcall(function() bagCap = packObj.Container() or 0 end)
             local bagName = 'Backpack'
@@ -1027,8 +1096,9 @@ function scanner.scanAll()
 
                 for s = 1, bagCap do
                     local okSub, subItem = pcall(function() return packObj.Item(s) end)
-                    if okSub and subItem and subItem() and (subItem.ID() or 0) > 0 then
-                        local it = extractItemData(subItem, 'INVENTORY', p, s, bagName, 'pack' .. p)
+                    local subId = (okSub and subItem and subItem() and subItem.ID()) or 0
+                    if subId > 0 then
+                        local it = extractItemData(subItem, 'INVENTORY', p, s, bagName, 'pack' .. p, subId)
                         if it then
                             table.insert(scannedItems, it)
                             invCount = invCount + 1
@@ -1052,7 +1122,7 @@ function scanner.scanAll()
                 -- Loose item directly in pack slot (not a bag)
                 totalInvCapacity = totalInvCapacity + 1
                 totalInvUsed = totalInvUsed + 1
-                local it = extractItemData(packObj, 'INVENTORY', p, nil, 'Pack Slot', 'pack' .. p)
+                local it = extractItemData(packObj, 'INVENTORY', p, nil, 'Pack Slot', 'pack' .. p, packId)
                 if it then
                     table.insert(scannedItems, it)
                     invCount = invCount + 1
@@ -1075,6 +1145,7 @@ function scanner.scanAll()
                 slots = {},
             })
         end
+        breathe()
     end
 
     -- 3. Scan Bank & Shared Bank
@@ -1101,7 +1172,8 @@ function scanner.scanAll()
 
         for b = 1, maxBankSlots do
             local ok, bBag = pcall(function() return mq.TLO.Me.Bank(b) end)
-            if ok and bBag and bBag() and (bBag.ID() or 0) > 0 then
+            local bBagId = (ok and bBag and bBag() and bBag.ID()) or 0
+            if bBagId > 0 then
                 local bagCap = 0
                 pcall(function() bagCap = bBag.Container() or 0 end)
                 local bagName = 'Bank Container'
@@ -1114,8 +1186,9 @@ function scanner.scanAll()
 
                     for s = 1, bagCap do
                         local okSub, subItem = pcall(function() return bBag.Item(s) end)
-                        if okSub and subItem and subItem() and (subItem.ID() or 0) > 0 then
-                            local it = extractItemData(subItem, 'BANK', b, s, bagName, 'bank' .. b)
+                        local subId = (okSub and subItem and subItem() and subItem.ID()) or 0
+                        if subId > 0 then
+                            local it = extractItemData(subItem, 'BANK', b, s, bagName, 'bank' .. b, subId)
                             if it then
                                 table.insert(liveBankItems, it)
                                 bankItemCount = bankItemCount + 1
@@ -1138,7 +1211,7 @@ function scanner.scanAll()
                 else
                     totalBankCapacity = totalBankCapacity + 1
                     totalBankUsed = totalBankUsed + 1
-                    local it = extractItemData(bBag, 'BANK', b, nil, 'Bank Slot', 'bank' .. b)
+                    local it = extractItemData(bBag, 'BANK', b, nil, 'Bank Slot', 'bank' .. b, bBagId)
                     if it then
                         table.insert(liveBankItems, it)
                         bankItemCount = bankItemCount + 1
@@ -1152,12 +1225,14 @@ function scanner.scanAll()
                     })
                 end
             end
+            breathe()
         end
 
         -- Shared Bank
         for sb = 1, 4 do
             local ok, sbBag = pcall(function() return mq.TLO.Me.SharedBank(sb) end)
-            if ok and sbBag and sbBag() and (sbBag.ID() or 0) > 0 then
+            local sbBagId = (ok and sbBag and sbBag() and sbBag.ID()) or 0
+            if sbBagId > 0 then
                 local bagCap = 0
                 pcall(function() bagCap = sbBag.Container() or 0 end)
                 local bagName = 'Shared Bank Container'
@@ -1166,8 +1241,9 @@ function scanner.scanAll()
                 if bagCap > 0 then
                     for s = 1, bagCap do
                         local okSub, subItem = pcall(function() return sbBag.Item(s) end)
-                        if okSub and subItem and subItem() and (subItem.ID() or 0) > 0 then
-                            local it = extractItemData(subItem, 'SHAREDBANK', sb, s, bagName, 'sharedbank' .. sb)
+                        local subId = (okSub and subItem and subItem() and subItem.ID()) or 0
+                        if subId > 0 then
+                            local it = extractItemData(subItem, 'SHAREDBANK', sb, s, bagName, 'sharedbank' .. sb, subId)
                             if it then
                                 table.insert(liveBankItems, it)
                                 bankItemCount = bankItemCount + 1
@@ -1175,13 +1251,14 @@ function scanner.scanAll()
                         end
                     end
                 else
-                    local it = extractItemData(sbBag, 'SHAREDBANK', sb, nil, 'Shared Bank Slot', 'sharedbank' .. sb)
+                    local it = extractItemData(sbBag, 'SHAREDBANK', sb, nil, 'Shared Bank Slot', 'sharedbank' .. sb, sbBagId)
                     if it then
                         table.insert(liveBankItems, it)
                         bankItemCount = bankItemCount + 1
                     end
                 end
             end
+            breathe()
         end
 
         -- Persist live bank scan
@@ -1224,8 +1301,9 @@ function scanner.scanAll()
     -- 4. Scan Cursor
     local cursorCount = 0
     local okCur, curItem = pcall(function() return mq.TLO.Cursor end)
-    if okCur and curItem and curItem() and (curItem.ID() or 0) > 0 then
-        local it = extractItemData(curItem, 'CURSOR', 0, nil, 'Cursor', nil)
+    local curId = (okCur and curItem and curItem() and curItem.ID()) or 0
+    if curId > 0 then
+        local it = extractItemData(curItem, 'CURSOR', 0, nil, 'Cursor', nil, curId)
         if it then
             table.insert(scannedItems, it)
             cursorCount = cursorCount + 1
@@ -1265,7 +1343,7 @@ function scanner.scanAll()
     state.counts.invPlat = myPlat
     state.counts.bankPlat = bPlat
     state.lastScanTime = os.time()
-    state.tableCache.dirty = true
+    markDirty()
 end
 
 -- UI Drawing Helpers
@@ -1389,7 +1467,7 @@ function UI.drawHeader()
 
     ImGui.SameLine(0, core.px(16))
     if ImGui.Button("Refresh Scan##hdrScanBtn", core.px(100), core.px(22)) then
-        scanner.scanAll()
+        state.pendingAction = { type = 'rescan' }
     end
 
     ImGui.Separator()
@@ -1594,6 +1672,42 @@ function UI.drawTooltip(it)
     ImGui.EndTooltip()
 end
 
+-- Items table columns (index -> sort field on the item) for the sortable header.
+local SORT_COLUMNS = { [0] = 'Location', [1] = 'Name', [2] = 'Augs', [3] = 'Qty', [4] = 'Wt', [5] = 'Value' }
+local SORT_KEYS = { Location = 'displayLocation', Name = 'name', Augs = 'augText', Qty = 'count', Wt = 'weight', Value = 'value' }
+local SORT_NUMERIC = { count = true, weight = true, value = true }
+
+-- Reads the table's sort specs (when the binding exposes them) into
+-- state.sortCol / state.sortAsc. Tolerates the two shapes MQ's ImGui Lua
+-- binding has used (Specs[i] table indexing or Specs(i) call).
+local function applyTableSortSpecs()
+    pcall(function()
+        if not ImGui.TableGetSortSpecs then return end
+        local specs = ImGui.TableGetSortSpecs()
+        if not specs or not specs.SpecsDirty then return end
+        local spec = nil
+        local okIdx, v = pcall(function() return specs.Specs[1] end)
+        if okIdx and v then
+            spec = v
+        else
+            local okCall, v2 = pcall(function() return specs:Specs(1) end)
+            if okCall and v2 then spec = v2 end
+        end
+        if spec then
+            local colIdx = tonumber(spec.ColumnIndex)
+            local dir = spec.SortDirection
+            local col = colIdx and SORT_COLUMNS[colIdx]
+            if col then
+                state.sortCol = col
+                local sortEnum = rawget(_G, 'ImGuiSortDirection')
+                local descVal = (sortEnum and sortEnum.Descending) or 2
+                state.sortAsc = (dir ~= descVal)
+            end
+        end
+        specs.SpecsDirty = false
+    end)
+end
+
 function UI.drawItemsTable()
     local tc = state.tableCache
     local isDirty = tc.dirty
@@ -1623,13 +1737,25 @@ function UI.drawItemsTable()
             end
         end
 
-        local colKey = string.lower(state.sortCol)
+        local colKey = SORT_KEYS[state.sortCol] or string.lower(state.sortCol)
+        local numeric = SORT_NUMERIC[colKey] == true
+        local asc = state.sortAsc
         table.sort(filt, function(a, b)
-            local valA = a[colKey] or a.name or ''
-            local valB = b[colKey] or b.name or ''
-            if type(valA) == 'string' then valA = string.lower(valA) end
-            if type(valB) == 'string' then valB = string.lower(valB) end
-            if state.sortAsc then
+            local valA, valB
+            if numeric then
+                valA = tonumber(a[colKey]) or 0
+                valB = tonumber(b[colKey]) or 0
+            else
+                valA = string.lower(tostring(a[colKey] or a.name or ''))
+                valB = string.lower(tostring(b[colKey] or b.name or ''))
+            end
+            if valA == valB then
+                -- Stable tie-break so equal keys keep a deterministic order
+                local na, nb = string.lower(a.name or ''), string.lower(b.name or '')
+                if na ~= nb then return na < nb end
+                return (a.notifyCmd or '') < (b.notifyCmd or '')
+            end
+            if asc then
                 return valA < valB
             else
                 return valA > valB
@@ -1665,6 +1791,7 @@ function UI.drawItemsTable()
         ImGui.TableSetupColumn("Value##colVal", ImGuiTableColumnFlags.WidthFixed, core.px(75))
         ImGui.TableSetupColumn("Actions##colAct", ImGuiTableColumnFlags.WidthFixed, core.px(140))
         ImGui.TableHeadersRow()
+        applyTableSortSpecs()
 
         local clipper = nil
         local ClipperClass = ImGui.ListClipper or (mq.imgui and mq.imgui.ListClipper) or _G['ImGuiListClipper']
@@ -1675,6 +1802,7 @@ function UI.drawItemsTable()
 
         local function drawRow(idx, it)
             ImGui.TableNextRow()
+            ImGui.PushID(idx)
 
             -- Col 0: Location
             ImGui.TableSetColumnIndex(0)
@@ -1693,9 +1821,9 @@ function UI.drawItemsTable()
                 if ImGui.IsItemClicked(1) then openDatabaseCard(it) end
             end
 
-            -- Col 2: Augs
+            -- Col 2: Augs (precomputed per item)
             ImGui.TableSetColumnIndex(2)
-            local augText = invLogic.formatAugs(it)
+            local augText = it.augText or invLogic.formatAugs(it)
             if augText ~= '' then
                 ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], augText)
             else
@@ -1705,38 +1833,39 @@ function UI.drawItemsTable()
             -- Col 3: Qty
             ImGui.TableSetColumnIndex(3)
             if it.stackable then
-                ImGui.Text(string.format("%d/%d", it.count or 1, it.stackSize or 1))
+                ImGui.Text(it.qtyText or string.format("%d/%d", it.count or 1, it.stackSize or 1))
             else
                 ImGui.TextDisabled("1")
             end
 
             -- Col 4: Weight
             ImGui.TableSetColumnIndex(4)
-            ImGui.Text(string.format("%.1f", it.weight or 0))
+            ImGui.Text(it.weightText or string.format("%.1f", it.weight or 0))
 
             -- Col 5: Value
             ImGui.TableSetColumnIndex(5)
-            ImGui.TextDisabled(invLogic.formatMoney(it.value or 0))
+            ImGui.TextDisabled(it.valueText or invLogic.formatMoney(it.value or 0))
 
-            -- Col 6: Actions
+            -- Col 6: Actions (PushID(idx) above keeps the labels unique)
             ImGui.TableSetColumnIndex(6)
-            if ImGui.SmallButton("Inspect##ins" .. idx) then
+            if ImGui.SmallButton("Inspect") then
                 state.pendingAction = { type = 'inspect', item = it }
             end
             ImGui.SameLine()
             if it.location == 'INVENTORY' and it.subSlot then
-                if ImGui.SmallButton("Open##opn" .. idx) then
+                if ImGui.SmallButton("Open") then
                     state.pendingAction = { type = 'open_bag', slot = it.slotIndex }
                 end
                 ImGui.SameLine()
-                if ImGui.SmallButton("Pick##pck" .. idx) then
+                if ImGui.SmallButton("Pick") then
                     state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                 end
             elseif it.location == 'BANK' and state.bankLive and it.subSlot then
-                if ImGui.SmallButton("Pick##pckB" .. idx) then
+                if ImGui.SmallButton("Pick") then
                     state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                 end
             end
+            ImGui.PopID()
         end
 
         if clipper then
@@ -1766,7 +1895,7 @@ local function optimisticTakeSlot(bag, s)
     if not it then return nil end
     bag.slots[s] = nil
     bag.used = math.max(0, (bag.used or 1) - 1)
-    state.tableCache.dirty = true
+    markDirty()
     return it
 end
 
@@ -1802,7 +1931,7 @@ local function optimisticSwapToSlot(destBag, destSlot, destItem, destCmd)
     else
         src.location = 'INVENTORY'
     end
-    state.tableCache.dirty = true
+    markDirty()
 end
 
 function UI.drawVisualizer()
@@ -1880,9 +2009,18 @@ function UI.drawVisualizer()
             -- Slot grid (up to 10 columns)
             local cols = math.min(bag.capacity, 10)
             if cols > 0 then
+                local btnIds = bag.btnIds
+                if not btnIds then
+                    btnIds = {}
+                    bag.btnIds = btnIds
+                end
                 for s = 1, bag.capacity do
                     local it = bag.slots and bag.slots[s]
-                    local btnId = string.format("##b%ds%d", bag.slot, s)
+                    local btnId = btnIds[s]
+                    if not btnId then
+                        btnId = string.format("##b%ds%d", bag.slot, s)
+                        btnIds[s] = btnId
+                    end
                     local startX, startY = ImGui.GetCursorScreenPos()
 
                     local clicked = ImGui.InvisibleButton(btnId, core.px(34), core.px(34))
@@ -1895,21 +2033,21 @@ function UI.drawVisualizer()
                     -- Slot background
                     local bgCol
                     if it then
-                        bgCol = active and col32(0.35, 0.55, 0.85, 0.9)
-                             or (hovered and col32(0.20, 0.40, 0.65, 0.8)
-                             or col32(0.08, 0.12, 0.18, 0.85))
+                        bgCol = active and SLOT_COL.invBgActive
+                             or (hovered and SLOT_COL.invBgHover
+                             or SLOT_COL.invBg)
                     else
-                        bgCol = hovered and col32(0.12, 0.16, 0.22, 0.6)
-                             or col32(0.04, 0.06, 0.09, 0.5)
+                        bgCol = hovered and SLOT_COL.invEmptyHover
+                             or SLOT_COL.invEmpty
                     end
                     dl:AddRectFilled(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bgCol, 3)
 
                     -- Slot border
                     local bdrCol
                     if hovered then
-                        bdrCol = cursorHasItem and col32(1.0, 0.85, 0.30, 1.0) or col32(0.50, 0.70, 1.0, 0.9)
+                        bdrCol = cursorHasItem and SLOT_COL.invBdrPlace or SLOT_COL.invBdrHover
                     else
-                        bdrCol = it and col32(0.25, 0.40, 0.60, 0.7) or col32(0.18, 0.22, 0.28, 0.5)
+                        bdrCol = it and SLOT_COL.invBdr or SLOT_COL.invBdrEmpty
                     end
                     dl:AddRect(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bdrCol, 3)
 
@@ -1922,7 +2060,7 @@ function UI.drawVisualizer()
                     if not iconDrawn then
                         local sStr = tostring(s)
                         local sw = textWidth(sStr)
-                        local numCol = it and col32(0.85, 0.90, 0.95, 0.9) or col32(0.35, 0.40, 0.45, 0.5)
+                        local numCol = it and SLOT_COL.invNum or SLOT_COL.numEmpty
                         dl:AddText(ImVec2(startX + math.max(0, (34 - sw) / 2), startY + 10), numCol, sStr)
                     end
 
@@ -1930,8 +2068,8 @@ function UI.drawVisualizer()
                     if it and it.stackable and it.count and it.count > 1 then
                         local cStr = tostring(it.count)
                         local cw = textWidth(cStr)
-                        dl:AddRectFilled(ImVec2(startX + 34 - cw - 4, startY + 34 - 12), ImVec2(startX + 34 - 1, startY + 34 - 1), col32(0, 0, 0, 0.75), 2)
-                        dl:AddText(ImVec2(startX + 34 - cw - 2, startY + 34 - 13), col32(1.0, 0.95, 0.5, 1.0), cStr)
+                        dl:AddRectFilled(ImVec2(startX + 34 - cw - 4, startY + 34 - 12), ImVec2(startX + 34 - 1, startY + 34 - 1), SLOT_COL.badgeBg, 2)
+                        dl:AddText(ImVec2(startX + 34 - cw - 2, startY + 34 - 13), SLOT_COL.badgeText, cStr)
                     end
 
                     -- Tooltip
@@ -1965,7 +2103,8 @@ function UI.drawVisualizer()
                             local toCmd = it and it.notifyCmd or string.format('in pack%d %d', bag.slot, s)
                             if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
                                 optimisticSwapToSlot(bag, s, it, toCmd)
-                                state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd }
+                                state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd,
+                                    fromId = state.dragSource and state.dragSource.id or nil }
                             end
                             state.dragSource = nil
                         end
@@ -2041,9 +2180,18 @@ function UI.drawVisualizer()
 
                 local cols = math.min(bag.capacity, 10)
                 if cols > 0 then
+                    local btnIds = bag.btnIds
+                    if not btnIds then
+                        btnIds = {}
+                        bag.btnIds = btnIds
+                    end
                     for s = 1, bag.capacity do
                         local it = bag.slots and bag.slots[s]
-                        local btnId = string.format("##bk%ds%d", bag.slot, s)
+                        local btnId = btnIds[s]
+                        if not btnId then
+                            btnId = string.format("##bk%ds%d", bag.slot, s)
+                            btnIds[s] = btnId
+                        end
                         local startX, startY = ImGui.GetCursorScreenPos()
 
                         local clicked = ImGui.InvisibleButton(btnId, core.px(34), core.px(34))
@@ -2056,21 +2204,21 @@ function UI.drawVisualizer()
                         -- Slot background
                         local bgCol
                         if it then
-                            bgCol = active and col32(0.55, 0.45, 0.15, 0.9)
-                                 or (hovered and col32(0.40, 0.30, 0.10, 0.8)
-                                 or col32(0.16, 0.13, 0.07, 0.85))
+                            bgCol = active and SLOT_COL.bankBgActive
+                                 or (hovered and SLOT_COL.bankBgHover
+                                 or SLOT_COL.bankBg)
                         else
-                            bgCol = hovered and col32(0.12, 0.12, 0.14, 0.6)
-                                 or col32(0.05, 0.05, 0.07, 0.5)
+                            bgCol = hovered and SLOT_COL.bankEmptyHover
+                                 or SLOT_COL.bankEmpty
                         end
                         dl:AddRectFilled(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bgCol, 3)
 
                         -- Slot border
                         local bdrCol
                         if hovered then
-                            bdrCol = (cursorHasItem and state.bankLive) and col32(1.0, 0.90, 0.40, 1.0) or col32(0.90, 0.75, 0.30, 0.9)
+                            bdrCol = (cursorHasItem and state.bankLive) and SLOT_COL.bankBdrPlace or SLOT_COL.bankBdrHover
                         else
-                            bdrCol = it and col32(0.60, 0.45, 0.20, 0.7) or col32(0.20, 0.18, 0.15, 0.5)
+                            bdrCol = it and SLOT_COL.bankBdr or SLOT_COL.bankBdrEmpty
                         end
                         dl:AddRect(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bdrCol, 3)
 
@@ -2083,7 +2231,7 @@ function UI.drawVisualizer()
                         if not iconDrawn then
                             local sStr = tostring(s)
                             local sw = textWidth(sStr)
-                            local numCol = it and col32(0.95, 0.90, 0.80, 0.9) or col32(0.35, 0.40, 0.45, 0.5)
+                            local numCol = it and SLOT_COL.bankNum or SLOT_COL.numEmpty
                             dl:AddText(ImVec2(startX + math.max(0, (34 - sw) / 2), startY + 10), numCol, sStr)
                         end
 
@@ -2091,8 +2239,8 @@ function UI.drawVisualizer()
                         if it and it.stackable and it.count and it.count > 1 then
                             local cStr = tostring(it.count)
                             local cw = textWidth(cStr)
-                            dl:AddRectFilled(ImVec2(startX + 34 - cw - 4, startY + 34 - 12), ImVec2(startX + 34 - 1, startY + 34 - 1), col32(0, 0, 0, 0.75), 2)
-                            dl:AddText(ImVec2(startX + 34 - cw - 2, startY + 34 - 13), col32(1.0, 0.95, 0.5, 1.0), cStr)
+                            dl:AddRectFilled(ImVec2(startX + 34 - cw - 4, startY + 34 - 12), ImVec2(startX + 34 - 1, startY + 34 - 1), SLOT_COL.badgeBg, 2)
+                            dl:AddText(ImVec2(startX + 34 - cw - 2, startY + 34 - 13), SLOT_COL.badgeText, cStr)
                         end
 
                         -- Tooltip
@@ -2131,7 +2279,8 @@ function UI.drawVisualizer()
                                     local toCmd = it and it.notifyCmd or string.format('in bank%d %d', bag.slot, s)
                                     if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
                                         optimisticSwapToSlot(bag, s, it, toCmd)
-                                        state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd }
+                                        state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd,
+                                            fromId = state.dragSource and state.dragSource.id or nil }
                                     end
                                     state.dragSource = nil
                                 end
@@ -2194,16 +2343,38 @@ function UI.drawOrganizer()
     if ImGui.Button("Auto-Inventory Cursor##orgAutoInv", core.px(160), core.px(24)) then
         state.pendingAction = { type = 'autoinv' }
     end
-    local dups = invLogic.findDuplicateStacks(state.items)
+    -- Duplicate stacks / heaviest items are recomputed only when the item
+    -- data changed (dataGen) or the bank flipped between live and cached.
+    local oc = state.orgCache
+    if oc.gen ~= state.dataGen or oc.bankLive ~= state.bankLive then
+        oc.gen = state.dataGen
+        oc.bankLive = state.bankLive
+        oc.dups = invLogic.findDuplicateStacks(state.items)
+        oc.heavies = invLogic.findHeaviestItems(state.items, 10)
+        -- Only enable when at least one duplicate can actually be moved right now
+        -- (bank stacks are unmovable while the bank window is closed).
+        oc.canCombineAny = false
+        for _, d in ipairs(oc.dups) do
+            if invLogic.findNextCombineMove(d, state.bankLive) then
+                oc.canCombineAny = true
+                break
+            end
+        end
+    end
+    local dups = oc.dups
+    local canCombineAny = oc.canCombineAny
     ImGui.SameLine()
-    if #dups == 0 then ImGui.BeginDisabled() end
+    if not canCombineAny then ImGui.BeginDisabled() end
     if ImGui.Button("Combine All Stacks##orgCombineAll", core.px(160), core.px(24)) then
-        if #dups > 0 then
+        if canCombineAny then
             state.combineAllActive = true
+            state.combineMoveCount = 0
+            state.combineNoProgress = 0
+            state.combineLastKey = nil
             state.pendingAction = { type = 'combine_stacks' }
         end
     end
-    if #dups == 0 then ImGui.EndDisabled() end
+    if not canCombineAny then ImGui.EndDisabled() end
 
     ImGui.Dummy(0, core.px(10))
 
@@ -2237,6 +2408,9 @@ function UI.drawOrganizer()
                 if (d.numStacks or #d.stacks) > 1 then
                     if ImGui.SmallButton("Combine##" .. tostring(d.id or d.name)) then
                         state.combineAllActive = false
+                        state.combineMoveCount = 0
+                        state.combineNoProgress = 0
+                        state.combineLastKey = nil
                         state.pendingAction = { type = 'combine_stacks', item = d }
                     end
                 else
@@ -2254,7 +2428,7 @@ function UI.drawOrganizer()
     ImGui.TextDisabled("Items below contribute the most weight to your character. Useful for Monks or managing encumbrance.")
     ImGui.Dummy(0, core.px(2))
 
-    local heavies = invLogic.findHeaviestItems(state.items, 10)
+    local heavies = oc.heavies
     if #heavies == 0 then
         ImGui.TextDisabled("No items found in bags.")
     else
@@ -2292,15 +2466,11 @@ function UI.drawSettings()
 
     ImGui.Dummy(0, core.px(4))
     if ImGui.Button("Force Full Scan Now##forceScan", core.px(160), core.px(26)) then
-        scanner.scanAll()
-        state.statusMsg = "Full scan completed."
+        state.pendingAction = { type = 'rescan', statusMsg = "Full scan completed." }
     end
     ImGui.SameLine()
     if ImGui.Button("Clear Offline Bank Cache##clearBank", core.px(180), core.px(26)) then
-        local p = getBankCachePath()
-        pcall(os.remove, p)
-        scanner.scanAll()
-        state.statusMsg = "Bank cache removed."
+        state.pendingAction = { type = 'clear_bank_cache' }
     end
 
     ImGui.Dummy(0, core.px(10))
@@ -2310,7 +2480,7 @@ function UI.drawSettings()
     state.autoScan = ImGui.Checkbox("Enable Background Auto-Scan##autoScan", state.autoScan)
     if state.autoScan then
         ImGui.PushItemWidth(180)
-        local newInterval, intChanged = ImGui.SliderInt("Scan Interval (sec)##scanInt", tonumber(state.autoScanInterval) or 3, 1, 10)
+        local newInterval, intChanged = ImGui.SliderInt("Scan Interval (sec)##scanInt", tonumber(state.autoScanInterval) or 15, 5, 60)
         if intChanged and type(newInterval) == 'number' then
             state.autoScanInterval = newInterval
         end
@@ -2397,7 +2567,11 @@ local function acceptQuantityWnd()
     end)
     delay(20)
     if quantityWndOpen() then
-        pcall(function() mq.cmd('/yes') end)
+        -- Retry the Accept button once; never send a blind /yes (it would
+        -- answer whatever unrelated confirmation happens to be open).
+        pcall(function()
+            mq.cmd('/notify QuantityWnd QTYW_Accept_Button leftmouseup')
+        end)
         delay(20)
     end
 end
@@ -2410,6 +2584,29 @@ local function notifyLeft(cmd)
     acceptQuantityWnd()
 end
 
+-- After a pickup click, confirm the cursor holds the expected item id before
+-- the next click in a chain. Returns true when the cursor matches (or when no
+-- expected id is known and the cursor holds something). On mismatch, drops
+-- whatever is on the cursor back into inventory and returns false so the
+-- caller aborts the chain.
+local function cursorMatches(expectedId)
+    expectedId = tonumber(expectedId)
+    local curId = 0
+    pcall(function()
+        if mq.TLO.Cursor() then curId = tonumber(mq.TLO.Cursor.ID()) or 0 end
+    end)
+    if not expectedId or expectedId <= 0 then
+        return curId > 0
+    end
+    if curId == expectedId then return true end
+    if curId > 0 then
+        pcall(function() mq.cmd('/autoinventory') end)
+        delay(100)
+    end
+    state.statusMsg = string.format('Aborted move: cursor held item %d, expected %d', curId, expectedId)
+    return false
+end
+
 -- ============================================================================
 -- Fiber body: one pass of the old main loop (queued action + background scan)
 -- ============================================================================
@@ -2420,7 +2617,15 @@ local function tick()
         state.pendingAction = nil
         local actType = tostring(act.type or '')
 
-        if actType == 'inspect' and act.item then
+        if actType == 'rescan' then
+            if act.statusMsg then state.statusMsg = act.statusMsg end
+        elseif actType == 'clear_bank_cache' then
+            local p = getBankCachePath()
+            pcall(os.remove, p)
+            inMemoryBankCache = nil
+            lastSavedBankCount = -1
+            state.statusMsg = "Bank cache removed."
+        elseif actType == 'inspect' and act.item then
             local it = act.item
             local cmd = it.notifyCmd
             if (it.location == 'INVENTORY' or it.location == 'WORN' or it.location == 'BANK') and cmd and cmd ~= '' then
@@ -2448,7 +2653,9 @@ local function tick()
         elseif actType == 'move' and act.fromCmd and act.toCmd then
             notifyLeft(act.fromCmd)
             delay(40)
-            notifyLeft(act.toCmd)
+            if cursorMatches(act.fromId) then
+                notifyLeft(act.toCmd)
+            end
         elseif actType == 'autoinv' then
             pcall(function()
                 mq.cmd('/autoinventory')
@@ -2469,10 +2676,11 @@ local function tick()
                 item = dups[1]
             end
 
-            local move = invLogic.findNextCombineMove(item)
+            local allowBank = state.bankLive == true
+            local move = invLogic.findNextCombineMove(item, allowBank)
             if not move and state.combineAllActive then
                 for _, d in ipairs(dups) do
-                    move = invLogic.findNextCombineMove(d)
+                    move = invLogic.findNextCombineMove(d, allowBank)
                     if move then
                         item = d
                         break
@@ -2480,11 +2688,33 @@ local function tick()
                 end
             end
 
+            -- Attempt cap: stop after 50 moves, or 3 consecutive cycles that
+            -- keep producing the same move (nothing is actually merging).
+            local MAX_COMBINE_MOVES, MAX_NO_PROGRESS = 50, 3
             if move then
+                local key = tostring(move.fromCmd) .. '>' .. tostring(move.toCmd)
+                if key == state.combineLastKey then
+                    state.combineNoProgress = (state.combineNoProgress or 0) + 1
+                else
+                    state.combineNoProgress = 0
+                end
+                state.combineLastKey = key
+                state.combineMoveCount = (state.combineMoveCount or 0) + 1
+                if state.combineMoveCount > MAX_COMBINE_MOVES or state.combineNoProgress >= MAX_NO_PROGRESS then
+                    state.statusMsg = 'Combine stopped: no progress or move limit reached'
+                    move = nil
+                end
+            end
+
+            if move then
+                local expectedId = (move.from and move.from.id) or (item and item.id) or nil
                 notifyLeft(move.fromCmd)
                 delay(80)
-                notifyLeft(move.toCmd)
-                delay(80)
+                local proceed = cursorMatches(expectedId)
+                if proceed then
+                    notifyLeft(move.toCmd)
+                    delay(80)
+                end
                 local hasCursor = false
                 pcall(function()
                     hasCursor = mq.TLO.Cursor() and (mq.TLO.Cursor.ID() or 0) > 0
@@ -2493,7 +2723,9 @@ local function tick()
                     pcall(function() mq.cmd('/autoinventory') end)
                     delay(100)
                 end
-                if state.combineAllActive then
+                if not proceed then
+                    state.combineAllActive = false
+                elseif state.combineAllActive then
                     state.pendingAction = { type = 'combine_stacks' }
                 else
                     state.pendingAction = { type = 'combine_stacks', item = item }
@@ -2506,12 +2738,23 @@ local function tick()
             local idx = tonumber(act.index) or 1
             local step = moves[idx]
             if step and step.fromCmd and step.toCmd then
+                local aborted = false
                 notifyLeft(step.fromCmd)
                 delay(80)
-                notifyLeft(step.toCmd)
-                if step.completeSwap then
-                    delay(80)
-                    notifyLeft(step.fromCmd)
+                if cursorMatches(step.fromId) then
+                    notifyLeft(step.toCmd)
+                    if step.completeSwap then
+                        delay(80)
+                        -- After swapping onto an occupied slot the cursor should now
+                        -- hold the displaced item; only place it back if it does.
+                        if cursorMatches(step.destId) then
+                            notifyLeft(step.fromCmd)
+                        else
+                            aborted = true
+                        end
+                    end
+                else
+                    aborted = true
                 end
                 delay(80)
                 local hasCursor = false
@@ -2522,25 +2765,25 @@ local function tick()
                     pcall(function() mq.cmd('/autoinventory') end)
                     delay(100)
                 end
-                if idx < #moves then
+                if not aborted and idx < #moves then
                     state.pendingAction = { type = 'sort_bag', moves = moves, index = idx + 1 }
                 end
             end
         end
         if actType == 'pickup' or actType == 'move' then
             delay(20)
-        else
+        elseif actType ~= 'rescan' and actType ~= 'clear_bank_cache' then
             delay(100)
         end
-        scanner.scanAll()
+        scanner.scanAll({ yield = true })
     end
 
     -- Periodic background scan
     if state.autoScan then
         local now = os.time()
-        local interval = tonumber(state.autoScanInterval) or 3
+        local interval = tonumber(state.autoScanInterval) or 15
         if (now - (tonumber(state.lastScanTime) or 0)) >= interval then
-            scanner.scanAll()
+            scanner.scanAll({ yield = true })
         end
     end
 end
@@ -2568,7 +2811,7 @@ function plugin.onTick()
     -- First scan happens lazily when the window is opened (the standalone
     -- script scanned at launch); background auto-scan keeps it fresh after.
     if ctrl.show_inv and (tonumber(state.lastScanTime) or 0) == 0 then
-        scanner.scanAll()
+        scanner.scanAll({ yield = true })
     end
     tick()
 end
@@ -2589,7 +2832,7 @@ function plugin.onDrawSettings()
         core.saveLoadout(true)
     end
     if ImGui.Button('Rescan Now##invRescan', core.px(120), core.px(22)) then
-        scanner.scanAll()
+        state.pendingAction = { type = 'rescan' }
     end
     ImGui.SameLine()
     ImGui.TextDisabled(string.format('%d items | Bank: %s | %s', state.counts.total or 0,
