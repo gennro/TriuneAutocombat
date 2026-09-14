@@ -15010,8 +15010,18 @@ end)()
 
     -- 4. Config sanitize
     local c = plugin.sanitizeConfig(nil)
-    assert_true(#c.windows == 1 and #c.windows[1].tabs == 6 and c.windows[1].tabs[1].channels == nil, 'Suite 102: default layout: one window, six tabs, All tab unfiltered')
+    assert_true(#c.windows == 1 and #c.windows[1].tabs == 7 and c.windows[1].tabs[1].channels == nil, 'Suite 102: default layout: one window, seven tabs, All tab unfiltered')
     assert_eq(c.windows[1].tabs[5].send, 'tell', 'Suite 102: Tells tab sends tells')
+    assert_true(c.windows[1].tabs[6].notifyOnly == true and c.windows[1].tabs[6].name == 'Notifications' and c.windows[1].tabs[6].channels == nil and c.windows[1].tabs[7].id == 'triune', 'Suite 102: default Notifications tab sits before Triune: every channel, flagged lines only')
+    local mig = plugin.sanitizeConfig({ version = 2, windows = { { id = 'main', activeTab = 2, tabs = { { id = 'all' }, { id = 'triune' } } }, { id = 'w2', tabs = { { id = 'all' } } } } })
+    assert_true(#mig.windows[1].tabs == 3 and mig.windows[1].tabs[2].notifyOnly == true and mig.windows[1].tabs[3].id == 'triune' and mig.windows[1].activeTab == 3 and #mig.windows[2].tabs == 1, 'Suite 102: a v2 config gains a Notifications tab in the main window only, before Triune, active tab kept')
+    local mig3 = plugin.sanitizeConfig({ version = 3, windows = { { id = 'main', tabs = { { id = 'all' } } } } })
+    assert_true(#mig3.windows[1].tabs == 1, 'Suite 102: a v3 config that dropped the tab is left alone')
+    local mig2b = plugin.sanitizeConfig({ version = 2, windows = { { id = 'main', tabs = { { id = 'mine', notifyOnly = true } } } } })
+    assert_true(#mig2b.windows[1].tabs == 1 and mig2b.windows[1].tabs[1].notifyOnly == true, 'Suite 102: a user-made Notifications tab is not duplicated by the migration')
+    local mcfg = plugin.sanitizeConfig({ mention = { on = false, color = 'zz', beep = 1 } }).mention
+    assert_true(mcfg.on == false and mcfg.color == 'FFA040' and mcfg.beep == false, 'Suite 102: mention settings sanitized (bad colour falls back)')
+    assert_true(plugin.sanitizeConfig({}).mention.on == true, 'Suite 102: mention highlighting on by default')
     assert_true(c.windows[1].tabs[5].channels.tell_in and c.windows[1].tabs[5].channels.tell_out and c.windows[1].tabs[5].channels.petchat == nil, 'Suite 102: Tells preset is player tells only')
     local old = plugin.sanitizeConfig({ version = 1, windows = { { id = 'w', tabs = { { id = 'tells', channels = { tell_in = true, tell_out = true, petchat = true } }, { id = 'mine', channels = { tell_in = true, petchat = true, say = true } } } } } })
     assert_true(old.windows[1].tabs[1].channels.petchat == nil and old.windows[1].tabs[1].channels.tell_in, 'Suite 102: v1 Tells preset migrates pet chat out')
@@ -15230,10 +15240,11 @@ end)()
     local w2 = plugin.newWindow('Second')
     assert_true(#cfg.windows == 2 and w2.title == 'Second' and #w2.tabs == 1 and w2.tabs[1].channels == nil, 'Suite 102: new window seeded with an All tab')
     local t = plugin.addTab(win, 'Extra', 'loot')
-    assert_true(#win.tabs == 7 and win.activeTab == 7 and t.channels.loot == true and t.id ~= win.tabs[1].id, 'Suite 102: addTab appends, activates, unique id')
-    assert_true(plugin.moveTab(win, 7, -1) and win.tabs[6] == t and win.activeTab == 6, 'Suite 102: moveTab swaps and follows')
+    assert_true(#win.tabs == 8 and win.activeTab == 8 and t.channels.loot == true and t.id ~= win.tabs[1].id, 'Suite 102: addTab appends, activates, unique id')
+    assert_true(plugin.moveTab(win, 8, -1) and win.tabs[7] == t and win.activeTab == 7, 'Suite 102: moveTab swaps and follows')
     assert_eq(plugin.moveTab(win, 1, -1), false, 'Suite 102: moveTab refuses to leave the list')
-    assert_true(plugin.moveTabToWindow(win, 6, w2) and #win.tabs == 6 and w2.tabs[2] == t and w2.activeTab == 2, 'Suite 102: tab moved to another window')
+    assert_true(plugin.moveTabToWindow(win, 7, w2) and #win.tabs == 7 and w2.tabs[2] == t and w2.activeTab == 2, 'Suite 102: tab moved to another window')
+
     assert_eq(plugin.moveTabToWindow(w2, 1, w2), false, 'Suite 102: no move onto itself')
     assert_true(plugin.removeTab(w2, 2) and #w2.tabs == 1, 'Suite 102: removeTab')
     assert_eq(plugin.removeTab(w2, 1), false, 'Suite 102: last tab cannot be removed')
@@ -15566,7 +15577,64 @@ end)()
     assert_true(chatSrc:find('GetFrameHeightWithSpacing', 1, true) ~= nil and chatSrc:find('GetTextLineHeightWithSpacing)', 1, true) ~= nil, 'Suite 102: input row height is measured, not guessed')
     assert_true(chatSrc:find('pv(SV.WindowPadding, core.px(', 1, true) ~= nil and chatSrc:find('PopStyleVar, pushedVars', 1, true) ~= nil, 'Suite 102: compact window chrome is pushed and popped')
 
+    -- 10b. Mentions of my name and the Notifications tab
+    local notifyTab
+    for _, t in ipairs(win.tabs) do if t.notifyOnly then notifyTab = t end end
+    assert_true(notifyTab ~= nil, 'Suite 102: the main window still has its Notifications tab')
+    cfg.highlights = { { text = 'wts', lower = 'wts', color = '00FF00', beep = false, flash = true } }
+    cfg.muted = { mutedguy = true }
+    cfg.mention.on = true
+    cfg.mention.beep = true
+    rt.lastBeepAt = 0
+    beeps = 0
+    mockMq.cmd = function(c) if c == '/beep' then beeps = beeps + 1 else S.cmds[#S.cmds + 1] = c end end
+    local before = rt.ring.last
+    S.events.TACChatAll.fn(P('Groupguy') .. " tells the group, 'genro pull that one'")
+    S.events.TACChatAll.fn(P('Groupguy') .. " tells the group, 'Genrox is here'")
+    S.events.TACChatAll.fn("[Triune] Genro fired Distant Strike")
+    S.events.TACChatAll.fn("You tell your party, 'Genro here'")
+    S.events.TACChatAll.fn("a rat says 'Hail, Genro'")
+    S.events.TACChatAll.fn(P('Mutedguy') .. " shouts, 'Genro!'")
+    S.events.TACChatAll.fn(P('Auc') .. " auctions, 'WTS stuff'")
+    S.events.TACChatAll.fn(P('Groupguy') .. " tells the group, 'WTS Genro'")
+    S.events.TACChatAll.fn(P('Emoter') .. " waves at Genro.")
+    plugin.onTick()
+    local m1 = rt.ring.items[before + 1]
+    assert_true(m1.mention == true and m1.notify == true and m1.hl == 'FFA040' and m1.flash == true, 'Suite 102: my name said by another player flags, colours and flashes the line (any case)')
+    assert_eq(beeps, 1, 'Suite 102: mention beep uses the shared once-a-second throttle')
+    for i = 2, 6 do
+        local e = rt.ring.items[before + i]
+        assert_true(e.mention == nil and e.notify == nil and e.hl == nil, 'Suite 102: no mention for a longer name / Triune output / my own line / an NPC / a muted sender: ' .. e.text)
+    end
+    local m7, m8, m9 = rt.ring.items[before + 7], rt.ring.items[before + 8], rt.ring.items[before + 9]
+    assert_true(m7.notify == true and m7.mention == nil and m7.hl == '00FF00', 'Suite 102: a highlight word hit is a notification too')
+    assert_true(m8.notify == true and m8.mention == true and m8.hl == '00FF00', 'Suite 102: a highlight word keeps its colour over the mention colour')
+    assert_true(m9.mention == true and m9.channel == 'emote', 'Suite 102: emotes count')
+    assert_true(plugin.tabAccepts(notifyTab, m1) and plugin.tabAccepts(notifyTab, m7) and not plugin.tabAccepts(notifyTab, rt.ring.items[before + 2]), 'Suite 102: the Notifications tab takes flagged lines only')
+    local plain = { channel = 'group', sender = 'X', text = 'plain', outgoing = false }
+    assert_true(plugin.tabAccepts(win.tabs[1], plain) and not plugin.tabAccepts(notifyTab, plain), 'Suite 102: unflagged lines still reach ordinary tabs')
+    notifyTab.channels = { auction = true }
+    assert_true(plugin.tabAccepts(notifyTab, m7) and not plugin.tabAccepts(notifyTab, m1), 'Suite 102: the channel filter still applies on top of Notifications only')
+    notifyTab.channels = nil
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    local notifySt = rt.tabs[win.id .. '/' .. notifyTab.id]
+    local flagged = 0
+    for i = rt.ring.first, rt.ring.last do if rt.ring.items[i].notify and not rt.ring.items[i].muted then flagged = flagged + 1 end end
+    assert_true(okDraw and notifySt ~= nil and notifySt.last == flagged and flagged >= 4, 'Suite 102: the Notifications tab rebuilds from the ring with every flagged line: ' .. tostring(notifySt and notifySt.last) .. ' vs ' .. flagged)
+    assert_true(plugin.renderLine(m1, false):find('^\a#FFA040') ~= nil, 'Suite 102: the classic renderer uses the highlight colour too')
+    cfg.mention.on = false
+    S.events.TACChatAll.fn(P('Groupguy') .. " tells the group, 'Genro?'")
+    plugin.onTick()
+    assert_true(rt.ring.items[rt.ring.last].mention == nil and rt.ring.items[rt.ring.last].notify == nil, 'Suite 102: mention highlighting can be turned off')
+    cfg.mention.on = true
+    cfg.mention.beep = false
+    cfg.highlights = {}
+    cfg.muted = {}
+    mockMq.cmd = origCmd
+
+
     -- 11. Per-frame delivery: the draw asks MQ for just our event and drains the queue
+
     S.pendingLines = { 'You receive 77 platinum.' }
     local ringBefore = rt.ring.last
     okDraw, errDraw = pcall(plugin.onDrawUI)

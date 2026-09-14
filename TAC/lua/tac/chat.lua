@@ -26,7 +26,7 @@
 local plugin = {
     id                 = 'chat',
     name               = 'Chat Windows',
-    version            = '1.6.0',
+    version            = '1.7.0',
     author             = 'Triune',
     description        = 'Chat window replacement: channel-filtered tabs, multiple windows, colors, timestamps, an input line and keyword filters.',
     defaultEnabled     = true,
@@ -53,7 +53,7 @@ local GOOD  = { 0.37, 0.88, 0.64, 1 }
 local WARN  = { 1.00, 0.72, 0.30, 1 }
 local ERR   = { 0.95, 0.35, 0.35, 1 }
 
-local CONFIG_VERSION = 2
+local CONFIG_VERSION = 3
 local LINK = string.char(18)              -- \x12 wraps EQ links
 local ITEM_LINK_PAYLOAD = 77              -- fixed-width item link body before the item name
 local COLOR_ESC = string.char(127)        -- \x7F RRGGBB inline color (MQ output)
@@ -167,6 +167,7 @@ local cfg = {
     capture = false,          -- write every line + channel to the capture file
     colors = {},              -- [channel] = 'RRGGBB' overrides
     highlights = {},          -- { { text, color = 'RRGGBB', beep, flash }, ... }
+    mention = { on = true, color = 'FFA040', beep = false },   -- my name said by another player: highlighted, flashes, feeds Notifications tabs
     muted = {},               -- [lowercase sender] = true
     windows = {},             -- { id, title, open, opacity, tabs = { { id, name, channels, include, exclude, send, tellTarget, logToFile } } }
     tellPopouts = false,      -- incoming tells open the Tells window (one window, a tab per person)
@@ -741,6 +742,14 @@ local function newTab(id, name, preset, send)
     }
 end
 
+-- The Notifications tab: every channel, but only lines flagged by ingest
+-- (my name mentioned, or a highlight word hit).
+local function newNotifyTab(id)
+    local t = newTab(id or 'notify', 'Notifications', 'all', 'say')
+    t.notifyOnly = true
+    return t
+end
+
 local function defaultWindows()
     return {
         {
@@ -751,6 +760,7 @@ local function defaultWindows()
                 newTab('combat', 'Combat', 'combat', 'say'),
                 newTab('loot', 'Loot & XP', 'loot', 'say'),
                 newTab('tells', 'Tells', 'tells', 'tell'),
+                newNotifyTab('notify'),
                 newTab('triune', 'Triune', 'triune', 'say'),
             },
         },
@@ -788,6 +798,12 @@ local function sanitizeConfig(c)
         end
     end
     c.highlights = hl
+    local m = type(c.mention) == 'table' and c.mention or {}
+    c.mention = {
+        on = (m.on ~= false),
+        color = (type(m.color) == 'string' and m.color:match('^%x%x%x%x%x%x$')) and m.color or 'FFA040',
+        beep = (m.beep == true),
+    }
     local muted = {}
     for k, v in pairs(type(c.muted) == 'table' and c.muted or {}) do
         if type(k) == 'string' and k ~= '' and v == true then muted[k:lower()] = true end
@@ -858,6 +874,27 @@ local function sanitizeConfig(c)
             t.tellTarget = type(t.tellTarget) == 'string' and t.tellTarget or ''
             t.tellWith = (type(t.tellWith) == 'string' and t.tellWith ~= '') and t.tellWith or nil
             t.logToFile = (t.logToFile == true)
+            t.notifyOnly = (t.notifyOnly == true)
+        end
+        -- v3 added the Notifications tab; an older main window gets one
+        -- unless the user already made their own.
+        if fromVersion < 3 and wi == 1 then
+            local has = false
+            for _, t in ipairs(w.tabs) do if t.notifyOnly then has = true end end
+            if not has then
+                local taken = {}
+                for _, t in ipairs(w.tabs) do taken[t.id] = true end
+                local id = 'notify'
+                while taken[id] do id = id .. '_' end
+                -- Before Triune, so the tab order reads Social ... Tells, Notifications, Triune.
+                local at = #w.tabs + 1
+                for ti, t in ipairs(w.tabs) do
+                    if t.id == 'triune' then at = ti; break end
+                end
+                table.insert(w.tabs, at, newNotifyTab(id))
+                if tonumber(w.activeTab) and tonumber(w.activeTab) >= at then w.activeTab = tonumber(w.activeTab) + 1 end
+
+            end
         end
         w.activeTab = math.max(1, math.min(#w.tabs, math.floor(tonumber(w.activeTab) or 1)))
         -- Panes: every tab sits in a pane 1..panes; empty panes collapse.
@@ -962,7 +999,7 @@ local function renderLine(entry, withTimestamp)
     if entry.display == nil then
         entry.display = entry.raw and (resolveLinks(convertColors(entry.raw))) or entry.text
     end
-    return prefix .. '\a#' .. channelColor(entry.channel) .. entry.display .. '\ax'
+    return prefix .. '\a#' .. (entry.hl or channelColor(entry.channel)) .. entry.display .. '\ax'
 end
 
 -- Opening links. MQ's link parser expects stock RoF2 links (56 bytes of link
@@ -1063,6 +1100,8 @@ local function tabAccepts(tab, entry)
     if tab.tellWith then
         if not entry.sender or entry.sender:lower() ~= tab.tellWith:lower() then return false end
     end
+    -- A Notifications tab only shows lines ingest flagged (mention / highlight).
+    if tab.notifyOnly and not entry.notify then return false end
     if #tab.exclude > 0 or #tab.include > 0 then
         local lower = entry.lower or entry.text:lower()
         entry.lower = lower
@@ -1523,8 +1562,19 @@ function resolveTellTarget(text)
     return rt.lastTellTo or rt.lastTellFrom or cfg.recentTells[1]
 end
 
+-- Whole-word, case-insensitive pattern for my name (the frontier keeps
+-- "Genro" from matching "Genrox"), rebuilt when the name changes.
+local function mentionPattern()
+    if rt.mePatternFor ~= rt.me then
+        rt.mePatternFor = rt.me
+        rt.mePattern = '%f[%w]' .. (rt.me:lower():gsub('%W', '%%%0')) .. '%f[%W]'
+    end
+    return rt.mePattern
+end
+
 local function ingest(raw)
     local st = rt.stats
+
     st.total = st.total + 1
     local sec = math.floor(nowMs() / 1000)
     if sec ~= st.curSec then st.curSec = sec; st.curCount = 0 end
@@ -1544,21 +1594,42 @@ local function ingest(raw)
         raw = raw,
     }
     if r.sender and cfg.muted[r.sender:lower()] and not r.outgoing then entry.muted = true end
+    local function beep()
+        if os.time() - rt.lastBeepAt >= 1 then
+            rt.lastBeepAt = os.time()
+            pcall(mq.cmd, '/beep')
+        end
+    end
     if #cfg.highlights > 0 and not entry.muted then
         local lower = r.text:lower()
         entry.lower = lower
         for _, h in ipairs(cfg.highlights) do
             if lower:find(h.lower or h.text:lower(), 1, true) then
                 entry.hl = h.color
+                entry.notify = true
                 if h.flash then entry.flash = true end
-                if h.beep and os.time() - rt.lastBeepAt >= 1 then
-                    rt.lastBeepAt = os.time()
-                    pcall(mq.cmd, '/beep')
-                end
+                if h.beep then beep() end
                 break
             end
         end
     end
+    -- My name said by another player (whole word, any case) on a social
+    -- channel: highlighted in the mention colour unless a highlight word
+    -- already coloured it, flashes the tab, and lands in Notifications tabs.
+    -- Triune / MQ output and NPC dialogue say my name all day; those do not
+    -- count, nor do my own lines.
+    if cfg.mention.on and not entry.muted and not r.outgoing and PLAYER_CHANNELS[r.channel] and rt.me ~= '' and r.sender ~= rt.me then
+        local lower = entry.lower or r.text:lower()
+        entry.lower = lower
+        if lower:find(mentionPattern()) then
+            entry.mention = true
+            entry.notify = true
+            entry.hl = entry.hl or cfg.mention.color
+            entry.flash = true
+            if cfg.mention.beep then beep() end
+        end
+    end
+
     ringPush(rt.ring, entry)
     for li, link in ipairs(extractItemLinks(raw)) do
         rt.recentLinks[#rt.recentLinks + 1] = { name = link.name, payload = link.payload, raw = raw, id = entry.id, index = li }
@@ -2368,6 +2439,15 @@ local function drawTabPage(win, tab)
         markDirty()
     end
     if ImGui.IsItemHovered and ImGui.IsItemHovered() then core.setTooltip('Appends this tab\'s lines to logs/tac_chat_<Name>_<tab>_<date>.txt') end
+    local notify = ImGui.Checkbox('Notifications only##tabNotify', tab.notifyOnly == true)
+    if notify ~= (tab.notifyOnly == true) then
+        tab.notifyOnly = notify or nil
+        invalidateTabs()
+        markDirty()
+    end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() then
+        core.setTooltip('Only lines that mention my name (another player saying it) or hit a highlight word.\nThe channel and keyword filters below still apply on top. Set up the mention colour / beep on the Highlights page.')
+    end
     ImGui.Separator()
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Channels shown in this tab')
     drawChannelMatrix(tab)
@@ -2412,7 +2492,21 @@ local function drawColorsPage()
 end
 
 local function drawHighlightsPage()
+    local m = cfg.mention
+    local on = ImGui.Checkbox('Highlight lines where another player says my name##mentionOn', m.on)
+    if on ~= m.on then m.on = on; markDirty() end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() then
+        core.setTooltip('Whole word, any case, on say / tells / group / guild / raid / OOC / auction / shout / emotes / channels.\nMentions flash the tab and land in any tab set to Notifications only (the default Notifications tab).')
+    end
+    ImGui.SameLine()
+    local mc = drawColorField('mention', m.color)
+    if mc then m.color = mc; markDirty() end
+    ImGui.SameLine()
+    local mb = ImGui.Checkbox('Beep##mentionBeep', m.beep)
+    if mb ~= m.beep then m.beep = mb; markDirty() end
+    ImGui.Separator()
     ImGui.TextDisabled('Lines containing a highlight word are drawn in its colour; Flash marks the tab, Beep plays /beep (max once a second).')
+    ImGui.TextDisabled('Highlighted lines also land in Notifications tabs.')
     ImGui.SetNextItemWidth(core.px(180))
     local txt = ImGui.InputTextWithHint('##hlText', 'word or phrase', rt.hlInput)
     if type(txt) == 'string' then rt.hlInput = txt end
@@ -2699,6 +2793,8 @@ local function drawTabMenuBody(win, tab, ti)
     ImGui.Separator()
     if ImGui.MenuItem('Timestamps', nil, cfg.timestamps) then cfg.timestamps = not cfg.timestamps; invalidateTabs(); markDirty() end
     if ImGui.MenuItem('Incoming tells open the Tells window', nil, cfg.tellPopouts) then cfg.tellPopouts = not cfg.tellPopouts; markDirty() end
+    if ImGui.MenuItem('Highlight mentions of my name', nil, cfg.mention.on) then cfg.mention.on = not cfg.mention.on; markDirty() end
+
     if ImGui.MenuItem('Enter opens the input (like the game)', nil, cfg.enterFocus) then cfg.enterFocus = not cfg.enterFocus; markDirty() end
     if ImGui.MenuItem('Colours...') then openEditor('colors', win, tab) end
     if ImGui.MenuItem('Highlights...') then openEditor('highlights', win, tab) end
