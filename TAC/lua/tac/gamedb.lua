@@ -12,7 +12,9 @@
 -- No network, no plugins, no LuaRocks. The data is plain text under
 -- resources/gamedb/, built from the server's SQL dump and quest scripts by
 -- tools/build_gamedb.py:
---   <kind>.idx      one line per searchable entry (id, chunk:offset, name)
+--   <kind>.idx      one line per searchable entry (id, chunk:offset, name;
+--                   items v2 also a filter field: classes, races, slots,
+--                   type, required level, flags, base / top tier ac, hp, mana)
 --   <kind>.N.dat    one "key=value|key=value" line per record
 -- The index is read into memory in slices across ticks (no hitch), search is
 -- one plain string.find over a lowercased name blob, and opening a record is
@@ -20,14 +22,32 @@
 -- from the loaded indexes.
 --
 -- Window: ctrl.show_gamedb (header button "Database", /ac db, Window Layout).
+-- Item filters: the Items pane narrows by class / race / slot / type / level /
+-- effect / tradeable / minimum stats and sorts by AC, HP, mana or level from
+-- the items.idx v2 filter field (DB.itemFilter, DB.sortItems); a v1 index
+-- searches by name only.
 -- Commands: /ac db [text] | /ac item <text> | /ac npc <text> | /ac spell <text>
 -- Other plugins: plugin.open(kind, id), plugin.search(kind, text),
 -- plugin.popout(kind, id) for a floating card (chat item links, targets),
 -- plugin.lookupCursor(), plugin.lookupTarget(), plugin.npcIdForSpawn(id),
 -- plugin.itemSummary(id) -> tooltip lines (tiers, top drop, quests, recipes),
--- plugin.spellIdByName(name, level), plugin.spellSummary(id) (effects, scrolls).
+-- plugin.spellIdByName(name, level), plugin.spellSummary(id) (effects, scrolls),
+-- plugin.itemLink(id) / plugin.spellLink(id) (the client's \x12 chat link text),
+-- plugin.linkToChat(kind, id, channel) (into the Chat Windows input line, or
+-- straight to a channel).
+-- Chat links: every item and spell card has a Link to chat button that drops
+-- the link into the Chat Windows input line like the game's own input line
+-- takes a dragged item (right-click: send to a channel); /ac linkitem,
+-- /ac linkspell, /ac linknpc, /ac linkcursor and /ac linktarget do the same
+-- from the command line. Item links are the client's own; a spell or NPC
+-- link is plain "[Spell Name]" / "[NPC Name (Zone)]" text that the Chat
+-- Windows plugin renders as a link for Triune users.
 -- Loot Advisor: while the loot window is open, a small window lists the
 -- corpse's items with drop chance on that NPC, value and quest / recipe notes.
+-- Spell Info: the game's Spell Display window (right-click on a gem, buff or
+-- spellbook page) is replaced by the spell's card (/ac spellwindow toggles;
+-- plugin.inspectSpell(idOrName) opens one directly, core.inspectSpell wraps
+-- it with the game window as the fallback).
 -- Combat loop: the plugin installs core.castTracker.knownImmunity so mez /
 -- slow / snare / charm / fear / stun / dispel casts are skipped on NPCs whose
 -- special abilities make them immune, before the first wasted cast.
@@ -44,7 +64,7 @@ local plugin = {
     runOutOfCombatOnly = false,
     hasThread          = false,
     window             = { label = 'Database', tooltip = 'Toggles the Game Database window (items, NPCs, spells).', flag = 'show_gamedb', desc = 'Item / NPC / spell lookup (offline database)', headerButton = true, order = 22 },
-    uses               = { map = 'Map button on NPC spawn rows (opens the Zone Atlas on that zone)' },
+    uses               = { map = 'Map button on NPC spawn rows (opens the Zone Atlas on that zone)', chat = 'Link to chat puts item and spell links in the Chat Windows input line' },
 }
 
 -- Populated by refresh() on every entry point; typed so the language server
@@ -673,6 +693,11 @@ local function newIndex(kind)
     return { kind = kind, loaded = false, count = 0, n = 0, ids = {}, refs = {}, byId = {}, pieces = {}, starts = {}, pos = 1, lower = nil, orig = nil,
              extra = {},            -- items: tier letters; spells: "class:level,..." string
              refE = {}, refL = {},  -- items: enchanted / legendary record refs (false when absent)
+             version = 1,           -- index format from the header line
+             -- items v2, packed per entry (see PACK / unpack helpers):
+             mask = {},             -- classes * 2^17 + races
+             attr = {},             -- slots * 2^23 + reqlevel * 2^15 + itemtype * 2^8 + flags
+             statB = {}, statT = {},-- ac * 2^36 + hp * 2^18 + mana, base tier / top tier
              lvl = {}, zone = {} }  -- npcs
 end
 
@@ -791,15 +816,60 @@ function DB.nameAt(ix, n)
     return blob:sub(s, e)
 end
 
+-- Item filter packing (items.idx v2). Three numbers per entry keep the
+-- 150k-entry index at a few tables instead of a dozen; every field stays
+-- exact in a double (34, 46 and 52 bits).
+local PACK = {
+    CLASSES = 131072,          -- 2^17: classes field (bit 16 is set on "all" rows)
+    SLOTS = 8388608,           -- 2^23
+    REQ = 32768,               -- 2^15
+    TYPE = 256,                -- 2^8
+    AC = 68719476736,          -- 2^36
+    HP = 262144,               -- 2^18
+    STAT_MAX = 262143,         -- hp / mana cap (18 bits); ac caps at 65535
+}
+-- flags bits (tools/build_gamedb.py ITEM_FLAG_BITS)
+local FLAG = { NODROP = 1, MAGIC = 2, LORE = 4, CLICK = 8, PROC = 16, WORN = 32, FOCUS = 64, QUEST = 128 }
+
+local function clampStat(v, cap)
+    v = tonumber(v) or 0
+    if v < 0 then return 0 end
+    if v > cap then return cap end
+    return v
+end
+
+local function packStat(ac, hp, mana)
+    return clampStat(ac, 65535) * PACK.AC + clampStat(hp, PACK.STAT_MAX) * PACK.HP + clampStat(mana, PACK.STAT_MAX)
+end
+
+-- Fills the packed filter arrays of entry n from the v2 filter field.
+local function parseItemFilter(ix, n, filt)
+    local c, r, sl, t, q, fl, a1, h1, m1, a2, h2, m2 = filt:match('^(%d+),(%d+),(%d+),(%d+),(%d+),(%d+),(%-?%d+),(%-?%d+),(%-?%d+),(%-?%d+),(%-?%d+),(%-?%d+)$')
+    if not c then
+        ix.mask[n], ix.attr[n], ix.statB[n], ix.statT[n] = 0, 0, 0, 0
+        return
+    end
+    ix.mask[n] = (tonumber(c) % PACK.CLASSES) * PACK.CLASSES + (tonumber(r) % PACK.CLASSES)
+    ix.attr[n] = (tonumber(sl) % PACK.SLOTS) * PACK.SLOTS + math.min(tonumber(q), 255) * PACK.REQ + (tonumber(t) % 128) * PACK.TYPE + (tonumber(fl) % 256)
+    ix.statB[n] = packStat(a1, h1, m1)
+    ix.statT[n] = packStat(a2, h2, m2)
+end
+
 local PARSERS = {}
 PARSERS.items = function(ix, line)
-    local id, tiers, rb, re_, rl, name = line:match('^(%d+)|(%a*)|([^|]*)|([^|]*)|([^|]*)|(.*)$')
+    local id, tiers, rb, re_, rl, filt, name
+    if ix.version >= 2 then
+        id, tiers, rb, re_, rl, filt, name = line:match('^(%d+)|(%a*)|([^|]*)|([^|]*)|([^|]*)|([%d,%-]*)|(.*)$')
+    else
+        id, tiers, rb, re_, rl, name = line:match('^(%d+)|(%a*)|([^|]*)|([^|]*)|([^|]*)|(.*)$')
+    end
     if not id then return end
     -- refs[n] is the base row, or the enchanted / legendary row when no base exists
     local n = addEntry(ix, tonumber(id), rb ~= '' and rb or (re_ ~= '' and re_ or rl), ENC.unescape(name))
     ix.extra[n] = tiers
     ix.refE[n] = packRef(re_)
     ix.refL[n] = packRef(rl)
+    if filt then parseItemFilter(ix, n, filt) end
 end
 PARSERS.npcs = function(ix, line)
     local id, ref, lvl, zone, name = line:match('^(%d+)|([^|]*)|(%-?%d+)|([^|]*)|(.*)$')
@@ -859,6 +929,7 @@ function DB.stepLoad(budget)
             end
             local header = f:read('*l') or ''
             ix.expected = tonumber(header:match('count=(%d+)')) or 0
+            ix.version = tonumber(header:match(' v(%d+) ')) or 1
             ix.file = f
             DB.loading = ix
         end
@@ -1075,6 +1146,165 @@ function DB.record(kind, ref)
     return rec
 end
 
+-- ---- item filters (items.idx v2) ------------------------------------------
+-- True once the items index is in and carries the filter field.
+function DB.hasItemFilters()
+    local ix = DB.kinds.items
+    return ix ~= nil and ix.loaded and ix.version >= 2
+end
+
+local function maskHas(mask, bitValue)
+    return math.floor(mask / bitValue) % 2 >= 1
+end
+
+-- classes, races, slots, itemtype, reqlevel, flags of item entry n.
+function DB.itemAttrs(ix, n)
+    local m, a = ix.mask[n] or 0, ix.attr[n] or 0
+    return math.floor(m / PACK.CLASSES), m % PACK.CLASSES,
+           math.floor(a / PACK.SLOTS), math.floor(a / PACK.TYPE) % 128, math.floor(a / PACK.REQ) % 256, a % 256
+end
+
+-- ac, hp, mana of item entry n: the base row, or the top tier row (L / E)
+-- when `top` is set.
+function DB.itemStats(ix, n, top)
+    local st = (top and ix.statT or ix.statB)[n] or 0
+    return math.floor(st / PACK.AC), math.floor(st / PACK.HP) % PACK.HP, st % PACK.HP
+end
+
+local EFFECT_BITS = { FLAG.CLICK, FLAG.PROC, FLAG.WORN, FLAG.FOCUS }
+-- Effect filter choices: { label, bits any of which must be set, bits all of which must be clear }.
+DB.EFFECT_FILTERS = {
+    { 'Any effect',  nil },
+    { 'Has effect',  FLAG.CLICK + FLAG.PROC + FLAG.WORN + FLAG.FOCUS },
+    { 'Click',       FLAG.CLICK },
+    { 'Proc',        FLAG.PROC },
+    { 'Worn',        FLAG.WORN },
+    { 'Focus',       FLAG.FOCUS },
+    { 'No effect',   nil, FLAG.CLICK + FLAG.PROC + FLAG.WORN + FLAG.FOCUS },
+}
+
+-- Builds the search filter for the item pane's settings, or nil when none
+-- is set: class / race (1-16), slots (bitmask, 0 = any), types (set of
+-- itemtype ids, nil = any), minLvl / maxLvl on the required level, tradeable
+-- (no NO DROP), effect (index into DB.EFFECT_FILTERS), minAC / minHP /
+-- minMana, topTier (stats of the item's highest tier).
+function DB.itemFilter(f)
+    local classBit = (f.class or 0) > 0 and 2 ^ (f.class - 1) or nil
+    local raceBit = (f.race or 0) > 0 and 2 ^ (f.race - 1) or nil
+    -- wanted slot bits as values (a slot choice is one or two bits)
+    local slotBits = nil
+    if (f.slots or 0) > 0 then
+        slotBits = {}
+        local rest, bit = f.slots, 1
+        while rest > 0 do
+            if rest % 2 >= 1 then slotBits[#slotBits + 1] = bit end
+            rest, bit = math.floor(rest / 2), bit * 2
+        end
+    end
+    local types = f.types
+    local minL, maxL = f.minLvl or 0, f.maxLvl or 0
+    local eff = DB.EFFECT_FILTERS[f.effect or 1] or DB.EFFECT_FILTERS[1]
+    local effAny, effNone = eff[2], eff[3]
+    local minAC, minHP, minMana = f.minAC or 0, f.minHP or 0, f.minMana or 0
+    local anyStat = minAC > 0 or minHP > 0 or minMana > 0
+    if not (classBit or raceBit or slotBits or types or minL > 0 or maxL > 0 or f.tradeable or effAny or effNone or anyStat) then
+        return nil
+    end
+    local top = f.topTier == true
+    local CLASSES, SLOTS, REQ, TYPE, AC, HP = PACK.CLASSES, PACK.SLOTS, PACK.REQ, PACK.TYPE, PACK.AC, PACK.HP
+    return function(ix, n)
+        if ix.version < 2 then return true end
+        if classBit or raceBit then
+            local m = ix.mask[n] or 0
+            if classBit and not maskHas(math.floor(m / CLASSES), classBit) then return false end
+            if raceBit and not maskHas(m % CLASSES, raceBit) then return false end
+        end
+        local a = ix.attr[n] or 0
+        if slotBits then
+            local sl = math.floor(a / SLOTS)
+            local hit = false
+            for i = 1, #slotBits do
+                if maskHas(sl, slotBits[i]) then hit = true; break end
+            end
+            if not hit then return false end
+        end
+        if types and not types[math.floor(a / TYPE) % 128] then return false end
+        if minL > 0 or maxL > 0 then
+            local q = math.floor(a / REQ) % 256
+            if minL > 0 and q < minL then return false end
+            if maxL > 0 and q > maxL then return false end
+        end
+        if f.tradeable or effAny or effNone then
+            local fl = a % 256
+            if f.tradeable and fl % 2 >= 1 then return false end
+            if effAny then
+                local hit = false
+                for i = 1, #EFFECT_BITS do
+                    local bit = EFFECT_BITS[i]
+                    if maskHas(effAny, bit) and maskHas(fl, bit) then hit = true; break end
+                end
+                if not hit then return false end
+            end
+            if effNone then
+                for i = 1, #EFFECT_BITS do
+                    if maskHas(fl, EFFECT_BITS[i]) then return false end
+                end
+            end
+        end
+        if anyStat then
+            local st = (top and ix.statT or ix.statB)[n] or 0
+            if minAC > 0 and math.floor(st / AC) < minAC then return false end
+            if minHP > 0 and math.floor(st / HP) % HP < minHP then return false end
+            if minMana > 0 and st % HP < minMana then return false end
+        end
+        return true
+    end
+end
+
+-- Sort keys for item results (descending); 'match' keeps DB.search order.
+DB.ITEM_SORTS = { { 'match', 'Best match' }, { 'ac', 'AC' }, { 'hp', 'HP' }, { 'mana', 'Mana' }, { 'level', 'Req. level' } }
+
+-- Reorders `results` (entry numbers) by a numeric key, highest first, and
+-- cuts the list to `limit`; entries sharing a key keep their search order.
+-- Groups by distinct key so a 100k-row filter sorts a few thousand keys,
+-- not the rows. Returns the new list and the pre-cut count.
+function DB.sortItems(results, key, top, limit)
+    local ix = DB.kinds.items
+    if not ix or not ix.loaded or key == 'match' or not key then return results, #results end
+    local keyOf
+    if key == 'level' then
+        local attr, REQ = ix.attr, PACK.REQ
+        keyOf = function(n) return math.floor((attr[n] or 0) / REQ) % 256 end
+    else
+        local stat = top and ix.statT or ix.statB
+        local AC, HP = PACK.AC, PACK.HP
+        if key == 'ac' then keyOf = function(n) return math.floor((stat[n] or 0) / AC) end
+        elseif key == 'hp' then keyOf = function(n) return math.floor((stat[n] or 0) / HP) % HP end
+        else keyOf = function(n) return (stat[n] or 0) % HP end end
+    end
+    local groups, keys = {}, {}
+    for i = 1, #results do
+        local n = results[i]
+        local k = keyOf(n)
+        local g = groups[k]
+        if not g then
+            g = {}
+            groups[k] = g
+            keys[#keys + 1] = k
+        end
+        g[#g + 1] = n
+    end
+    table.sort(keys, function(a, b) return a > b end)
+    local out = {}
+    for _, k in ipairs(keys) do
+        for _, n in ipairs(groups[k]) do
+            out[#out + 1] = n
+            if limit and #out >= limit then return out, #results end
+        end
+    end
+    return out, #results
+end
+
 -- ---- lookups by id --------------------------------------------------------
 function DB.itemEntry(id)
     local ix = DB.kinds.items
@@ -1204,7 +1434,10 @@ end
 -- ----------------------------------------------------------------------------
 local S = {
     tab      = 'items',
-    items    = { query = '', results = {}, labels = {}, sel = nil, tier = 'B', dirty = false, dirtyAt = 0, scroll = false },
+    items    = { query = '', results = {}, labels = {}, sel = nil, tier = 'B', dirty = false, dirtyAt = 0, scroll = false,
+                 -- filters (items.idx v2): see DB.itemFilter / ITEM_FILTER_DEFAULTS
+                 class = 0, race = 0, slot = 0, itype = 0, minLvl = 0, maxLvl = 0, effect = 1, tradeable = false,
+                 minAC = 0, minHP = 0, minMana = 0, topTier = false, sort = 1, total = 0, filtersOpen = false },
     npcs     = { query = '', results = {}, labels = {}, sel = nil, zone = '', minLvl = 0, maxLvl = 0, dirty = false, dirtyAt = 0 },
     spells   = { query = '', results = {}, labels = {}, sel = nil, class = 0, minLvl = 0, maxLvl = 0, dirty = false, dirtyAt = 0 },
     history  = {},
@@ -1218,11 +1451,57 @@ local S = {
     -- Loot Advisor: rows for the corpse being looted
     lootAdvisor = true,
     loot = { open = false, corpseId = 0, npcId = nil, npcName = '', rows = {}, lastScan = 0 },
+    -- Spell Info replacement: the game's Spell Display window is closed as
+    -- it opens and the spell's card is shown instead (see watchSpellWindow)
+    spellWindow = true,
+    spellWnd = { wasOpen = false, lastKey = nil },
 }
 local MAX_POPOUTS = 8
 
 local KINDS = { 'items', 'npcs', 'spells' }
 local KIND_LABELS = { items = 'Items', npcs = 'NPCs', spells = 'Spells' }
+
+-- Item filter widgets. Slots with two bits (Ear, Wrist, Finger) are one
+-- choice covering both; item types sharing a name (Throwing, Key, Charm,
+-- Mount) are one choice matching every id.
+local ITEM_FILTER_DEFAULTS = { class = 0, race = 0, slot = 0, itype = 0, minLvl = 0, maxLvl = 0, effect = 1, tradeable = false,
+                               minAC = 0, minHP = 0, minMana = 0, sort = 1 }
+local SLOT_CHOICES = {}   -- { name, mask }
+do
+    local at = {}
+    for i, name in ipairs(D.SLOTS) do
+        local c = at[name]
+        if not c then
+            c = { name, 0 }
+            at[name] = c
+            SLOT_CHOICES[#SLOT_CHOICES + 1] = c
+        end
+        c[2] = c[2] + 2 ^ (i - 1)
+    end
+end
+local TYPE_CHOICES = {}   -- { name, { [id] = true } }, name order
+do
+    local at = {}
+    for id, name in pairs(D.ITEM_TYPES) do
+        local c = at[name]
+        if not c then
+            c = { name, {} }
+            at[name] = c
+            TYPE_CHOICES[#TYPE_CHOICES + 1] = c
+        end
+        c[2][id] = true
+    end
+    table.sort(TYPE_CHOICES, function(a, b) return a[1] < b[1] end)
+end
+
+-- Number of item filters set away from their defaults.
+local function itemFiltersActive(st)
+    local n = 0
+    for k, v in pairs(ITEM_FILTER_DEFAULTS) do
+        if k ~= 'sort' and st[k] ~= v then n = n + 1 end
+    end
+    return n
+end
 
 local function queueAll()
     DB.ensure('zones')
@@ -1339,7 +1618,19 @@ local function runSearch(kind)
     local st = S[kind]
     st.dirty = false
     local filter = nil
-    if kind == 'npcs' then
+    local sortKey = nil
+    if kind == 'items' then
+        if DB.hasItemFilters() then
+            local slotChoice, typeChoice = SLOT_CHOICES[st.slot or 0], TYPE_CHOICES[st.itype or 0]
+            filter = DB.itemFilter({
+                class = st.class, race = st.race, slots = slotChoice and slotChoice[2] or 0, types = typeChoice and typeChoice[2] or nil,
+                minLvl = st.minLvl, maxLvl = st.maxLvl, effect = st.effect, tradeable = st.tradeable,
+                minAC = st.minAC, minHP = st.minHP, minMana = st.minMana, topTier = st.topTier,
+            })
+            local sort = DB.ITEM_SORTS[st.sort or 1]
+            if sort and sort[1] ~= 'match' then sortKey = sort[1] end
+        end
+    elseif kind == 'npcs' then
         local zone = (st.zone or ''):lower()
         local minL, maxL = st.minLvl or 0, st.maxLvl or 0
         if zone ~= '' or minL > 0 or maxL > 0 then
@@ -1372,7 +1663,15 @@ local function runSearch(kind)
             end
         end
     end
-    st.results = DB.search(kind, st.query, filter, DB.MAX_RESULTS)
+    if sortKey then
+        -- sorted: collect every match (a word query is still bounded by
+        -- DB.MAX_SCAN), order by the key and keep the top of the list
+        local all = DB.search(kind, st.query, filter, math.huge)
+        st.results, st.total = DB.sortItems(all, sortKey, st.topTier, DB.MAX_RESULTS)
+    else
+        st.results = DB.search(kind, st.query, filter, DB.MAX_RESULTS)
+        st.total = #st.results
+    end
     local ix = DB.kinds[kind]
     local labels = {}
     if ix and ix.loaded then
@@ -1592,6 +1891,83 @@ function plugin.spellIdByName(name, level)
     return best
 end
 
+-- Database id for a command argument: a numeric id (tier offsets kept), or
+-- the best name match (exact first, as DB.search ranks). An item name may
+-- carry the tier the client shows, "Foo (Enchanted)". nil when nothing
+-- matches or the index is not loaded yet (the load is queued).
+function plugin.lookupId(kind, text)
+    kind = KIND_LABELS[kind] and kind or 'items'
+    text = tostring(text or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if text == '' then return nil end
+    local ix = DB.kinds[kind]
+    if not ix or not ix.loaded then
+        DB.ensure(kind)
+        return nil
+    end
+    local num = tonumber(text)
+    if num then
+        if kind == 'items' then return DB.itemEntry(num) and num or nil end
+        return ix.byId[num] and num or nil
+    end
+    if kind == 'npcs' then
+        -- Same-named NPCs: the one in your zone first.
+        local here = nil
+        pcall(function() here = mq.TLO.Zone.ShortName() end)
+        local id = DB.npcIdFor(text, here)
+        if id then return id end
+    end
+    local offset = 0
+    if kind == 'items' then
+        local base, tier = text:match('^(.-)%s*%((%a+)%)$')
+        if base and tier then
+            local t = tier:lower()
+            if t == 'enchanted' then text, offset = base, D.TIER_OFFSET.E
+            elseif t == 'legendary' then text, offset = base, D.TIER_OFFSET.L end
+        end
+    end
+    -- A wider net than one: the exact name must not lose to the first few
+    -- prefix matches the scan happens to meet first.
+    local hits = DB.search(kind, text, nil, 20)
+    if not hits[1] then return nil end
+    local id = ix.ids[hits[1]]
+    if offset > 0 and not (ix.extra[hits[1]] or ''):find(offset == D.TIER_OFFSET.E and 'E' or 'L', 1, true) then offset = 0 end
+    return id + offset
+end
+
+-- Spell Info: opens the card for a spell id or name when the replacement is
+-- on and the spell is in the database. Returns false otherwise so the caller
+-- can fall back to the game's own Spell Display window (core.inspectSpell
+-- does exactly that). A numeric id is trusted while the index is still
+-- loading (client and database ids are the same on this server); the card
+-- resolves once the index is in.
+-- Spell id for a name as the client shows it: exact, then with rank / gem
+-- decorations stripped (core.cleanSpellName). `level` defaults to yours.
+local function spellIdForName(name, level)
+    name = name ~= nil and tostring(name) or ''
+    if name == '' then return nil end
+    if not level then pcall(function() level = mq.TLO.Me.Level() end) end
+    local id = plugin.spellIdByName(name, level)
+    if not id and core.cleanSpellName then
+        local clean = core.cleanSpellName(name)
+        if clean ~= '' and clean ~= name then id = plugin.spellIdByName(clean, level) end
+    end
+    return id
+end
+
+function plugin.inspectSpell(spell, level)
+    if not core or not S.spellWindow then return false end
+    refresh()
+    local id = tonumber(spell)
+    if id and id > 0 then
+        if not DB.isLoaded('spells') then return plugin.popout('spells', id) end
+        if not DB.spellRecord(id) then id = nil end
+    else
+        id = spellIdForName(spell, level)
+    end
+    if not id then return false end
+    return plugin.popout('spells', id)
+end
+
 -- Tooltip lines for a spell: decoded effects (up to six) and where its
 -- scrolls come from (through itemSummary). Cached per spell id.
 local spellSummaryCache, spellSummaryCount = {}, 0
@@ -1680,6 +2056,184 @@ function plugin.lookupCursor()
 end
 
 -- ----------------------------------------------------------------------------
+-- Chat links. The client wraps a link in \x12 bytes. An item link on this
+-- server is a type byte '0', the item id as eight hex digits (tier offsets
+-- included, so 1032100 links the Enchanted tier), then augments, evolving
+-- data, ornament and hash padded to 77 bytes - the server sends all of that
+-- zeroed, so a zeroed body is exactly what the client already accepts. MQ's
+-- own Item.ItemLink builds the stock 56-byte RoF2 body, which this client
+-- does not read. The client has no spell or NPC links at all, so those are
+-- plain text - "[Complete Heal]", "[Fippy Darkpaw (North Qeynos)]" - that
+-- everyone can read and the Chat Windows plugin turns into a clickable card
+-- for Triune users: a spell name resolves through spellIdByName (the way
+-- the Spell Info replacement reads the game window's title), an NPC name
+-- through the name index with the zone in parentheses deciding between
+-- same-named NPCs (your own zone when there is none).
+-- ----------------------------------------------------------------------------
+local LINK = string.char(18)
+D.ITEM_LINK_PAYLOAD = 77
+
+function D.itemLinkText(id, name)
+    id = tonumber(id)
+    if not id or id <= 0 then return nil end
+    local body = string.format('0%08X', id)
+    return LINK .. body .. string.rep('0', D.ITEM_LINK_PAYLOAD - #body) .. tostring(name or '') .. LINK
+end
+
+function D.spellLinkText(id, name)
+    id = tonumber(id)
+    if not id or id <= 0 or not name or name == '' then return nil end
+    return '[' .. tostring(name) .. ']'
+end
+
+-- The name a "[Name]" link in chat carries, or nil (the Chat Windows plugin
+-- asks per bracketed word group it draws).
+function D.spellLinkName(text)
+    return type(text) == 'string' and text:match('^%[([^%[%]]+)%]$') or nil
+end
+D.textLinkName = D.spellLinkName
+
+function D.npcLinkText(id, name, zone)
+    id = tonumber(id)
+    if not id or id <= 0 or not name or name == '' then return nil end
+    if zone and zone ~= '' then return '[' .. name .. ' (' .. zone .. ')]' end
+    return '[' .. name .. ']'
+end
+
+-- Link text for an item id (tier offsets honoured); nil when unknown.
+function plugin.itemLink(id)
+    id = tonumber(id)
+    if not id or not DB.itemEntry(id) then return nil end
+    return D.itemLinkText(id, DB.itemName(id))
+end
+
+-- Link text for a spell id; nil when the spell is not in the database.
+function plugin.spellLink(id)
+    id = tonumber(id)
+    if not id or not DB.spellRecord(id) then return nil end
+    return D.spellLinkText(id, DB.spellName(id))
+end
+
+-- Link text for an NPC id: the name with its zone's long name in
+-- parentheses; nil when the NPC is not in the database.
+function plugin.npcLink(id)
+    id = tonumber(id)
+    local info = id and DB.npcInfo(id)
+    if not info then return nil end
+    local zone = info.zone ~= '' and DB.zoneName(info.zone) or ''
+    return D.npcLinkText(id, info.name, zone)
+end
+
+-- Spell id for the text of a chat spell link ("[Complete Heal]"), nil for
+-- anything else. `ready` (second result) is false while the spell index is
+-- still loading, so the caller can look again later.
+function plugin.spellLinkId(text)
+    local name = D.spellLinkName(text)
+    if not name then return nil, true end
+    if not DB.isLoaded('spells') then
+        DB.ensure('spells')
+        return nil, false
+    end
+    return plugin.spellIdByName(name), true
+end
+
+-- NPC id for the text of a chat NPC link: "[Name (Zone)]" picks the NPC of
+-- that name in that zone (long or short zone name), "[Name]" the one in
+-- your zone or else the first of that name. nil, ready=false while the NPC
+-- index loads.
+function plugin.npcLinkId(text)
+    local body = D.textLinkName(text)
+    if not body then return nil, true end
+    if not DB.isLoaded('npcs') then
+        DB.ensure('npcs')
+        return nil, false
+    end
+    local ix = DB.kinds.npcs
+    local name, zone = body:match('^(.-)%s*%((.+)%)$')
+    if name and zone and ix.byName then
+        local hit = ix.byName[name:lower()]
+        if hit then
+            zone = zone:lower()
+            for _, n in ipairs(type(hit) == 'number' and { hit } or hit) do
+                local short = ix.zone[n] or ''
+                if short:lower() == zone or DB.zoneName(short):lower() == zone then return ix.ids[n], true end
+            end
+        end
+    end
+    local here = nil
+    pcall(function() here = mq.TLO.Zone.ShortName() end)
+    local id = DB.npcIdFor(body, here)
+    if not id and name then id = DB.npcIdFor(name, here) end
+    return id, true
+end
+
+-- What a bracketed name in chat opens: kind ('spells' / 'npcs') and id, or
+-- nil. `ready` is false while an index that could still answer is loading.
+function plugin.textLinkTarget(text)
+    if not D.textLinkName(text) then return nil, nil, true end
+    local sid, sready = plugin.spellLinkId(text)
+    if sid then return 'spells', sid, true end
+    local nid, nready = plugin.npcLinkId(text)
+    if nid then return 'npcs', nid, true end
+    return nil, nil, (sready and nready) == true
+end
+
+-- The Chat Windows plugin (tac/chat.lua) when it is loaded and enabled.
+local function chatPlugin()
+    local pm = core and core.runtime and core.runtime.pluginManager
+    local p = pm and pm.plugins and pm.plugins.chat
+    if p and p.enabled and p.instance and p.instance.insertLink then return p.instance end
+    return nil
+end
+
+-- Channels a link can be sent to straight away (the Link button's
+-- right-click menu and the /ac link... commands' "/cmd" prefix).
+local LINK_CHANNELS = {
+    { label = 'Say',     cmd = '/say' },
+    { label = 'Group',   cmd = '/g' },
+    { label = 'Guild',   cmd = '/gu' },
+    { label = 'Raid',    cmd = '/rs' },
+    { label = 'OOC',     cmd = '/ooc' },
+    { label = 'Auction', cmd = '/auc' },
+    { label = 'Shout',   cmd = '/shout' },
+}
+
+-- Puts an item or spell link where the game's input line would take a
+-- dragged item: the Chat Windows input (the tab that last had focus), or,
+-- with `channel` (a chat command such as '/g' or '/tell Bob'), sends it
+-- there at once. Without the Chat Windows plugin and without a channel the
+-- link goes to the clipboard. Returns true when the link went somewhere.
+function plugin.linkToChat(kind, id, channel)
+    if not core then return false end
+    refresh()
+    local text = kind == 'spells' and plugin.spellLink(id) or kind == 'npcs' and plugin.npcLink(id) or plugin.itemLink(id)
+    if not text then
+        echo((kind == 'spells' and 'Spell ' or kind == 'npcs' and 'NPC ' or 'Item ') .. tostring(id) .. ' is not in the database.')
+        return false
+    end
+    local name = kind == 'spells' and DB.spellName(id) or kind == 'npcs' and DB.npcName(id) or DB.itemName(id)
+    channel = channel and channel:gsub('^%s+', ''):gsub('%s+$', '') or ''
+    if channel ~= '' then
+        if channel:sub(1, 1) ~= '/' then channel = '/' .. channel end
+        pcall(mq.cmdf, '%s %s', channel, text)
+        return true
+    end
+    local chat = chatPlugin()
+    if chat then
+        local ok, res = pcall(chat.insertLink, text, name)
+        if ok and res then return true end
+    end
+    local copied = false
+    pcall(function() ImGui.SetClipboardText(text); copied = true end)
+    if copied then
+        echo(name .. ' link copied to the clipboard' .. (chat and '' or ' (Chat Windows plugin not loaded)') .. '.')
+    else
+        echo('Nowhere to put the ' .. name .. ' link: load the Chat Windows plugin or give a channel.')
+    end
+    return copied
+end
+
+-- ----------------------------------------------------------------------------
 -- Drawing helpers
 -- ----------------------------------------------------------------------------
 local C = {}   -- colors, filled on draw
@@ -1712,6 +2266,34 @@ local function link(label, _)
         if ImGuiMouseCursor then pcall(function() ImGui.SetMouseCursor(ImGuiMouseCursor.Hand) end) end
     end
     return hovered and ImGui.IsItemClicked()
+end
+
+-- Link to chat button for a card: left-click drops the link into the Chat
+-- Windows input line, right-click picks a channel to send it to now.
+local function drawLinkButton(kind, id, uid)
+    local tag = 'link_' .. kind .. '_' .. tostring(uid)
+    if ImGui.SmallButton('Link to chat##' .. tag) then plugin.linkToChat(kind, id) end
+    if ImGui.IsItemHovered() then
+        if core.setTooltip then
+            core.setTooltip(kind == 'items'
+                and 'Puts a clickable link in the chat input line, like dragging an item onto the game\'s input.\nRight-click: send it to a channel now.'
+                or ('Puts [' .. (kind == 'spells' and 'Spell Name' or 'NPC Name (Zone)') .. '] in the chat input line: plain text for everyone, a clickable card for Triune users.\nRight-click: send it to a channel now.'))
+        end
+        if ImGui.IsMouseClicked(1) then ImGui.OpenPopup('##menu_' .. tag) end
+    end
+    if ImGui.BeginPopup('##menu_' .. tag) then
+        ImGui.TextDisabled('Send link to')
+        ImGui.Separator()
+        for _, ch in ipairs(LINK_CHANNELS) do
+            if ImGui.MenuItem(ch.label .. '##' .. tag) then plugin.linkToChat(kind, id, ch.cmd) end
+        end
+        ImGui.Separator()
+        if ImGui.MenuItem('Copy to clipboard##' .. tag) then
+            local text = kind == 'spells' and plugin.spellLink(id) or kind == 'npcs' and plugin.npcLink(id) or plugin.itemLink(id)
+            if text then pcall(ImGui.SetClipboardText, text) end
+        end
+        ImGui.EndPopup()
+    end
 end
 
 -- Item icon via the shared A_DragItem animation (cell = icon - 500).
@@ -2429,8 +3011,8 @@ local function drawItemCardFor(st, compact)
                 ImGui.SameLine()
             end
         end
-        ImGui.NewLine()
     end
+    drawLinkButton('items', card.fullId, st.key or 'main')
     ImGui.Separator()
     drawItemStats(card.stats)
     if compact then
@@ -2478,6 +3060,7 @@ local function drawNpcCardFor(st)
     gold(c.title)
     muted(c.subtitle)
     if c.tags then warn(c.tags) end
+    drawLinkButton('npcs', id, st.key or 'main')
     ImGui.Separator()
 
     if ImGui.BeginTable('##npcstats', 6, ImGuiTableFlags.SizingFixedFit) then
@@ -2589,6 +3172,28 @@ end
 -- ----------------------------------------------------------------------------
 -- Spell card
 -- ----------------------------------------------------------------------------
+-- Your own relationship to the spell ("Scribed - Gem 3", "Scribed", or nil):
+-- what the game's Spell Info window never says. Read once a second per card.
+local LIVE_STATUS_TTL = 1.0
+local function spellLiveStatus(st, id, name)
+    local now = os.clock()
+    if st.liveId == id and st.liveAt and (now - st.liveAt) < LIVE_STATUS_TTL then return st.liveText end
+    st.liveId, st.liveAt = id, now
+    local text = nil
+    pcall(function()
+        local me = mq.TLO.Me
+        local gem = me.Gem(name)()
+        local book = me.Book(name)()
+        if gem and gem > 0 then
+            text = 'Scribed - Gem ' .. gem
+        elseif book and book > 0 then
+            text = 'Scribed'
+        end
+    end)
+    st.liveText = text
+    return text
+end
+
 local function drawSpellCardFor(st)
     local id = st.sel
     if not id then
@@ -2607,7 +3212,10 @@ local function drawSpellCardFor(st)
     ImGui.BeginGroup()
     gold(c.name)
     muted(c.subtitle)
+    local live = spellLiveStatus(st, id, c.name)
+    if live then good(live) end
     ImGui.EndGroup()
+    drawLinkButton('spells', id, st.key or 'main')
     ImGui.Separator()
 
     if ImGui.BeginTable('##spellstats', 4, ImGuiTableFlags.SizingFixedFit) then
@@ -2728,10 +3336,14 @@ local function drawPopouts()
                 pcall(ImGui.SetNextWindowFocus)
                 pop.focus = false
             end
-            local open, draw = ImGui.Begin(title .. '###TriuneGameDBPop' .. pop.key, true, windowFlags)
+            -- One shared layout key for every card: the options (title bar,
+            -- ghost, scale) apply to all of them.
+            if core.preBeginWindow then core.preBeginWindow('gamedb_pop') end
+            local open, draw = ImGui.Begin(title .. '###TriuneGameDBPop' .. pop.key, true, core.windowFlags and core.windowFlags('gamedb_pop', windowFlags) or windowFlags)
             if not open then
                 remove = true
             elseif draw then
+                if core.postBeginWindow then core.postBeginWindow('gamedb_pop') end
                 if pop.pending then
                     muted('Loading the ' .. pop.kind .. ' index...')
                 else
@@ -2739,7 +3351,9 @@ local function drawPopouts()
                     if not ok then warn('Card error: ' .. tostring(err)) end
                 end
             end
+            if core.preEndWindow then core.preEndWindow('gamedb_pop', false, { name = 'Database cards', close = false }) end
             ImGui.End()
+            if core.postEndWindow then core.postEndWindow('gamedb_pop') end
         end
         if remove then table.remove(S.popouts, i) else i = i + 1 end
     end
@@ -2770,7 +3384,12 @@ local function drawResults(kind, height)
     if st.dirty then
         muted('Searching...')
     else
-        muted(string.format('%d result%s%s', #results, #results == 1 and '' or 's', #results >= DB.MAX_RESULTS and ' (capped)' or ''))
+        local total = st.total or #results
+        if total > #results then
+            muted(string.format('%d results (showing top %d)', total, #results))
+        else
+            muted(string.format('%d result%s%s', #results, #results == 1 and '' or 's', #results >= DB.MAX_RESULTS and ' (capped)' or ''))
+        end
     end
     if ImGui.BeginChild('##results' .. kind, ImVec2(0, height), true) then
         local function drawRow(i, n)
@@ -2807,6 +3426,109 @@ local function drawResults(kind, height)
     ImGui.EndChild()
 end
 
+-- A combo over `choices` ({ label, ... } rows, or plain strings) with an
+-- "any" row at index 0. Returns the new index and whether it changed.
+local function choiceCombo(id, width, current, anyLabel, choices, labelOf)
+    ImGui.SetNextItemWidth(core.px(width))
+    local cur = choices[current]
+    local label = cur and (labelOf and labelOf(current, cur) or cur[1] or cur) or anyLabel
+    local out, changed = current, false
+    if ImGui.BeginCombo(id, label) then
+        if anyLabel then
+            local _, pressed = ImGui.Selectable(anyLabel, current == 0)
+            if pressed then out, changed = 0, current ~= 0 end
+        end
+        for i, c in ipairs(choices) do
+            local _, pressed = ImGui.Selectable((labelOf and labelOf(i, c) or c[1] or c) .. '##' .. i, current == i)
+            if pressed then out, changed = i, current ~= i end
+        end
+        ImGui.EndCombo()
+    end
+    return out, changed
+end
+
+local function minInput(id, width, value, tooltip)
+    ImGui.SetNextItemWidth(core.px(width))
+    local v, changed = ImGui.InputInt(id, value, 0, 0)
+    if ImGui.IsItemHovered() then ImGui.SetTooltip(tooltip) end
+    if changed then return math.max(0, v), true end
+    return value, false
+end
+
+-- Item pane filters: a collapsible block under the search box (items.idx
+-- v2); every widget marks the search dirty, Clear resets them all.
+local function drawItemFilters(st)
+    if not DB.hasItemFilters() then
+        if DB.isLoaded('items') then
+            muted('(no filters: items.idx v1)')
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('Rebuild the index for class / slot / stat filters:\npython3 tools/build_gamedb.py --reindex-items') end
+        end
+        return
+    end
+    local active = itemFiltersActive(st)
+    local sort = DB.ITEM_SORTS[st.sort or 1]
+    local hdr = 'Filters'
+    if active > 0 then hdr = hdr .. ' (' .. active .. ')' end
+    if sort and sort[1] ~= 'match' then hdr = hdr .. '  sort: ' .. sort[2] end
+    local open = ImGui.CollapsingHeader(hdr .. '###itemFilters')
+    if not open then return end
+    local function set(k, v, changed)
+        if changed then st[k] = v; markDirty(st) end
+    end
+    -- row 1: class / race / slot
+    set('class', choiceCombo('##fcls', 92, st.class, 'Any class', D.CLASSES, function(i, c) return c .. ' - ' .. D.CLASS_NAMES[i] end))
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Usable by this class') end
+    ImGui.SameLine()
+    set('race', choiceCombo('##frace', 92, st.race, 'Any race', D.RACES, function(i, c) return c .. ' - ' .. (D.RACE_NAMES[i] or c) end))
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Usable by this race') end
+    ImGui.SameLine()
+    set('slot', choiceCombo('##fslot', 92, st.slot, 'Any slot', SLOT_CHOICES))
+    -- row 2: type / required level
+    set('itype', choiceCombo('##ftype', 128, st.itype, 'Any type', TYPE_CHOICES))
+    ImGui.SameLine()
+    muted('Lvl'); ImGui.SameLine()
+    set('minLvl', minInput('##fminl', 44, st.minLvl, 'Required level range (0 = any)'))
+    ImGui.SameLine(); muted('-'); ImGui.SameLine()
+    set('maxLvl', minInput('##fmaxl', 44, st.maxLvl, 'Required level range (0 = any)'))
+    -- row 3: effect / tradeable
+    set('effect', choiceCombo('##feff', 92, st.effect, nil, DB.EFFECT_FILTERS))
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Click, proc, worn or focus effect') end
+    ImGui.SameLine()
+    local tr = ImGui.Checkbox('Tradeable##ftrade', st.tradeable == true)
+    if tr ~= (st.tradeable == true) then st.tradeable = tr; markDirty(st) end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Hide NO DROP items') end
+    ImGui.SameLine()
+    local tt = ImGui.Checkbox('Top tier##ftop', st.topTier == true)
+    if tt ~= (st.topTier == true) then st.topTier = tt; markDirty(st) end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Use the stats of the item\'s highest tier (Legendary / Enchanted)\nfor the minimums below and for sorting, instead of the base item.') end
+    -- row 4: stat minimums
+    muted('Min'); ImGui.SameLine()
+    set('minAC', minInput('##fac', 46, st.minAC, 'Minimum AC (0 = any)'))
+    ImGui.SameLine(); muted('AC'); ImGui.SameLine()
+    set('minHP', minInput('##fhp', 46, st.minHP, 'Minimum HP (0 = any)'))
+    ImGui.SameLine(); muted('HP'); ImGui.SameLine()
+    set('minMana', minInput('##fmana', 46, st.minMana, 'Minimum mana (0 = any)'))
+    ImGui.SameLine(); muted('Mana')
+    -- row 5: sort / clear
+    muted('Sort'); ImGui.SameLine()
+    ImGui.SetNextItemWidth(core.px(110))
+    if ImGui.BeginCombo('##fsort', sort and sort[2] or 'Best match') then
+        for i, c in ipairs(DB.ITEM_SORTS) do
+            local _, pressed = ImGui.Selectable(c[2], st.sort == i)
+            if pressed and st.sort ~= i then st.sort = i; markDirty(st) end
+        end
+        ImGui.EndCombo()
+    end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Order results by a stat, highest first (the top ' .. DB.MAX_RESULTS .. ' of every match).') end
+    ImGui.SameLine()
+    if active > 0 or (sort and sort[1] ~= 'match') then
+        if ImGui.SmallButton('Clear##fclear') then
+            for k, v in pairs(ITEM_FILTER_DEFAULTS) do st[k] = v end
+            markDirty(st)
+        end
+    end
+end
+
 local function drawSearchPane(kind)
     local st = S[kind]
     ImGui.SetNextItemWidth(-1)
@@ -2818,6 +3540,7 @@ local function drawSearchPane(kind)
     if kind == 'items' then
         if ImGui.SmallButton('Cursor Item') then plugin.lookupCursor() end
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Look up the item on your cursor.') end
+        drawItemFilters(st)
     elseif kind == 'npcs' then
         ImGui.SetNextItemWidth(core.px(110))
         local z, zc = ImGui.InputTextWithHint('##zone', 'zone', st.zone)
@@ -2856,6 +3579,78 @@ local function drawSearchPane(kind)
         -- an empty result set must not re-run the search every frame)
     end
     drawResults(kind, -1)
+end
+
+-- ----------------------------------------------------------------------------
+-- Spell Info replacement: every way the game opens its Spell Display window
+-- (right-click on a gem, a buff, a spellbook page, a spell link) lands here.
+-- The window is polled each frame; when it opens (or shows a new spell while
+-- open) its spell is resolved by name and, if the database knows it, the
+-- game window is closed and the spell's card takes its place. Unknown spells
+-- keep the game window, and the same name is not retried until it changes.
+-- ----------------------------------------------------------------------------
+-- STML (the client's HTML-like markup) to plain lines: tags dropped, <br>
+-- as line breaks, entities decoded, blank lines removed.
+local STML_ENTITIES = { amp = '&', lt = '<', gt = '>', quot = '"', apos = "'", nbsp = ' ' }
+local function stmlToLines(text)
+    text = tostring(text or '')
+    text = text:gsub('<[bB][rR]%s*/?>', '\n'):gsub('</?[pP]%s*>', '\n'):gsub('<[^>]*>', '')
+    text = text:gsub('&(%a+);', function(e) return STML_ENTITIES[e:lower()] or ('&' .. e .. ';') end)
+    text = text:gsub('&#(%d+);', function(n) n = tonumber(n) return (n and n < 256) and string.char(n) or '' end)
+    local lines = {}
+    for line in (text .. '\n'):gmatch('(.-)\r?\n') do
+        line = line:gsub('^%s+', ''):gsub('%s+$', '')
+        if line ~= '' then lines[#lines + 1] = line end
+    end
+    return lines
+end
+
+-- The spell name the game's Spell Display window is showing: its title, or
+-- the first line of its description when the title is not the spell.
+local function spellWindowName(title, stml)
+    title = tostring(title or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if title ~= '' and not title:lower():find('^spell display') then return title end
+    local lines = stmlToLines(stml)
+    return lines[1]
+end
+
+local function watchSpellWindow()
+    local W = S.spellWnd
+    if not S.spellWindow then
+        W.wasOpen = false
+        W.lastKey = nil
+        return
+    end
+    local open, title, stml = false, nil, nil
+    pcall(function()
+        local w = mq.TLO.Window('SpellDisplayWindow')
+        if not (w and w.Open and w.Open() == true) then return end
+        open = true
+        title = w.Text and w.Text() or nil
+        local d = w.Child and w.Child('SDW_SpellDescription')
+        if d and d.Text then stml = d.Text() end
+    end)
+    if not open then
+        W.wasOpen = false
+        W.lastKey = nil
+        return
+    end
+    local name = spellWindowName(title, stml)
+    local key = name or '?'
+    if W.wasOpen and key == W.lastKey then return end
+    W.wasOpen = true
+    W.lastKey = key
+    if not name then return end
+    if not DB.isLoaded('spells') then
+        -- first open starts the (sliced) load; the game window stays this time
+        DB.ensure('spells')
+        return
+    end
+    local id = spellIdForName(name)
+    if not id then return end
+    pcall(function() mq.TLO.Window('SpellDisplayWindow').DoClose() end)
+    W.wasOpen = false
+    plugin.popout('spells', id)
 end
 
 -- ----------------------------------------------------------------------------
@@ -2957,7 +3752,7 @@ local function drawLootAdvisor()
     core.pushTheme()
     ImGui.SetNextWindowSize(core.px(520), core.px(220), ImGuiCond.FirstUseEver)
     core.preBeginWindow('gamedb_loot')
-    local open, draw = ImGui.Begin('Loot Advisor###TriuneGameDBLoot', true, 0)
+    local open, draw = ImGui.Begin('Loot Advisor###TriuneGameDBLoot', true, core.windowFlags and core.windowFlags('gamedb_loot', 0) or 0)
     if not open then
         S.lootAdvisor = false
         core.saveLoadout(true)
@@ -2998,6 +3793,7 @@ local function drawLootAdvisor()
             ImGui.EndTable()
         end
     end
+    if core.preEndWindow then core.preEndWindow('gamedb_loot', false) end
     ImGui.End()
     core.popTheme()
 end
@@ -3039,15 +3835,17 @@ local function drawWindow()
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
     end
     core.preBeginWindow('gamedb')
-    local open, draw = ImGui.Begin('Triune Database###TriuneGameDB', ctrl.show_gamedb, windowFlags)
+    local open, draw = ImGui.Begin('Triune Database###TriuneGameDB', ctrl.show_gamedb, core.windowFlags and core.windowFlags('gamedb', windowFlags) or windowFlags)
     if not open then
         ctrl.show_gamedb = false
+        if core.preEndWindow then core.preEndWindow('gamedb', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
         return
     end
     if not draw then
+        if core.preEndWindow then core.preEndWindow('gamedb', false) end
         ImGui.End()
         core.popTheme()
         return
@@ -3114,6 +3912,7 @@ local function drawWindow()
     end
     if applied and S.pendingTab == applied then S.pendingTab = nil end
 
+    if core.preEndWindow then core.preEndWindow('gamedb', false) end
     ImGui.End()
     core.popTheme()
 end
@@ -3160,6 +3959,7 @@ function plugin.onDrawUI()
     if not core then return end
     refresh()
     stepLoading()
+    watchSpellWindow()
     drawWindow()
     drawPopouts()
     drawLootAdvisor()
@@ -3175,13 +3975,14 @@ function plugin.onZoned()
 end
 
 function plugin.onSaveSettings()
-    return { tab = S.tab, lootAdvisor = S.lootAdvisor == true }
+    return { tab = S.tab, lootAdvisor = S.lootAdvisor == true, spellWindow = S.spellWindow == true }
 end
 
 function plugin.onLoadSettings(s)
     if type(s) ~= 'table' then return end
     if KIND_LABELS[s.tab] then S.tab = s.tab end
     if s.lootAdvisor ~= nil then S.lootAdvisor = (s.lootAdvisor == true) end
+    if s.spellWindow ~= nil then S.spellWindow = (s.spellWindow == true) end
 end
 
 function plugin.onDrawSettings()
@@ -3199,6 +4000,12 @@ function plugin.onDrawSettings()
         S.lootAdvisor = la
         core.saveLoadout(true)
     end
+    local sw = ImGui.Checkbox('Replace the game\'s Spell Info window with a database card##gdbSpellWnd', S.spellWindow == true)
+    if sw ~= (S.spellWindow == true) then
+        S.spellWindow = sw
+        core.saveLoadout(true)
+    end
+    core.setTooltip('Right-clicking a spell gem, a buff or a spellbook page normally opens EverQuest\'s Spell Display window.\nWith this on, that window is closed as it opens and a Triune spell card (effects, costs, scroll sources, who casts it) takes its place.\nSpells the database does not know keep the game window. Also /ac spellwindow.')
     local m = DB.readManifest()
     if m.present then
         ImGui.TextDisabled(string.format('Data built %s: %s items, %s NPCs, %s spells (%s)', m.built or '?', m.item_index or '?', m.npcs or '?', m.spells or '?', m.source or ''))
@@ -3237,11 +4044,81 @@ function plugin.onCommand(cmd, args)
     if cmd == 'npc' then plugin.search('npcs', text); return true end
     if cmd == 'spell' then plugin.search('spells', text); return true end
     if cmd == 'dbcursor' then plugin.lookupCursor(); return true end
+    if cmd == 'linkitem' or cmd == 'linkspell' or cmd == 'linknpc' or cmd == 'linkcursor' or cmd == 'linktarget' then
+        -- /ac linkitem [/channel [name]] <name|id>: an optional leading chat
+        -- command ("/g", "/tell Bob") sends the link there instead of the
+        -- input line.
+        local channel, rest = nil, text
+        if rest:sub(1, 1) == '/' then
+            local c, r = rest:match('^(/%S+)%s*(.*)$')
+            if c == '/t' or c == '/tell' then
+                local who
+                who, r = r:match('^(%S+)%s*(.*)$')
+                c = c .. ' ' .. tostring(who or '')
+            end
+            channel, rest = c, r or ''
+        end
+        local kind, id = 'items', nil
+        if cmd == 'linkcursor' then
+            pcall(function()
+                local c = mq.TLO.Cursor
+                if c() then id = c.ID() or 0 end
+            end)
+            if not id or id <= 0 then
+                echo('Nothing on the cursor.')
+                return true
+            end
+        elseif cmd == 'linktarget' then
+            kind = 'npcs'
+            local tid = 0
+            pcall(function() tid = mq.TLO.Target.ID() or 0 end)
+            if tid <= 0 then
+                echo('No target.')
+                return true
+            end
+            id = plugin.npcIdForSpawn(tid)
+            if not id then
+                echo(DB.isLoaded('npcs') and 'Your target is not in the database.' or 'The NPC index is still loading; try again in a moment.')
+                return true
+            end
+        else
+            if cmd == 'linkspell' then kind = 'spells' elseif cmd == 'linknpc' then kind = 'npcs' end
+            if rest == '' then
+                echo('Usage: /ac ' .. cmd .. ' [/channel] <name|id>')
+                return true
+            end
+            id = plugin.lookupId(kind, rest)
+            if not id then
+                if not DB.isLoaded(kind) then
+                    echo('The ' .. kind .. ' index is still loading; try again in a moment.')
+                else
+                    echo('No ' .. (kind == 'spells' and 'spell' or kind == 'npcs' and 'NPC' or 'item') .. ' matches "' .. rest .. '".')
+                end
+                return true
+            end
+        end
+        plugin.linkToChat(kind, id, channel)
+        return true
+    end
     if cmd == 'dbtarget' then plugin.lookupTarget(); return true end
     if cmd == 'lootadvisor' then
         S.lootAdvisor = not S.lootAdvisor
         core.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Loot Advisor %s.', S.lootAdvisor and 'ON' or 'OFF'))
+        return true
+    end
+    if cmd == 'spellwindow' or cmd == 'spellinfo' then
+        if text ~= '' then
+            -- /ac spellinfo <name|id>: open the card (or the game window) for one spell
+            if not plugin.inspectSpell(tonumber(text) or text) then
+                if core.inspectSpell and core.inspectSpell(tonumber(text) or text) then return true end
+                echo('Spell not found: ' .. text)
+            end
+            return true
+        end
+        S.spellWindow = not S.spellWindow
+        core.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Spell Info replacement %s.', S.spellWindow and 'ON (database cards replace the game\'s Spell Display window)' or 'OFF (game window)'))
         return true
     end
     return false
@@ -3253,6 +4130,10 @@ plugin.help = {
     '  \ag/ac dbcursor\ax - Look up the item on your cursor',
     '  \ag/ac dbtarget\ax - Open a card for your current target (stats, abilities, loot)',
     '  \ag/ac lootadvisor\ax - Toggle the Loot Advisor shown while looting a corpse',
+    '  \ag/ac spellwindow\ax - Toggle replacing the game\'s Spell Info window with a database card',
+    '  \ag/ac spellinfo <name|id>\ax - Open the Spell Info card for a spell',
+    '  \ag/ac linkitem [/channel] <name|id>\ax, \ag/ac linkspell [/channel] <name|id>\ax, \ag/ac linknpc [/channel] <name|id>\ax - Put a chat link in the Chat Windows input line (or send it to /g, /gu, /tell Name...)',
+    '  \ag/ac linkcursor [/channel]\ax, \ag/ac linktarget [/channel]\ax - Link the item on your cursor / your current target',
 }
 
 -- Exposed for tests and other plugins
@@ -3263,5 +4144,8 @@ plugin.state = S
 plugin.showEntry = showEntry
 plugin.runSearch = runSearch
 plugin.scanLoot = scanLoot
+plugin.stmlToLines = stmlToLines
+plugin.spellWindowName = spellWindowName
+plugin.watchSpellWindow = watchSpellWindow
 
 return plugin

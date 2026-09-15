@@ -707,9 +707,10 @@ function plugin.onDrawUI()
     core.pushTheme()
     ImGui.SetNextWindowSize(core.px(620), core.px(520), ImGuiCond.FirstUseEver)
     core.preBeginWindow('auto_accept')
-    local open, show = ImGui.Begin('Triune Auto-Accept v' .. (core.VERSION or '') .. '###triuneAutoAccept', c.show_auto_accept)
+    local open, show = ImGui.Begin('Triune Auto-Accept v' .. (core.VERSION or '') .. '###triuneAutoAccept', c.show_auto_accept, core.windowFlags and core.windowFlags('auto_accept', 0) or 0)
     if not open then
         c.show_auto_accept = false
+        if core.preEndWindow then core.preEndWindow('auto_accept', false) end
         ImGui.End()
         core.popTheme()
         saveLoadout()
@@ -719,6 +720,7 @@ function plugin.onDrawUI()
         core.postBeginWindow('auto_accept')
         drawPanel()
     end
+    if core.preEndWindow then core.preEndWindow('auto_accept', false) end
     ImGui.End()
     core.popTheme()
 end

@@ -4,4 +4,4 @@ items=281490
 item_index=153944
 npcs=68205
 spells=40914
-format=1
+format=2

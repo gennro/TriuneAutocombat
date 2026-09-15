@@ -2213,9 +2213,10 @@ local function renderGUI()
 
     core.pushTheme()
     core.preBeginWindow('buffbot')
-    local open, visible = ImGui.Begin(string.format("Triune Buffbot v%s###TriuneBuffbotWin", VERSION), ctrl.show_buffbot)
+    local open, visible = ImGui.Begin(string.format("Triune Buffbot v%s###TriuneBuffbotWin", VERSION), ctrl.show_buffbot, core.windowFlags and core.windowFlags('buffbot', 0) or 0)
     if not open then
         ctrl.show_buffbot = false
+        if core.preEndWindow then core.preEndWindow('buffbot', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
@@ -2241,6 +2242,7 @@ local function renderGUI()
         end
     end
 
+    if core.preEndWindow then core.preEndWindow('buffbot', false) end
     ImGui.End()
     core.popTheme()
 end

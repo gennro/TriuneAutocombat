@@ -1175,7 +1175,7 @@ function M.drawCooldownWindow()
     core.pushTheme()
 
     if ctrl.cooldown_alpha then
-        ImGui.SetNextWindowBgAlpha(ctrl.cooldown_alpha)
+        ImGui.SetNextWindowBgAlpha(core.windowBgAlpha and core.windowBgAlpha('cooldowns', ctrl.cooldown_alpha) or ctrl.cooldown_alpha)
     end
     ImGui.SetNextWindowSize(core.px(500), core.px(340), ImGuiCond.FirstUseEver)
 
@@ -1190,8 +1190,9 @@ function M.drawCooldownWindow()
     ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(4), core.px(3))
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(3), core.px(2))
     local show
-    ctrl.show_cooldowns, show = ImGui.Begin('Triune Cooldown Monitor v' .. (core.VERSION or '') .. '###triuneCooldowns', ctrl.show_cooldowns, winFlags)
+    ctrl.show_cooldowns, show = ImGui.Begin('Triune Cooldown Monitor v' .. (core.VERSION or '') .. '###triuneCooldowns', ctrl.show_cooldowns, core.windowFlags and core.windowFlags('cooldowns', winFlags) or winFlags)
     if not ctrl.show_cooldowns then
+        if core.preEndWindow then core.preEndWindow('cooldowns', false) end
         ImGui.End()
         ImGui.PopStyleVar(3)
         core.popTheme()
@@ -1203,6 +1204,7 @@ function M.drawCooldownWindow()
         M.renderCooldownContent('_win', true)
     end
 
+    if core.preEndWindow then core.preEndWindow('cooldowns', false) end
     ImGui.End()
     ImGui.PopStyleVar(3)
     core.popTheme()

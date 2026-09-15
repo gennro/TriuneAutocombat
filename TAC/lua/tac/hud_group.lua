@@ -182,12 +182,12 @@ local function renderGwSettingsContent()
         ctrl.gw_show_endurance = endVal
         core.saveLoadout(true)
     end
-    local boxVal = ImGui.Checkbox('Show Box Network Characters##gwBoxes', ctrl.gw_show_boxes ~= false)
-    if boxVal ~= (ctrl.gw_show_boxes ~= false) then
+    local boxVal = ImGui.Checkbox('Show Box Network Characters##gwBoxes', ctrl.gw_show_boxes == true)
+    if boxVal ~= (ctrl.gw_show_boxes == true) then
         ctrl.gw_show_boxes = boxVal
         core.saveLoadout(true)
     end
-    if ImGui.IsItemHovered() then core.setTooltip('Also list your other boxed characters (Box Network) that are not in this group, with live vitals from their heartbeat.') end
+    if ImGui.IsItemHovered() then core.setTooltip('Off by default: the window lists only your group. Turn on to also list your other boxed characters (Box Network) that are not in this group, with live vitals from their heartbeat.') end
     local petVal = ImGui.Checkbox('Show Pet Bars##gwPets', ctrl.gw_show_pets ~= false)
     if petVal ~= (ctrl.gw_show_pets ~= false) then
         ctrl.gw_show_pets = petVal
@@ -412,10 +412,11 @@ local function refreshGroup(force)
         end)
     end
 
-    -- Box Network: this computer's other Triune characters that are not in
-    -- the group (vitals from their heartbeat; spawn looked up locally so the
-    -- row can be targeted and shows distance).
-    if ctrl.gw_show_boxes ~= false and core.boxnet and type(core.boxnet.peers) == 'function' then
+    -- Box Network (opt-in, default off so the window shows only the group):
+    -- this computer's other Triune characters that are not in the group
+    -- (vitals from their heartbeat; spawn looked up locally so the row can be
+    -- targeted and shows distance).
+    if ctrl.gw_show_boxes == true and core.boxnet and type(core.boxnet.peers) == 'function' then
         local okB, peers = pcall(core.boxnet.peers)
         if okB and type(peers) == 'table' then
             local seenNames = {}
@@ -501,7 +502,7 @@ function plugin.onDrawUI()
     core.pushTheme()
 
     if ctrl.gw_alpha then
-        ImGui.SetNextWindowBgAlpha(ctrl.gw_alpha)
+        ImGui.SetNextWindowBgAlpha(core.windowBgAlpha and core.windowBgAlpha('group', ctrl.gw_alpha) or ctrl.gw_alpha)
     end
     ImGui.SetNextWindowSize(core.px(280), core.px(320), ImGuiCond.FirstUseEver)
 
@@ -516,8 +517,9 @@ function plugin.onDrawUI()
     ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
     local show
-    ctrl.show_group_window, show = ImGui.Begin('Triune Group v' .. (core.VERSION or '') .. '###triuneGroupWindow', ctrl.show_group_window, winFlags)
+    ctrl.show_group_window, show = ImGui.Begin('Triune Group v' .. (core.VERSION or '') .. '###triuneGroupWindow', ctrl.show_group_window, core.windowFlags and core.windowFlags('group', winFlags) or winFlags)
     if not ctrl.show_group_window then
+        if core.preEndWindow then core.preEndWindow('group', true) end
         ImGui.End()
         ImGui.PopStyleVar(3)
         core.popTheme()
@@ -531,6 +533,10 @@ function plugin.onDrawUI()
         -- Right-click anywhere in window for options
         if ImGui.BeginPopupContextWindow('##gwContextMenu') then
             if core.applyWindowScale then core.applyWindowScale('group') end
+            if core.drawWindowMenuItems then
+                core.drawWindowMenuItems('group', { header = false, lock = false, scale = false, layout = false, close = false })
+                ImGui.Separator()
+            end
             renderGwSettingsContent()
             ImGui.EndPopup()
         end
@@ -845,6 +851,8 @@ function plugin.onDrawUI()
             end
         end
     end
+
+    if core.preEndWindow then core.preEndWindow('group', true) end
 
     ImGui.End()
     ImGui.PopStyleVar(3)

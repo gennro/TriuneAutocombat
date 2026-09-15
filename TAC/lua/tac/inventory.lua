@@ -2508,9 +2508,10 @@ local function DrawInventoryManagerUI()
     end
 
     core.preBeginWindow('inventory')
-    local open, draw = ImGui.Begin("Triune Inventory & Bank Manager###TriuneInventoryManager", ctrl.show_inv, windowFlags)
+    local open, draw = ImGui.Begin("Triune Inventory & Bank Manager###TriuneInventoryManager", ctrl.show_inv, core.windowFlags and core.windowFlags('inventory', windowFlags) or windowFlags)
     if not open then
         ctrl.show_inv = false
+        if core.preEndWindow then core.preEndWindow('inventory', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
@@ -2546,6 +2547,7 @@ local function DrawInventoryManagerUI()
         end
     end
 
+    if core.preEndWindow then core.preEndWindow('inventory', false) end
     ImGui.End()
     core.popTheme()
 end

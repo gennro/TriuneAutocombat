@@ -197,7 +197,7 @@ local browser = {
     search  = '',
     lists   = {},          -- tab -> { entries }
     scanAt  = {},          -- tab -> os.clock() of the last scan
-    boxScope = 'all',      -- Box Control tab: all | zone | group
+    boxScope = 'bar',      -- Box Control tab: bar (hotbar switch) | all | zone | group
     scanRequest = {},      -- tab -> true: the draw thread wants onTick to (re)scan it
     gemFp   = nil,         -- memorized-gem fingerprint the Gem list was built from
     gemFpAt = 0,
@@ -286,13 +286,24 @@ local CORE_COMMANDS = {
     { group = 'Setting', name = 'Save Preset',        cmd = '/ac preset save <name>',   desc = 'Save the current spell set as a preset' },
 }
 -- Box Control presets: the Box Net window's quick actions as buttons. `%s` is
--- the scope (all | zone | group). ${Me.CleanName} is expanded by the command
+-- the scope: a fixed one (all | zone | group) baked into the command, or the
+-- `{scope}` placeholder ('bar'), which runButton resolves at press time from
+-- the hotbar's own Group / Zone / All switch (hb.boxScope) so one set of
+-- buttons serves every scope. ${Me.CleanName} is expanded by the command
 -- parser on the character that presses the button, so the shared library
 -- works for every box.
+local BOX_SCOPE_TOKEN = '{scope}'
 local BOX_SCOPES = {
+    { id = 'bar',   label = 'Hotbar switch' },
     { id = 'all',   label = 'All boxes' },
     { id = 'zone',  label = 'Same zone' },
     { id = 'group', label = 'My group' },
+}
+-- The live scopes a hotbar switch can be set to (what `{scope}` becomes).
+local BAR_SCOPES = {
+    { id = 'group', label = 'Group', desc = 'My group' },
+    { id = 'zone',  label = 'Zone',  desc = 'Same zone' },
+    { id = 'all',   label = 'All',   desc = 'All boxes' },
 }
 local BOX_PRESETS = {
     { name = 'Run',          desc = 'Start auto-combat on the boxes',                cmd = '/ac net %s run',                                          color = { 40, 125, 55 } },
@@ -667,6 +678,8 @@ local function newHotbar(title)
         perCharPos    = false,
         showSearch    = false,
         advTooltips   = false,
+        boxScope      = 'all',  -- live scope for `{scope}` box-control buttons: group | zone | all
+        showScopeBar  = true,   -- draw the Group / Zone / All switch when the bar has such buttons
         buttonSize    = 6,      -- x10 px
         fontScale     = 1.0,
         alpha         = 1.0,
@@ -747,6 +760,7 @@ local function normalizeDb(d)
                 hb.buttonSize = math.max(MIN_BUTTON_SIZE, math.min(MAX_BUTTON_SIZE, math.floor(tonumber(hb.buttonSize) or 6)))
                 hb.fontScale = tonumber(hb.fontScale) or 1.0
                 hb.alpha = math.max(0.1, math.min(1.0, tonumber(hb.alpha) or 1.0))
+                if hb.boxScope ~= 'group' and hb.boxScope ~= 'zone' and hb.boxScope ~= 'all' then hb.boxScope = 'all' end
                 if hb.title == '' then hb.title = 'Hot Buttons ' .. i end
                 local keep = {}
                 if type(hb.sets) ~= 'table' then hb.sets = {} end
@@ -1485,9 +1499,64 @@ local function pumpScripts()
     end
 end
 
-local function runButton(b, key)
+-- Box-control buttons made with the "Hotbar switch" scope carry `{scope}`;
+-- the hotbar's own Group / Zone / All switch decides where they go.
+local function usesBoxScope(cmd)
+    return type(cmd) == 'string' and cmd:find(BOX_SCOPE_TOKEN, 1, true) ~= nil
+end
+
+local function hotbarUsesBoxScope(hb)
+    for _, setName in ipairs(hb and hb.sets or {}) do
+        for _, key in pairs(db.sets[setName] or {}) do
+            local b = db.buttons[key]
+            if b and usesBoxScope(b.cmd) then return true end
+        end
+    end
+    return false
+end
+
+local function hotbarBoxScope(hb)
+    local sc = hb and hb.boxScope
+    if sc ~= 'group' and sc ~= 'zone' and sc ~= 'all' then sc = 'all' end
+    return sc
+end
+
+local function barScopeLabel(scope)
+    for _, sc in ipairs(BAR_SCOPES) do
+        if sc.id == scope then return sc.desc end
+    end
+    return scope
+end
+
+-- The hotbar whose switch a set answers to: the one passed in, else the first
+-- of this character's hotbars showing the set, else the first hotbar (so
+-- /ac btn exec and the /btnexec bind resolve the same way a click does).
+local function hotbarForSet(setName, hb)
+    if hb then return hb end
+    local hbs = hotbars()
+    for _, h in ipairs(hbs) do
+        if setName and hotbarHasSet(h, setName) then return h end
+    end
+    return hbs[1]
+end
+
+local function resolveBoxScope(cmd, hb)
+    if not usesBoxScope(cmd) then return cmd end
+    return (cmd:gsub('{scope}', hotbarBoxScope(hb)))   -- the token has no pattern magic
+end
+
+local function setHotbarBoxScope(hb, scope, hbId)
+    if not hb or hotbarBoxScope(hb) == scope then return false end
+    if scope ~= 'group' and scope ~= 'zone' and scope ~= 'all' then return false end
+    hb.boxScope = scope
+    saveDb({ silent = true })
+    setStatus('%s: box-control buttons now send to %s.', hb.title or ('Hotbar ' .. tostring(hbId or '')), barScopeLabel(scope):lower())
+    return true
+end
+
+local function runButton(b, key, hb)
     if not b then return end
-    local cmd = b.cmd or ''
+    local cmd = resolveBoxScope(b.cmd or '', hb)
     if prefs.announceRun then log('Running \at%s\ax', b.label or key or '?') end
     if isLuaButton(cmd) then
         if runLuaButton(b, key) then pumpScripts() end
@@ -1511,10 +1580,13 @@ local function runButton(b, key)
 end
 
 -- Fires the button in a slot right now. Returns false for an empty slot.
-local function fireButton(setName, index)
+-- `hb` is the hotbar that was clicked; without one, a `{scope}` button asks
+-- the first hotbar showing the set.
+local function fireButton(setName, index, hb)
     local b, key = buttonAt(setName, index)
     if not b then return false end
-    runButton(b, key)
+    if usesBoxScope(b.cmd) then hb = hotbarForSet(setName, hb) end
+    runButton(b, key, hb)
     return true
 end
 
@@ -1690,7 +1762,7 @@ local function saveEditor()
 end
 
 local function slotClicked(hbId, setName, index)
-    if fireButton(setName, index) then return end
+    if fireButton(setName, index, hotbars()[hbId]) then return end
     local fromCursor = buttonFromCursor()
     openEditor(hbId, setName, index, fromCursor)
     if fromCursor then setStatus('Captured %s from the cursor - review and Save.', fromCursor.label) end
@@ -1860,10 +1932,13 @@ local function boxScopeLabel(scope)
 end
 
 local function boxPresetButton(preset, scope)
-    local cmd = preset.cmd:gsub('%%s', scope)
+    scope = scope or 'bar'
+    local live = scope == 'bar'
+    local cmd = preset.cmd:gsub('%%s', live and BOX_SCOPE_TOKEN or scope)
     local suffix = ({ all = 'all', zone = 'zone', group = 'grp' })[scope] or scope
     return {
-        label = string.format('%s (%s)', preset.name, suffix),
+        -- Live-scope buttons keep the bare name: the switch on the bar says where they go.
+        label = live and preset.name or string.format('%s (%s)', preset.name, suffix),
         cmd = cmd,
         buttonColor = preset.color and deepcopy(preset.color) or nil,
         timerType = 'None',
@@ -1872,7 +1947,7 @@ end
 
 local function scanBoxControl()
     local out = {}
-    local scope = browser.boxScope or 'all'
+    local scope = browser.boxScope or 'bar'
     for _, preset in ipairs(BOX_PRESETS) do
         local b = boxPresetButton(preset, scope)
         out[#out + 1] = { name = preset.name, sub = preset.desc, icon = nil, iconType = 'Spell', button = b }
@@ -2080,8 +2155,8 @@ end
 -- Creates a "Box Control" set holding every preset for the chosen scope and
 -- adds it to the target hotbar. Returns the set name.
 local function addBoxControlSet(scope, hb)
-    scope = scope or browser.boxScope or 'all'
-    local name = uniqueSetName('Box Control' .. (scope ~= 'all' and (' (' .. scope .. ')') or ''))
+    scope = scope or browser.boxScope or 'bar'
+    local name = uniqueSetName('Box Control' .. (scope ~= 'bar' and (' (' .. scope .. ')') or ''))
     local set = {}
     for i, preset in ipairs(BOX_PRESETS) do
         set[i] = addButton(boxPresetButton(preset, scope), false)
@@ -2312,8 +2387,10 @@ local function drawSlot(hb, hbId, setName, index, size, dimmed)
             local tip = c.label ~= '' and c.label or (b.label or '')
             if c.remaining > 0.05 then tip = tip .. '\nReady in ' .. fmtTime(c.remaining) end
             if c.locked then tip = tip .. '\n(active)' end
+            local liveScope = usesBoxScope(b.cmd)
+            if liveScope then tip = tip .. '\nBoxes: ' .. barScopeLabel(hotbarBoxScope(hb)) .. ' (hotbar switch)' end
             if hb.advTooltips and b.cmd and b.cmd ~= '' then
-                local shown = lines(b.cmd)
+                local shown = lines(liveScope and resolveBoxScope(b.cmd, hb) or b.cmd)
                 local extra = ''
                 if #shown > 6 then
                     extra = string.format('\n... (%d more lines)', #shown - 6)
@@ -2544,6 +2621,17 @@ drawHotbarMenu = function(hb, hbId)
         end
         ImGui.EndMenu()
     end
+    if ImGui.BeginMenu('Box Control Scope') then
+        local cur = hotbarBoxScope(hb)
+        for _, sc in ipairs(BAR_SCOPES) do
+            if ImGui.MenuItem(sc.desc .. '##hbScopeMenu_' .. hbId .. '_' .. sc.id, nil, cur == sc.id) then
+                setHotbarBoxScope(hb, sc.id, hbId)
+            end
+        end
+        ImGui.Separator()
+        ImGui.TextDisabled('Applies to Box Control buttons made with the "Hotbar switch" scope.')
+        ImGui.EndMenu()
+    end
     ImGui.Separator()
     drawSetSubmenus(hb, hbId)
     ImGui.Separator()
@@ -2572,6 +2660,10 @@ drawHotbarMenu = function(hb, hbId)
             hb.hideTitleBar = not hb.hideTitleBar
             saveDb({ silent = true })
         end
+        -- The shared ghost fade (core window options, keyed by this hotbar's window key).
+        if core.drawWindowMenuItems then
+            core.drawWindowMenuItems((hbId == 1) and 'buttons' or ('buttons_' .. hbId), { header = false, titleBar = false, lock = false, scale = false, layout = false, close = false })
+        end
         if ImGui.MenuItem(hb.compact and 'Normal Mode (tabs)' or 'Compact Mode (one set, no tabs)') then
             hb.compact = not hb.compact
             saveDb({ silent = true })
@@ -2588,6 +2680,11 @@ drawHotbarMenu = function(hb, hbId)
             hb.advTooltips = not hb.advTooltips
             saveDb({ silent = true })
         end
+        if ImGui.MenuItem((hb.showScopeBar ~= false and 'Hide' or 'Show') .. ' Box Scope Switch (Group / Zone / All row)') then
+            hb.showScopeBar = not (hb.showScopeBar ~= false)
+            saveDb({ silent = true })
+        end
+        if ImGui.IsItemHovered() then core.setTooltip('The row only appears while this bar holds Box Control buttons made with the "Hotbar switch" scope.') end
         if ImGui.MenuItem(hb.perCharPos and 'Global Window Position' or 'Per-Character Window Position') then
             hb.perCharPos = not hb.perCharPos
             saveDb({ silent = true })
@@ -2680,6 +2777,21 @@ drawHotbarMenu = function(hb, hbId)
     end
 end
 
+-- Group / Zone / All row at the top of a hotbar that holds live-scope box
+-- control buttons. One click retargets every `{scope}` button on the bar.
+local function drawScopeSwitch(hb, hbId)
+    local cur = hotbarBoxScope(hb)
+    ImGui.TextDisabled('Boxes:')
+    if ImGui.IsItemHovered() then core.setTooltip('Where the Box Control buttons on this bar send their commands.\nAlso: /ac btn scope <group|zone|all> [hotbar].') end
+    for _, sc in ipairs(BAR_SCOPES) do
+        ImGui.SameLine()
+        if ImGui.RadioButton(sc.label .. '##hbScope_' .. hbId .. '_' .. sc.id, cur == sc.id) then
+            setHotbarBoxScope(hb, sc.id, hbId)
+        end
+        if ImGui.IsItemHovered() then core.setTooltip('Send to ' .. sc.desc:lower() .. ' (/ac net ' .. sc.id .. ' ...).') end
+    end
+end
+
 -- One hotbar window -----------------------------------------------------------
 local function windowFlags(hb)
     local flags = 0
@@ -2699,13 +2811,13 @@ local function drawHotbar(hb, hbId)
     if hb.perCharPos then title = title .. '_' .. charKey() end
 
     core.pushTheme()
-    if hb.alpha and hb.alpha < 1 then pcall(ImGui.SetNextWindowBgAlpha, hb.alpha) end
+    if hb.alpha and hb.alpha < 1 then pcall(ImGui.SetNextWindowBgAlpha, core.windowBgAlpha and core.windowBgAlpha(winKey, hb.alpha) or hb.alpha) end
     pcall(ImGui.SetNextWindowSize, core.px(300), core.px(90), ImGuiCond and ImGuiCond.FirstUseEver or 4)
     core.preBeginWindow(winKey)
     -- Same tight chrome as the Spell Gem bar: 2px padding, 1px frames (pushed
     -- after preBeginWindow so it wins over the scaled theme padding).
     local pushed = pushStyleVarSafe('WindowPadding', core.px(2), core.px(2)) + pushStyleVarSafe('ItemSpacing', core.px(2), core.px(2)) + pushStyleVarSafe('FramePadding', core.px(1), core.px(1))
-    local open, show = ImGui.Begin(title, true, windowFlags(hb))
+    local open, show = ImGui.Begin(title, true, core.windowFlags and core.windowFlags(winKey, windowFlags(hb)) or windowFlags(hb))
     if open == false then
         hb.visible = false
         saveDb({ silent = true })
@@ -2721,6 +2833,12 @@ local function drawHotbar(hb, hbId)
         if ImGui.BeginPopupContextWindow('##hbWinMenu') then
             drawHotbarMenu(hb, hbId)
             ImGui.EndPopup()
+        end
+
+        -- Group / Zone / All switch for `{scope}` box-control buttons, shown
+        -- only while the bar actually holds some (and the option is on).
+        if hb.showScopeBar ~= false and hotbarUsesBoxScope(hb) then
+            drawScopeSwitch(hb, hbId)
         end
 
         if hb.compact then
@@ -2806,6 +2924,7 @@ local function drawHotbar(hb, hbId)
         end
         ImGui.PopID()
     end
+    if core.preEndWindow then core.preEndWindow(winKey, true) end
     ImGui.End()
     popStyleVarsSafe(pushed)
     core.popTheme()
@@ -3309,6 +3428,9 @@ local function drawBrowser()
                                 browser.boxScope = sc.id
                                 browser.lists.Box = nil
                             end
+                            if sc.id == 'bar' and ImGui.IsItemHovered() then
+                                core.setTooltip('The buttons follow a Group / Zone / All switch shown on the hotbar (right-click -> Box Control Scope, or /ac btn scope), so one set serves every scope.')
+                            end
                             ImGui.SameLine()
                         end
                         ImGui.NewLine()
@@ -3316,7 +3438,10 @@ local function drawBrowser()
                             if ImGui.Button('Add All as a Set##boxAddAll', core.px(150), core.px(22)) then
                                 addBoxControlSet(browser.boxScope, hotbars()[browser.target.hbId])
                             end
-                            if ImGui.IsItemHovered() then core.setTooltip('Creates a "Box Control" set with every preset for ' .. boxScopeLabel(browser.boxScope) .. ' and adds it as a tab on this hotbar.') end
+                            if ImGui.IsItemHovered() then
+                                local who = browser.boxScope == 'bar' and 'that follow the hotbar\'s Group / Zone / All switch' or ('for ' .. boxScopeLabel(browser.boxScope))
+                                core.setTooltip('Creates a "Box Control" set with every preset ' .. who .. ' and adds it as a tab on this hotbar.')
+                            end
                         end
                         ImGui.Separator()
                     elseif tab.id == 'Cmd' then
@@ -3458,6 +3583,40 @@ local function handleCommand(args)
         end
         openBrowser(tab, 'assign', target)
         ctrl.show_buttons = true
+    elseif sub == 'scope' then
+        -- /ac btn scope [group|zone|all|next] [hotbar]: the live scope for
+        -- `{scope}` box-control buttons. Without a hotbar number, the first
+        -- bar holding such buttons is used (else hotbar 1).
+        local want, hbs = (args[2] or ''):lower(), hotbars()
+        local hbId = tonumber(args[3])
+        if not hbId then
+            for i, h in ipairs(hbs) do
+                if hotbarUsesBoxScope(h) then hbId = i break end
+            end
+            hbId = hbId or 1
+        end
+        hbId = math.floor(hbId)
+        local hb = hbs[hbId]
+        if not hb then
+            log('\arNo hotbar %d.', hbId)
+        elseif want == '' then
+            log('Hotbar %d (%s) box-control scope: %s.', hbId, hb.title or '', barScopeLabel(hotbarBoxScope(hb)))
+        else
+            if want == 'next' or want == 'cycle' then
+                local cur = hotbarBoxScope(hb)
+                for i, sc in ipairs(BAR_SCOPES) do
+                    if sc.id == cur then want = BAR_SCOPES[(i % #BAR_SCOPES) + 1].id break end
+                end
+            end
+            want = ({ grp = 'group', group = 'group', zone = 'zone', all = 'all' })[want]
+            if not want then
+                log('usage: /ac btn scope [group|zone|all|next] [hotbar]')
+            elseif not setHotbarBoxScope(hb, want, hbId) then
+                log('Hotbar %d already sends to %s.', hbId, barScopeLabel(want):lower())
+            else
+                log('Hotbar %d box-control buttons now send to %s.', hbId, barScopeLabel(want):lower())
+            end
+        end
     elseif sub == 'list' then
         listLibrary()
     elseif sub == 'reload' then
@@ -3488,7 +3647,7 @@ local function handleCommand(args)
     elseif sub == 'help' then
         for _, h in ipairs(plugin.help) do print(h) end
     else
-        log('usage: /ac btn [toggle|show|hide|<n>|new|add [aa|gem|ability|disc|item|box|cmd]|exec <set> <index>|list|reload|import [bm]|copy <server> <char>]')
+        log('usage: /ac btn [toggle|show|hide|<n>|new|add [aa|gem|ability|disc|item|box|cmd]|exec <set> <index>|scope [group|zone|all|next] [hotbar]|list|reload|import [bm]|copy <server> <char>]')
     end
     return true
 end
@@ -3665,6 +3824,7 @@ plugin.help = {
     '  \ag/ac btn <n>\ax - Show / hide hotbar n     \ag/ac btn new\ax - Create a hotbar',
     '  \ag/ac btn add [aa|gem|ability|disc|item|box|cmd]\ax - Browse your AAs / gems / abilities / discs / clickies and add one as a button',
     '  \ag/ac btn exec <set> <index>\ax - Fire a button   \ag/ac btn import bm\ax - Import ButtonMaster.lua',
+    '  \ag/ac btn scope [group|zone|all|next] [hotbar]\ax - Where a hotbar\'s Box Control buttons send (its Group / Zone / All switch)',
     '  \ag/btn [n]\ax, \ag/btnexec "<set>" <index>\ax, \ag/btncopy <server> <char>\ax - Button Master-compatible binds',
 }
 
@@ -3695,6 +3855,8 @@ plugin._ = {
     browserList = browserList, openBrowser = openBrowser, pickBrowserEntry = pickBrowserEntry, firstFreeSlot = firstFreeSlot,
     scanCommands = scanCommands, parseHelpLine = parseHelpLine, commandNeedsEdit = commandNeedsEdit, CORE_COMMANDS = CORE_COMMANDS,
     scanBoxControl = scanBoxControl, boxPresetButton = boxPresetButton, addBoxControlSet = addBoxControlSet, BOX_PRESETS = BOX_PRESETS, BOX_SCOPES = BOX_SCOPES,
+    BAR_SCOPES = BAR_SCOPES, BOX_SCOPE_TOKEN = BOX_SCOPE_TOKEN, usesBoxScope = usesBoxScope, hotbarUsesBoxScope = hotbarUsesBoxScope,
+    hotbarBoxScope = hotbarBoxScope, resolveBoxScope = resolveBoxScope, setHotbarBoxScope = setHotbarBoxScope, hotbarForSet = hotbarForSet,
     getDb = function() return db end,
     setDb = function(d) db = normalizeDb(d) cache = {} end,
     loadDb = loadDb, saveDb = saveDb, defaultDb = defaultDb, normalizeDb = normalizeDb,

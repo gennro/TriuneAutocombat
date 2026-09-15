@@ -25,6 +25,7 @@ local plugin = {
     tickInterval       = 0.05,       -- Fiber updates cached vitals every 50ms
     runOutOfCombatOnly = false,      -- Stays fully active during combat
     hasThread          = true,       -- Dedicated coroutine fiber
+    uses               = { parcels = 'Parcels waiting / over limit badge on the player section (click to Collect All at a parcel merchant)' },
     -- Window owned by this plugin (drives the main-window header button)
     window             = { label = 'Target & Player HUD', tooltip = 'Toggles the popout Target & Player HUD Unit Frames window.', flag = 'show_unit_frames', key = 'unit_frames', lockFlag = 'uf_lock', desc = 'Popout Target, Player & Pet vitals', headerButton = true, order = 60 },
 }
@@ -54,6 +55,7 @@ function plugin.onInit(coreApi)
         if core.ctrl.uf_hide_empty_pets == nil then core.ctrl.uf_hide_empty_pets = true end
         if core.ctrl.uf_show_endurance == nil then core.ctrl.uf_show_endurance = true end
         if core.ctrl.uf_show_xp == nil then core.ctrl.uf_show_xp = true end
+        if core.ctrl.uf_show_parcels == nil then core.ctrl.uf_show_parcels = true end
     end
 end
 
@@ -79,6 +81,14 @@ local function resolveTargetBuffSlotMax(mq)
     return targetBuffSlotMax
 end
 
+-- The Parcel Helper plugin (tac/parcels.lua) when it is loaded and enabled.
+local function parcelsPlugin()
+    local pm = core and core.runtime and core.runtime.pluginManager
+    local p = pm and pm.plugins and pm.plugins.parcels
+    if p and p.enabled and p.instance and p.instance.getStatus then return p.instance end
+    return nil
+end
+
 -- Slow snapshot: target-of-target, target buffs and pet spawn info. These are
 -- the expensive reads (resolveTargetOfTarget, one Buff(slot) walk, a spawn
 -- info lookup per pet), so they run every SLOW_REFRESH_INTERVAL and when the
@@ -92,6 +102,17 @@ local function refreshSlow(force)
     local mq = core.mq
     local ctrl = core.ctrl
     s.slowForTid = s.tId
+
+    -- Parcel notifier (parcels plugin), the HUD twin of the client's
+    -- PW_ParcelsIcon / PW_ParcelsOverLimitIcon on the player window.
+    s.parcels = nil
+    if ctrl.uf_show_parcels ~= false then
+        local pp = parcelsPlugin()
+        if pp then
+            local okP, st = pcall(pp.getStatus)
+            if okP and type(st) == 'table' and st.badge ~= false and (st.status or 0) > 0 then s.parcels = st end
+        end
+    end
 
     -- Target of Target (ToT)
     if s.hasTarget and core.resolveTargetOfTarget then
@@ -279,6 +300,14 @@ local function renderUfSettingsContent()
         ctrl.uf_show_xp = showXpVal
         if core.saveLoadout then core.saveLoadout(true) end
     end
+    local showParcelsVal = ImGui.Checkbox('Show Parcels Waiting Badge##ufParcels', ctrl.uf_show_parcels ~= false)
+    if showParcelsVal ~= (ctrl.uf_show_parcels ~= false) then
+        ctrl.uf_show_parcels = showParcelsVal
+        if core.saveLoadout then core.saveLoadout(true) end
+    end
+    if ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('Shows a parcel badge on the player section when parcels are waiting at a parcel merchant (parcels plugin), like the client player window icon.')
+    end
     if core.drawWindowScaleControl then core.drawWindowScaleControl('unit_frames', 'Scale', 120) end
     ImGui.SetNextItemWidth(core.px(120))
     local newAlpha = ImGui.SliderFloat('Opacity##ufAlpha', ctrl.uf_alpha or 0.85, 0.20, 1.0, '%.2f')
@@ -317,7 +346,7 @@ function plugin.onDrawUI()
     if core.pushTheme then core.pushTheme() end
 
     if ctrl.uf_alpha then
-        ImGui.SetNextWindowBgAlpha(ctrl.uf_alpha)
+        ImGui.SetNextWindowBgAlpha(core.windowBgAlpha and core.windowBgAlpha('unit_frames', ctrl.uf_alpha) or ctrl.uf_alpha)
     end
     ImGui.SetNextWindowSize(core.px(320), core.px(360), ImGuiCond.FirstUseEver)
 
@@ -334,9 +363,10 @@ function plugin.onDrawUI()
 
     local show
     local winTitle = 'Triune Target & Player v' .. (core.VERSION or '2.15') .. '###triuneUnitFrames'
-    ctrl.show_unit_frames, show = ImGui.Begin(winTitle, ctrl.show_unit_frames, winFlags)
+    ctrl.show_unit_frames, show = ImGui.Begin(winTitle, ctrl.show_unit_frames, core.windowFlags and core.windowFlags('unit_frames', winFlags) or winFlags)
 
     if not ctrl.show_unit_frames then
+        if core.preEndWindow then core.preEndWindow('unit_frames', true) end
         ImGui.End()
         ImGui.PopStyleVar(3)
         if core.popTheme then core.popTheme() end
@@ -354,6 +384,10 @@ function plugin.onDrawUI()
         -- Context Menu
         if ImGui.BeginPopupContextWindow('##ufContextMenu') then
             if core.applyWindowScale then core.applyWindowScale('unit_frames') end
+            if core.drawWindowMenuItems then
+                core.drawWindowMenuItems('unit_frames', { header = false, lock = false, scale = false, layout = false, close = false })
+                ImGui.Separator()
+            end
             renderUfSettingsContent()
             ImGui.EndPopup()
         end
@@ -518,6 +552,49 @@ function plugin.onDrawUI()
 
         -- 2. Player Vitals
         ImGui.Separator()
+
+        -- Parcel badge: only drawn while parcels are waiting (status 1) or the
+        -- mailbox is over its limit (status 2), like the client's player icon.
+        local pst = snap.parcels
+        if pst then
+            local over = (pst.status or 0) >= 2
+            local Col = ImGuiCol or _G.ImGuiCol or (core.mq and core.mq.imgui and core.mq.imgui.Col)
+            local pushed = 0
+            if Col then
+                if over then
+                    local pulse = 0.55 + 0.45 * math.sin(os.clock() * 6)
+                    if pcall(ImGui.PushStyleColor, Col.Button, 0.55 * pulse + 0.15, 0.10, 0.10, 0.85) then pushed = pushed + 1 end
+                    if pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.75, 0.18, 0.18, 0.95) then pushed = pushed + 1 end
+                    if pcall(ImGui.PushStyleColor, Col.Text, 1.0, 0.80, 0.80, 1.0) then pushed = pushed + 1 end
+                else
+                    if pcall(ImGui.PushStyleColor, Col.Button, 0.40, 0.30, 0.10, 0.80) then pushed = pushed + 1 end
+                    if pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.55, 0.42, 0.14, 0.95) then pushed = pushed + 1 end
+                    if pcall(ImGui.PushStyleColor, Col.Text, GOLD[1], GOLD[2], GOLD[3], 1.0) then pushed = pushed + 1 end
+                end
+            end
+            local label = over and ('[!] ' .. (pst.label or 'Parcels OVER LIMIT')) or ('[=] ' .. (pst.label or 'Parcels waiting'))
+            if pst.collecting then label = '[=] Collecting parcels...' end
+            if ImGui.SmallButton(label .. '##ufParcelBadge') then
+                local pp = parcelsPlugin()
+                if pp and pp.onBadgeClick then pcall(pp.onBadgeClick) end
+            end
+            if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
+            if ImGui.IsItemHovered() and core.setTooltip then
+                local tip
+                if over then
+                    tip = 'You are over your parcel limit! Retrieve the excess ones soon or risk losing them!'
+                else
+                    tip = 'You have parcel deliveries.'
+                end
+                if pst.merchantOpen then
+                    tip = tip .. '\nClick: Collect All at this merchant'
+                else
+                    tip = tip .. '\nClick: open the Parcel Helper (visit a parcel merchant to collect)'
+                end
+                core.setTooltip('%s', tip)
+            end
+        end
+
         local pr, pg, pb = 0.25, 0.80, 0.35
         if (snap.myHpPct or 0) <= 25 then
             pr, pg, pb = 0.90, 0.20, 0.20
@@ -573,6 +650,8 @@ function plugin.onDrawUI()
         end
         end
     end
+
+    if core.preEndWindow then core.preEndWindow('unit_frames', true) end
 
     ImGui.End()
     ImGui.PopStyleVar(3)

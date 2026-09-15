@@ -3,8 +3,12 @@
 -- TAC/lua/tac/hud_xtarget.lua — Triune Popout Extended Target Window Plugin
 -- ============================================================================
 -- Compact, auto-scaling replacement for EverQuest's Extended Target window:
--- con-colored names, HP bars, aggro %, distance / LoS, target-of-target, and a
--- per-row right-click menu (Target, Face, Add to Ignore List).
+-- con-colored names, HP bars, aggro %, distance / LoS, target-of-target, a
+-- per-row right-click menu (Target, Face, Add to Ignore List), and two per-row
+-- toggles that steer the engine: Force (stay on this spawn until it is dead,
+-- then move on to the rest of the list) and Ignore (skip this spawn until the
+-- toggle is cleared). Both are per spawn id and session-only; see
+-- runtime.setXtForce / runtime.setXtIgnore in triune.lua.
 --
 -- No fiber: onTick (every 0.25 s) snapshots the XTarget slots into a cache
 -- (static facts per slot/spawn id are cached; only HP, distance, LoS, aggro
@@ -17,9 +21,9 @@
 local plugin = {
     id                 = 'hud_xtarget',
     name               = 'Extended Target HUD',
-    version            = '1.0.0',
+    version            = '1.1.0',
     author             = 'Triune',
-    description        = 'Popout Extended Target window with HP bars, aggro %, distance/LoS, ToT, and right-click actions.',
+    description        = 'Popout Extended Target window with HP bars, aggro %, distance/LoS, ToT, per-row Force/Ignore toggles, and right-click actions.',
     defaultEnabled     = true,
     tickInterval       = 0.25,
     runOutOfCombatOnly = false,
@@ -311,7 +315,7 @@ function plugin.onDrawUI()
     core.pushTheme()
 
     if ctrl.xt_alpha then
-        ImGui.SetNextWindowBgAlpha(ctrl.xt_alpha)
+        ImGui.SetNextWindowBgAlpha(core.windowBgAlpha and core.windowBgAlpha('xtarget', ctrl.xt_alpha) or ctrl.xt_alpha)
     end
     ImGui.SetNextWindowSize(core.px(260), core.px(320), ImGuiCond.FirstUseEver)
 
@@ -326,8 +330,9 @@ function plugin.onDrawUI()
     ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
     local show
-    ctrl.show_xtarget_window, show = ImGui.Begin('Triune Extended Target v' .. (core.VERSION or '') .. '###triuneXTargetWindow', ctrl.show_xtarget_window, winFlags)
+    ctrl.show_xtarget_window, show = ImGui.Begin('Triune Extended Target v' .. (core.VERSION or '') .. '###triuneXTargetWindow', ctrl.show_xtarget_window, core.windowFlags and core.windowFlags('xtarget', winFlags) or winFlags)
     if not ctrl.show_xtarget_window then
+        if core.preEndWindow then core.preEndWindow('xtarget', true) end
         ImGui.End()
         ImGui.PopStyleVar(3)
         core.popTheme()
@@ -340,6 +345,10 @@ function plugin.onDrawUI()
 
         if ImGui.BeginPopupContextWindow('##xtWinContextMenu') then
             if core.applyWindowScale then core.applyWindowScale('xtarget') end
+            if core.drawWindowMenuItems then
+                core.drawWindowMenuItems('xtarget', { header = false, lock = false, scale = false, layout = false, close = false })
+                ImGui.Separator()
+            end
             renderXtSettingsContent()
             ImGui.EndPopup()
         end
@@ -348,6 +357,40 @@ function plugin.onDrawUI()
         refreshXTargets(false)
         local currentTargetId = snap.currentTargetId or 0
         local activeCount = snap.activeCount or 0
+        local forceId = core.getXtForceId and core.getXtForceId() or 0
+        -- Two toggle buttons ('F', 'I') to the right of each HP bar, sized to
+        -- the bar height so they read as part of the row.
+        local spacingX = core.px(3)
+        local btnPad = core.px(10)
+        local forceW = ImGui.CalcTextSize('F') + btnPad
+        local ignoreW = ImGui.CalcTextSize('I') + btnPad
+        local toggleW = forceW + ignoreW + spacingX * 2
+
+        -- On/off button. Off: dim, hollow (dark fill, muted text) so it reads
+        -- as an unset option. On: solid (r,g,b) fill, white text and a
+        -- matching border so the active state is obvious at a glance.
+        -- `onChange(newState)` runs on click; these are pure state toggles so
+        -- they may be called straight from the render pass (no core.defer).
+        local function drawToggle(label, on, w, r, g, b, tip, onChange)
+            if on then
+                ImGui.PushStyleColor(ImGuiCol.Button, r, g, b, 1.0)
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, math.min(1, r + 0.15), math.min(1, g + 0.15), math.min(1, b + 0.15), 1.0)
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, r, g, b, 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Text, 1.0, 1.0, 1.0, 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Border, 1.0, 1.0, 1.0, 0.9)
+            else
+                ImGui.PushStyleColor(ImGuiCol.Button, 0.16, 0.16, 0.18, 0.90)
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, r, g, b, 0.45)
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, r, g, b, 0.70)
+                ImGui.PushStyleColor(ImGuiCol.Text, 0.62, 0.62, 0.66, 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Border, r, g, b, 0.35)
+            end
+            ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1)
+            if ImGui.Button(label, w, barH) then onChange(not on) end
+            ImGui.PopStyleVar(1)
+            ImGui.PopStyleColor(5)
+            if ImGui.IsItemHovered() then core.setTooltip('%s', tip) end
+        end
 
         for slot = 1, (snap.slotCount or 0) do
             local xtData = snap.slots[slot] or nil
@@ -386,6 +429,15 @@ function plugin.onDrawUI()
                 if isCurrentTarget then
                     ImGui.SameLine()
                     accent(GOOD, '[TARGET]')
+                end
+                local isForced = (forceId > 0 and forceId == xtData.id)
+                local isIgnoredId = core.isXtIgnoredId and core.isXtIgnoredId(xtData.id) or false
+                if isForced then
+                    ImGui.SameLine()
+                    accent(ERR, '[FORCED]')
+                elseif isIgnoredId then
+                    ImGui.SameLine()
+                    accent({ 0.45, 0.65, 1.0, 1.0 }, '[IGNORED]')
                 end
 
                 if ctrl.xt_show_dist ~= false then
@@ -428,10 +480,22 @@ function plugin.onDrawUI()
                     hr, hg, hb = 0.95, 0.75, 0.20
                 end
                 local hpLabel = string.format('%d%%', hp)
-                core.drawStatusProgressBar(hp / 100.0, -1, barH, hpLabel, hr, hg, hb, 1.0)
+                local availW = ImGui.GetContentRegionAvail()
+                local barW = math.max(core.px(60), availW - toggleW)
+                core.drawStatusProgressBar(hp / 100.0, barW, barH, hpLabel, hr, hg, hb, 1.0)
                 if ImGui.IsItemClicked() then
                     mq.cmdf('/target id %d', xtData.id)
                 end
+                ImGui.SameLine()
+                drawToggle('F##xtForce_' .. rowKey, isForced, forceW, 0.85, 0.25, 0.15,
+                    isForced and 'FORCED: the engine stays on this spawn until it dies, then moves on to the rest of the list. Click to release.'
+                        or 'Force target: stay on this spawn until it dies (any other Force is replaced).',
+                    function(on) core.setXtForce(xtData.id, on) end)
+                ImGui.SameLine()
+                drawToggle('I##xtIgnore_' .. rowKey, isIgnoredId, ignoreW, 0.25, 0.45, 0.80,
+                    isIgnoredId and 'IGNORED: the engine will not target or attack this spawn. Click to clear.'
+                        or 'Ignore this spawn until cleared (this one only; not the name-based ignore list).',
+                    function(on) core.setXtIgnore(xtData.id, on) end)
 
                 -- Right-click menu on target item
                 if ImGui.BeginPopupContextItem('##xtItemMenu_' .. rowKey) then
@@ -444,6 +508,12 @@ function plugin.onDrawUI()
                     if ImGui.MenuItem('Face Target##face_' .. rowKey) then
                         mq.cmdf('/target id %d', xtData.id)
                         mq.cmd('/face fast')
+                    end
+                    if ImGui.MenuItem((isForced and 'Release Force Target' or 'Force Target') .. '##force_' .. rowKey) then
+                        core.setXtForce(xtData.id, not isForced)
+                    end
+                    if ImGui.MenuItem((isIgnoredId and 'Stop Ignoring This Spawn' or 'Ignore This Spawn') .. '##ignid_' .. rowKey) then
+                        core.setXtIgnore(xtData.id, not isIgnoredId)
                     end
                     if ImGui.MenuItem('Add to Ignore List##ign_' .. rowKey) then
                         if core.addIgnore then
@@ -470,6 +540,11 @@ function plugin.onDrawUI()
                     if xtData.targetType and xtData.targetType ~= '' then
                         table.insert(lines, string.format('Slot Role: %s', xtData.targetType))
                     end
+                    if isForced then
+                        table.insert(lines, 'FORCED: engine stays on this spawn until it dies')
+                    elseif isIgnoredId then
+                        table.insert(lines, 'IGNORED: engine skips this spawn until cleared')
+                    end
                     table.insert(lines, 'Click to target | Right-click for options')
                     core.setTooltip('%s', table.concat(lines, '\n'))
                 end
@@ -486,6 +561,8 @@ function plugin.onDrawUI()
             accent(MUTED, 'No hostile extended targets.')
         end
     end
+
+    if core.preEndWindow then core.preEndWindow('xtarget', true) end
 
     ImGui.End()
     ImGui.PopStyleVar(3)

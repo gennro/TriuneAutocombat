@@ -16,7 +16,7 @@ local plugin = {
     name               = 'Spell Gem Bar HUD',
     version            = '1.0.0',
     author             = 'Triune',
-    uses               = { spellbook = 'Open Spellbook from the gem bar' },
+    uses               = { spellbook = 'Open Spellbook from the gem bar', gamedb = 'Inspect Spell Info opens a database card' },
     description        = 'Popout spell gem bar with recast timers, casting overlays, spell-set presets, and right-click actions.',
     defaultEnabled     = true,
     tickInterval       = 0.1,
@@ -305,7 +305,7 @@ function M.drawSpellGemBarWindow()
     core.pushTheme()
 
     if ctrl.gem_alpha then
-        ImGui.SetNextWindowBgAlpha(ctrl.gem_alpha)
+        ImGui.SetNextWindowBgAlpha(core.windowBgAlpha and core.windowBgAlpha('spell_gems', ctrl.gem_alpha) or ctrl.gem_alpha)
     end
 
     ImGui.SetNextWindowSize(core.px(320), core.px(38), ImGuiCond.FirstUseEver)
@@ -321,8 +321,9 @@ function M.drawSpellGemBarWindow()
     ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(2), core.px(2))
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(1), core.px(1))
     local show
-    ctrl.show_spell_gems, show = ImGui.Begin('Triune Spell Gems v' .. (core.VERSION or '') .. '###triuneSpellGemsWindow', ctrl.show_spell_gems, winFlags)
+    ctrl.show_spell_gems, show = ImGui.Begin('Triune Spell Gems v' .. (core.VERSION or '') .. '###triuneSpellGemsWindow', ctrl.show_spell_gems, core.windowFlags and core.windowFlags('spell_gems', winFlags) or winFlags)
     if not ctrl.show_spell_gems then
+        if core.preEndWindow then core.preEndWindow('spell_gems', true) end
         ImGui.End()
         ImGui.PopStyleVar(3)
         core.popTheme()
@@ -334,6 +335,10 @@ function M.drawSpellGemBarWindow()
 
         if ImGui.BeginPopupContextWindow('##gemWinContextMenu') then
             if core.applyWindowScale then core.applyWindowScale('spell_gems') end
+            if core.drawWindowMenuItems then
+                core.drawWindowMenuItems('spell_gems', { header = false, lock = false, scale = false, layout = false, close = false })
+                ImGui.Separator()
+            end
             renderGemSettingsContent()
             ImGui.EndPopup()
         end
@@ -535,7 +540,7 @@ function M.drawSpellGemBarWindow()
                         mq.cmdf('/cast %d', slot)
                     end
                     if ImGui.MenuItem(lbl.infoId) then
-                        pcall(function() mq.TLO.Spell(gemData.id).Inspect() end)
+                        core.inspectSpell(gemData.id)
                     end
                     if ImGui.MenuItem(lbl.unmemId) then
                         mq.cmdf('/memorize "" %d', slot)
@@ -678,6 +683,8 @@ function M.drawSpellGemBarWindow()
             core.setTooltip('Spellbook & Spell Sets\nLeft-click: Open Spellbook\nRight-click: Load, Save, or Delete Spell Sets')
         end
     end
+
+    if core.preEndWindow then core.preEndWindow('spell_gems', true) end
 
     ImGui.End()
     ImGui.PopStyleVar(3)

@@ -7,7 +7,6 @@
 --   - Auto-loads map line and label files from the EverQuest maps directory (Layers 0-3).
 --   - Interactive 2D map viewport: smooth pan, zoom, follow-player, and Z-filtering.
 --   - Entity overlays for Player, Group, Raid, Pets, Corpses, and all Zone NPCs.
---   - Real-time Navmesh Reachability: NPCs drawn Green (pathable) or Red (unreachable).
 --   - Map Click-to-Move: click terrain or double-click an NPC to navigate.
 --   - Norrath Zone Atlas with connection routing and POI drawer.
 --   - Dedicated NPC Tracking tab with live search, consideration, and pathability filters.
@@ -17,16 +16,16 @@
 -- from disk every 2.5s). Map settings persist in triune_map_config.lua as
 -- before. Window visibility is ctrl.show_map (header Map button, Mini HUD,
 -- /ac map, and the Window Layout manager flip it); the engine tick (zone
--- detection, spawn scan chunks, navmesh batches, queued nav actions) runs
+-- detection, spawn scan chunks, queued nav actions) runs
 -- only while the window is open.
 -- ============================================================================
 
 local plugin = {
     id                 = 'map',
     name               = 'Map & NPC Tracker',
-    version            = '1.1.0',
+    version            = '1.2.0',
     author             = 'Triune',
-    description        = '2D in-game map with navmesh-aware NPC tracking, click-to-move, Norrath zone atlas, and Triune camp / waypoint overlays.',
+    description        = '2D in-game map with NPC tracking, click-to-move, Norrath zone atlas, and Triune camp / waypoint overlays.',
     defaultEnabled     = true,
     tickInterval       = 0.1,
     runOutOfCombatOnly = false,
@@ -85,12 +84,6 @@ local SORT_OPTIONS = {
     'Level (High -> Low)',
     'Level (Low -> High)',
     'Name (A - Z)',
-}
-
-local COLOR_MODE_OPTIONS = {
-    'Dual (Con Dot + Nav Halo)',
-    'Navmesh Validity (Green/Red)',
-    'Consideration Colors Only',
 }
 
 local ATLAS_ERA_OPTIONS = {
@@ -187,7 +180,6 @@ local state = {
     maxLevel            = 150,
     maxDistance         = 5000,
     sortIndex           = 1,
-    pathableOnly        = false,
     losOnly             = false,
 
     -- Settings Persistence State
@@ -258,7 +250,6 @@ local cfg = {
     showCorpses         = false,
     showNPCNames        = false,
     showNavLine         = true,
-    colorModeIndex      = 1, -- 1: Dual, 2: Navmesh Only, 3: Con Only
 
     -- Triune Combat & Waypoint Overlays
     showSearchRadius    = true,
@@ -325,14 +316,6 @@ local spawns = {
 local navState = {
     meshLoaded          = false,
     navActive           = false,
-    cache               = {}, -- [id] = { hasPath = bool, length = num, checkedAt = time, lengthAt = time }
-    checkQueue          = {}, -- array of IDs needing path checks (entries are never nil'd; see queueHead/queueTail)
-    queueHead           = 1,  -- O(1) dequeue pointer (next index to process)
-    queueTail           = 0,  -- index of the last enqueued entry
-    queueSet            = {}, -- lookup set to prevent queue duplicates
-    batchSize           = 6,  -- PathExists checks per nav batch (tick is ~100ms, so ~60/s)
-    cacheFreshMs        = 15000,
-    lastQueueProcessTime = 0,
 }
 
 local actionQueue = {
@@ -467,7 +450,6 @@ local function saveConfig(silent)
         showCorpses         = cfg.showCorpses,
         showNPCNames        = cfg.showNPCNames,
         showNavLine         = cfg.showNavLine,
-        colorModeIndex      = cfg.colorModeIndex,
 
         -- Triune Overlays
         showSearchRadius    = cfg.showSearchRadius,
@@ -499,7 +481,6 @@ local function saveConfig(silent)
         -- Tracker & Atlas Filters
         conFilterIndex      = state.conFilterIndex,
         sortIndex           = state.sortIndex,
-        pathableOnly        = state.pathableOnly,
         losOnly             = state.losOnly,
         atlasEraFilterIdx   = state.atlasEraFilterIdx,
         atlasTypeFilterIdx  = state.atlasTypeFilterIdx,
@@ -554,7 +535,6 @@ local function loadConfig()
         if cData.showCorpses ~= nil then cfg.showCorpses = (cData.showCorpses == true) end
         if cData.showNPCNames ~= nil then cfg.showNPCNames = (cData.showNPCNames == true) end
         if cData.showNavLine ~= nil then cfg.showNavLine = (cData.showNavLine == true) end
-        if cData.colorModeIndex ~= nil then cfg.colorModeIndex = tonumber(cData.colorModeIndex) or 1 end
 
         if cData.showSearchRadius ~= nil then cfg.showSearchRadius = (cData.showSearchRadius == true) end
         if cData.showCampRadius ~= nil then cfg.showCampRadius = (cData.showCampRadius == true) end
@@ -591,7 +571,6 @@ local function loadConfig()
             if si < 1 or si > #SORT_OPTIONS then si = 1 end
             state.sortIndex = si
         end
-        if cData.pathableOnly ~= nil then state.pathableOnly = (cData.pathableOnly == true) end
         if cData.losOnly ~= nil then state.losOnly = (cData.losOnly == true) end
         if cData.atlasEraFilterIdx ~= nil then state.atlasEraFilterIdx = tonumber(cData.atlasEraFilterIdx) or 1 end
         if cData.atlasTypeFilterIdx ~= nil then state.atlasTypeFilterIdx = tonumber(cData.atlasTypeFilterIdx) or 1 end
@@ -1954,13 +1933,38 @@ end
 -- ============================================================================
 -- SPAWN SCANNER & FILTER ENGINE
 -- ============================================================================
--- Spawn scan sizing. The NPC list is fetched in ONE native pass per cycle
--- (mq.getFilteredSpawns) so positions are never mixed across ticks; only the
--- Line-of-Sight raycasts are spread across ticks in SCAN_LOS_CHUNK slices.
-local SCAN_MAX_NPCS    = 150 -- nearest NPCs kept per cycle (was 120 via NearestSpawn)
+-- Spawn scan sizing. The NPC list is fetched in ONE pass per cycle so
+-- positions are never mixed across ticks; only the Line-of-Sight raycasts are
+-- spread across ticks in SCAN_LOS_CHUNK slices. The pass asks MQ for the
+-- SCAN_MAX_NPCS nearest NPCs (NearestSpawn: the search and distance sort run
+-- in C++), so the cost is ~150 TLO calls plus the per-NPC field reads, not a
+-- Lua round-trip per spawn in the zone (which was ~7000 calls and a second
+-- per tick in a 1500-spawn zone such as Plane of Hate).
+local SCAN_MAX_NPCS    = 150 -- nearest NPCs kept per cycle
+local SCAN_STATIC_MS   = 30000 -- name / level / class / con / KOS re-read this often per ID
 local SCAN_LOS_CHUNK   = 8   -- raycasts per tick from the rolling LoS cursor
 local SCAN_LOS_BUDGET  = 24  -- raycasts run synchronously on init / zone change
 local LOS_STALE_MS     = 5000
+
+-- Tick budget. The host runs every plugin tick on the game thread before the
+-- core gets its combat pass, so a slow tick here delays targeting / attack
+-- for the whole script. The spawn scan is the cost that scales with the zone,
+-- so its interval stretches from its measured duration instead of a fixed
+-- count. (Per-NPC navmesh reachability checks used to run here too; a full
+-- Navigation.PathExists search per NPC was a second per tick in Plane of Hate
+-- and only ever served as a diagnostic, so the map no longer asks the mesh
+-- anything except when you click to navigate.)
+local SCAN_DUTY_FACTOR   = 4   -- a scan may occupy at most 1/4 of wall time: interval >= scanMs * 4
+
+-- Per-phase timing for the plugin status tooltip and /ac dump (ms unless
+-- named otherwise). *AvgMs are exponential averages (0.1 weight).
+plugin.profile = {
+    tickMs = 0, tickAvgMs = 0,
+    scanMs = 0, scanAvgMs = 0, scanEveryMs = 0, scanNpcs = 0, zoneSpawns = 0,
+    losMs = 0, floorMs = 0,
+}
+local prof = plugin.profile
+local function ema(avg, v) return (avg and avg > 0) and (avg * 0.9 + v * 0.1) or v end
 
 -- Player marker smoothing. The draw callback samples Me.X/Y/Z/Heading live every
 -- frame (the host main loop only reaches the plugin tick every ~150ms, far too
@@ -2029,27 +2033,63 @@ end
 -- Reads the per-spawn fields the map needs into a plain record. cleanName /
 -- level / distance strings and the ImGui id suffixes are precomputed here so
 -- the tracker table and canvas never string.format per row per frame.
-local function buildMobRecord(s, id, dist)
-    local ok, cleanName, level, classShort, conColor, sx, sy, sz, pctHPs, kos = pcall(function()
-        return s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.X(), s.Y(), s.Z(), s.PctHPs(), s.Aggressive()
-    end)
-    if not ok then return nil end
+-- Fields that do not change while an NPC is up (name, level, class, con
+-- colour, KOS flag) and the strings built from them, read once per ID and
+-- refreshed every SCAN_STATIC_MS. Spawn IDs restart per zone, so
+-- resetZoneRuntimeState() drops the whole cache.
+local staticCache = {}
+
+local function readSpawnStatic(s)
+    return s.CleanName(), s.Level(), s.Class.ShortName(), s.ConColor(), s.Aggressive()
+end
+local function readSpawnLive(s)
+    return s.X(), s.Y(), s.Z(), s.PctHPs(), s.Dead()
+end
+local function readSpawnIdDist(s)
+    return s.ID(), s.Distance3D()
+end
+
+local function buildMobRecord(s, id, dist, now)
+    local st = staticCache[id]
+    if not st or (now - st.at) > SCAN_STATIC_MS then
+        local ok, cleanName, level, classShort, conColor, kos = pcall(readSpawnStatic, s)
+        if not ok then return nil end
+        local name = cleanName or 'Unknown NPC'
+        local lvl = level or 0
+        local idStr = tostring(id)
+        st = {
+            at          = now,
+            idStr       = idStr,
+            pushId      = 'tm' .. idStr,
+            cleanName   = name,
+            nameLower   = name:lower(),
+            rowLabel    = name .. '##TrackMob_' .. idStr,
+            rowLabelSel = '> ' .. name .. '##TrackMob_' .. idStr,
+            level       = lvl,
+            levelStr    = tostring(lvl),
+            class       = classShort or 'WAR',
+            conColor    = string.upper(tostring(conColor or 'GREY')),
+            -- Spawn.Aggressive is the KOS flag (would attack on sight), NOT
+            -- "currently has aggro on me"; the canvas ring and tooltip say so.
+            isKos       = (kos == true),
+        }
+        staticCache[id] = st
+    end
+    local ok, sx, sy, sz, pctHPs, dead = pcall(readSpawnLive, s)
+    if not ok or dead then return nil end
     local losCacheEntry = state.losCache[id]
-    local name = cleanName or 'Unknown NPC'
-    local lvl = level or 0
-    local idStr = tostring(id)
     return {
         id          = id,
-        idStr       = idStr,
-        pushId      = 'tm' .. idStr,
-        cleanName   = name,
-        nameLower   = name:lower(),
-        rowLabel    = name .. '##TrackMob_' .. idStr,
-        rowLabelSel = '> ' .. name .. '##TrackMob_' .. idStr,
-        level       = lvl,
-        levelStr    = tostring(lvl),
-        class       = classShort or 'WAR',
-        conColor    = string.upper(tostring(conColor or 'GREY')),
+        idStr       = st.idStr,
+        pushId      = st.pushId,
+        cleanName   = st.cleanName,
+        nameLower   = st.nameLower,
+        rowLabel    = st.rowLabel,
+        rowLabelSel = st.rowLabelSel,
+        level       = st.level,
+        levelStr    = st.levelStr,
+        class       = st.class,
+        conColor    = st.conColor,
         distance    = dist,
         distStr     = string.format('%.1fy', dist),
         lineOfSight = (losCacheEntry and losCacheEntry.los) or false,
@@ -2057,58 +2097,34 @@ local function buildMobRecord(s, id, dist)
         y           = sy or 0,
         z           = sz or 0,
         pctHPs      = pctHPs or 100,
-        -- Spawn.Aggressive is the KOS flag (would attack on sight), NOT
-        -- "currently has aggro on me"; the canvas ring and tooltip say so.
-        isKos       = (kos == true),
+        isKos       = st.isKos,
     }
 end
 
--- One-pass NPC fetch: every NPC spawn in one native call, deduped by spawn ID,
--- trimmed to the SCAN_MAX_NPCS nearest. Returns the record list and the total
--- NPC count in the zone.
+-- One-pass NPC fetch: the SCAN_MAX_NPCS nearest NPCs via NearestSpawn (MQ
+-- filters and distance-sorts the zone's spawn list in C++; `npc` already
+-- excludes pets and corpses), deduped by spawn ID. Returns the record list
+-- and the total NPC count in the zone.
 local function fetchZoneNPCs()
-    local list = nil
-    if type(mq.getFilteredSpawns) == 'function' then
-        local okList, res = pcall(mq.getFilteredSpawns, function(sp)
-            return sp.Type() == 'NPC'
-        end)
-        if okList and type(res) == 'table' then list = res end
-    end
-    if not list then
-        -- Fallback for hosts without getFilteredSpawns: still a single pass,
-        -- so the ordering cannot shift between ticks.
-        list = {}
-        local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
-        count = (okCount and tonumber(count)) or 0
-        for i = 1, math.min(count, SCAN_MAX_NPCS) do
-            local okS, sp = pcall(function() return mq.TLO.NearestSpawn(i, 'npc') end)
-            if okS and sp and sp() then list[#list + 1] = sp end
-        end
-    end
-
-    -- Cheap first pass (ID / distance / dead) so the field reads below only
-    -- run for the NPCs we actually keep.
-    local seen, cand = {}, {}
-    for i = 1, #list do
-        local sp = list[i]
-        local okId, id, dist, dead = pcall(function() return sp.ID(), sp.Distance3D(), sp.Dead() end)
-        if okId and id and id > 0 and not dead and not seen[id] then
+    local now = mq.gettime()
+    local okCount, count = pcall(function() return mq.TLO.SpawnCount('npc')() end)
+    local total = (okCount and tonumber(count)) or 0
+    -- The tracker never shows anything past its distance filter, so let the
+    -- search skip those too (MQ's radius is a horizontal distance; the 3D
+    -- filter below still applies).
+    local search = string.format('npc radius %d', math.max(50, math.floor(tonumber(state.maxDistance) or 5000)))
+    local out, seen = {}, {}
+    for i = 1, SCAN_MAX_NPCS do
+        local okS, sp = pcall(function() return mq.TLO.NearestSpawn(i, search) end)
+        if not okS or not sp or not sp() then break end
+        local okId, id, dist = pcall(readSpawnIdDist, sp)
+        if okId and id and id > 0 and not seen[id] then
             seen[id] = true
-            cand[#cand + 1] = { s = sp, id = id, dist = dist or 99999 }
+            local rec = buildMobRecord(sp, id, dist or 99999, now)
+            if rec then out[#out + 1] = rec end
         end
     end
-    if #cand > SCAN_MAX_NPCS then
-        table.sort(cand, function(a, b) return a.dist < b.dist end)
-        for i = #cand, SCAN_MAX_NPCS + 1, -1 do cand[i] = nil end
-    end
-
-    local out = {}
-    for i = 1, #cand do
-        local c = cand[i]
-        local rec = buildMobRecord(c.s, c.id, c.dist)
-        if rec then out[#out + 1] = rec end
-    end
-    return out, #list
+    return out, total
 end
 
 -- Rolling Line-of-Sight refresh: walks spawns.allNPCs from the saved cursor,
@@ -2148,14 +2164,13 @@ end
 -- forceComplete (init / zone change) also runs a synchronous LoS burst so the
 -- tracker has LoS data immediately.
 local function scanZoneSpawns(forceComplete)
+    local scanT0 = mq.gettime()
     navState.meshLoaded = navMeshLoaded()
     local okNavAct, isNavAct = pcall(function() return mq.TLO.Navigation.Active() end)
     navState.navActive = (okNavAct and isNavAct) or false
 
     local okZone, zoneName = pcall(function() return mq.TLO.Zone.Name() end)
     if okZone and zoneName then state.currentZoneName = zoneName end
-
-    local nowTime = mq.gettime()
 
     local npcs, total = fetchZoneNPCs()
     spawns.allNPCs = npcs
@@ -2177,7 +2192,6 @@ local function scanZoneSpawns(forceComplete)
     local filterIdx = state.conFilterIndex
     local sf = state.smartFloor
     local applyZ = (cfg.zFilterMode ~= 3)
-    local wantNavChecks = (state.viewMode ~= 'ATLAS')
 
     for _, mob in ipairs(npcs) do
         local keep = true
@@ -2203,24 +2217,7 @@ local function scanZoneSpawns(forceComplete)
         if keep and applyZ then
             if mob.z < sf.minZ or mob.z > sf.maxZ then keep = false end
         end
-
-        local wantOnMap = keep
-        if keep and state.pathableOnly then
-            local c = navState.cache[mob.id]
-            if not c or not c.hasPath then keep = false end
-        end
         if keep then filtered[#filtered + 1] = mob end
-
-        if wantOnMap and wantNavChecks then
-            local cached = navState.cache[mob.id]
-            if not cached or (nowTime - cached.checkedAt) > navState.cacheFreshMs then
-                if not navState.queueSet[mob.id] then
-                    navState.queueTail = navState.queueTail + 1
-                    navState.checkQueue[navState.queueTail] = mob.id
-                    navState.queueSet[mob.id] = true
-                end
-            end
-        end
     end
 
     local sIdx = state.sortIndex
@@ -2260,79 +2257,25 @@ local function scanZoneSpawns(forceComplete)
         end
     end
     spawns.groupMembers = groupList
-end
 
--- ============================================================================
--- NAVMESH PATH ENGINE (Throttled Background Batch Verification)
--- ============================================================================
--- Drops every queued-but-unprocessed path check and clears their queueSet
--- marks so the next scan can re-queue them (otherwise an ID stays marked as
--- queued forever and its tracker row is stuck on "[CHECKING]").
-local function resetNavQueue()
-    navState.checkQueue = {}
-    navState.queueSet = {}
-    navState.queueHead = 1
-    navState.queueTail = 0
-end
-
-local function processNavBatch()
-    if not navState.meshLoaded then return end
-    if navState.queueHead > navState.queueTail then return end
-
-    local now = mq.gettime()
-    local count = 0
-    local maxBatch = navState.batchSize
-    local q = navState.checkQueue
-
-    -- Entries are never nil'd: the head/tail pointers define the live window,
-    -- so `#q` (undefined on tables with holes) is never consulted.
-    while navState.queueHead <= navState.queueTail and count < maxBatch do
-        local mobId = q[navState.queueHead]
-        navState.queueHead = navState.queueHead + 1
-
-        if mobId and mobId > 0 then
-            navState.queueSet[mobId] = nil
-            -- Only ask for path existence here; the expensive PathLength is
-            -- resolved lazily on hover (see hover tooltip) and cached.
-            local okPath, hasPath = pcall(function()
-                return mq.TLO.Navigation.PathExists(string.format('id %d', mobId))()
-            end)
-
-            local cached = navState.cache[mobId]
-            navState.cache[mobId] = {
-                hasPath   = (okPath and hasPath) or false,
-                length    = (cached and cached.length) or 0,
-                lengthAt  = (cached and cached.lengthAt) or 0,
-                checkedAt = now,
-            }
-            count = count + 1
-        end
-    end
-
-    if navState.queueHead > navState.queueTail then
-        -- Fully drained: every dequeued ID was processed, so nothing is left
-        -- marked in queueSet.
-        navState.checkQueue = {}
-        navState.queueHead = 1
-        navState.queueTail = 0
-    elseif navState.queueHead > 128 then
-        -- Compact the processed prefix away; the remaining IDs keep their
-        -- queueSet marks because they are still queued.
-        local compact = {}
-        for i = navState.queueHead, navState.queueTail do
-            compact[#compact + 1] = q[i]
-        end
-        navState.checkQueue = compact
-        navState.queueHead = 1
-        navState.queueTail = #compact
-    end
+    local scanMs = mq.gettime() - scanT0
+    prof.scanMs = scanMs
+    prof.scanAvgMs = ema(prof.scanAvgMs, scanMs)
+    prof.scanNpcs = #npcs
+    prof.zoneSpawns = total
+    -- Adaptive interval: never let the scan take more than 1/SCAN_DUTY_FACTOR
+    -- of wall time. A 300 ms scan in a 1500-spawn zone runs every 1.2 s
+    -- instead of every 0.5 s; small zones keep the configured interval.
+    prof.scanEveryMs = math.max(state.scanIntervalMs, math.floor(prof.scanAvgMs * SCAN_DUTY_FACTOR))
 end
 
 -- Spawn IDs are reused per zone, so every per-ID cache and the active nav /
 -- POI markers must be dropped when the character zones.
 local function resetZoneRuntimeState()
-    navState.cache = {}
-    resetNavQueue()
+    staticCache = {}
+    -- Per-zone cost: let the next zone measure its own scan.
+    prof.scanAvgMs = 0
+    prof.scanEveryMs = 0
     state.losCache = {}
     state.activeNavLoc = nil
     state.activeNavSpawnId = 0
@@ -2948,16 +2891,11 @@ local now = mq.gettime()
         if cfg.showNPCs then
             -- Constant colors hoisted out of the per-NPC loop; the opaque
             -- (alphaMult == 1) con / nav colors come from small caches.
-            local meshUp = navState.meshLoaded
-            local colorMode = cfg.colorModeIndex
             local nodeRadius = cfg.npcNodeRadius
             local ringBlack = ImGui.GetColorU32(0, 0, 0, 0.8)
             local targetRingCol = ImGui.GetColorU32(1.0, 0.85, 0.20, 1.0)
             local kosRingCol = ImGui.GetColorU32(1.0, 0.1, 0.1, 0.9)
             local hoverRingCol = ImGui.GetColorU32(1, 1, 1, 0.9)
-            local navGreen = ImGui.GetColorU32(0.15, 0.95, 0.35, 1.0)
-            local navRed = ImGui.GetColorU32(0.95, 0.20, 0.20, 1.0)
-            local navGrey = ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8)
             local hitRadius = nodeRadius + 4.0
             local hitRadiusSq = hitRadius * hitRadius
             local showNames = cfg.showNPCNames
@@ -2979,33 +2917,11 @@ local now = mq.gettime()
                             conColU32 = ImGui.GetColorU32(conStyle.r, conStyle.g, conStyle.b, alphaMult)
                         end
 
-                        local cNav = navState.cache[mob.id]
-                        local isPathable = cNav and cNav.hasPath
-                        local navColU32
-                        if not meshUp then
-                            navColU32 = opaque and navGrey or ImGui.GetColorU32(0.6, 0.6, 0.6, 0.8 * alphaMult)
-                        elseif isPathable then
-                            navColU32 = opaque and navGreen or ImGui.GetColorU32(0.15, 0.95, 0.35, alphaMult)
-                        else
-                            navColU32 = opaque and navRed or ImGui.GetColorU32(0.95, 0.20, 0.20, alphaMult)
-                        end
-
                         local isTarget = (mob.id == targetId)
 
-                        -- Draw Node by Color Mode
-                        if colorMode == 1 then
-                            -- Dual Mode: Con fill with Nav halo
-                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.5, navColU32, 0, 1.5)
-                        elseif colorMode == 2 then
-                            -- Navmesh Reachability Only
-                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, navColU32, 0)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ringBlack, 0, 1.0)
-                        else
-                            -- Con Colors Only
-                            drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
-                            drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ringBlack, 0, 1.0)
-                        end
+                        -- Con-coloured node with a black outline
+                        drawList:AddCircleFilled(ImVec2(sx, sy), nodeRadius, conColU32, 0)
+                        drawList:AddCircle(ImVec2(sx, sy), nodeRadius + 1.0, ringBlack, 0, 1.0)
 
                         -- Target Highlight Ring
                         if isTarget then
@@ -3442,32 +3358,6 @@ local now = mq.gettime()
     -- Hover Tooltip for NPC
     if hoveredMob then
         local hid = hoveredMob.id
-        local cNav = navState.cache[hid]
-        local pathStr = 'Unchecked'
-        if not navState.meshLoaded then
-            pathStr = 'Mesh Not Loaded'
-        elseif cNav then
-            -- Resolve the (expensive) exact path length on demand for the
-            -- hovered mob only, and only when a path exists, throttled to
-            -- ~1 refresh/sec on its own timestamp. checkedAt belongs to the
-            -- PathExists verification and is left alone so re-checks are
-            -- not suppressed by hovering.
-            if cNav.hasPath then
-                local nowT = mq.gettime()
-                if cNav.length == 0 or (nowT - (cNav.lengthAt or 0)) > 1000 then
-                    local okLen, pathLen = pcall(function()
-                        return mq.TLO.Navigation.PathLength(string.format('id %d', hid))()
-                    end)
-                    if okLen and pathLen then
-                        cNav.length = pathLen
-                    end
-                    cNav.lengthAt = nowT
-                end
-                pathStr = string.format('Valid Path (%.1f yds)', cNav.length or 0)
-            else
-                pathStr = 'NO PATH (Unreachable)'
-            end
-        end
 
         -- Lazily refresh hovered mob's LoS so the tooltip stays accurate
         local hoverLos = hoveredMob.lineOfSight
@@ -3488,8 +3378,7 @@ local now = mq.gettime()
             'Name: %s\n' ..
             'Level: %d  |  Class: %s  |  Con: %s\n' ..
             'Distance: %.1f yds  |  LoS: %s  |  Z-Diff: %.1f yds\n' ..
-            'HP: %d%%  |  Aggressive (KOS): %s\n' ..
-            'Navmesh Status: %s\n\n' ..
+            'HP: %d%%  |  Aggressive (KOS): %s\n\n' ..
             '[Left-Click] Target  |  [Double-Click] Navigate',
             hoveredMob.cleanName,
             hoveredMob.level,
@@ -3499,8 +3388,7 @@ local now = mq.gettime()
             hoverLos and 'YES' or 'NO',
             math.abs(hoveredMob.z - playerZ),
             hoveredMob.pctHPs,
-            hoveredMob.isKos and 'YES' or 'NO',
-            pathStr
+            hoveredMob.isKos and 'YES' or 'NO'
         )
         ImGui.SetTooltip('%s', tt)
     end
@@ -4025,12 +3913,6 @@ local function DrawNPCTrackerTab()
     ImGui.PopItemWidth()
 
     ImGui.SameLine()
-    local pathOnly, pathChanged = ImGui.Checkbox('Pathable Only##PathCheck', state.pathableOnly)
-    if pathChanged then
-        state.pathableOnly = pathOnly
-    end
-
-    ImGui.SameLine()
     local losOnly, losChanged = ImGui.Checkbox('LoS Only##LoSCheck', state.losOnly)
     if losChanged then
         state.losOnly = losOnly
@@ -4051,12 +3933,11 @@ local function DrawNPCTrackerTab()
     local availW, availH = ImGui.GetContentRegionAvail()
     local tableHeight = math.max(80, availH - 32)
 
-    if ImGui.BeginTable('##TriuneMapTrackerTable', 8, tableFlags, availW, tableHeight) then
+    if ImGui.BeginTable('##TriuneMapTrackerTable', 7, tableFlags, availW, tableHeight) then
         ImGui.TableSetupColumn('Name', ImGuiTableColumnFlags.WidthStretch, 2.2)
         ImGui.TableSetupColumn('Lvl', ImGuiTableColumnFlags.WidthFixed, core.px(38))
         ImGui.TableSetupColumn('Con', ImGuiTableColumnFlags.WidthFixed, core.px(55))
         ImGui.TableSetupColumn('Dist', ImGuiTableColumnFlags.WidthFixed, core.px(65))
-        ImGui.TableSetupColumn('Nav Path', ImGuiTableColumnFlags.WidthFixed, core.px(90))
         ImGui.TableSetupColumn('LoS', ImGuiTableColumnFlags.WidthFixed, core.px(40))
         ImGui.TableSetupColumn('ID', ImGuiTableColumnFlags.WidthFixed, core.px(55))
         ImGui.TableSetupColumn('Actions', ImGuiTableColumnFlags.WidthFixed, core.px(140))
@@ -4112,36 +3993,21 @@ local function DrawNPCTrackerTab()
             ImGui.TableSetColumnIndex(3)
             ImGui.Text(mob.distStr)
 
-            -- Column 5: Navmesh Status Badge
+            -- Column 5: Line of Sight
             ImGui.TableSetColumnIndex(4)
-            local cNav = navState.cache[mob.id]
-            if not navState.meshLoaded then
-                ImGui.TextDisabled('[NO MESH]')
-            elseif cNav then
-                if cNav.hasPath then
-                    ImGui.TextColored(0.2, 0.95, 0.35, 1.0, '[PATHABLE]')
-                else
-                    ImGui.TextColored(0.95, 0.25, 0.25, 1.0, '[NO PATH]')
-                end
-            else
-                ImGui.TextDisabled('[CHECKING]')
-            end
-
-            -- Column 6: Line of Sight
-            ImGui.TableSetColumnIndex(5)
             if mob.lineOfSight then
                 ImGui.TextColored(0.2, 0.9, 0.3, 1.0, 'YES')
             else
                 ImGui.TextDisabled('NO')
             end
 
-            -- Column 7: Spawn ID
-            ImGui.TableSetColumnIndex(6)
+            -- Column 6: Spawn ID
+            ImGui.TableSetColumnIndex(5)
             ImGui.TextDisabled(mob.idStr)
 
-            -- Column 8: Actions ([Tar], [Nav], [Map]) scoped by PushID so the
+            -- Column 7: Actions ([Tar], [Nav], [Map]) scoped by PushID so the
             -- button labels are constant strings.
-            ImGui.TableSetColumnIndex(7)
+            ImGui.TableSetColumnIndex(6)
             ImGui.PushID(mob.pushId)
 
             if ImGui.SmallButton('Tar') then
@@ -4346,9 +4212,6 @@ local function DrawSettingsTab()
     if csnl then cfg.showNavLine = snl; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
 
     ImGui.PushItemWidth(220)
-    local cmIdx, cmChanged = ImGui.Combo('Node Color Mode##ColorModeCombo', cfg.colorModeIndex, COLOR_MODE_OPTIONS)
-    if cmChanged then cfg.colorModeIndex = cmIdx; state.dirtySettings = true; state.dirtySettingsTime = mq.gettime() end
-    ImGui.SameLine()
     local scanVal, scanChanged = ImGui.SliderInt('Spawn Scan Interval (ms)##ScanIntervalSlider', state.scanIntervalMs, 250, 3000, '%d ms')
     if scanChanged then
         state.scanIntervalMs = scanVal
@@ -4513,10 +4376,11 @@ local function DrawTriuneMapUI()
     local zoneDisplay = (state.viewMode == 'ATLAS') and string.format('Atlas: %s', (state.atlasSelectedZone and state.atlasSelectedZone.name) or state.atlasZoneShort) or state.currentZoneName
     local title = string.format('Triune Map v%s — %s###TriuneMapMainWindow', VERSION, zoneDisplay)
     core.preBeginWindow('map')
-    local open, draw = ImGui.Begin(title, ctrl.show_map, windowFlags)
+    local open, draw = ImGui.Begin(title, ctrl.show_map, core.windowFlags and core.windowFlags('map', windowFlags) or windowFlags)
 
     if not open then
         ctrl.show_map = false
+        if core.preEndWindow then core.preEndWindow('map', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
@@ -4610,6 +4474,7 @@ local function DrawTriuneMapUI()
         ImGui.Text(state.statusMsg)
     end
 
+    if core.preEndWindow then core.preEndWindow('map', false) end
     ImGui.End()
     core.popTheme()
 end
@@ -4732,21 +4597,21 @@ local function tick()
 
     -- Smart Auto-Z floor bounds (histogram over the map geometry) belong on
     -- the engine tick; the canvas only reads state.smartFloor.
+    local phaseT0 = mq.gettime()
     updateSmartFloorBounds(lp.x, lp.y, lp.z)
+    prof.floorMs = mq.gettime() - phaseT0
 
     -- Spawn scanning: one native fetch per interval (positions are never
     -- mixed across ticks), plus a small rolling LoS raycast slice every tick.
-    if (now - state.lastScanTime) >= state.scanIntervalMs then
+    -- The interval stretches with the measured scan cost (see scanZoneSpawns).
+    local scanEvery = math.max(state.scanIntervalMs, prof.scanEveryMs or 0)
+    if (now - state.lastScanTime) >= scanEvery then
         state.lastScanTime = now
         scanZoneSpawns()
     end
+    phaseT0 = mq.gettime()
     refreshLosChunk(SCAN_LOS_CHUNK, false)
-
-    -- Process Throttled Background Navmesh Batch
-    if (now - navState.lastQueueProcessTime) >= 80 then
-        navState.lastQueueProcessTime = now
-        processNavBatch()
-    end
+    prof.losMs = mq.gettime() - phaseT0
 
     -- Process Queued Actions from UI Callback
     if actionQueue.pendingTargetId > 0 then
@@ -4830,7 +4695,10 @@ function plugin.onTick()
     refresh()
     if not ctrl.show_map then return end
     if not initialized then initialize() end
+    local t0 = mq.gettime()
     tick()
+    prof.tickMs = mq.gettime() - t0
+    prof.tickAvgMs = ema(prof.tickAvgMs, prof.tickMs)
 end
 
 function plugin.onDrawUI()
@@ -4899,5 +4767,9 @@ plugin.state = state
 plugin.cfg = cfg
 plugin.syncTriuneLoadout = syncTriuneLoadout
 plugin.tick = tick
+plugin.scanZoneSpawns = scanZoneSpawns
+plugin.resetZoneRuntimeState = resetZoneRuntimeState
+plugin.spawns = spawns
+plugin.navState = navState
 
 return plugin

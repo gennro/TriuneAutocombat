@@ -18,6 +18,17 @@
 --     and your spell hits use your name, not "You".
 --   * /chat is an EQ command, so the bind is /tacchat (also /ac chat).
 --
+-- Links out: plugin.insertLink(text, name) (the Game Database's Link to chat
+-- button, /ac linkitem) puts a link in the input line the way the game's
+-- input takes a dragged item - shown as [Name], the raw \x12 body swapped
+-- back in when the line is sent (expandLinks). Link ... to chat in a line's
+-- menu does the same with an item link someone else posted.
+-- Text links: the client has no spell or NPC links, so "[Spell Name]" and
+-- "[NPC Name (Zone)]" in a line (what the database's Link to chat sends for
+-- those) are drawn as links when the database knows the name, and open the
+-- card. Lines tokenized before the indexes were in are re-tokenized once
+-- they are.
+--
 -- Layout, filters and colors persist per character in
 -- config/triune_chat_<Name>.lua. Window visibility is ctrl.show_chat (header
 -- button, Window Layout manager, /tacchat).
@@ -26,14 +37,14 @@
 local plugin = {
     id                 = 'chat',
     name               = 'Chat Windows',
-    version            = '1.7.0',
+    version            = '1.8.0',
     author             = 'Triune',
     description        = 'Chat window replacement: channel-filtered tabs, multiple windows, colors, timestamps, an input line and keyword filters.',
     defaultEnabled     = true,
     tickInterval       = 0.05,
     runOutOfCombatOnly = false,
     hasThread          = false,
-    uses               = { gamedb = 'Look up in Database entry in the tab menu (item links by name)' },
+    uses               = { gamedb = 'Look up in Database entry in the tab menu (item links by name); its cards drop links into the input line' },
 }
 
 -- Populated by refresh() on every entry point; typed so the language server
@@ -57,6 +68,19 @@ local LINK = string.char(18)              -- \x12 wraps EQ links
 local ITEM_LINK_PAYLOAD = 77              -- fixed-width item link body before the item name
 local COLOR_ESC = string.char(127)        -- \x7F RRGGBB inline color (MQ output)
 local MAX_APPENDS_PER_FRAME = 300
+
+-- Drain budget. The tick runs on the game thread ahead of the core's combat
+-- pass, so one long drain (a burst of combat spam from three pets, or the
+-- backlog after a slow pass) delays targeting for the whole script -- and a
+-- slower pass queues more lines for the next drain. Each drain stops at
+-- DRAIN_BUDGET_MS or DRAIN_MAX_LINES and leaves the rest queued, in order;
+-- the queue itself is capped so a stall can never build an unbounded backlog.
+local DRAIN_BUDGET_MS = 12
+local DRAIN_MAX_LINES = 400
+local QUEUE_CAP       = 3000
+
+-- Per-tick timing for the plugin status tooltip and /ac dump.
+plugin.profile = { drainMs = 0, drainAvgMs = 0, drainLines = 0, queued = 0, dropped = 0, deferred = 0 }
 
 -- ----------------------------------------------------------------------------
 -- Channels. Order here is the order in filter editors; `group` bands them.
@@ -168,12 +192,16 @@ local cfg = {
     highlights = {},          -- { { text, color = 'RRGGBB', beep, flash }, ... }
     mention = { on = true, color = 'FFA040', beep = false },   -- my name said by another player: highlighted, flashes, feeds Notifications tabs
     muted = {},               -- [lowercase sender] = true
-    windows = {},             -- { id, title, open, opacity, tabs = { { id, name, channels, include, exclude, send, tellTarget, logToFile } } }
+    windows = {},             -- { id, title, open, opacity, ghost, tabs = { { id, name, channels, include, exclude, send, tellTarget, logToFile } } }
     tellPopouts = false,      -- incoming tells open the Tells window (one window, a tab per person)
     enterFocus = true,        -- Enter (when not typing anywhere) focuses the chat input; Enter sends and hands the keys back
     recentTells = {},         -- last few people you exchanged tells with, most recent first
+    history = { on = true, lines = 1000 },  -- tells and notifications kept on disk and restored on the next start
 }
 local RECENT_TELLS = 5
+-- Tell / notification history helpers (filled in with the logging below;
+-- one table so the main chunk stays under Lua's 200-local limit).
+local H = { MIN = 100, MAX = 5000 }
 
 local chatCommand -- defined with the commands below; the settings pages call it
 local saveConfig  -- defined with the config persistence below (only the tick / destroy paths call it)
@@ -184,6 +212,7 @@ local uniqueId    -- defined with the window management below; the Tells window 
 local rt = {
     queue = {},               -- raw lines from the event callback, drained in onTick
     ring = nil,               -- classified entries
+    keep = nil,               -- tells and notifications, held past the main ring's eviction (see tabSource)
     tabs = {},                -- runtime state keyed by window.id .. '/' .. tab.id
     me = '',
     pets = {},                -- [name] = true for my pets
@@ -197,6 +226,7 @@ local rt = {
     lastTellFrom = nil,       -- last player who sent a tell
     tellReq = nil,            -- player name clicked in a line: opened as a Tells tab before the next draw
     selectReq = nil,          -- [window id] = tab id to select programmatically on the next draw
+    tabOrderGen = {},         -- [window id] = bumped by moveTab: part of the tab bar id, so ImGui relays out the new order
     trace = nil,              -- draw trace ring (/tacchat trace on); off by default: trace() is a no-op
     editor = nil,             -- { kind = 'tab'|'global', winId, tabId } while the settings window is open
     tabMenuReq = nil,         -- { win, ti } set while drawing tabs, opened at window scope
@@ -225,6 +255,10 @@ local rt = {
     lastInputKey = nil,       -- tab key of the input that last had keyboard focus
     echo = nil,
     configPath = nil,
+    hist = nil,               -- tell / notification history: { lines, first, last, fileLines, file } (see H.load)
+    ghost = {},               -- [window id] = { a, held, heldAt, at }: ghost window fade state (see G.alpha)
+    popupWin = nil,           -- window id whose tab / line menu is open this frame (set while it draws)
+    activeInputWin = nil,     -- window id whose input has the keyboard this frame
     dirty = false,
     lastSave = 0,
 }
@@ -236,10 +270,12 @@ local function newRing(cap)
     return { first = 1, last = 0, items = {}, cap = cap }
 end
 
-local function ringPush(ring, item)
+-- With `keepId`, the item keeps the id it already has (the kept ring holds
+-- entries that were numbered by the main ring).
+local function ringPush(ring, item, keepId)
     ring.last = ring.last + 1
     ring.items[ring.last] = item
-    item.id = ring.last
+    if not keepId then item.id = ring.last end
     while ring.last - ring.first + 1 > ring.cap do
         ring.items[ring.first] = nil
         ring.first = ring.first + 1
@@ -248,6 +284,13 @@ end
 
 local function ringCount(ring)
     return ring.last - ring.first + 1
+end
+
+-- Into the kept ring (tells / notifications): the entry keeps its id and
+-- remembers its position there, which is what its eviction is judged by.
+local function keepPush(entry)
+    ringPush(rt.keep, entry, true)
+    entry.keepPos = rt.keep.last
 end
 
 -- ----------------------------------------------------------------------------
@@ -383,6 +426,25 @@ local PET_PHRASES = {
     '^Attacking ', '^Waiting for your order', '^Following you', '^Guarding ', '^Sitting down',
     '^Changing my target', '^Sorry, Master', '^At your service', '^I have no target', '^Master, ',
     '^I am unable to', '^That is not a legal target', '^Stopping', '^Sitting', '^Standing',
+    '^I beg forgiveness', '^Guarding with my life', '^I cannot ', '^I will not ', '^Very well', '^As you wish',
+    '^My leader ', '^I am not able to', '^Yes, Master', '^No, Master', '^Leaving ', '^Taunting ', '^Holding ',
+    '^I am holding', '^No longer ', '^Returning to ', '^Backing off', '^Focusing on ', '^Regrouping',
+}
+
+-- NPC death emotes (no quotes, no "has been slain"): the death channel.
+local NPC_DEATH_PATTERNS = {
+    ', and is still%.$', ' sags to the ground, defeated%.$', ' has met her end ', ' has met his end ', ' has met its end ',
+    ' lays broken before you%.$', ' lies broken before you%.$', ' falls to the ground, dead', ' crumbles to dust%.$',
+    ' collapses in a heap', ' breathes its last', ' breathes his last', ' breathes her last', ' is still%.$',
+    ' drops to the ground, lifeless', ' falls lifeless', ' shatters into ', ' fades from existence',
+    ', defeated%.$', ' dies%.$', ' is dead%.$',
+}
+
+-- NPC emotes aimed at you (no quotes): NPC dialogue.
+local NPC_EMOTE_PATTERNS = {
+    ' lunges toward you', ' snaps at you', ' stumbles backwards?%.$', ' stumbles forward%.$', ' hisses at you',
+    ' growls at you', ' snarls at you', ' screeches at you', ' roars at you', ' glares at you%.$', ' charges at you',
+    ' turns to face you', ' notices you', ' spots you', ' shrieks', ' howls', ' bellows',
 }
 
 local SPELL_LAND_PATTERNS = {
@@ -409,6 +471,8 @@ local CONSIDER_PATTERNS = {
     ' looks your way apprehensively', ' regards you indifferently', ' judges you amiably', ' kindly considers you',
     ' looks upon you warmly', ' regards you as an ally', '^This creature would take', '^What would you like your tombstone',
     '^You could probably win', '^Looks like a ', "^It looks like it's going to be a tough", '^You would need some help',
+    "^Something about this creature's gaze", "^This creature's will is unbreakable", '^This creature .- cannot be',
+    '^You sense .- is immune', '^This creature is immune',
 }
 
 local BUFF_WORN_PATTERNS = {
@@ -427,6 +491,9 @@ local SYSTEM_PATTERNS = {
     ' has come online', ' is already in your ', '^You are not in a guild', '^You must be in a group',
     '^Your (.-) is now ', '^Auto%-', '^The server ', '^Your bind point', '^You have set your ', '^Cannot bind ',
     '^Consent ', '^You are now ', '^You are no longer anonymous', '^Your inventory', '^Attack mode changed',
+    -- server-wide announcements
+    ' has reached Level %d+%.$', ' has logged in for the first time%.$', ' has discovered: ', ' has been born!',
+    '^To begin searching for items', '^Your (.-) has been (created|changed)%.$',
 }
 
 local MQ_PREFIXES = { '[Nav]', '[MQ2', '[MQ]', '[Lua]', '[TAC', '[Triune' }
@@ -478,9 +545,15 @@ local function classify(raw, ctx)
     if text == '' then return result('unknown', nil, text) end
 
     local function player(name) return players[name] == true end
+    -- A pet's "tells you" line: my pet by name, or any of the pet responses
+    -- (which all address a Master). The pet list is polled every 15 s, and
+    -- another box's pet is never on it, so the wording decides too.
     local function petish(name, msg)
         if isMyPet(name, ctx) then return true end
         if msg and (msg:find("Master%.?'?$") or matchAny(msg, PET_PHRASES)) then return true end
+        -- Players arrive as name links; an unlinked sender addressing a
+        -- Master anywhere in the line is a pet whose name we do not know yet.
+        if msg and not player(name) and msg:find('%f[%a]Master%f[%A]') then return true end
         return false
     end
 
@@ -492,7 +565,7 @@ local function classify(raw, ctx)
             if text:sub(1, #p) == p then return result('mq', nil, text) end
         end
     end
-    if text:find('^Cannot bind ') or text:find('^Could not load ') or text:find('^Unknown command') then
+    if text:find('^Cannot bind ') or text:find('^Could not load ') or text:find('^Unknown command') or text:find('^MQ2%w+ ::') then
         return result('mq', nil, text)
     end
 
@@ -550,11 +623,12 @@ local function classify(raw, ctx)
 
     -- Combat
     s = text:match('^(.-) scores a critical hit! %(%d+%)$') or text:match('^(.-) delivers a critical blast!')
+        or text:match('^(.-) scores a Finishing Blow!')
     if s then
         if isMyPet(s, ctx) then return result('pet', s, text) end
         return result('crit', s, text, isMe(s, ctx))
     end
-    if text:find('^You deliver a critical blast!') then return result('crit', ctx.me, text, true) end
+    if text:find('^You deliver a critical blast!') or text:find('^Your .- with critical force!') then return result('crit', ctx.me, text, true) end
     s = text:match('^(.-) performs an exceptional heal!')
     if s then
         if isMyPet(s, ctx) then return result('pet', s, text) end
@@ -607,7 +681,9 @@ local function classify(raw, ctx)
         or text:find('^Your spell is interrupted') or text:find('^Your spell did not take hold') or text:find('^Your spell would not have taken hold')
         or text:find('^Your target is immune') or text:find('^Your target cannot be mezzed') or text:find('^Insufficient Mana')
         or text:find('^You must first memorize') or text:find('^You cannot cast') or text:find('^Spell recast time not yet met')
-        or text:find('^Your target has no mana') or text:find('^You .- interrupted') then
+        or text:find('^Your target has no mana') or text:find('^You .- interrupted') or text:find('^Ability recovery time not yet met')
+        or text:find('^Your spell is ineffective') or text:find('^Your .- did not take hold on ') or text:find('^You must first select a target')
+        or text:find('^You must first target') or text:find('^Your target is out of range') then
         return result('cast', ctx.me, text, true)
     end
 
@@ -626,6 +702,7 @@ local function classify(raw, ctx)
     if s then return result('death', s, text) end
     if text:find('^You have been slain') or text:find('^You died%.') then return result('death', nil, text) end
     if text:find(' has been slain%.$') or text:find(' died%.$') then return result('death', nil, text) end
+    if not text:find("'") and matchAny(text, NPC_DEATH_PATTERNS) then return result('death', nil, text) end
 
     if text:find('^You resist the ') or text:find(' resisted your ') or text:find('^Your target resisted') or text:find(' avoided your ')
         or text:find('^You avoid the ') or text:find('^You resist ') then
@@ -680,6 +757,12 @@ local function classify(raw, ctx)
     end
     if matchAny(text, SYSTEM_PATTERNS) then return result('system', nil, text) end
     if matchAny(text, SPELL_LAND_PATTERNS) then return result('spell_land', nil, text) end
+    if not text:find("'") and matchAny(text, NPC_EMOTE_PATTERNS) then
+        s = text:match('^(.-) %a+s ')
+        return result('npc_say', s, text, false, false)
+
+    end
+
     if text:find('^You feel ') or text:find('^You are ') or text:find('^Your body ') or text:find('^Your skin ') or text:find('^Your mind ')
         or text:find('^You look ') or text:find('^Your eyes ') or text:find('^Your hands ') or text:find('^A .- surrounds you') then
         return result('buff', nil, text)
@@ -811,6 +894,11 @@ local function sanitizeConfig(c)
     c.muted = muted
     c.tellPopouts = (c.tellPopouts == true)
     c.enterFocus = (c.enterFocus ~= false)
+    local h = type(c.history) == 'table' and c.history or {}
+    c.history = {
+        on = (h.on ~= false),
+        lines = math.max(H.MIN, math.min(H.MAX, math.floor(tonumber(h.lines) or 1000))),
+    }
     local recent = {}
     for _, n in ipairs(type(c.recentTells) == 'table' and c.recentTells or {}) do
         if type(n) == 'string' and n ~= '' and #recent < RECENT_TELLS then recent[#recent + 1] = n end
@@ -834,6 +922,8 @@ local function sanitizeConfig(c)
         w.title = tostring(w.title or ('Chat ' .. wi))
         if type(w.open) ~= 'boolean' then w.open = true end
         if w.opacity ~= nil then w.opacity = math.max(0.1, math.min(1.0, tonumber(w.opacity) or c.opacity)) end
+        w.ghost = (w.ghost == true)
+        w.noTitle = (w.noTitle == true)
         w.fontScale = math.max(0.6, math.min(2.5, tonumber(w.fontScale) or 1.0))
         w.font = nil -- font selection removed: pushing atlas fonts from Lua crashed imgui.dll
         w.tellWith = nil
@@ -1076,6 +1166,13 @@ local function lookupInDatabase(link)
     return db.search('items', link.name)
 end
 
+-- A "[Spell Name]" / "[NPC Name (Zone)]" link: its card (deferred to the
+-- tick like items).
+local function openTextLink(link)
+    rt.pendingLink = link
+    return true
+end
+
 -- Called from the UI: defers the actual execution to the next tick.
 local function openItemLink(link)
     rt.pendingLink = link
@@ -1087,7 +1184,32 @@ local function runPendingLink()
     local link = rt.pendingLink
     if not link then return end
     rt.pendingLink = nil
+    if link.kind then
+        local db = gamedbPlugin()
+        if not (db and db.popout and pcall(db.popout, link.kind, link.dbId)) then
+            echo('Could not open the card for ' .. tostring(link.name) .. '.')
+        end
+        return
+    end
     executeLink(link)
+end
+
+-- Lines that met a bracketed name before the spell and NPC indexes were in
+-- are tokenized again once they are (their cached layouts go with the
+-- tokens).
+local function retryTextLinks()
+    local db = gamedbPlugin()
+    if not (db and db.DB and db.DB.isLoaded and db.DB.isLoaded('spells') and db.DB.isLoaded('npcs')) then return end
+    if rt.textIndexReady then return end
+    rt.textIndexReady = true
+    local ring = rt.ring
+    for i = ring.first, ring.last do
+        local e = ring.items[i]
+        if e and e.linkRetry then
+            e.linkRetry = nil
+            e.tokens, e.links, e.layouts, e.layoutKeys = nil, nil, nil, nil
+        end
+    end
 end
 
 -- ----------------------------------------------------------------------------
@@ -1117,6 +1239,33 @@ local function tabAccepts(tab, entry)
         end
     end
     return true
+end
+
+-- The ring a tab is built from and bounded by. Tells and notifications live
+-- in rt.keep as well as the main ring, and a conversation tab, a
+-- Notifications tab or a tells-only tab reads from that: the general chat
+-- volume (a fight is thousands of lines) must not empty a conversation that
+-- is still open. Everything else mirrors the main ring.
+local function tabSource(tab)
+    if tab.tellWith or tab.notifyOnly then return rt.keep end
+    if tab.channels then
+        local any = false
+        for id, on in pairs(tab.channels) do
+            if on then
+                any = true
+                if id ~= 'tell_in' and id ~= 'tell_out' then return rt.ring end
+            end
+        end
+        if any then return rt.keep end
+    end
+    return rt.ring
+end
+
+-- Whether a source ring has evicted an entry: by ring position (the main
+-- ring's ids are positions; the kept ring records keepPos).
+local function evictedFrom(src, entry)
+    local pos = (src == rt.keep) and entry.keepPos or entry.id
+    return pos ~= nil and pos < src.first
 end
 
 local function tabKey(win, tab)
@@ -1177,8 +1326,8 @@ local function rebuildTab(win, tab)
     st.last = 0
     st.rebuild = false
     st.forceBottom = true
-    local ring = rt.ring
-    local start = math.max(ring.first, ring.last - cfg.maxLines + 1)
+    local ring = tabSource(tab)
+    local start = math.max(ring.first, ring.last - ((ring == rt.keep) and ring.cap or cfg.maxLines) + 1)
     local w = (cfg.renderer == 'console') and ensureConsole(win, tab) or nil
     if w then pcall(function() w:Clear() end) end
     for i = start, ring.last do
@@ -1382,6 +1531,70 @@ local function requestTell(name)
     rt.tellReq = name
 end
 
+local focusTargetKey -- defined with the Enter handling below
+
+-- The window and tab a tab key names (nil when it is gone).
+local function tabByKey(key)
+    for _, w in ipairs(cfg.windows) do
+        for _, t in ipairs(w.tabs) do
+            if tabKey(w, t) == key then return w, t end
+        end
+    end
+    return nil
+end
+
+-- A link from another plugin (a Game Database card's Link to chat button,
+-- /ac linkitem) lands in the input line that last had focus - or the first
+-- open window's active tab, opening the first window when none is - as
+-- [Name], and the input takes the keyboard. The raw \x12 text waits in the
+-- tab's link table until the line is sent; a plain-text spell link
+-- ("[Complete Heal]") is its own placeholder. Returns true when placed.
+local function insertLink(text, name)
+    if type(text) ~= 'string' or text == '' then return false end
+    if type(name) ~= 'string' or name == '' then
+        name = nil
+        local body = text:match(LINK .. '(.-)' .. LINK)
+        if body then
+            name = (#body > ITEM_LINK_PAYLOAD and body:sub(1, 1) == '0') and body:sub(ITEM_LINK_PAYLOAD + 1) or body
+        else
+            name = text:match('^%[([^%[%]]+)%]$') or text
+        end
+        if not name or name == '' then return false end
+    end
+    local key = focusTargetKey()
+    if not key then
+        local w = cfg.windows[1]
+        if not w then return false end
+        w.open = true
+        key = focusTargetKey()
+        if not key then return false end
+    end
+    local win, tab = tabByKey(key)
+    if not win then return false end
+    local st = tabState(win, tab)
+    st.links = st.links or {}
+    st.links[name] = text
+    local draft = st.input or ''
+    if draft ~= '' and not draft:find('%s$') then draft = draft .. ' ' end
+    st.input = draft .. '[' .. name .. ']'
+    ctrl.show_chat = true
+    win.open = true
+    rt.focusRequested = true
+    rt.focusKey = key
+    rt.lastInputKey = key
+    return true
+end
+
+-- [Name] placeholders the input line holds for inserted links become the
+-- raw link text on send; the table is cleared with the draft.
+local function expandLinks(st, text)
+    local links = st and st.links
+    if not links or not text or not text:find('[', 1, true) then return text end
+    local out = text:gsub('%[([^%[%]]+)%]', function(name) return links[name] end)
+    st.links = nil
+    return out
+end
+
 local function distribute(entry)
     for _, win in ipairs(cfg.windows) do
         for ti, tab in ipairs(win.tabs) do
@@ -1393,7 +1606,8 @@ local function distribute(entry)
                     st.entries[st.last] = entry
                     -- Bounded here, not only when drawn: inactive tabs, closed
                     -- windows and hidden chat must not grow for the session.
-                    local cap = cfg.maxLines
+                    local src = tabSource(tab)
+                    local cap = (src == rt.keep) and src.cap or cfg.maxLines
                     while st.last - st.first + 1 > cap do
                         st.entries[st.first] = nil
                         st.first = st.first + 1
@@ -1479,8 +1693,238 @@ end
 -- ----------------------------------------------------------------------------
 local registeredEvents = {}
 
+-- ----------------------------------------------------------------------------
+-- Tell / notification history: config/triune_chat_history_<Name>.txt. One
+-- line per tell (in or out) and per notification (a mention or a highlight
+-- hit), appended as they arrive and flushed on the tick like the other log
+-- files, so a crash loses at most the last few hundred milliseconds. The
+-- next start pushes the last cfg.history.lines of them into the ring before
+-- any new line: the Tells and Notifications tabs (and a person's tab in the
+-- Tells window, once it reopens) come back with their conversation. Lines
+-- from an earlier day show the date in their timestamp. Nothing else is
+-- kept here; the per-tab log files are for that.
+-- ----------------------------------------------------------------------------
+H.FIELDS = 7
+
+function H.path()
+    return string.format('%s/triune_chat_history_%s.txt', ((mq and mq.configDir) or 'config'):gsub('[/\\]+$', ''), safeFileName(myName()))
+end
+
+-- Fields are tab-separated; a backslash and every control byte (the \x12 of
+-- an item link, the \x7F of a colour code, a tab) are escaped as \\ and
+-- \xNN, so the file is one line per entry and a restored line renders
+-- exactly as it did.
+function H.escape(s)
+    return (tostring(s or ''):gsub('[%c\127\\]', function(c)
+        if c == '\\' then return '\\\\' end
+        return string.format('\\x%02X', c:byte())
+    end))
+end
+
+function H.unescape(s)
+    return (s:gsub('\\(.)(%x?%x?)', function(c, hex)
+        if c == '\\' then return '\\' .. hex end
+        if c == 'x' and #hex == 2 then return string.char(tonumber(hex, 16)) end
+        return '\\' .. c .. hex
+    end))
+end
+
+function H.encode(e)
+    local flags = (e.notify and 'n' or '') .. (e.mention and 'm' or '') .. (e.hl and ('h' .. e.hl) or '')
+    return table.concat({
+        tostring(e.t or 0), e.channel or 'unknown', H.escape(e.sender or ''), e.outgoing and '1' or '0',
+        flags, H.escape(e.text), H.escape(e.raw or e.text),
+    }, '\t')
+end
+
+-- The name of another player on a social line is clickable (opens their
+-- Tells tab). NPC names carry spaces and pets have their own channel; my own
+-- name is on outgoing lines, except that an outgoing tell's sender is its
+-- recipient.
+local function clickablePlayer(channel, sender, outgoing)
+    if sender and PLAYER_CHANNELS[channel] and sender ~= rt.me and not sender:find(' ', 1, true)
+        and (not outgoing or channel == 'tell_out') then
+        return sender
+    end
+    return nil
+end
+
+-- Timestamp for a restored line: the time of day when it is from today,
+-- date and time otherwise.
+function H.stamp(t)
+    if os.date('%Y%m%d', t) == os.date('%Y%m%d') then return os.date('%H:%M:%S', t) end
+    return os.date('%m/%d %H:%M', t)
+end
+
+function H.decode(line)
+    local f = {}
+    for field in (line .. '\t'):gmatch('([^\t]*)\t') do f[#f + 1] = field end
+    if #f < H.FIELDS then return nil end
+    local t, channel = tonumber(f[1]), f[2]
+    if not t or not CHANNEL_BY_ID[channel] then return nil end
+    local sender = H.unescape(f[3])
+    if sender == '' then sender = nil end
+    local outgoing = (f[4] == '1')
+    local flags = f[5]
+    local e = {
+        t = t,
+        hms = H.stamp(t),
+        channel = channel,
+        sender = sender,
+        outgoing = outgoing,
+        text = H.unescape(f[6]),
+        display = nil,
+        raw = H.unescape(f[7]),
+        restored = true,
+    }
+    if flags:find('n', 1, true) then e.notify = true end
+    if flags:find('m', 1, true) then e.mention = true end
+    e.hl = flags:match('h(%x%x%x%x%x%x)')
+    e.player = clickablePlayer(channel, sender, outgoing)
+    if sender and cfg.muted[sender:lower()] and not outgoing then e.muted = true end
+    return e
+end
+
+function H.keeps(entry)
+    if entry.muted then return false end
+    return entry.channel == 'tell_in' or entry.channel == 'tell_out' or entry.notify == true
+end
+
+-- A kept entry that is there as a notification, not as a tell.
+function H.isNotification(entry)
+    return entry.notify == true and entry.channel ~= 'tell_in' and entry.channel ~= 'tell_out'
+end
+
+-- Clear notifications (Notifications tab menu): drops them from the kept
+-- ring and the history file; tells stay. Tabs built from the kept ring
+-- rebuild. Returns how many went.
+function H.clearNotifications()
+    local k, gone = rt.keep, 0
+    if k then
+        local kept = {}
+        for i = k.first, k.last do
+            local e = k.items[i]
+            if e then
+                if H.isNotification(e) then gone = gone + 1 else kept[#kept + 1] = e end
+            end
+        end
+        rt.keep = newRing(k.cap)
+        for _, e in ipairs(kept) do keepPush(e) end
+    end
+    local h = rt.hist
+    if h then
+        local lines = {}
+        for i = h.first, h.last do
+            local e = H.decode(h.lines[i])
+            if not (e and H.isNotification(e)) then lines[#lines + 1] = h.lines[i] end
+        end
+        h.lines, h.first, h.last = lines, 1, #lines
+        H.compact()
+    end
+    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    return gone
+end
+
+-- The in-memory copy of the kept lines (encoded), bounded to cfg.history.lines.
+function H.remember(h, line)
+    h.last = h.last + 1
+    h.lines[h.last] = line
+    while h.last - h.first + 1 > cfg.history.lines do
+        h.lines[h.first] = nil
+        h.first = h.first + 1
+    end
+end
+
+function H.close()
+    local h = rt.hist
+    if h and h.file then
+        pcall(function() h.file:close() end)
+        h.file = nil
+    end
+end
+
+-- Rewrites the file with just the kept lines. Runs from the tick (or a
+-- command), never per line: the file only ever grows in H.write.
+function H.compact()
+    local h = rt.hist
+    if not h then return false end
+    H.close()
+    local f = io.open(H.path(), 'w')
+    if not f then return false end
+    for i = h.first, h.last do f:write(h.lines[i], '\n') end
+    f:close()
+    h.fileLines = h.last - h.first + 1
+    return true
+end
+
+-- Called from ingest for every entry; only tells and notifications are kept.
+function H.write(entry)
+    local h = rt.hist
+    if not h or not cfg.history.on or not H.keeps(entry) then return end
+    local line = H.encode(entry)
+    H.remember(h, line)
+    if not h.file then
+        h.file = io.open(H.path(), 'a')
+        if not h.file then return end
+    end
+    h.file:write(line, '\n')
+    h.fileLines = h.fileLines + 1
+    rt.logDirty = true
+end
+
+-- Drops everything kept (memory and file).
+function H.clear()
+    local h = rt.hist
+    if not h then return false end
+    h.lines, h.first, h.last = {}, 1, 0
+    return H.compact()
+end
+
+-- Reads the file, keeps the last cfg.history.lines, pushes them into the
+-- ring oldest first and trims the file when it held more. Returns the number
+-- of lines restored.
+function H.load()
+    rt.hist = { lines = {}, first = 1, last = 0, fileLines = 0, file = nil }
+    if not cfg.history.on then return 0 end
+    local f = io.open(H.path(), 'r')
+    if not f then return 0 end
+    local h = rt.hist
+    local total = 0
+    for line in f:lines() do
+        total = total + 1
+        if line ~= '' then H.remember(h, line) end
+    end
+    f:close()
+    local n = 0
+    for i = h.first, h.last do
+        local e = H.decode(h.lines[i])
+        if e then
+            -- Into the kept ring only: restored tells belong to the Tells tabs
+            -- and restored notifications to the Notifications tab, not to
+            -- All / Social. Ids stay unique below the main ring's.
+            rt.restoreId = (rt.restoreId or 0) - 1
+            e.id = rt.restoreId
+            keepPush(e)
+            n = n + 1
+        end
+    end
+    h.fileLines = total
+    if total > cfg.history.lines then H.compact() end
+    return n
+end
+
 local function onAnyLine(line)
-    rt.queue[#rt.queue + 1] = tostring(line or '')
+    local q = rt.queue
+    if #q >= QUEUE_CAP then
+        -- Backlog beyond what a few ticks can drain: drop the oldest half in
+        -- one move (cheaper than shifting one line at a time per event).
+        local keep, n = {}, #q
+        for i = math.floor(n / 2) + 1, n do keep[#keep + 1] = q[i] end
+        plugin.profile.dropped = plugin.profile.dropped + (n - #keep)
+        rt.queue = keep
+        q = keep
+    end
+    q[#q + 1] = tostring(line or '')
     rt.stats.lastEventAt = os.time()
 end
 
@@ -1529,6 +1973,9 @@ local function refreshNames(force)
             end
         end)
     end
+    -- Pets recognised by their chatter (see petish) stay known for the
+    -- session, so their crits / casts / flurries file under Pet too.
+    for n in pairs(rt.learnedPets or {}) do pets[n] = true end
     rt.pets = pets
 end
 
@@ -1583,6 +2030,11 @@ local function ingest(raw)
 
     local r = classify(raw, ctxForClassify())
     if r.selfEcho then r.sender = resolveTellTarget(r.text) end
+    if r.channel == 'petchat' and r.sender and not rt.pets[r.sender] then
+        rt.learnedPets = rt.learnedPets or {}
+        rt.learnedPets[r.sender] = true
+        rt.pets[r.sender] = true
+    end
     local entry = {
         t = os.time(),
         hms = os.date('%H:%M:%S'),
@@ -1631,6 +2083,7 @@ local function ingest(raw)
     end
 
     ringPush(rt.ring, entry)
+    if H.keeps(entry) then keepPush(entry) end
     for li, link in ipairs(extractItemLinks(raw)) do
         rt.recentLinks[#rt.recentLinks + 1] = { name = link.name, payload = link.payload, raw = raw, id = entry.id, index = li }
         if #rt.recentLinks > 20 then table.remove(rt.recentLinks, 1) end
@@ -1649,16 +2102,9 @@ local function ingest(raw)
         noteTeller(r.sender)
         if cfg.tellPopouts then openTellTab(r.sender, false) end
     end
-    -- The name of another player on a social line is clickable (opens their
-    -- Tells tab). NPC names carry spaces and pets have their own channel; my
-    -- own name is on outgoing lines, except that an outgoing tell's sender
-    -- is its recipient.
-    if r.sender and PLAYER_CHANNELS[r.channel] and r.sender ~= rt.me and not r.sender:find(' ', 1, true)
-        and (not r.outgoing or r.channel == 'tell_out') then
-        entry.player = r.sender
-    end
+    entry.player = clickablePlayer(r.channel, r.sender, r.outgoing)
     distribute(entry)
-
+    H.write(entry)
 end
 
 -- Classifies and distributes queued lines. Runs from the tick and, while the
@@ -1666,11 +2112,31 @@ end
 -- ring and the tab queues. File flushes happen on the tick (flushLogs).
 local function drainQueue()
     local q = rt.queue
-    if #q == 0 then return end
-    rt.queue = {}
+    local n = #q
+    if n == 0 then return end
+    local prof = plugin.profile
     local t0 = nowMs()
-    for i = 1, #q do ingest(q[i]) end
+    local i = 0
+    while i < n do
+        i = i + 1
+        ingest(q[i])
+        if i >= DRAIN_MAX_LINES or (nowMs() - t0) >= DRAIN_BUDGET_MS then break end
+    end
+    if i < n then
+        -- Budget hit: keep the remainder (in order) for the next drain. Lines
+        -- that arrived during the drain sit past n and are kept too.
+        local rest = {}
+        for j = i + 1, #q do rest[#rest + 1] = q[j] end
+        rt.queue = rest
+        prof.deferred = prof.deferred + (n - i)
+    else
+        rt.queue = {}
+    end
     local ms = nowMs() - t0
+    prof.drainMs = ms
+    prof.drainAvgMs = (prof.drainAvgMs > 0) and (prof.drainAvgMs * 0.9 + ms * 0.1) or ms
+    prof.drainLines = i
+    prof.queued = #rt.queue
     if ms > rt.stats.drainMaxMs then rt.stats.drainMaxMs = ms end
 end
 
@@ -1681,6 +2147,7 @@ local function flushLogs()
     if not rt.logDirty then return end
     rt.logDirty = false
     if rt.captureFile then pcall(function() rt.captureFile:flush() end) end
+    if rt.hist and rt.hist.file then pcall(function() rt.hist.file:flush() end) end
     for _, st in pairs(rt.tabs) do
         if st.logFile then pcall(function() st.logFile:flush() end) end
     end
@@ -1758,14 +2225,45 @@ local function tokenize(entry)
         end
         if text:match('%s$') then carrySpace = true end
     end
+    -- Plain text between item links: "[Spell Name]" / "[NPC Name (Zone)]"
+    -- that the database knows becomes a text link (the name alone, drawn as
+    -- a link). Anything else in brackets stays text. While an index loads,
+    -- the entry is marked so it is tokenized again once names can be
+    -- resolved. Triune's and MQ's own output ("[Triune] ...") never carries
+    -- one, and is the bulk of bracketed lines: no index lookups for those.
+    local db = (entry.channel ~= 'triune' and entry.channel ~= 'mq') and gamedbPlugin and gamedbPlugin() or nil
+    local function addText(text)
+        if not db or not db.textLinkTarget or not text:find('[', 1, true) then
+            addWords(text)
+            return
+        end
+        local start, p = 1, 1   -- emitted up to `start`, searching from `p`
+        while true do
+            local a, b, name = text:find('%[([^%[%]]+)%]', p)
+            if not a then
+                addWords(text:sub(start))
+                break
+            end
+            local okId, kind, id, ready = pcall(db.textLinkTarget, '[' .. name .. ']')
+            if okId and ready == false then entry.linkRetry = true end
+            if okId and id then
+                addWords(text:sub(start, a - 1))
+                links[#links + 1] = { name = name, kind = kind, dbId = id, raw = entry.raw, index = #links + 1 }
+                addWords(name, #links)
+                start, p = b + 1, b + 1
+            else
+                p = a + 1
+            end
+        end
+    end
     local pos = 1
     while true do
         local a, b, payload = raw:find(LINK .. '(.-)' .. LINK, pos)
         if not a then
-            addWords(raw:sub(pos))
+            addText(raw:sub(pos))
             break
         end
-        addWords(raw:sub(pos, a - 1))
+        addText(raw:sub(pos, a - 1))
         if payload:sub(1, 1) == '1' and #payload > 1 and #payload < ITEM_LINK_PAYLOAD then
             addWords(payload:sub(2))
         elseif #payload > ITEM_LINK_PAYLOAD then
@@ -1915,14 +2413,166 @@ local function drawRun(text, link, isTs, entry, r, g, b, isName)
             clicked = okC and hit == true
         end
         if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
-            core.setTooltip(gamedbPlugin and gamedbPlugin() and ('Open ' .. l.name .. ' (Game Database card)') or ('Open ' .. l.name .. ' (items you carry or have banked)'))
+            if l.kind then
+                core.setTooltip('Open ' .. l.name .. (l.kind == 'npcs' and ' (NPC card)' or ' (spell card)'))
+            else
+                core.setTooltip(gamedbPlugin and gamedbPlugin() and ('Open ' .. l.name .. ' (Game Database card)') or ('Open ' .. l.name .. ' (items you carry or have banked)'))
+            end
         end
-        if clicked then openItemLink(l) end
+        if clicked then
+            if l.kind then openTextLink(l) else openItemLink(l) end
+        end
     elseif isTs then
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], text)
     else
         ImGui.TextColored(r, g, b, 1, text)
     end
+end
+
+-- ----------------------------------------------------------------------------
+-- Ghost windows (win.ghost): the chrome - title bar, tab bar, background,
+-- border, status and input rows, scrollbar - fades out when the mouse
+-- leaves the window and back in under it, so only the text is left on the
+-- screen. The window itself stays where it is (its hit area does not change),
+-- so it can still be hovered, dragged and scrolled. Done with colours, not
+-- ImGui's global style alpha (which took the text with it in the field):
+-- every chrome colour is pushed at the fade fraction of its alpha before
+-- Begin and popped after End, the background alpha is set explicitly, and
+-- the log text is untouched because every run is drawn with its own colour
+-- (drawRun); the text / link colours are pushed back for the console
+-- renderer and links, and every colour is pushed back for the menus. One
+-- table so the main chunk stays under Lua's local limit.
+-- ----------------------------------------------------------------------------
+local G = { IN_MS = 150, OUT_MS = 400, LINGER_MS = 350, cur = 1, saved = nil }
+
+-- Colours that make up the chrome. Names missing from the binding's enum
+-- (they changed across ImGui versions) are skipped.
+G.CHROME = {
+    'Text', 'TextDisabled', 'TextLink', 'TextSelectedBg',
+    'Border', 'BorderShadow', 'TitleBg', 'TitleBgActive', 'TitleBgCollapsed', 'ChildBg',
+    'Tab', 'TabHovered', 'TabActive', 'TabUnfocused', 'TabUnfocusedActive', 'TabSelected', 'TabSelectedOverline', 'TabDimmed', 'TabDimmedSelected',
+    'FrameBg', 'FrameBgHovered', 'FrameBgActive',
+    'ScrollbarBg', 'ScrollbarGrab', 'ScrollbarGrabHovered', 'ScrollbarGrabActive',
+    'Button', 'ButtonHovered', 'ButtonActive', 'CheckMark', 'Separator',
+    'ResizeGrip', 'ResizeGripHovered', 'ResizeGripActive',
+}
+G.TEXT = { Text = true, TextLink = true }
+
+-- Chrome alpha for this frame: stepped toward 1 while the window is held
+-- (hovered, one of its menus open, or its input taking the keys; see
+-- G.hold) and toward 0 otherwise, after a short linger so crossing a gap
+-- between two tabs does not flicker.
+function G.alpha(win)
+    local now = nowMs()
+    local g = rt.ghost[win.id]
+    if not g then
+        g = { a = 1, held = false, heldAt = now, at = now }
+        rt.ghost[win.id] = g
+    end
+    if g.held then g.heldAt = now end
+    local lingerEnd = g.heldAt + G.LINGER_MS
+    if g.held or now < lingerEnd then
+        g.a = math.min(1, g.a + math.max(0, now - g.at) / G.IN_MS)
+    else
+        -- Only the part of this frame past the linger counts toward the fade.
+        g.a = math.max(0, g.a - math.max(0, now - math.max(g.at, lingerEnd)) / G.OUT_MS)
+    end
+    g.at = now
+    return g.a
+end
+
+function G.hold(win, held)
+    local g = rt.ghost[win.id]
+    if g then g.held = (held == true) end
+end
+
+-- Pushes every chrome colour at fraction `a` of its alpha (before Begin);
+-- returns the count for G.popChrome. The originals are remembered for
+-- G.pushFull / G.pushText. Nothing is pushed at 1 or when the binding
+-- cannot read the style.
+-- A style colour as four numbers: GetStyleColorVec4, else GetStyle().Colors;
+-- nil when the binding offers neither. The numbers are copied out because
+-- the vector may refer into the style itself.
+function G.readColor(idx)
+    if ImGui.GetStyleColorVec4 then
+        local ok, c = pcall(ImGui.GetStyleColorVec4, idx)
+        if ok and c ~= nil and c.x ~= nil then
+            rt.stats.ghost = 'colours read with GetStyleColorVec4'
+            return c.x, c.y, c.z, c.w
+        end
+    end
+    if ImGui.GetStyle then
+        local ok, st = pcall(ImGui.GetStyle)
+        if ok and st ~= nil then
+            local okc, c = pcall(function() return st.Colors[idx] end)
+            if okc and c ~= nil and c.x ~= nil then
+                rt.stats.ghost = 'colours read with GetStyle().Colors'
+                return c.x, c.y, c.z, c.w
+            end
+        end
+    end
+    rt.stats.ghost = 'style colours unreadable: chrome only goes transparent once fully faded'
+    return nil
+end
+
+function G.pushChrome(a)
+    G.saved = nil
+    if a >= 1 then return 0 end
+    local Col = ImGuiCol or _G.ImGuiCol
+    if not Col then
+        rt.stats.ghost = 'ImGuiCol enum missing: chrome cannot fade'
+        return 0
+    end
+    local saved, n = {}, 0
+    for _, name in ipairs(G.CHROME) do
+        local idx = Col[name]
+        if idx ~= nil then
+            local x, y, z, w = G.readColor(idx)
+            if x then
+                if pcall(ImGui.PushStyleColor, idx, x, y, z, w * a) then
+                    n = n + 1
+                    saved[n] = { idx = idx, name = name, x = x, y = y, z = z, w = w }
+                end
+            elseif a <= 0 then
+                -- Unknown colour: fully faded is still fully transparent
+                -- (nothing to restore for a menu; the hover that opens one
+                -- has brought the window back by then).
+                if pcall(ImGui.PushStyleColor, idx, 0, 0, 0, 0) then n = n + 1 end
+            end
+        end
+    end
+    G.saved = saved
+    return n
+end
+
+function G.popChrome(n)
+    if n > 0 then pcall(ImGui.PopStyleColor, n) end
+end
+
+-- Inside a fading window: the original colours back, all of them (a menu)
+-- or the text ones (the log). Returns the count for G.popFull.
+local function pushSaved(only)
+    local saved = G.saved
+    if not saved or G.cur >= 1 then return 0 end
+    local n = 0
+    for _, c in ipairs(saved) do
+        if (not only or only[c.name]) and pcall(ImGui.PushStyleColor, c.idx, c.x, c.y, c.z, c.w) then n = n + 1 end
+    end
+    return n
+end
+
+-- For a menu: the colours must be pushed before BeginPopup (the popup's
+-- own frame uses them), so only when that popup is open.
+function G.pushFull(popupId)
+    if G.cur >= 1 then return 0 end
+    local ok, open = pcall(ImGui.IsPopupOpen, popupId)
+    if ok and open == false then return 0 end
+    return pushSaved(nil)
+end
+function G.pushText() return pushSaved(G.TEXT) end
+
+function G.popFull(n)
+    if n > 0 then pcall(ImGui.PopStyleColor, n) end
 end
 
 -- Right-click on a line: copy, and for lines with a sender reply / target /
@@ -1941,6 +2591,10 @@ local function drawLineContextMenuBody(win, tab)
         -- this server's link format).
         if ImGui.MenuItem('Show link in MQ window (clickable there)') then
             print('\ag[Triune Chat]\ax link: ' .. e.raw)
+        end
+        -- Re-post an item someone linked: the same raw link into my input line.
+        for i, l in ipairs(extractItemLinks(e.raw)) do
+            if ImGui.MenuItem('Link ' .. l.name .. ' to chat##relink' .. i) then insertLink(LINK .. l.payload .. LINK, l.name) end
         end
     end
     local sender = e.sender
@@ -1966,9 +2620,13 @@ local function drawLineContextMenuBody(win, tab)
 end
 
 local function drawLineContextMenu(win, tab)
-    if not ImGui.BeginPopup('##tacchatLineCtx_' .. tabKey(win, tab)) then return end
-    guarded('line menu', drawLineContextMenuBody, win, tab)
-    ImGui.EndPopup()
+    local pushed = G.pushFull('##tacchatLineCtx_' .. tabKey(win, tab))
+    if ImGui.BeginPopup('##tacchatLineCtx_' .. tabKey(win, tab)) then
+        rt.popupWin = win.id
+        guarded('line menu', drawLineContextMenuBody, win, tab)
+        ImGui.EndPopup()
+    end
+    G.popFull(pushed)
 end
 
 -- Repairs a tab queue that somehow has empty slots between first and last:
@@ -1989,15 +2647,15 @@ end
 
 local function drawInlineLogBody(win, tab, st, logH)
     pcall(ImGui.SetWindowFontScale, rt.safeMode and 1.0 or (win.fontScale or 1.0))
-    -- Drop entries the ring has already evicted.
-    local ring = rt.ring
+    -- Drop entries the tab's source ring has already evicted.
+    local src = tabSource(tab)
     while st.first <= st.last do
         local head = st.entries[st.first]
         if head == nil then
             healQueue(st, 'evict')
             break
         end
-        if head.id >= ring.first then break end
+        if not evictedFrom(src, head) then break end
         st.entries[st.first] = nil
         st.first = st.first + 1
     end
@@ -2203,7 +2861,13 @@ local function moveTab(win, ti, dir)
     while win.tabs[tj] and (win.tabs[tj].pane or 1) ~= (tab.pane or 1) do tj = tj + dir end
     if tj < 1 or tj > #win.tabs then return false end
     win.tabs[ti], win.tabs[tj] = win.tabs[tj], win.tabs[ti]
-    setActiveTab(win, tj)
+    -- ImGui keeps a tab bar's order once laid out and only re-sorts by
+    -- submission order when a tab is added, so a swap of existing tabs
+    -- would not show: the bar gets a new id (a fresh bar lays out in
+    -- submission order) and the moved tab is selected explicitly, since a
+    -- fresh bar has no selection of its own.
+    rt.tabOrderGen[win.id] = (rt.tabOrderGen[win.id] or 0) + 1
+    selectTab(win, tj)
     markDirty()
     return true
 end
@@ -2601,6 +3265,22 @@ local function drawGeneralPage()
         core.setTooltip('Like the game\'s tell windows, folded into one: each person gets a tab with only that conversation and the input set to reply.\nClicking a player name in any chat line opens their tab whether this is on or off.')
     end
 
+    local hs = ImGui.Checkbox('Keep tells and notifications across restarts##genHist', cfg.history.on)
+    if hs ~= cfg.history.on then chatCommand('history', hs and 'on' or 'off') end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('Every tell (in or out) and every Notifications line is written to config/triune_chat_history_<Name>.txt as it arrives.\nThe next start (after a camp or a crash) puts the last ones back into the Tells and Notifications tabs, dated when they are from another day.\n/tacchat history on|off|clear does the same from a command.')
+    end
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(core.px(160))
+    local hl = ImGui.SliderInt('Tell / notification lines kept##genHistLines', cfg.history.lines, H.MIN, H.MAX)
+    if type(hl) == 'number' and hl ~= cfg.history.lines then
+        cfg.history.lines = math.max(H.MIN, math.min(H.MAX, hl))
+        if rt.keep then rt.keep.cap = cfg.history.lines end
+        markDirty()
+    end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('How many tells and notifications the Tells / Notifications tabs hold (in memory, and in the file when kept across restarts).\nThey are separate from Buffer lines: a fight\'s thousands of combat lines never push a conversation out of its tab.')
+    end
     local ef = ImGui.Checkbox('Enter opens the chat input; Enter sends and hands the keys back (like the game)##genEnter', cfg.enterFocus)
     if ef ~= cfg.enterFocus then cfg.enterFocus = ef; markDirty() end
     if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
@@ -2643,6 +3323,7 @@ local function drawEditor()
         core.postBeginWindow('chat_settings')
         guarded('settings', drawEditorBody, ed)
     end
+    if core.preEndWindow then pcall(core.preEndWindow, 'chat_settings', true) end
     ImGui.End()
     core.popTheme()
 end
@@ -2745,6 +3426,15 @@ local function drawTabMenuBody(win, tab, ti)
         st.pending, st.pendingFirst, st.pendingLast = {}, 1, 0
         if st.console then pcall(function() st.console:Clear() end) end
     end
+    if tab.notifyOnly then
+        if ImGui.MenuItem('Clear notifications') then
+            local n = H.clearNotifications()
+            echo(string.format('%d notification%s cleared (tells kept).', n, n == 1 and '' or 's'))
+        end
+        if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+            core.setTooltip('Drops every notification from this tab, from memory and from the history file, so they do not come back on the next start. Tells are kept.')
+        end
+    end
     if ImGui.MenuItem('Jump to bottom') then tabState(win, tab).forceBottom = true end
     if ImGui.MenuItem('Close tab', nil, false, #win.tabs > 1 or win.tellWindow == true) then closeTab(win, ti) end
     ImGui.Separator()
@@ -2763,6 +3453,14 @@ local function drawTabMenuBody(win, tab, ti)
         local op = ImGui.SliderFloat('Opacity##winOpacity', win.opacity or cfg.opacity, 0.1, 1.0, '%.2f')
         if type(op) == 'number' and math.abs(op - (win.opacity or cfg.opacity)) > 0.001 then win.opacity = op; markDirty() end
         if ImGui.MenuItem('Lock position & size', nil, cfg.locked) then cfg.locked = not cfg.locked; markDirty() end
+        if ImGui.MenuItem('Hide title bar', nil, win.noTitle) then win.noTitle = not win.noTitle; markDirty() end
+        if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+            core.setTooltip('A cleaner overlay: no title bar, no close button. Drag the window by its body; Close window below closes it.')
+        end
+        if ImGui.MenuItem('Ghost: only the text until the mouse is over it', nil, win.ghost) then win.ghost = not win.ghost; markDirty() end
+        if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+            core.setTooltip('The title bar, tabs, background, input line and scrollbar fade out when the mouse leaves the window and fade back in under it.\nThe text stays. The window keeps its place and size, so it can still be hovered, dragged and scrolled.\n/tacchat ghost [window] toggles it from a command.')
+        end
         ImGui.Separator()
         ImGui.SetNextItemWidth(core.px(140))
         local nw = ImGui.InputTextWithHint('##newWinName', 'new window name', rt.newWindowName)
@@ -2795,6 +3493,7 @@ local function drawTabMenuBody(win, tab, ti)
     if ImGui.MenuItem('Timestamps', nil, cfg.timestamps) then cfg.timestamps = not cfg.timestamps; invalidateTabs(); markDirty() end
     if ImGui.MenuItem('Incoming tells open the Tells window', nil, cfg.tellPopouts) then cfg.tellPopouts = not cfg.tellPopouts; markDirty() end
     if ImGui.MenuItem('Highlight mentions of my name', nil, cfg.mention.on) then cfg.mention.on = not cfg.mention.on; markDirty() end
+    if ImGui.MenuItem('Keep tells and notifications across restarts', nil, cfg.history.on) then chatCommand('history', cfg.history.on and 'off' or 'on') end
 
     if ImGui.MenuItem('Enter opens the input (like the game)', nil, cfg.enterFocus) then cfg.enterFocus = not cfg.enterFocus; markDirty() end
     if ImGui.MenuItem('Colours...') then openEditor('colors', win, tab) end
@@ -2802,14 +3501,19 @@ local function drawTabMenuBody(win, tab, ti)
     if ImGui.MenuItem('Muted senders...') then openEditor('muted', win, tab) end
     if ImGui.MenuItem('Clear all tabs') then
         rt.ring = newRing(cfg.maxLines)
+        rt.keep = newRing(cfg.history.lines)
         invalidateTabs()
     end
 end
 
 local function drawTabMenu(win, tab, ti)
-    if not ImGui.BeginPopup('##tacchatTabMenu_' .. win.id) then return end
-    guarded('tab menu', drawTabMenuBody, win, tab, ti)
-    ImGui.EndPopup()
+    local pushed = G.pushFull('##tacchatTabMenu_' .. win.id)
+    if ImGui.BeginPopup('##tacchatTabMenu_' .. win.id) then
+        rt.popupWin = win.id
+        guarded('tab menu', drawTabMenuBody, win, tab, ti)
+        ImGui.EndPopup()
+    end
+    G.popFull(pushed)
 end
 
 -- ----------------------------------------------------------------------------
@@ -2903,10 +3607,13 @@ local function drawInput(win, tab)
         text, entered = ImGui.InputText('##tacchatInput', draft, (F and F.EnterReturnsTrue) or 0)
     end
     ImGui.PopItemWidth()
-    if ImGui.IsItemActive and ImGui.IsItemActive() then rt.lastInputKey = key end
+    if ImGui.IsItemActive and ImGui.IsItemActive() then
+        rt.lastInputKey = key
+        rt.activeInputWin = win.id
+    end
     if type(text) == 'string' then st.input = text end
     if entered == true then
-        sendText(tab, st.input or '')
+        sendText(tab, expandLinks(st, st.input or ''))
         st.input = ''
         rt.lastInputKey = key
         -- Like the game: Enter sends and hands the keyboard back; the next
@@ -2943,6 +3650,7 @@ local function drawTabContents(win, tab, ti)
     textRow = (okT and tonumber(textRow)) or statusH
     frameRow = (okF and tonumber(frameRow)) or core.px(26)
     local logH = math.max(core.px(40), (tonumber(availH) or 300) - textRow - frameRow - core.px(2))
+    local ghostText = G.pushText()   -- a ghost window: the text (console renderer, links) stays while the chrome fades
     if cfg.renderer ~= 'console' then
         st.pending = {}
         st.pendingFirst = 1
@@ -2977,6 +3685,7 @@ local function drawTabContents(win, tab, ti)
         end
         ImGui.EndChild()
     end
+    G.popFull(ghostText)
 
     if showNew then
         if ImGui.SmallButton(string.format('v %d new##tacchatNew_%s', st.newBelow, tabKey(win, tab))) then
@@ -3027,7 +3736,7 @@ end
 -- One pane: a tab bar over the tabs assigned to it.
 local function drawPaneTabs(win, pane)
     trace('BeginTabBar pane %d', pane)
-    if not ImGui.BeginTabBar('##tacchatTabs_' .. win.id .. '_' .. pane) then
+    if not ImGui.BeginTabBar('##tacchatTabs_' .. win.id .. '_' .. pane .. '_' .. (rt.tabOrderGen[win.id] or 0)) then
         trace('BeginTabBar returned false')
         return
     end
@@ -3039,9 +3748,10 @@ local function drawPaneTabs(win, pane)
             trace('BeginTabItem %s -> %s', tab.name, tostring(selected))
             if ImGui.IsItemHovered and ImGui.IsItemHovered() and ImGui.IsMouseClicked then
                 -- Right-click on the tab (selected or not) opens its menu;
-                -- middle-click closes a conversation in the Tells window.
+                -- middle-click closes it (a window keeps its last tab; the
+                -- Tells window closes with its last conversation).
                 if ImGui.IsMouseClicked(1) then rt.tabMenuReq = { win = win, ti = ti } end
-                if win.tellWindow and ImGui.IsMouseClicked(2) then closeTi = ti end
+                if ImGui.IsMouseClicked(2) then closeTi = ti end
             end
             if selected then
                 if not isTabActive(win, ti) then
@@ -3146,15 +3856,37 @@ local function drawWindow(win, wi)
     else
         pcall(ImGui.SetNextWindowSize, core.px(620), core.px(380), (ImGuiCond and ImGuiCond.FirstUseEver) or 4)
     end
-    pcall(ImGui.SetNextWindowBgAlpha, win.opacity or cfg.opacity)
+    -- A ghost window begins with its chrome colours at the fade fraction of
+    -- their alpha (title bar, border, tabs, frames, buttons, scrollbar, the
+    -- chrome's text) and the background alpha scaled the same way; the log
+    -- text keeps its own colours, and the menus push the originals back.
+    local ghost = 1
+    if win.ghost and not rt.safeMode then ghost = G.alpha(win) end
+    G.cur = ghost
+    local ghostCols = G.pushChrome(ghost)
+    rt.popupWin, rt.activeInputWin = nil, nil
+    pcall(ImGui.SetNextWindowBgAlpha, (win.opacity or cfg.opacity) * ghost)
     local flags = 0
     if cfg.locked and ImGuiWindowFlags then
         flags = (ImGuiWindowFlags.NoMove or 0) + (ImGuiWindowFlags.NoResize or 0)
     end
+    -- No title bar: dragged by its body, closed from the tab menu's Window submenu.
+    if win.noTitle and ImGuiWindowFlags and ImGuiWindowFlags.NoTitleBar then flags = flags + ImGuiWindowFlags.NoTitleBar end
     local title = string.format('%s###TriuneChat_%s', win.title, win.id)
     trace('Begin window %s', win.title)
     local open, draw = ImGui.Begin(title, true, flags)
     trace('  window -> %s', tostring(draw))
+    -- Hovered anywhere over the window or its children, also while dragging
+    -- a splitter / scrollbar or with one of its menus open (the mouse over
+    -- the menu itself is covered by rt.popupWin below).
+    local held = false
+    if win.ghost then
+        local HF = ImGuiHoveredFlags or _G.ImGuiHoveredFlags
+        local hf = HF and ((HF.RootAndChildWindows or 0) + (HF.AllowWhenBlockedByActiveItem or 0) + (HF.AllowWhenBlockedByPopup or 0)) or 0
+        local okH, hov = pcall(ImGui.IsWindowHovered, hf)
+        if not okH then okH, hov = pcall(ImGui.IsWindowHovered) end
+        held = (okH and hov == true)
+    end
     if open == false then
         if win.tellWindow then
             -- The Tells window goes away when closed (every conversation with
@@ -3186,11 +3918,16 @@ local function drawWindow(win, wi)
             drawTabMenu(win, win.tabs[ti], ti)
         end
     end
+    if win.ghost then G.hold(win, held or rt.popupWin == win.id or rt.activeInputWin == win.id) end
+    G.cur = 1
     -- A programmatic tab selection is a one-frame flag (drawn or not).
     if rt.selectReq then rt.selectReq[win.id] = nil end
+    -- The core's pre-End hook (balance only: chat draws its own menus and ghost).
+    if core.preEndWindow then pcall(core.preEndWindow, key, true) end
     local okEnd, errEnd = pcall(ImGui.End)
     trace('End window %s%s', win.title, okEnd and '' or (' FAILED ' .. tostring(errEnd)))
     if pushedVars > 0 then pcall(ImGui.PopStyleVar, pushedVars) end
+    G.popChrome(ghostCols)
     core.popTheme()
     if not okEnd then
         rt.stats.drawErr = 'End window: ' .. tostring(errEnd)
@@ -3220,7 +3957,7 @@ local function enterPressed()
     return false
 end
 
-local function focusTargetKey()
+function focusTargetKey()
     if rt.lastInputKey then
         for _, w in ipairs(cfg.windows) do
             if w.open then
@@ -3362,11 +4099,29 @@ function chatCommand(sub, arg1, arg2)
         openTellTab(name, true)
     elseif sub == 'clear' then
         rt.ring = newRing(cfg.maxLines)
+        rt.keep = newRing(cfg.history.lines)
         for _, s in pairs(rt.tabs) do s.rebuild = true end
         return
     elseif sub == 'capture' then
         local on = tostring(arg1 or ''):lower()
         if on == 'on' then setCapture(true) elseif on == 'off' then setCapture(false) else setCapture(not cfg.capture) end
+        return
+    elseif sub == 'history' then
+        local what = tostring(arg1 or ''):lower()
+        if what == 'clear' then
+            H.clear()
+            print('\ag[Triune Chat]\ax tell / notification history cleared.')
+            return
+        end
+        local on
+        if what == 'on' then on = true elseif what == 'off' then on = false else on = not cfg.history.on end
+        if on ~= cfg.history.on then
+            cfg.history.on = on
+            if not on then H.close() end
+            markDirty()
+        end
+        print(string.format('\ag[Triune Chat]\ax tells and notifications %s across restarts (%d lines kept in %s).',
+            on and 'are kept' or 'are not kept', cfg.history.lines, H.path()))
         return
     elseif sub == 'tab' then
         local win, ti = findTab(arg1)
@@ -3401,6 +4156,19 @@ function chatCommand(sub, arg1, arg2)
         invalidateTabs()
         markDirty()
         print(string.format('\ag[Triune Chat]\ax %s %s', sub == 'mute' and 'muted' or 'unmuted', name))
+        return
+    elseif sub == 'ghost' then
+        local name = trim(tostring(arg1 or ''))
+        local win
+        if name ~= '' then win = findWindow(name) else win = cfg.windows[1] end
+        if not win then
+            print('\ay[Triune Chat]\ax no window called ' .. name .. ' (/tacchat tabs lists them)')
+            return
+        end
+        win.ghost = not win.ghost
+        markDirty()
+        print(string.format('\ag[Triune Chat]\ax %s: ghost %s (%s)', win.title, win.ghost and 'on' or 'off',
+            win.ghost and 'only the text shows until the mouse is over the window' or 'always drawn in full'))
         return
     elseif sub == 'timestamps' then
         cfg.timestamps = not cfg.timestamps
@@ -3464,6 +4232,7 @@ function chatCommand(sub, arg1, arg2)
         if s.holes or s.drawErr then
             print(string.format('\ay[Triune Chat]\ax queue repairs %d (%s) | last renderer error: %s', s.holes or 0, tostring(s.holeInfo), tostring(s.drawErr)))
         end
+        if s.ghost then print('\ag[Triune Chat]\ax ghost windows: ' .. s.ghost) end
         return
     else
         print('\ay[Triune Chat]\ax /tacchat [show|hide|toggle|focus|settings|clear|capture on|off|tab <name>|tell <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|trace on|off|dump|safemode on|off|unsplit|reset]')
@@ -3499,10 +4268,19 @@ function plugin.onInit(coreApi)
     if ctrl and ctrl.show_chat == nil then ctrl.show_chat = false end
     rt.configPath = nil
     loadConfig()
+    local freshRing = (rt.ring == nil)
     rt.ring = rt.ring or newRing(cfg.maxLines)
     rt.ring.cap = cfg.maxLines
+    rt.keep = rt.keep or newRing(cfg.history.lines)
+    rt.keep.cap = cfg.history.lines
     for _, s in pairs(rt.tabs) do s.rebuild = true end
     refreshNames(true)
+    -- Restored before the event is registered, so the old lines sit under
+    -- every new one. A re-init keeps the session's ring (and history state).
+    if freshRing or not rt.hist then
+        local n = H.load()
+        if n > 0 then print(string.format('\ag[Triune Chat]\ax restored %d tell / notification line%s from the last session.', n, n == 1 and '' or 's')) end
+    end
     registerEvents()
     if cfg.capture and not openCapture() then cfg.capture = false end
     if cfg.lastDrawFailed then
@@ -3522,12 +4300,14 @@ function plugin.onDestroy()
     unregisterEvents()
     closeCapture()
     closeTabLogs()
+    H.close()
     rt.editor = nil
     if mq and mq.unbind then
         for _, cmd in ipairs(boundCommands) do pcall(mq.unbind, cmd) end
     end
     boundCommands = {}
     rt.tabs = {}
+    rt.ghost = {}
     rt.configPath = nil
 end
 
@@ -3542,7 +4322,9 @@ function plugin.onTick()
     refreshNames(false)
     drainQueue()
     flushLogs()
+    if rt.hist and rt.hist.fileLines > cfg.history.lines * 2 then H.compact() end
     runPendingLink()
+    retryTextLinks()
     if rt.dirty and os.time() - rt.lastSave >= 2 then saveConfig() end
 end
 
@@ -3604,7 +4386,7 @@ function plugin.onCommand(cmd, args)
 end
 
 plugin.help = {
-    '  \ag/ac chat [show|hide|toggle|focus|settings|clear|capture on|off|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|reset]\ax - Chat Windows (also /tacchat)',
+    '  \ag/ac chat [show|hide|toggle|focus|settings|clear|capture on|off|history on|off|clear|ghost [window]|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|reset]\ax - Chat Windows (also /tacchat)',
 }
 
 -- Exposed for tests
@@ -3655,18 +4437,26 @@ plugin.selectTab = selectTab
 plugin.layoutEntry = layoutEntry
 plugin.runPendingLink = runPendingLink
 plugin.sanitizeConfig = sanitizeConfig
+plugin.history = H
+plugin.ghost = G
 plugin.defaultWindows = defaultWindows
 plugin.serialize = serialize
 plugin.newRing = newRing
 plugin.ringPush = ringPush
 plugin.ringCount = ringCount
 plugin.tabAccepts = tabAccepts
+plugin.tabSource = tabSource
 plugin.renderLine = renderLine
 plugin.channelColor = channelColor
 plugin.ingest = ingest
 plugin.drainQueue = drainQueue
 plugin.onAnyLine = onAnyLine
 plugin.sendText = sendText
+plugin.insertLink = insertLink
+plugin.openTextLink = openTextLink
+plugin.retryTextLinks = retryTextLinks
+plugin.expandLinks = expandLinks
+plugin.tabByKey = tabByKey
 plugin.chatCommand = chatCommand
 plugin.registeredEvents = function() return registeredEvents end
 

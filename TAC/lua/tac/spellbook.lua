@@ -24,7 +24,7 @@ local plugin = {
     tickInterval       = 0.1,
     runOutOfCombatOnly = false, -- queue processing has its own combat / casting gates
     hasThread          = false,
-    uses               = { gamedb = 'Effect lines and scroll sources in spell tooltips, middle-click spell cards' },
+    uses               = { gamedb = 'Effect lines and scroll sources in spell tooltips, middle-click spell cards, Spell Info cards' },
     -- Window owned by this plugin (drives the main-window header button)
     window             = { label = 'Open Spellbook', tooltip = 'Toggles the Spellbook Browser window (spellbook plugin).', flag = 'show_spellbook', desc = 'Per-class spell database browser & mem queue', headerButton = true, order = 10 },
 }
@@ -707,35 +707,29 @@ local function isListPending(cls)
     return activeSpellsClass ~= cls
 end
 
+-- Spell Info: the Game Database card when that plugin replaces the game's
+-- window (core.inspectSpell), else the game's Spell Display window, trying
+-- the exact name, the cleaned name and finally the spellbook slot.
 local function showSpellInfo(name)
     if not name or name == "" then return end
-    local inspected = false
-    pcall(function()
-        local sp = mq.TLO.Spell(name)
-        if sp and sp() then
-            sp.Inspect()
-            inspected = true
-            return
-        end
-        local clean = core.cleanSpellName(name)
-        if clean ~= "" and clean ~= name then
-            sp = mq.TLO.Spell(clean)
-            if sp and sp() then
-                sp.Inspect()
+    local inspected = core.inspectSpell(name) == true
+    if not inspected then
+        pcall(function()
+            local clean = core.cleanSpellName(name)
+            if clean ~= "" and clean ~= name and core.inspectSpell(clean) then
                 inspected = true
                 return
             end
-        end
-        local bookSlot = rt.getSpellBookSlot(name) or (clean ~= "" and rt.getSpellBookSlot(clean))
-        if bookSlot and bookSlot > 0 then
-            local bsp = mq.TLO.Me.Book(bookSlot)
-            if bsp and bsp() then
-                bsp.Inspect()
-                inspected = true
-                return
+            local bookSlot = rt.getSpellBookSlot(name) or (clean ~= "" and rt.getSpellBookSlot(clean))
+            if bookSlot and bookSlot > 0 then
+                local bsp = mq.TLO.Me.Book(bookSlot)
+                if bsp and bsp() then
+                    bsp.Inspect()
+                    inspected = true
+                end
             end
-        end
-    end)
+        end)
+    end
     if inspected then
         state.statusMsg = "Showing spell info: " .. name
         if state.debugLogging then
@@ -802,15 +796,17 @@ local function drawWindow()
         )
     end
     core.preBeginWindow('spellbook')
-    local open, show = ImGui.Begin('Triune Spellbook Engine v' .. (core.VERSION or '') .. '###triuneSpellbook', ctrl.show_spellbook, windowFlags)
+    local open, show = ImGui.Begin('Triune Spellbook Engine v' .. (core.VERSION or '') .. '###triuneSpellbook', ctrl.show_spellbook, core.windowFlags and core.windowFlags('spellbook', windowFlags) or windowFlags)
     if not open then
         ctrl.show_spellbook = false
+        if core.preEndWindow then core.preEndWindow('spellbook', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
         return
     end
     if not show then
+        if core.preEndWindow then core.preEndWindow('spellbook', false) end
         ImGui.End()
         core.popTheme()
         return
@@ -1080,6 +1076,7 @@ local function drawWindow()
     ImGui.SameLine()
     ImGui.Text(state.statusMsg)
 
+    if core.preEndWindow then core.preEndWindow('spellbook', false) end
     ImGui.End()
     core.popTheme()
 end

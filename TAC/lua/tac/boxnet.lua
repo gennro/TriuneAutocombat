@@ -1437,15 +1437,17 @@ local function drawWindow()
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
     end
     core.preBeginWindow('boxnet')
-    local open, draw = ImGui.Begin('Triune Box Network###TriuneBoxNet', ctrl.show_boxnet, windowFlags)
+    local open, draw = ImGui.Begin('Triune Box Network###TriuneBoxNet', ctrl.show_boxnet, core.windowFlags and core.windowFlags('boxnet', windowFlags) or windowFlags)
     if not open then
         ctrl.show_boxnet = false
+        if core.preEndWindow then core.preEndWindow('boxnet', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
         return
     end
     if not draw then
+        if core.preEndWindow then core.preEndWindow('boxnet', false) end
         ImGui.End()
         core.popTheme()
         return
@@ -1464,6 +1466,7 @@ local function drawWindow()
     ImGui.Dummy(0, core.px(4))
     drawLog(MUTED, WARN, ERR)
 
+    if core.preEndWindow then core.preEndWindow('boxnet', false) end
     ImGui.End()
     core.popTheme()
 end

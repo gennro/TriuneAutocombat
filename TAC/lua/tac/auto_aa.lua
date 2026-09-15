@@ -3,11 +3,12 @@
 -- TAC/lua/tac/auto_aa.lua — Triune Auto AA Plugin
 -- ============================================================================
 -- Automatic Alternate Advancement spending: scans the character's AA window,
--- ranks abilities by the user's priority list, purchases them natively through
--- the AA window (or delegates to MQ2AAspend with a native fallback), handles
--- the Fireworks / Special-tab cap spender, auto-summons fireworks, and owns the
--- "Auto AA" popout window (ctrl.show_auto_aa, header button) plus the /ac autoaa
--- family of commands.
+-- ranks abilities by the user's priority list, purchases them through the
+-- game's own AA window (open it, pick the tab and row, click Train, confirm
+-- the unspent total dropped, close it), handles the Fireworks / Special-tab
+-- cap spender, auto-summons fireworks, and owns the "Auto AA" popout window
+-- (ctrl.show_auto_aa, header button) plus the /ac autoaa family of commands.
+-- No MQ2AAspend: every purchase goes through the window trainer.
 --
 -- Combat coupling is expressed through two plugin hooks rather than shared
 -- runtime state:
@@ -23,9 +24,9 @@
 local plugin = {
     id                 = 'auto_aa',
     name               = 'Auto AA Spender',
-    version            = '1.0.0',
+    version            = '1.1.0',
     author             = 'Triune',
-    description        = 'Automatically spends AA points by priority (native AA window or MQ2AAspend), Fireworks cap spender, auto-summon, and the Auto AA window.',
+    description        = 'Automatically spends AA points by priority through the AA window, Fireworks cap spender, auto-summon, and the Auto AA window.',
     defaultEnabled     = true,
     tickInterval       = 0.15,
     runOutOfCombatOnly = false, -- has its own combat gates; the purchase workflow must be able to finish/abort mid-fight
@@ -51,7 +52,6 @@ local function resetState()
     AA.lastAutoSpendAAAt = 0
     AA.lastAutoSummonAt = 0
     AA.pendingFireworksSummon = nil
-    AA.lastAASpendIniFingerprint = nil
     AA.scannedAAs = nil
     AA.scannedAAMap = nil
     AA.lastAAScanAt = 0
@@ -67,25 +67,16 @@ local function resetState()
     AA.specialTabReadDone = false
     AA.pendingReadSpecialTab = false
     AA.pendingAATrain = nil
-    AA.lastAASpendDelegatedTarget = nil
-    AA.lastAASpendDelegatedAt = nil
-    AA.lastAASpendDelegatedPoints = nil
-    AA.lastAACapDelegatedTarget = nil
-    AA.lastAACapDelegatedAt = nil
-    AA.lastAACapDelegatedPoints = nil
-    AA.lastAASpendAutoloadAttempt = nil
     AA.scanRequestAt = nil          -- os.clock() when the next deferred scan is due (nil = none)
     AA.scanning = false             -- set while a scan runs (the window shows "scanning...")
     AA.scanCtx = nil                -- per-scan TLO lookup caches (see scanPlayerAAs)
     AA.trainBackoff = {}            -- AA name -> os.clock() until which it is not retried
     AA.trainFailLogged = {}         -- AA name -> true once the failure was reported
-    AA.aaSpendLoadedCache = nil
-    AA.aaSpendLoadedAt = 0
 end
 resetState()
 
--- One bank / reserve threshold default for every path (slider, cap spender,
--- MQ2AAspend delegation, command output). nil is the only "unset" value:
+-- One bank threshold default for every path (slider, prioritized purchases,
+-- cap spender, command output). nil is the only "unset" value:
 -- a user-picked 100 is a real threshold, not a default to second-guess.
 AA.DEFAULT_THRESHOLD = 25
 AA.MIN_THRESHOLD = 5
@@ -102,30 +93,6 @@ end
 function AA.requestScan(delay)
     local due = os.clock() + (tonumber(delay) or 0)
     if AA.scanRequestAt == nil or due < AA.scanRequestAt then AA.scanRequestAt = due end
-end
-
--- ----------------------------------------------------------------------------
--- MQ2AAspend detection
--- ----------------------------------------------------------------------------
--- Probes each plugin name in turn (a TLO object is truthy even for an
--- unloaded plugin, so `a or b` never reached the second name). The answer
--- is cached for two seconds: the window asks every frame.
-AA.AASPEND_NAMES = { 'mq2aaspend', 'MQ2AASpend', 'aaspend' }
-function AA.aaSpendLoaded()
-    local now = os.clock()
-    if AA.aaSpendLoadedCache ~= nil and (now - (AA.aaSpendLoadedAt or 0)) < 2.0 then
-        return AA.aaSpendLoadedCache
-    end
-    local ok, loaded = pcall(function()
-        for _, nm in ipairs(AA.AASPEND_NAMES) do
-            local p = mq.TLO.Plugin(nm)
-            if p and p() and p.IsLoaded and p.IsLoaded() then return true end
-        end
-        return false
-    end)
-    AA.aaSpendLoadedCache = ok and (loaded == true)
-    AA.aaSpendLoadedAt = now
-    return AA.aaSpendLoadedCache
 end
 
 function AA.findChildRecursive(parent, targetName)
@@ -1723,10 +1690,6 @@ function AA.processAATrainWorkflow()
         AA.lastAATrainAttempt = AA.lastAATrainAttempt or {}
         AA.lastAATrainAttempt[task.name] = now
         AA.pendingAATrain = nil
-        AA.lastAASpendDelegatedTarget = nil
-        AA.lastAASpendDelegatedAt = nil
-        AA.lastAACapDelegatedAt = nil
-        AA.lastAACapDelegatedTarget = nil
         if task.purchased then
             AA.trainBackoff[task.name] = nil
             AA.trainFailLogged[task.name] = nil
@@ -1752,114 +1715,6 @@ function AA.processAATrainWorkflow()
         end
         return
     end
-end
-
--- Writes the [MQ2AASpend_Settings] / [MQ2AASpend_AAList] sections of
--- Server_Character.ini and asks MQ2AAspend to reload them. The INI is only
--- rewritten (and the plugin only reloaded) when the generated sections differ
--- from what was last written; `force` bypasses that check (manual Sync).
-function AA.syncAAsToMQ2AASpendIni(silent, force)
-    local server, cleanName
-    pcall(function()
-        server = mq.TLO.EverQuest.Server()
-        cleanName = mq.TLO.Me.CleanName()
-    end)
-    if not server or server == '' or not cleanName or cleanName == '' then return false end
-
-    local iniFile = string.format('%s/%s_%s.ini', (mq.configDir or 'config'), server, cleanName)
-
-    local prioList = {}
-    if ctrl.auto_aa_priorities then
-        for nm, enabled in pairs(ctrl.auto_aa_priorities) do
-            if enabled and (not AA.isSpecialTabAA or not AA.isSpecialTabAA(nm)) then
-                local cost = 0
-                if rt.cachedAAData and rt.cachedAAData[nm] then
-                    cost = rt.cachedAAData[nm].cost or 0
-                end
-                prioList[#prioList + 1] = { name = nm, cost = cost }
-            end
-        end
-    end
-
-    if ctrl.auto_aa_buy_order == 'list' then
-        table.sort(prioList, function(a, b) return a.name:lower() < b.name:lower() end)
-    else
-        table.sort(prioList, function(a, b)
-            if a.cost ~= b.cost then return a.cost < b.cost end
-            return a.name:lower() < b.name:lower()
-        end)
-    end
-
-    local section = {}
-    section[#section + 1] = '[MQ2AASpend_Settings]'
-    section[#section + 1] = 'AutoSpend=1'
-    section[#section + 1] = (ctrl.auto_aa_aaspend_mode == 'brute') and 'BruteForce=1' or 'BruteForce=0'
-    section[#section + 1] = 'BruteForceBonusFirst=0'
-    section[#section + 1] = string.format('BankPoints=%d', ctrl.auto_spend_aa_threshold or 0)
-    section[#section + 1] = 'SpendOrder=35214'
-    section[#section + 1] = ''
-    section[#section + 1] = '[MQ2AASpend_AAList]'
-    for idx, item in ipairs(prioList) do
-        section[#section + 1] = string.format('%d=%s|M', idx, item.name)
-    end
-
-    -- Skip the file read, the write and /aaspend load when nothing that
-    -- feeds the INI changed (this runs on every loadout save).
-    local fingerprint = iniFile .. '\n' .. table.concat(section, '\n')
-    if not force and AA.lastAASpendIniFingerprint == fingerprint then
-        return true, false
-    end
-
-    local lines = {}
-    local f = io.open(iniFile, 'r')
-    if f then
-        for line in f:lines() do
-            lines[#lines + 1] = line
-        end
-        f:close()
-    end
-
-    local newLines = {}
-    local inTargetSection = false
-    for _, line in ipairs(lines) do
-        local trimmed = line:match('^%s*(.-)%s*$')
-        if trimmed:find('^%[') then
-            local lowerHeader = trimmed:lower()
-            if lowerHeader == '[mq2aaspend_aalist]' or lowerHeader == '[mq2aaspend_settings]' then
-                inTargetSection = true
-            else
-                inTargetSection = false
-                newLines[#newLines + 1] = line
-            end
-        elseif not inTargetSection then
-            newLines[#newLines + 1] = line
-        end
-    end
-
-    while #newLines > 0 and newLines[#newLines]:match('^%s*$') do
-        table.remove(newLines)
-    end
-
-    if #newLines > 0 then newLines[#newLines + 1] = '' end
-    for _, line in ipairs(section) do newLines[#newLines + 1] = line end
-
-    local out = io.open(iniFile, 'w')
-    if out then
-        for _, line in ipairs(newLines) do
-            out:write(line .. '\n')
-        end
-        out:close()
-        AA.lastAASpendIniFingerprint = fingerprint
-        if not silent then
-            print(string.format('\ag[Triune]\ax Synced %d prioritized AAs to %s_%s.ini [MQ2AASpend_AAList].',
-                #prioList, server, cleanName))
-        end
-        if AA.aaSpendLoaded and AA.aaSpendLoaded() then
-            mq.cmd('/aaspend load')
-        end
-        return true, true
-    end
-    return false
 end
 
 function AA.checkAutoSpendAA(allowStop)
@@ -1916,14 +1771,6 @@ function AA.checkAutoSpendAA(allowStop)
         AA.lastAATrainAttempt = {}
     end
     AA.lastObservedAutoSpendPts = unspent
-
-    -- Autoload MQ2AAspend plugin if missing and auto_spend is active
-    if AA.aaSpendLoaded and not AA.aaSpendLoaded() then
-        if not AA.lastAASpendAutoloadAttempt or (now - AA.lastAASpendAutoloadAttempt) > 15.0 then
-            AA.lastAASpendAutoloadAttempt = now
-            mq.cmd('/plugin mq2aaspend load')
-        end
-    end
 
     -- 1. Check prioritized AAs
     if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
@@ -2005,6 +1852,11 @@ function AA.checkAutoSpendAA(allowStop)
         end
 
         if #candidates > 0 then
+            -- The Bank slider gates every automatic purchase: a priority is
+            -- bought only once the unspent pool has reached it (the cap
+            -- spender below never runs while a priority is waiting).
+            if unspent < AA.threshold() then return false end
+
             -- Movement check: if moving and allowStop is true, cleanly stop movement before purchasing
             local moving = false
             pcall(function()
@@ -2026,54 +1878,16 @@ function AA.checkAutoSpendAA(allowStop)
                 end)
             end
             local target = candidates[1]
-
-            -- If candidate is a Special tab ability (such as Fireworks), MQ2AAspend cannot purchase it.
-            -- Train it directly via Triune's native window workflow!
-            if AA.isSpecialTabAA and AA.isSpecialTabAA(target.name) then
-                AA.lastAutoSpendAAAt = now
-                print(string.format('\ag[Triune]\ax Auto-spending AA on Special tab ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
-                    target.name, target.rank, target.maxRank, target.cost, unspent))
-                return AA.startAATrainWorkflow(target.name, allowStop)
-            end
-
-            -- For regular general/class abilities, if MQ2AAspend is active, delegate with native fallback:
-            if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-                local threshold = AA.threshold()
-                if unspent >= threshold then
-                    local delegTarget = AA.lastAASpendDelegatedTarget
-                    local delegAt = AA.lastAASpendDelegatedAt or 0
-                    local delegPts = AA.lastAASpendDelegatedPoints or 0
-                    if delegTarget == target.name and (now - delegAt) >= 2.5 and unspent >= delegPts then
-                        AA.lastAutoSpendAAAt = now
-                        AA.lastAASpendDelegatedTarget = nil
-                        print(string.format('\ay[Triune]\ax MQ2AAspend did not purchase prioritized ability "%s" (unspent: %d AA); falling back to Triune native window trainer...',
-                            target.name, unspent))
-                        return AA.startAATrainWorkflow(target.name, allowStop)
-                    end
-
-                    AA.lastAutoSpendAAAt = now
-                    AA.lastAASpendDelegatedAt = now
-                    AA.lastAASpendDelegatedTarget = target.name
-                    AA.lastAASpendDelegatedPoints = unspent
-                    local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-                    mq.cmdf('/aaspend bank %d', threshold)
-                    mq.cmd('/aaspend ' .. mode)
-                    print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
-                        mode, unspent, threshold))
-                    return true
-                end
-                return false
-            end
-
-            -- Otherwise, train via Triune's native workflow
+            local isSpecialTarget = AA.isSpecialTabAA and AA.isSpecialTabAA(target.name)
             AA.lastAutoSpendAAAt = now
-            print(string.format('\ag[Triune]\ax Auto-spending AA on prioritized ability "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
+            print(string.format('\ag[Triune]\ax Auto-spending AA on %s "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
+                isSpecialTarget and 'Special tab ability' or 'prioritized ability',
                 target.name, target.rank, target.maxRank, target.cost, unspent))
             return AA.startAATrainWorkflow(target.name, allowStop)
         end
     end
 
-    -- 2. Fallback: Cap threshold spender (Fireworks or general delegation)
+    -- 2. Fallback: Cap threshold spender (Fireworks or the configured ability)
     local threshold = AA.threshold()
     local cost = tonumber(ctrl.auto_spend_aa_cost) or 25
     local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
@@ -2109,31 +1923,6 @@ function AA.checkAutoSpendAA(allowStop)
             print(string.format('\ag[Triune]\ax Auto-spending AA cap protection on Special tab "%s" (Threshold: %d AA, Cost: %d AA, Unspent: %d AA)...',
                 effectiveName, threshold, cost, unspent))
             return AA.startAATrainWorkflow(effectiveName, allowStop)
-        end
-
-        -- Delegation to MQ2AAspend plugin for cap dumping if loaded
-        if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-            local delegCapAt = AA.lastAACapDelegatedAt or 0
-            local delegCapPts = AA.lastAACapDelegatedPoints or 0
-            local delegCapTarget = AA.lastAACapDelegatedTarget
-            if delegCapTarget == effectiveName and (now - delegCapAt) >= 3.0 and unspent >= delegCapPts and cost > 0 and unspent >= cost then
-                AA.lastAutoSpendAAAt = now
-                AA.lastAACapDelegatedTarget = nil
-                print(string.format('\ay[Triune]\ax MQ2AAspend did not spend cap protection points; falling back to Triune native trainer on "%s"...',
-                    effectiveName))
-                return AA.startAATrainWorkflow(effectiveName, allowStop)
-            end
-
-            AA.lastAutoSpendAAAt = now
-            AA.lastAACapDelegatedAt = now
-            AA.lastAACapDelegatedTarget = effectiveName
-            AA.lastAACapDelegatedPoints = unspent
-            local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-            mq.cmdf('/aaspend bank %d', threshold)
-            mq.cmd('/aaspend ' .. mode)
-            print(string.format('\ag[Triune]\ax Delegated Auto-Spend to MQ2AAspend (/aaspend %s, unspent: %d, bank: %d).',
-                mode, unspent, threshold))
-            return true
         end
 
         if cost > 0 and unspent >= cost then
@@ -2228,37 +2017,8 @@ function AA.manualSpendAA(targetName)
     end
 
     if topPrioritized then
-        -- Special tab abilities always train natively
-        if AA.isSpecialTabAA and AA.isSpecialTabAA(topPrioritized.name) then
-            return AA.startAATrainWorkflow(topPrioritized.name)
-        end
-
-        -- If MQ2AAspend is active, try delegation first unless already delegated or disabled
-        if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-            local threshold = AA.threshold()
-            local now = os.clock()
-            local delegTarget = AA.lastAASpendDelegatedTarget
-            local delegAt = AA.lastAASpendDelegatedAt or 0
-            local delegPts = AA.lastAASpendDelegatedPoints or 0
-            -- If previously delegated for this target and didn't purchase after >= 2.5s, fall back immediately to native!
-            if delegTarget == topPrioritized.name and (now - delegAt) >= 2.5 and unspent >= delegPts then
-                AA.lastAASpendDelegatedTarget = nil
-                print(string.format('\ay[Triune]\ax MQ2AAspend did not purchase prioritized ability "%s"; falling back to Triune native window trainer...',
-                    topPrioritized.name))
-                return AA.startAATrainWorkflow(topPrioritized.name)
-            end
-
-            local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-            AA.lastAASpendDelegatedAt = now
-            AA.lastAASpendDelegatedTarget = topPrioritized.name
-            AA.lastAASpendDelegatedPoints = unspent
-            mq.cmdf('/aaspend bank %d', threshold)
-            mq.cmd('/aaspend ' .. mode)
-            print(string.format('\ag[Triune]\ax Issued MQ2AAspend manual command (/aaspend %s).', mode))
-            return true
-        end
-
-        -- Native workflow
+        -- Spend Now is manual: it ignores the Bank threshold and buys the
+        -- top affordable priority right away.
         return AA.startAATrainWorkflow(topPrioritized.name)
     end
 
@@ -2266,15 +2026,6 @@ function AA.manualSpendAA(targetName)
     local fallbackName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
     if AA.isSpecialTabAA and AA.isSpecialTabAA(fallbackName) and (not ctrl.auto_aa_priorities or not next(ctrl.auto_aa_priorities)) then
         return AA.startAATrainWorkflow(fallbackName)
-    end
-
-    if ctrl.auto_aa_delegate_aaspend and AA.aaSpendLoaded and AA.aaSpendLoaded() then
-        local threshold = AA.threshold()
-        local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-        mq.cmdf('/aaspend bank %d', threshold)
-        mq.cmd('/aaspend ' .. mode)
-        print(string.format('\ag[Triune]\ax Issued MQ2AAspend manual command (/aaspend %s).', mode))
-        return true
     end
 
     local cost = 0
@@ -2447,15 +2198,17 @@ function AA.drawWindow()
     core.pushTheme()
     ImGui.SetNextWindowSize(core.px(760), core.px(560), ImGuiCond.FirstUseEver)
     core.preBeginWindow('auto_aa')
-    local open, show = ImGui.Begin('Triune Auto AA v' .. (core.VERSION or '') .. '###triuneAutoAA', ctrl.show_auto_aa)
+    local open, show = ImGui.Begin('Triune Auto AA v' .. (core.VERSION or '') .. '###triuneAutoAA', ctrl.show_auto_aa, core.windowFlags and core.windowFlags('auto_aa', 0) or 0)
     if not open then
         ctrl.show_auto_aa = false
+        if core.preEndWindow then core.preEndWindow('auto_aa', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
         return
     end
     if not show then
+        if core.preEndWindow then core.preEndWindow('auto_aa', false) end
         ImGui.End()
         core.popTheme()
         return
@@ -2512,41 +2265,10 @@ function AA.drawWindow()
     local spendVal = ImGui.Checkbox('Auto-Spend AA##aaAutoSpendMaster', ctrl.auto_spend_aa or false)
     if spendVal ~= (ctrl.auto_spend_aa or false) then
         ctrl.auto_spend_aa = spendVal
-        if spendVal then
-            if AA.aaSpendLoaded and not AA.aaSpendLoaded() then
-                mq.cmd('/plugin mq2aaspend load')
-            end
-            if AA.syncAAsToMQ2AASpendIni then
-                AA.syncAAsToMQ2AASpendIni(true)
-            end
-        end
         core.saveLoadout(true)
     end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'Automatically purchases prioritized Alternate Advancements via MQ2AAspend in the background as points are earned.')
-    end
-
-    ImGui.SameLine()
-    local aaSpendAvail = AA.aaSpendLoaded and AA.aaSpendLoaded()
-    if aaSpendAvail then
-        local delVal = ImGui.Checkbox('MQ2AAspend##aaDelegateMaster', ctrl.auto_aa_delegate_aaspend ~= false)
-        if delVal ~= (ctrl.auto_aa_delegate_aaspend ~= false) then
-            ctrl.auto_aa_delegate_aaspend = delVal
-            if delVal and AA.syncAAsToMQ2AASpendIni then
-                AA.syncAAsToMQ2AASpendIni(true)
-            end
-            core.saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('%s', 'Delegate AA purchasing to MQ2AAspend plugin.\n• Checked: MQ2AAspend attempts purchases first; Triune automatically falls back to native window training if MQ2AAspend fails.\n• Unchecked: Triune trains all prioritized AAs directly via native window training.')
-        end
-    else
-        if ImGui.SmallButton('Load MQ2AAspend##btnLoadAASpend') then
-            mq.cmd('/plugin mq2aaspend load')
-        end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('%s', 'MQ2AAspend is not loaded. Click to execute /plugin mq2aaspend load.\n(Triune trains AAs natively using its built-in window trainer when MQ2AAspend is not loaded).')
-        end
+        ImGui.SetTooltip('%s', 'Automatically purchases prioritized Alternate Advancements through the AA window as points are earned (out of combat, standing still).')
     end
 
     ImGui.SameLine()
@@ -2558,7 +2280,7 @@ function AA.drawWindow()
     end
     if ImGui.IsItemDeactivatedAfterEdit() then core.saveLoadout(true) end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', string.format('Reserve/Bank Threshold: %d AA points (min: 5).\nAuto-spending begins once your unspent points reach this number.', curThresh))
+        ImGui.SetTooltip('%s', string.format('Bank threshold: %d AA points (min: 5).\nAuto-spending begins once your unspent points reach this number:\nprioritized abilities are bought first, and with none affordable the cap spender dumps into its ability.\nSpend Now ignores it.', curThresh))
     end
 
     ImGui.SameLine()
@@ -2567,16 +2289,6 @@ function AA.drawWindow()
     end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip('%s', 'Manually trigger an immediate purchase of prioritized AAs right now.')
-    end
-
-    ImGui.SameLine()
-    if ImGui.Button('Sync to INI##btnSyncIni') then
-        if AA.syncAAsToMQ2AASpendIni then
-            AA.syncAAsToMQ2AASpendIni(false, true)
-        end
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', 'Manually syncs prioritized AAs to Server_Character.ini [MQ2AASpend_AAList] and reloads the plugin.\n(Note: Triune also syncs this automatically in the background!)')
     end
 
     ImGui.SameLine()
@@ -2904,6 +2616,7 @@ function AA.drawWindow()
     ImGui.EndChild()
     ImGui.PopStyleVar(2)
 
+    if core.preEndWindow then core.preEndWindow('auto_aa', false) end
     ImGui.End()
     core.popTheme()
 end
@@ -2986,38 +2699,6 @@ function AA.onCommand(cmd, args)
         core.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Auto-Summon Fireworks %s (/alt act %d / Summon Firework).',
             ctrl.auto_summon_fireworks and '\agENABLED\ax' or '\arDISABLED\ax', ctrl.auto_spend_aa_id or 17788))
-    elseif cmd == 'aaspend' or cmd == 'mq2aaspend' then
-        local sub = args[2] and string.lower(args[2]) or ''
-        if sub == 'on' or sub == '1' or sub == 'enable' then
-            ctrl.auto_aa_delegate_aaspend = true
-            core.saveLoadout(true)
-            print('\ag[Triune]\ax Delegated AA spending to MQ2AAspend \agENABLED\ax.')
-        elseif sub == 'off' or sub == '0' or sub == 'disable' then
-            ctrl.auto_aa_delegate_aaspend = false
-            core.saveLoadout(true)
-            print('\ag[Triune]\ax Delegated AA spending to MQ2AAspend \arDISABLED\ax.')
-        elseif sub == 'auto' or sub == 'brute' then
-            ctrl.auto_aa_aaspend_mode = sub
-            core.saveLoadout(true)
-            print(string.format('\ag[Triune]\ax MQ2AAspend Mode set to: %s.', sub))
-        elseif sub == 'sync' or sub == 'inisync' then
-            if AA.syncAAsToMQ2AASpendIni then
-                AA.syncAAsToMQ2AASpendIni(false, true)
-            end
-        elseif sub == 'now' then
-            if AA.aaSpendLoaded and AA.aaSpendLoaded() then
-                mq.cmdf('/aaspend bank %d', AA.threshold())
-                mq.cmd('/aaspend ' .. ((ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'))
-                print(string.format('\ag[Triune]\ax Triggered: /aaspend %s now', ctrl.auto_aa_aaspend_mode or 'auto'))
-            else
-                print('\ar[Triune]\ax MQ2AAspend is not loaded. Type /plugin mq2aaspend load.')
-            end
-        else
-            ctrl.auto_aa_delegate_aaspend = not ctrl.auto_aa_delegate_aaspend
-            core.saveLoadout(true)
-            print(string.format('\ag[Triune]\ax Delegated AA spending to MQ2AAspend: %s.',
-                ctrl.auto_aa_delegate_aaspend and '\agENABLED\ax' or '\arDISABLED\ax'))
-        end
     elseif cmd == 'aatrain' or cmd == 'trainwindow' or cmd == 'trainaa' or cmd == 'spendnow' or cmd == 'spendaa' or cmd == 'spendpoints' then
         if AA.manualSpendAA then AA.manualSpendAA() end
     elseif cmd == 'summonnow' or cmd == 'summonfireworks' then
@@ -3162,11 +2843,6 @@ function plugin.onDrawSettings()
         ctrl.auto_summon_fireworks = fwVal
         core.saveLoadout(true)
     end
-    local delVal = ImGui.Checkbox('Delegate to MQ2AAspend##aaPlgDel', ctrl.auto_aa_delegate_aaspend ~= false)
-    if delVal ~= (ctrl.auto_aa_delegate_aaspend ~= false) then
-        ctrl.auto_aa_delegate_aaspend = delVal
-        core.saveLoadout(true)
-    end
     if AA.pendingAATrain then
         accent(WARN, string.format('Purchase workflow active: %s (step: %s)', tostring(AA.pendingAATrain.name), tostring(AA.pendingAATrain.step)))
     end
@@ -3183,20 +2859,6 @@ function plugin.onBetweenPulls()
     rt = core.runtime
     if not ctrl.auto_spend_aa then return false end
     return AA.checkAutoSpendAA(true) == true
-end
-
--- Keep MQ2AAspend's INI in step with the priority list whenever the loadout saves.
--- Keep MQ2AAspend's INI in step with the loadout, but only while Auto-Spend
--- is actually on and delegated to MQ2AAspend - and even then the sync is a
--- no-op unless the priorities / mode / threshold changed. saveLoadout runs on
--- every settings click, so this used to rewrite the INI and /aaspend load
--- constantly even with Auto AA idle.
-function plugin.onLoadoutSaved()
-    if not core then return end
-    ctrl = core.ctrl
-    if ctrl.auto_spend_aa and ctrl.auto_aa_delegate_aaspend then
-        AA.syncAAsToMQ2AASpendIni(true)
-    end
 end
 
 -- /ac command family
@@ -3217,7 +2879,6 @@ plugin.help = {
     '  \ag/ac aaname [name]\ax - Set the cap-spender AA ability name',
     '  \ag/ac aascan\ax - Force a rescan of purchasable AAs',
     '  \ag/ac aaprio [name]\ax - Toggle an AA on the priority list',
-    '  \ag/ac aaspend [on|off|auto|brute|sync|now]\ax - MQ2AAspend delegation controls',
 }
 
 -- Exposed for tests and other plugins

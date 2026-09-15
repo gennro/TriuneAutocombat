@@ -125,7 +125,7 @@ local cfg = {
     reportChannel = 'group', -- default channel: 'group', 'say', 'guild', 'raid'
     autoResetOnZone = true,
     showPetBreakdown = true,
-    meterScope = 'group',  -- group meter rows: 'group' (boxes in our group) | 'all' (every box sharing a parse)
+    meterScope = 'all',    -- group meter rows: 'all' (every box sharing a parse, grouped or not) | 'group' (boxes in our group)
     compactGroup = true,   -- compact window shows the group meter
 }
 
@@ -1813,14 +1813,27 @@ local function drawMiniDpsGui()
     if not ctrl.show_dps or not cfg.compact then return end
 
     core.pushTheme()
-    if core.pushWindowScale then core.pushWindowScale('dps') end
-    local open, draw = ImGui.Begin("Triune DPS###TriuneDPSMiniWindow", ctrl.show_dps, ImGuiWindowFlags.AlwaysAutoResize)
+    -- Its own layout key: the shared window options (title bar, ghost, scale)
+    -- are set on the compact window, not the full parser.
+    if core.preBeginWindow then core.preBeginWindow('dps_compact') end
+    local flags = ImGuiWindowFlags.AlwaysAutoResize
+    if core.windowFlags then flags = core.windowFlags('dps_compact', flags) end
+    local open, draw = ImGui.Begin("Triune DPS###TriuneDPSMiniWindow", ctrl.show_dps, flags)
     ctrl.show_dps = open
-    if open and draw and core.applyWindowScale then core.applyWindowScale('dps') end
-    if not open then
+    if open and draw then
+        if core.postBeginWindow then core.postBeginWindow('dps_compact') end
+    end
+    local function closeCompact()
         ctrl.show_dps = false
         rt.guiOpen = false
         cfg.compact = false
+    end
+    local function preEnd()
+        if core.preEndWindow then core.preEndWindow('dps_compact', false, { name = 'DPS compact window', onClose = closeCompact }) end
+    end
+    if not open then
+        closeCompact()
+        preEnd()
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
@@ -1903,6 +1916,7 @@ local function drawMiniDpsGui()
         if ImGui.IsItemHovered() then ImGui.SetTooltip('Open the full DPS Parser window') end
     end
 
+    preEnd()
     ImGui.End()
     core.popTheme()
 end
@@ -1915,12 +1929,13 @@ local function drawDpsGui()
     
     core.pushTheme()
     core.preBeginWindow('dps')
-    local open, draw = ImGui.Begin("Triune DPS Parser v" .. VERSION .. "###TriuneDPSWindow", ctrl.show_dps)
+    local open, draw = ImGui.Begin("Triune DPS Parser v" .. VERSION .. "###TriuneDPSWindow", ctrl.show_dps, core.windowFlags and core.windowFlags('dps', 0) or 0)
     ctrl.show_dps = open
     if not open then
         ctrl.show_dps = false
         rt.guiOpen = false
         rt.inspectorOpen = false
+        if core.preEndWindow then core.preEndWindow('dps', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
@@ -2301,6 +2316,7 @@ local function drawDpsGui()
         end
     end
     
+    if core.preEndWindow then core.preEndWindow('dps', false) end
     ImGui.End()
     core.popTheme()
 end

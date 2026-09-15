@@ -245,6 +245,7 @@ local function sanitizeModeConfig(c)
     if c.show_buffbot == nil then c.show_buffbot = false end
     if c.show_chat == nil then c.show_chat = false end
     if c.show_gamedb == nil then c.show_gamedb = false end
+    if c.show_parcels == nil then c.show_parcels = false end
     if c.cooldown_alpha == nil then c.cooldown_alpha = 0.90 end
     if c.cooldown_locked == nil then c.cooldown_locked = false end
     if c.cooldown_view_mode == nil then c.cooldown_view_mode = 'table' end
@@ -291,10 +292,9 @@ local function sanitizeModeConfig(c)
     if c.auto_aa_buy_order ~= 'cost' and c.auto_aa_buy_order ~= 'list' then
         c.auto_aa_buy_order = 'cost'
     end
-    if c.auto_aa_delegate_aaspend == nil then c.auto_aa_delegate_aaspend = true end
-    if c.auto_aa_aaspend_mode ~= 'auto' and c.auto_aa_aaspend_mode ~= 'brute' then
-        c.auto_aa_aaspend_mode = 'auto'
-    end
+    -- MQ2AAspend delegation is gone; drop the keys old loadouts still carry.
+    c.auto_aa_delegate_aaspend = nil
+    c.auto_aa_aaspend_mode = nil
     if c.downtime_buffing == nil then c.downtime_buffing = true end
     if c.pause_on_zone == nil then c.pause_on_zone = true end
     if c.combat_style ~= 'Melee' and c.combat_style ~= 'Ranged' and c.combat_style ~= 'Spell' then
@@ -418,7 +418,6 @@ local function defaultCtrl()
         pet_assist_at            = 100,
         pet_hold_enabled         = true,
         pet_names                = {},   -- cls -> pet name learned from that class's last summon (pet names are unique per player on this server)
-        show_map_radius          = true,
         show_crit_floaters       = true,
         show_cooldowns           = false,
         show_spellbook           = false,
@@ -431,6 +430,7 @@ local function defaultCtrl()
         show_buffbot             = false,
         show_chat                = false,
         show_gamedb              = false,
+        show_parcels             = false,
         cooldown_alpha           = 0.90,
         cooldown_locked          = false,
         cooldown_view_mode       = 'table',
@@ -455,6 +455,7 @@ local function defaultCtrl()
         gw_show_mana             = true,
         gw_show_endurance        = false,
         gw_show_pets             = true,
+        gw_show_boxes            = false,
         gw_show_roles            = true,
         show_effects_window      = false,
         eff_lock                 = false,
@@ -515,8 +516,6 @@ local function defaultCtrl()
         auto_aa_hide_maxed       = false,
         auto_aa_only_prioritized = false,
         auto_aa_buy_order        = 'cost',
-        auto_aa_delegate_aaspend = true,
-        auto_aa_aaspend_mode     = 'auto',
         downtime_buffing         = true,
         pause_on_zone            = true,
         auto_group               = false,
@@ -570,6 +569,7 @@ local runtime = {
     serverAttackModeAssumed = false,
     attackModeAttempts = 0,
     attackModeRangedUsed = false,
+    rangedPullAttackOn = false, -- a bow pull-tag turned /attack on for a non-Ranged stance (see finishRangedPullTag)
     lastAttackModeCmdAt = 0,
     -- Under server Ranged attack mode, /attack behaves as a pure on/off
     -- toggle rather than "start attacking my current target": if it's
@@ -597,7 +597,6 @@ local runtime = {
     npcSpellApplied = {},
     npcSpellLastCast = {},
     lastNpcCastPruneAt = 0,
-    lastMapDraw = { active = false, type = nil, key = '' },
     trackStartTime = nil,
     startAA = nil,
     currentAA = 0,
@@ -606,6 +605,12 @@ local runtime = {
     pendingCursorClearAt = nil,
     ignoreList = {},
     pullList = {},
+    -- Per-spawn XTarget overrides set from the Extended Target window
+    -- (session-only: spawn ids are transient). xtForceId is the one mob the
+    -- engine stays on until it dies; xtIgnoreIds is a set of spawn ids the
+    -- engine will not target or count as hostile until the toggle is cleared.
+    xtForceId = 0,
+    xtIgnoreIds = {},
     ignoreInput = '',
     pullInput = '',
     conCache = {},
@@ -2152,6 +2157,29 @@ local function sungKey(spellName, targetId)
     return string.format('%d_%s', targetId or 0, spellName or '')
 end
 
+-- Bard songs come in two kinds on this server: a beneficial song stays up
+-- after one sing, while a song whose effect only lasts while it is sung
+-- (most detrimental ones) has to be sung over and over. The Brd gem's
+-- `keep_singing` box picks the mode; 'twist while fighting' is the older
+-- way of asking for the same thing and still works.
+local function bardKeepSinging(g)
+    return type(g) == 'table' and g.cls == 'Brd'
+        and (g.keep_singing == true or g.when == 'twist while fighting')
+end
+
+-- sungBuffs[key] is `true` for a buff applied this life. For a bard song it
+-- is a record { at, seen, missingSince } so bardSongDropped can watch it and
+-- release the mark once the song is seen to fall off.
+local function markSung(key, cls)
+    if cls == 'Brd' then
+        if type(runtime.sungBuffs[key]) ~= 'table' then
+            runtime.sungBuffs[key] = { at = os.clock(), seen = false }
+        end
+    else
+        runtime.sungBuffs[key] = true
+    end
+end
+
 -- Plugin-loaded probes. The bodies stay self-contained (the test suite
 -- extracts navLoaded / navMeshLoaded / stickLoaded by name); the locals are
 -- rebound below with a 2 s cache because each probe is 2-4 TLO calls and is
@@ -2190,27 +2218,6 @@ local function stickLoaded()
     return ok and (loaded == true)
 end
 
-function runtime.mapLoaded()
-    local ok, loaded = pcall(function()
-        if mq.TLO.Map and mq.TLO.Map() ~= nil then
-            return true
-        end
-        local p = mq.TLO.Plugin('mq2map')
-        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
-        return false
-    end)
-    return ok and (loaded == true)
-end
-
-function runtime.fovLoaded()
-    local ok, loaded = pcall(function()
-        local p = mq.TLO.Plugin('mq2fov')
-        if p and p() and p.IsLoaded and p.IsLoaded() then return true end
-        return false
-    end)
-    return ok and (loaded == true)
-end
-
 runtime.pluginProbeCache = {}
 do
     local function cached(key, fn)
@@ -2226,8 +2233,6 @@ do
     navLoaded = cached('nav', navLoaded)
     navMeshLoaded = cached('navmesh', navMeshLoaded)
     stickLoaded = cached('stick', stickLoaded)
-    runtime.mapLoaded = cached('map', runtime.mapLoaded)
-    runtime.fovLoaded = cached('fov', runtime.fovLoaded)
 end
 
 -- Called after '/plugin ...' from the UI so the buttons update immediately.
@@ -2365,6 +2370,10 @@ end
 -- rather than continuing to sit on something they can never reach.
 function runtime.markUnreachable(id)
     pursuit.unreachableIds[id] = os.clock()
+    if runtime.xtForceId == id then
+        runtime.xtForceId = 0
+        print(string.format('\ay[Triune]\ax Force target #%d released -- no path to it.', id))
+    end
     if runtime.clearDetour then runtime.clearDetour() end
 end
 
@@ -2548,6 +2557,10 @@ end
 -- every "is this a valid enemy" rule here rather than duplicating it at callers.
 isHostileTarget = function(id)
     if not id or id <= 0 then return false end
+    -- Spawn ignored from the Extended Target window: not a valid enemy for
+    -- any scanner, counter or offensive action until the toggle is cleared.
+    local xtIgn = runtime.xtIgnoreIds
+    if xtIgn and xtIgn[id] then return false end
     if isSpawnPetOrPlayer(id) then return false end
 
     local s = mq.TLO.Spawn(id)
@@ -2646,8 +2659,75 @@ do
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Extended Target window per-spawn overrides (Force / Ignore).
+-- Force: the engine targets this spawn and stays on it until it is dead (or
+-- gone / unreachable), then falls back to normal selection. Ignore: the spawn
+-- is skipped by every scanner and never attacked until the toggle is cleared.
+-- Both are keyed by spawn id and live only for the session / zone.
+-- ---------------------------------------------------------------------------
+function runtime.isXtIgnoredId(id)
+    local set = runtime.xtIgnoreIds
+    return (id and id > 0 and set and set[id]) and true or false
+end
+
+function runtime.setXtIgnore(id, on)
+    if not id or id <= 0 then return end
+    if not runtime.xtIgnoreIds then runtime.xtIgnoreIds = {} end
+    if on then
+        runtime.xtIgnoreIds[id] = true
+        if runtime.xtForceId == id then runtime.xtForceId = 0 end
+    else
+        runtime.xtIgnoreIds[id] = nil
+    end
+end
+
+function runtime.setXtForce(id, on)
+    if not id or id <= 0 then return end
+    if on then
+        runtime.xtForceId = id
+        if runtime.xtIgnoreIds then runtime.xtIgnoreIds[id] = nil end
+    elseif runtime.xtForceId == id then
+        runtime.xtForceId = 0
+    end
+end
+
+-- The forced spawn id while it is still a live, reachable hostile; releases
+-- the override (with a chat line) the moment it is not, so the next tick's
+-- normal target selection moves on to whatever else is on XTarget.
+function runtime.forcedTargetId()
+    local id = runtime.xtForceId or 0
+    if id <= 0 then return nil end
+    if isHostileTarget(id) and not isUnreachable(id) then
+        return id
+    end
+    runtime.xtForceId = 0
+    print(string.format('\ay[Triune]\ax Force target #%d released -- dead, gone or unreachable. Resuming normal targeting.', id))
+    return nil
+end
+
+-- Drop ignore entries whose spawn no longer exists (killed / despawned) so the
+-- set does not grow across a long session. Cheap; runs every 10 s from combatTick.
+function runtime.pruneXtOverrides()
+    local set = runtime.xtIgnoreIds
+    if not set then return end
+    for id in pairs(set) do
+        local ok, alive = pcall(function()
+            local s = mq.TLO.Spawn(id)
+            return s and s() and not s.Dead() and (s.Type() or '') ~= 'Corpse'
+        end)
+        if not ok or not alive then set[id] = nil end
+    end
+end
+
 function runtime.findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn, maxDist, maxZ, isBuffActiveFn)
     maxDist = maxDist or (ctrl and ctrl.xtar_nav_dist) or 150
+    -- A forced spawn (Extended Target window) wins over every distance / HP
+    -- rule while it is a live hostile we can path to.
+    local forceId = runtime.xtForceId or 0
+    if forceId > 0 and isHostileTarget(forceId) and (not isUnreachableFn or not isUnreachableFn(forceId)) then
+        return forceId
+    end
     local myZ = mq.TLO.Me.Z() or 0
     local chosenId, lowestHp = nil, 101
     pcall(function()
@@ -4736,6 +4816,7 @@ function runtime.importCurrentGems(targetGemsTable)
                 min_xtar = 1,
                 max_casts = 0,
                 burn_only = false,
+                keep_singing = (cls == 'Brd' and not bene) or nil,
             })
         end
     end
@@ -4935,6 +5016,7 @@ function runtime.applyEntry(e)
         if ctrl.fov == nil then ctrl.fov = 100 end
         if ctrl.fov_enabled == nil then ctrl.fov_enabled = false end
         if type(ctrl.saved_window_positions) ~= 'table' then ctrl.saved_window_positions = {} end
+        if type(ctrl.window_opts) ~= 'table' then ctrl.window_opts = {} end
         if ctrl.winpos_auto_restore_on_resize == nil then ctrl.winpos_auto_restore_on_resize = true end
         if ctrl.winpos_restore_visibility == nil then ctrl.winpos_restore_visibility = false end
         if type(ctrl.plugins) ~= 'table' then ctrl.plugins = {} end
@@ -5860,7 +5942,9 @@ local function loadoutSig()
                     '~' ..
                     tostring(g.max_casts or 0) ..
                     '~' ..
-                    tostring(g.burn_only)
+                    tostring(g.burn_only) ..
+                    '~' ..
+                    tostring(g.keep_singing)
             end
         end
     end
@@ -5948,10 +6032,10 @@ function runtime.restartScript()
     mq.cmd('/lua stop ' .. runtime.SCRIPT_NAME)
 end
 
--- Field of View (FOV) Camera Management
+-- Field of View (FOV) Camera Management. /fov 50-150 is a native server
+-- command, so this just re-issues the slider value (on load, after zoning).
 function runtime.applyFov()
     if not ctrl.fov_enabled then return end
-    if not runtime.fovLoaded() then return end
     local val = tonumber(ctrl.fov) or 100
     if val < 50 then val = 50 end
     if val > 150 then val = 150 end
@@ -6293,6 +6377,17 @@ function UI.popTheme()
     else
         vCnt = runtime.varN or 0
     end
+    -- A ghost window's frame colours were pushed after the theme (preBeginWindow): popped first.
+    local gs = runtime.ghostStack
+    if gs and #gs > 0 then
+        local key = table.remove(gs)
+        local gp = runtime.ghostPush and runtime.ghostPush[key]
+        if gp then
+            if gp.contentN > 0 then pcall(ImGui.PopStyleColor, gp.contentN) end  -- a window that skipped preEndWindow
+            if gp.frameN > 0 then pcall(ImGui.PopStyleColor, gp.frameN) end
+            runtime.ghostPush[key] = nil
+        end
+    end
     if (vCnt or 0) > 0 then pcall(ImGui.PopStyleVar, vCnt) end
     if (cCnt or 0) > 0 then pcall(ImGui.PopStyleColor, cCnt) end
     runtime.colN = 0
@@ -6407,6 +6502,28 @@ function runtime.initPluginManager()
         return pm.dirPath
     end
 
+    -- Spell Info for a spell id or name: the Game Database plugin's card when
+    -- it is loaded and replacing the game's window, else the client's own
+    -- Spell Display window. Every "Inspect" in Triune goes through this.
+    -- Returns true when either opened.
+    function pm.inspectSpell(spell)
+        if spell == nil or spell == '' then return false end
+        local p = pm.plugins and pm.plugins.gamedb
+        if p and p.enabled and p.instance and p.instance.inspectSpell then
+            local ok, res = pcall(p.instance.inspectSpell, spell)
+            if ok and res == true then return true end
+        end
+        local ok, shown = pcall(function()
+            local sp = mq.TLO.Spell(spell)
+            if sp and sp() and sp.Inspect then
+                sp.Inspect()
+                return true
+            end
+            return false
+        end)
+        return ok and shown == true
+    end
+
     -- One shared core API table for every plugin. `ctrl` / `loadout` and the
     -- other mutable core tables are resolved live through __index because
     -- runtime.onCharacterChanged() replaces them wholesale; a snapshot taken at
@@ -6440,6 +6557,13 @@ function runtime.initPluginManager()
             setTooltip            = UI.setTooltip,
             preBeginWindow        = UI.preBeginWindow,
             postBeginWindow       = UI.postBeginWindow,
+            preEndWindow          = UI.preEndWindow,
+            postEndWindow         = UI.postEndWindow,
+            windowFlags           = UI.windowFlags,
+            windowBgAlpha         = UI.windowBgAlpha,
+            drawWindowMenuItems   = UI.drawWindowMenuItems,
+            windowOpts            = UI.windowOpts,
+            setWindowOpt          = UI.setWindowOpt,
             px                    = UI.px,
             currentWindowScale    = function() return runtime.curWindowScale or 1.0 end,
             windowScale           = UI.windowScale,
@@ -6454,6 +6578,11 @@ function runtime.initPluginManager()
             getPetSpawnInfo       = runtime.getPetSpawnInfo or getPetSpawnInfo,
             isSpawnAlive          = runtime.isSpawnAlive or isSpawnAlive,
             addIgnore             = runtime.addIgnore,
+            -- Extended Target window per-spawn overrides (see runtime.setXtForce)
+            setXtForce            = runtime.setXtForce,
+            setXtIgnore           = runtime.setXtIgnore,
+            isXtIgnoredId         = runtime.isXtIgnoredId,
+            getXtForceId          = function() return runtime.xtForceId or 0 end,
             parseDurationSec      = parseDurationSec,
             parseSpellRecastTime  = parseSpellRecastTime,
             parseCombatAbilityTimer = parseCombatAbilityTimer,
@@ -6472,6 +6601,9 @@ function runtime.initPluginManager()
             getSpellIconAnimation = UI.getSpellIconAnimation,
             getGemCooldownSec     = UI.getGemCooldownSec,
             drawSpellbookIcon     = UI.drawSpellbookIcon,
+            -- Spell Info for an id or name: the Game Database card, else the
+            -- game's Spell Display window. Use this instead of Spell().Inspect().
+            inspectSpell          = function(spell) return pm.inspectSpell(spell) end,
             delay                 = function(ms, cond) return pm.delay(ms, cond) end,
             -- Queue work to run on the main script coroutine next tick. Any
             -- plugin button that fires an ability / casts / targets (anything
@@ -7087,6 +7219,7 @@ function runtime.initPluginManager()
             'boxnet.lua',
             'buttons.lua',
             'gamedb.lua',
+            'parcels.lua',
         }
         for _, f in ipairs(known) do
             if not fileSet[f:lower()] then
@@ -7813,8 +7946,22 @@ function UI.drawPluginsTab()
                     local col = (avg < 1.0) and GOOD or ((avg < 3.0) and WARN or ERR)
                     ImGui.TextColored(col[1], col[2], col[3], col[4], string.format('%.2f', avg))
                     if ImGui.IsItemHovered() then
-                        ImGui.SetTooltip('%s', string.format('Average tick: %.3f ms\nLast tick: %.3f ms\nInterval: %.2fs\nRuns in combat: %s',
-                            avg, p.lastExecMs or 0, p.tickInterval or 0.1, p.runOutOfCombatOnly and 'No (sleeps)' or 'Yes'))
+                        local tip = string.format('Average tick: %.3f ms\nLast tick: %.3f ms\nInterval: %.2fs\nRuns in combat: %s',
+                            avg, p.lastExecMs or 0, p.tickInterval or 0.1, p.runOutOfCombatOnly and 'No (sleeps)' or 'Yes')
+                        -- Per-phase breakdown when the plugin keeps one (map, chat).
+                        local prof = p.instance and p.instance.profile
+                        if type(prof) == 'table' then
+                            local keys = {}
+                            for k in pairs(prof) do keys[#keys + 1] = k end
+                            table.sort(keys)
+                            for _, k in ipairs(keys) do
+                                local v = prof[k]
+                                if type(v) == 'number' then
+                                    tip = tip .. string.format('\n  %s: %s', k, (v == math.floor(v)) and tostring(v) or string.format('%.2f', v))
+                                end
+                            end
+                        end
+                        ImGui.SetTooltip('%s', tip)
                     end
                 else
                     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '—')
@@ -8174,6 +8321,7 @@ UI.HELP_COMMANDS = {
         { cmd = '/ac buffbot [on|off]',               desc = 'Toggle the Buffbot window; on/off starts or stops the buffbot station (buffbot plugin)' },
         { cmd = '/ac map / /ac track / /ac zone',     desc = 'Toggle the Map, Zone Atlas & NPC Tracker window (map plugin)' },
         { cmd = '/ac inv / /ac bank',                 desc = 'Toggle the Inventory & Bank Manager window (inventory plugin)' },
+        { cmd = '/ac parcels [collect|stop|status]',  desc = 'Toggle the Parcel Helper window; collect retrieves every parcel at the open parcel merchant (parcels plugin)' },
         { cmd = '/ac dps / /dps',                     desc = 'Toggle the DPS Parser window (dps plugin)' },
         { cmd = '/ac net [all|zone|group|Name] [command]', desc = 'Toggle the Box Network window, or run an /ac command on your other boxes (boxnet plugin)' },
         { cmd = '/ac btn [n|new|exec <set> <index>|import bm]', desc = 'Toggle the Hot Buttons hotbars, show/hide hotbar n, or fire a button (buttons plugin; also /btn, /btnexec)' },
@@ -8213,7 +8361,7 @@ UI.HELP_TARGETS = {
 UI.HELP_CONDITIONS = {
         { when = 'always',               desc = 'Casts whenever the spell gem or ability is ready and off cooldown (respects mana and reagent requirements).' },
         { when = 'in combat',            desc = 'Casts whenever your character or group is actively engaged in combat.' },
-        { when = 'twist while fighting', desc = 'Continuously sings the song while in combat without waiting for buff duration to expire (Bard songs).' },
+        { when = 'twist while fighting', desc = 'Continuously sings the song while in combat without waiting for buff duration to expire (Bard songs). Same as "in combat" with the Twist box checked.' },
         { when = 'target HP <=',         desc = 'Casts when the target\'s HP percentage drops to or below the configured slider threshold.' },
         { when = 'target HP between',    desc = 'Casts only when target HP is between the configured minimum HP and percentage threshold (e.g. DoTs between 20% and 90%).' },
         { when = 'my HP <=',             desc = 'Casts when your own character\'s HP percentage drops to or below threshold (heals, defensives, Feign Death, Mend).' },
@@ -8523,6 +8671,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                             if lu and lu.name ~= g.spell then
                                 g.spell = lu.name
                                 g.target, g.when, g.pct = defaultsForKind(lu.kind, lu.bene)
+                                if cls == 'Brd' then g.keep_singing = not lu.bene end
                                 if ctrl.automem and isActiveSet and (tonumber(g.gem) or 1) <= maxGems then
                                     runtime.pendingMem[tonumber(g.gem) or 1] = lu.name
                                 end
@@ -8587,6 +8736,24 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                             end
                             if ImGui.IsItemHovered() then
                                 UI.setTooltip(string.format('Min Target HP%%: %d%% (Cast when target is between %d%% and %d%% HP).', newMinHp, newMinHp, newPct))
+                            end
+                        end
+
+                        -- Bard: keep singing vs sing once and resing on drop
+                        if cls == 'Brd' then
+                            ImGui.SameLine()
+                            local ksCur = g.keep_singing == true
+                            local ksVal = ImGui.Checkbox('Twist##ks', ksCur)
+                            if ksVal ~= ksCur then
+                                g.keep_singing = ksVal
+                                runtime.saveLoadout(true)
+                            end
+                            if ImGui.IsItemHovered() then
+                                if ksVal then
+                                    UI.setTooltip('Keep singing: recast this song over and over whenever its trigger is met, even while its effect shows as up. For songs that only work while you are singing them (most detrimental songs).')
+                                else
+                                    UI.setTooltip('Sing once: cast it, then leave it alone until the effect is seen to drop, then sing it again. For songs that stay up after one sing (beneficial songs on this server).')
+                                end
                             end
                         end
                     end
@@ -11075,7 +11242,6 @@ function UI.drawControlTab()
             if manualCampRChanged then
                 ctrl.camp_radius = manualCampR
                 runtime.saveLoadout(true)
-                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Maximum distance in units from camp center to engage enemies.')
@@ -11135,7 +11301,11 @@ function UI.drawControlTab()
         ctrl.pull_style = MODES.PULL_STYLES[newPullStyleIdx]
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Method used to pull/tag target mob:\n- Melee: Closes to melee range and attacks\n- Spell: Casts spell from range\n- Pet: Sends pet out to tag mob\n- Ranged: Fires bow/ranged from distance')
+                'How the target mob gets tagged (the combat style takes over once it is):\n'
+                .. '- Melee: closes to the active style\'s distance and attacks\n'
+                .. '- Spell: stops at the Engagement Distance and casts the pull spell\n'
+                .. '- Pet: stops at the Engagement Distance and sends the pets in\n'
+                .. '- Ranged: stops at the Engagement Distance and fires Throw Stone / the bow')
         end
 
         if ctrl.pull_style == 'Spell' then
@@ -11205,7 +11375,8 @@ function UI.drawControlTab()
                 15, 250)
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip(
-                    'Distance (units) to close to before sending in pets, casting pull spell, or firing bow.')
+                    'Distance (units) to stop at before sending in pets, casting the pull spell, or firing the bow.\n'
+                    .. 'Automatically shortened to the pull spell\'s range or the bow + ammo range when that is less.')
             end
 
             ctrl.pull_stand_back = ImGui.Checkbox('Stand Back (Let Pet Tank / Stay Ranged)##pullStandBack',
@@ -11234,7 +11405,6 @@ function UI.drawControlTab()
             if huntRChanged then
                 ctrl.hunter_radius = huntR
                 runtime.saveLoadout(true)
-                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             end
             ImGui.SetNextItemWidth(UI.px(180))
             ctrl.hunter_z_plane = ImGui.SliderInt('Floor Height (Z Plane)', ctrl.hunter_z_plane or 15, 5, 50)
@@ -11287,7 +11457,6 @@ function UI.drawControlTab()
                     if (ctrl.hunter_combat_radius or 0) <= 0 then
                         ctrl.hunter_combat_radius = 250
                     end
-                    if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
                 end
             end
             if ImGui.IsItemHovered() then
@@ -11297,7 +11466,6 @@ function UI.drawControlTab()
             if ImGui.Button('Clear Anchor##pullerAnchorClear') then
                 ctrl.hunter_combat_loc = nil
                 pursuit.wanderLoc = nil
-                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             end
 
             ImGui.SetNextItemWidth(UI.px(220))
@@ -11306,7 +11474,6 @@ function UI.drawControlTab()
             local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000)
             if changed then
                 ctrl.hunter_combat_radius = newRadius
-                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
                 runtime.saveLoadout(true)
             end
         elseif ctrl.submode == 'Camp' then
@@ -11338,7 +11505,6 @@ function UI.drawControlTab()
             if pullRadChanged then
                 ctrl.camp_radius = pullRad
                 runtime.saveLoadout(true)
-                if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             end
             if ImGui.IsItemHovered() then
                 ImGui.SetTooltip('Maximum horizontal distance in units from camp to search for pullable NPCs.')
@@ -11379,7 +11545,6 @@ function UI.drawControlTab()
             if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
                 runtime.setNearestWaypoint()
             end
-            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
@@ -12561,6 +12726,159 @@ function runtime.checkDisplaySizeChange()
     end
 end
 
+-- ============================================================================
+-- Shared window options: title bar, ghost fade, lock and the right-click
+-- menu every window gets. Keyed like the window scale (the key a window
+-- passes to preBeginWindow), stored in ctrl.window_opts and saved with the
+-- loadout. A window wires them in with three calls:
+--   ImGui.Begin(title, open, core.windowFlags(key, flags))
+--   core.preEndWindow(key)          -- before every ImGui.End() of that window
+--   core.windowBgAlpha(key, alpha)  -- around its own SetNextWindowBgAlpha, if any
+-- and, when it already has a right-click menu of its own, draws
+-- core.drawWindowMenuItems(key) inside it and calls core.preEndWindow(key,
+-- true) so the core does not open a second one.
+--
+-- Ghost fades the frame - background, border, title bar (its text and
+-- buttons too), menu bar, scrollbar, resize grip - when the mouse leaves the
+-- window and back in under it, and leaves the content alone: the frame
+-- colours are pushed before Begin at the fade fraction of their alpha and
+-- popped after End (popTheme), and the ones the content also uses (text,
+-- buttons) are pushed back at their originals after Begin and popped in
+-- preEndWindow, since ImGui requires colour pushes to balance inside a
+-- window - that is what the pre-End hook is for.
+-- ============================================================================
+function UI.windowOpts(key, create)
+    if not key then return nil end
+    if type(ctrl.window_opts) ~= 'table' then ctrl.window_opts = {} end
+    local o = ctrl.window_opts[key]
+    if not o and create then
+        o = {}
+        ctrl.window_opts[key] = o
+    end
+    return o
+end
+
+-- Sets one option (nil / false clears it; an empty record is dropped).
+function UI.setWindowOpt(key, name, val)
+    local o = UI.windowOpts(key, true)
+    if not o then return end
+    if val == false then val = nil end
+    if o[name] ~= val then
+        o[name] = val
+        if next(o) == nil then ctrl.window_opts[key] = nil end
+        runtime.saveLoadout(true)
+    end
+end
+
+-- The flags a window passes to ImGui.Begin, plus the shared options.
+function UI.windowFlags(key, flags)
+    flags = tonumber(flags) or 0
+    local o = UI.windowOpts(key)
+    local WF = ImGuiWindowFlags
+    if not o or not WF then return flags end
+    if o.notitle and WF.NoTitleBar then flags = bit.bor(flags, WF.NoTitleBar) end
+    if o.lock then flags = bit.bor(flags, WF.NoMove or 0, WF.NoResize or 0) end
+    return flags
+end
+
+-- Ghost fade state per window key: { a, held, hovered, heldAt, at }.
+runtime.ghost = {}
+runtime.ghostPush = {}     -- [key] = { frameN, contentN, saved } while pushed
+runtime.ghostStack = {}    -- keys with frame colours pushed, popped in popTheme
+runtime.windowBegun = {}   -- [key] = true once postBeginWindow ran this frame
+runtime.GHOST = {
+    IN_MS = 150, OUT_MS = 400, LINGER_MS = 350,
+    -- the frame: pushed at the fade fraction before Begin
+    FRAME = {
+        'WindowBg', 'Border', 'BorderShadow', 'TitleBg', 'TitleBgActive', 'TitleBgCollapsed', 'MenuBarBg',
+        'ScrollbarBg', 'ScrollbarGrab', 'ScrollbarGrabHovered', 'ScrollbarGrabActive',
+        'ResizeGrip', 'ResizeGripHovered', 'ResizeGripActive',
+        'Text', 'Button', 'ButtonHovered', 'ButtonActive',
+    },
+    -- also used by the content: pushed back at their originals after Begin
+    CONTENT = { Text = true, Button = true, ButtonHovered = true, ButtonActive = true },
+}
+
+function UI.ghostNowMs()
+    local ok, t = pcall(function() return mq.gettime() end)
+    if ok and type(t) == 'number' then return t end
+    return os.clock() * 1000
+end
+
+-- Frame alpha for this frame: toward 1 while the window is held (hovered,
+-- a popup open), toward 0 otherwise after a short linger.
+function UI.ghostAlpha(key)
+    local now = UI.ghostNowMs()
+    local g = runtime.ghost[key]
+    if not g then
+        g = { a = 1, held = false, hovered = false, heldAt = now, at = now }
+        runtime.ghost[key] = g
+    end
+    if g.held then g.heldAt = now end
+    local lingerEnd = g.heldAt + runtime.GHOST.LINGER_MS
+    if g.held or now < lingerEnd then
+        g.a = math.min(1, g.a + math.max(0, now - g.at) / runtime.GHOST.IN_MS)
+    else
+        g.a = math.max(0, g.a - math.max(0, now - math.max(g.at, lingerEnd)) / runtime.GHOST.OUT_MS)
+    end
+    g.at = now
+    return g.a
+end
+
+-- A window's own background opacity, scaled by its ghost fade.
+function UI.windowBgAlpha(key, alpha)
+    alpha = tonumber(alpha) or 1
+    local g = key and runtime.ghost[key]
+    if g then alpha = alpha * g.a end
+    return alpha
+end
+
+function UI.ghostReadColor(idx)
+    if ImGui.GetStyleColorVec4 then
+        local ok, c = pcall(ImGui.GetStyleColorVec4, idx)
+        if ok and c ~= nil and c.x ~= nil then return c.x, c.y, c.z, c.w end
+    end
+    if ImGui.GetStyle then
+        local ok, st = pcall(ImGui.GetStyle)
+        if ok and st ~= nil then
+            local okc, c = pcall(function() return st.Colors[idx] end)
+            if okc and c ~= nil and c.x ~= nil then return c.x, c.y, c.z, c.w end
+        end
+    end
+    return nil
+end
+
+function UI.ghostPushFrame(key, a)
+    local Col = ImGuiCol or _G.ImGuiCol
+    if not Col then return end
+    local saved, n = {}, 0
+    for _, name in ipairs(runtime.GHOST.FRAME) do
+        local idx = Col[name]
+        if idx ~= nil then
+            local x, y, z, w = UI.ghostReadColor(idx)
+            if x then
+                if pcall(ImGui.PushStyleColor, idx, x, y, z, w * a) then
+                    n = n + 1
+                    saved[n] = { idx = idx, name = name, x = x, y = y, z = z, w = w }
+                end
+            elseif a <= 0 and not runtime.GHOST.CONTENT[name] and pcall(ImGui.PushStyleColor, idx, 0, 0, 0, 0) then
+                n = n + 1
+            end
+        end
+    end
+    if n > 0 then
+        runtime.ghostPush[key] = { frameN = n, contentN = 0, saved = saved }
+        table.insert(runtime.ghostStack, key)
+    end
+end
+
+function UI.anyPopupOpen()
+    local PF = ImGuiPopupFlags or _G.ImGuiPopupFlags
+    if not PF then return false end
+    local ok, open = pcall(ImGui.IsPopupOpen, '', bit.bor(PF.AnyPopupId or 0, PF.AnyPopupLevel or 0))
+    return ok and open == true
+end
+
 function UI.preBeginWindow(winKey)
     runtime.checkDisplaySizeChange()
     UI.pushWindowScale(winKey)
@@ -12576,10 +12894,36 @@ function UI.preBeginWindow(winKey)
             runtime.pendingWindowRestore[winKey] = nil
         end
     end
+    local o = winKey and UI.windowOpts(winKey)
+    if o and o.ghost then
+        local a = UI.ghostAlpha(winKey)
+        if a < 1 then UI.ghostPushFrame(winKey, a) end
+    elseif winKey then
+        runtime.ghost[winKey] = nil
+    end
 end
 
 function UI.postBeginWindow(winKey)
     UI.applyWindowScale(winKey)
+    if winKey then
+        runtime.windowBegun[winKey] = true
+        local gp = runtime.ghostPush[winKey]
+        if gp and gp.contentN == 0 then
+            local n = 0
+            for _, c in ipairs(gp.saved) do
+                if runtime.GHOST.CONTENT[c.name] and pcall(ImGui.PushStyleColor, c.idx, c.x, c.y, c.z, c.w) then n = n + 1 end
+            end
+            gp.contentN = n
+        end
+        local g = runtime.ghost[winKey]
+        if g then
+            local HF = ImGuiHoveredFlags or _G.ImGuiHoveredFlags
+            local hf = HF and bit.bor(HF.RootAndChildWindows or 0, HF.AllowWhenBlockedByActiveItem or 0, HF.AllowWhenBlockedByPopup or 0) or 0
+            local ok, hov = pcall(ImGui.IsWindowHovered, hf)
+            if not ok then ok, hov = pcall(ImGui.IsWindowHovered) end
+            g.hovered = (ok and hov == true)
+        end
+    end
     if not runtime.liveWindowPositions then runtime.liveWindowPositions = {} end
     local px, py, pw, ph = 0, 0, 0, 0
     pcall(function()
@@ -12614,6 +12958,124 @@ function UI.postBeginWindow(winKey)
         live.w = math.floor(pw + 0.5)
         live.h = math.floor(ph + 0.5)
         live.updated = os.clock()
+    end
+end
+
+-- The Window Layout entry for a key (nil for windows that are not managed).
+function runtime.managedWindowByKey(key)
+    for _, def in ipairs(runtime.getManagedWindows()) do
+        if def.key == key then return def end
+    end
+    return nil
+end
+
+-- The shared items: drawn by the core's own menu, or by a window inside its
+-- own right-click menu. `opts` turns items off: { titleBar, ghost, lock,
+-- scale, close, layout } = false.
+function UI.drawWindowMenuItems(key, opts)
+    opts = opts or {}
+    local def = runtime.managedWindowByKey(key)
+    local o = UI.windowOpts(key) or {}
+    if opts.header ~= false then
+        ImGui.TextDisabled(opts.name or (def and def.name) or tostring(key))
+        ImGui.Separator()
+    end
+    if opts.titleBar ~= false then
+        if ImGui.MenuItem('Hide title bar', nil, o.notitle == true) then UI.setWindowOpt(key, 'notitle', not o.notitle) end
+        if ImGui.IsItemHovered() then UI.setTooltip('A cleaner overlay: no title bar, no close button. Drag the window by its body; right-click it to get back here or to close it.') end
+    end
+    if opts.ghost ~= false then
+        if ImGui.MenuItem('Ghost: fade the frame when the mouse is away', nil, o.ghost == true) then UI.setWindowOpt(key, 'ghost', not o.ghost) end
+        if ImGui.IsItemHovered() then UI.setTooltip('The background, border, title bar and scrollbar fade out when the mouse leaves the window and fade back in under it; the contents stay.\nPairs well with Hide title bar.') end
+    end
+    if opts.lock ~= false then
+        if def and def.canLock and def.getLock and def.setLock then
+            local locked = def.getLock() == true
+            if ImGui.MenuItem('Lock position & size', nil, locked) then def.setLock(not locked) end
+        else
+            if ImGui.MenuItem('Lock position & size', nil, o.lock == true) then UI.setWindowOpt(key, 'lock', not o.lock) end
+        end
+    end
+    if opts.scale ~= false and UI.drawWindowScaleControl then
+        UI.drawWindowScaleControl(key, 'UI scale', UI.px(120))
+    end
+    if opts.layout ~= false then
+        if ImGui.BeginMenu('Window layout') then
+            if ImGui.MenuItem('Save all window positions') then runtime.saveWindowPositions(false) end
+            if ImGui.MenuItem('Restore saved positions', nil, false, ctrl.saved_window_positions and next(ctrl.saved_window_positions) ~= nil) then runtime.triggerRestoreWindows() end
+            ImGui.EndMenu()
+        end
+    end
+    -- Close: the Window Layout entry's setOpen, or the onClose a window
+    -- without an entry passes (the DPS compact window).
+    local close = opts.onClose or (def and def.setOpen and function() def.setOpen(false) end)
+    if opts.close ~= false and close then
+        ImGui.Separator()
+        if ImGui.MenuItem('Close window') then
+            close()
+            runtime.saveLoadout(true)
+        end
+    end
+end
+
+-- The core's right-click menu for windows without one of their own: opens
+-- on a right-click released over the window (children included) that no
+-- item took. Drawn from preEndWindow, so the frame's items are known.
+function UI.windowContextMenu(key, menuOpts)
+    local id = '##tacWindowMenu_' .. tostring(key)
+    local HF = ImGuiHoveredFlags or _G.ImGuiHoveredFlags
+    local okH, hov = pcall(ImGui.IsWindowHovered, HF and (HF.RootAndChildWindows or 0) or 0)
+    if okH and hov == true then
+        local okR, rel = pcall(ImGui.IsMouseReleased, 1)
+        if not okR then okR, rel = pcall(ImGui.IsMouseClicked, 1) end
+        if okR and rel == true then
+            local okA, anyItem = pcall(ImGui.IsAnyItemHovered)
+            if not (okA and anyItem == true) then pcall(ImGui.OpenPopup, id) end
+        end
+    end
+    if ImGui.BeginPopup(id) then
+        runtime.windowMenuOpen = key
+        UI.applyWindowScale(key)
+        local ok, err = pcall(UI.drawWindowMenuItems, key, menuOpts)
+        if not ok then ImGui.TextDisabled('menu error: ' .. tostring(err)) end
+        ImGui.EndPopup()
+    elseif runtime.windowMenuOpen == key then
+        runtime.windowMenuOpen = nil
+    end
+end
+
+-- Before every ImGui.End() of a window: pops the content colours a ghost
+-- window pushed after Begin, draws the shared right-click menu (unless the
+-- window has its own: ownMenu), and settles the ghost hold for the next
+-- frame. Safe on paths where postBeginWindow did not run.
+function UI.preEndWindow(winKey, ownMenu, menuOpts)
+    if not winKey then return end
+    local gp = runtime.ghostPush[winKey]
+    if gp and gp.contentN > 0 then
+        pcall(ImGui.PopStyleColor, gp.contentN)
+        gp.contentN = 0
+    end
+    if runtime.windowBegun[winKey] then
+        if not ownMenu then UI.windowContextMenu(winKey, menuOpts) end
+        runtime.windowBegun[winKey] = nil
+    end
+    local g = runtime.ghost[winKey]
+    if g then g.held = g.hovered or runtime.windowMenuOpen == winKey or UI.anyPopupOpen() end
+end
+
+-- After ImGui.End() of a window that is not followed by its own popTheme
+-- (several windows under one theme scope, like the database popout cards):
+-- pops that window's ghost frame colours now, so they neither leak into
+-- the next window nor wait for popTheme.
+function UI.postEndWindow(winKey)
+    local gp = winKey and runtime.ghostPush[winKey]
+    if not gp then return end
+    if gp.contentN > 0 then pcall(ImGui.PopStyleColor, gp.contentN) end
+    if gp.frameN > 0 then pcall(ImGui.PopStyleColor, gp.frameN) end
+    runtime.ghostPush[winKey] = nil
+    local gs = runtime.ghostStack
+    for i = #gs, 1, -1 do
+        if gs[i] == winKey then table.remove(gs, i); break end
     end
 end
 
@@ -12885,20 +13347,26 @@ function UI.drawWindowSettings()
 
     accent(GOLD, 'Triune Popout Windows:')
 
-    -- Managed Windows Table
+    -- Managed Windows Table. The columns are fixed-width and together are
+    -- wider than the default main window; a table sized to the available
+    -- width would silently clip the rightmost columns, so give it its full
+    -- width instead and let the main window's horizontal scrollbar reach
+    -- the rest.
     local tblFlags = bit.bor(
         (ImGuiTableFlags and ImGuiTableFlags.Borders) or 0,
         (ImGuiTableFlags and ImGuiTableFlags.RowBg) or 0,
         (ImGuiTableFlags and ImGuiTableFlags.SizingFixedFit) or 0
     )
-    if ImGui.BeginTable('ManagedWinTable', 7, tblFlags) then
-        ImGui.TableSetupColumn('Window', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(180))
-        ImGui.TableSetupColumn('Status', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(95))
-        ImGui.TableSetupColumn('Live Pos (X, Y) [W x H]', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(150))
-        ImGui.TableSetupColumn('Saved Pos (X, Y) [W x H]', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(150))
-        ImGui.TableSetupColumn('Locked', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(50))
-        ImGui.TableSetupColumn('Scale', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(120))
-        ImGui.TableSetupColumn('Actions', (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0, UI.px(175))
+    local colFixed = (ImGuiTableColumnFlags and ImGuiTableColumnFlags.WidthFixed) or 0
+    local cols = {
+        { 'Window', 180 }, { 'Status', 95 }, { 'Live Pos (X, Y) [W x H]', 150 }, { 'Saved Pos (X, Y) [W x H]', 150 },
+        { 'Locked', 50 }, { 'Scale', 120 }, { 'Actions', 175 },
+    }
+    -- Column widths + cell padding / borders (~10px per column).
+    local tblWidth = UI.px(10 * #cols)
+    for _, c in ipairs(cols) do tblWidth = tblWidth + UI.px(c[2]) end
+    if ImGui.BeginTable('ManagedWinTable', #cols, tblFlags, tblWidth, 0) then
+        for _, c in ipairs(cols) do ImGui.TableSetupColumn(c[1], colFixed, UI.px(c[2])) end
         ImGui.TableHeadersRow()
 
         for _, def in ipairs(runtime.getManagedWindows()) do
@@ -13467,23 +13935,6 @@ function UI.drawSettingsTab()
                 .. 'When disabled, autocombat remains active and continues running across zone transitions.')
         end
 
-        local mapAvail = runtime.mapLoaded and runtime.mapLoaded()
-        local mapRadVal = ImGui.Checkbox('Show Map Radius Circles', ctrl.show_map_radius or false)
-        if mapRadVal ~= (ctrl.show_map_radius or false) then
-            ctrl.show_map_radius = mapRadVal
-            runtime.saveLoadout(true)
-        end
-        if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(
-                'Draws green radius circles on the in-game map window\n'
-                .. 'for Hunter, Anchor, and Pull/Camp radii.'
-                .. (mapAvail and '' or '\n\ayNOTE: MQ2Map plugin is not loaded (/mapfilter and /maploc commands inactive).\ax'))
-        end
-        if not mapAvail then
-            ImGui.SameLine()
-            ImGui.TextColored(0.7, 0.7, 0.7, 1.0, '(MQ2Map not loaded)')
-        end
-        ImGui.SameLine()
         local critVal = ImGui.Checkbox('Critical Hit Floating Text', ctrl.show_crit_floaters or false)
         if critVal ~= (ctrl.show_crit_floaters or false) then
             ctrl.show_crit_floaters = critVal
@@ -13550,7 +14001,6 @@ function UI.drawSettingsTab()
         end
 
         accent(GOLD, 'Camera & Viewport:')
-        local fovAvail = runtime.fovLoaded and runtime.fovLoaded()
         local fovVal = ImGui.Checkbox('Maintain Field of View (/fov)##fovEnabled', ctrl.fov_enabled or false)
         if fovVal ~= (ctrl.fov_enabled or false) then
             ctrl.fov_enabled = fovVal
@@ -13560,11 +14010,7 @@ function UI.drawSettingsTab()
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            if fovAvail then
-                ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.')
-            else
-                ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.\n\ayNOTE: MQ2FOV plugin is not loaded (/fov commands will not execute).\ax')
-            end
+            ImGui.SetTooltip('Enforces your custom camera Field of View and automatically re-applies /fov after zoning.')
         end
         ImGui.SameLine()
         ImGui.SetNextItemWidth(UI.px(200))
@@ -13577,11 +14023,7 @@ function UI.drawSettingsTab()
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            if fovAvail then
-                ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\nMoving the slider automatically enables FOV persistence across zoning.')
-            else
-                ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\n\ayNOTE: MQ2FOV plugin is not loaded (/fov commands will not execute).\ax')
-            end
+            ImGui.SetTooltip('Camera Field of View in units (50-150, default: 100).\nMoving the slider automatically enables FOV persistence across zoning.')
         end
         ImGui.SameLine()
         if ImGui.Button('Apply##applyFovBtn') then
@@ -13590,12 +14032,7 @@ function UI.drawSettingsTab()
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip(string.format('Executes /fov %d now and saves the setting.%s', ctrl.fov or 100,
-                fovAvail and '' or '\n\ayNOTE: MQ2FOV plugin is not loaded.\ax'))
-        end
-        if not fovAvail then
-            ImGui.SameLine()
-            ImGui.TextColored(0.7, 0.7, 0.7, 1.0, '(MQ2FOV not loaded)')
+            ImGui.SetTooltip(string.format('Executes /fov %d now and saves the setting.', ctrl.fov or 100))
         end
 
         ImGui.Separator()
@@ -13649,8 +14086,8 @@ UI.MINI_SECTIONS = {
 
 -- Handles the Combo widgets for the primary mode and its submode (shared by
 -- the compact window and the Control tab). Switching the primary mode
--- resets the submode to the first one, manages the Manual pet hold and
--- drops the map radius visuals, exactly as the Control tab always did.
+-- resets the submode to the first one and manages the Manual pet hold,
+-- exactly as the Control tab always did.
 function UI.applyPrimaryMode(newPrimaryMode)
     if newPrimaryMode == nil or newPrimaryMode == ctrl.mode then return false end
     if ctrl.mode == 'Manual' and newPrimaryMode ~= 'Manual' then
@@ -13666,7 +14103,6 @@ function UI.applyPrimaryMode(newPrimaryMode)
     else
         ctrl.submode = 'Hunt'
     end
-    if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
     runtime.saveLoadout(true)
     return true
 end
@@ -13674,7 +14110,6 @@ end
 function UI.applySubmode(newSubmode)
     if newSubmode == nil or newSubmode == ctrl.submode then return false end
     ctrl.submode = newSubmode
-    if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
     runtime.saveLoadout(true)
     return true
 end
@@ -13984,7 +14419,6 @@ function UI.drawMiniCamp()
         local mx, my, mz = mq.TLO.Me.X(), mq.TLO.Me.Y(), mq.TLO.Me.Z()
         if mx and my and mz then
             ctrl.camp_loc = { x = mx, y = my, z = mz }
-            if runtime.updateMapRadiusVisuals then runtime.updateMapRadiusVisuals() end
             runtime.saveLoadout(true)
         end
     end
@@ -13996,7 +14430,6 @@ function UI.drawMiniCamp()
             if ctrl.mode == 'Puller' then
                 runtime.pullState = 'IDLE'; runtime.pullTargetId = 0
             end
-            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             runtime.saveLoadout(true)
         end
         if ImGui.IsItemHovered() then UI.setTooltip('Forget the camp anchor.') end
@@ -14119,6 +14552,7 @@ function UI.drawMiniMenu()
         runtime.saveLoadout(true)
     end
     if ImGui.IsItemHovered() then UI.setTooltip('Hide the title bar for a cleaner overlay. Right-click the window to get back here.') end
+    UI.drawWindowMenuItems('mini', { header = false, titleBar = false, lock = false, scale = false, layout = false, close = false })
     UI.drawWindowScaleControl('mini', 'Scale', 130)
     ImGui.SetNextItemWidth(UI.px(140))
     local alpha = ImGui.SliderFloat('Opacity##miniAlpha', ctrl.mini_alpha or 0.92, 0.20, 1.0, '%.2f')
@@ -14133,10 +14567,11 @@ function UI.drawMiniGui()
     if not open or not ctrl.compact then return end
     UI.pushTheme()
     UI.preBeginWindow('mini')
-    pcall(ImGui.SetNextWindowBgAlpha, ctrl.mini_alpha or 0.92)
+    pcall(ImGui.SetNextWindowBgAlpha, UI.windowBgAlpha('mini', ctrl.mini_alpha or 0.92))
     local flags = ImGuiWindowFlags.AlwaysAutoResize
     if ctrl.mini_lock then flags = bit.bor(flags, ImGuiWindowFlags.NoMove) end
     if ctrl.mini_titlebar == false and ImGuiWindowFlags.NoTitleBar then flags = bit.bor(flags, ImGuiWindowFlags.NoTitleBar) end
+    flags = UI.windowFlags('mini', flags)
     local show
     -- The X on the mini window returns to the full window; it used to write
     -- the script-level `open` flag and so terminated the whole script.
@@ -14144,6 +14579,7 @@ function UI.drawMiniGui()
     miniOpen, show = ImGui.Begin('Triune AutoCombat Mini v' .. VERSION .. '###triuneMini', true, flags)
     if not miniOpen then
         ctrl.compact = false
+        UI.preEndWindow('mini', true)
         ImGui.End()
         UI.popTheme()
         return
@@ -14187,6 +14623,7 @@ function UI.drawMiniGui()
         end
     end
 
+    UI.preEndWindow('mini', true)
     ImGui.End()
     UI.popTheme()
 end
@@ -14208,8 +14645,9 @@ function UI.drawFullGui()
     local charName = myName or (mq.TLO.Me.CleanName and mq.TLO.Me.CleanName()) or '(no character)'
     local winTitle = string.format('TAC v%s - %s (%s)###triune', VERSION, charName, clsText)
     UI.preBeginWindow('main')
-    open, show = ImGui.Begin(winTitle, open, winFlags)
+    open, show = ImGui.Begin(winTitle, open, UI.windowFlags('main', winFlags))
     if not show then
+        UI.preEndWindow('main')
         ImGui.End(); UI.popTheme(); return
     end
     UI.postBeginWindow('main')
@@ -14235,6 +14673,7 @@ function UI.drawFullGui()
         ImGui.EndTabBar()
     end
 
+    UI.preEndWindow('main')
     ImGui.End()
     UI.popTheme()
 end
@@ -16420,6 +16859,29 @@ mq.event('TriuneZone', 'You have entered #*#', function()
     runtime.sungBuffs = {}; runtime.npcCastCounts = {}; runtime.npcSpellApplied = {}; runtime.npcSpellLastCast = {}; if runtime.onZoned then runtime.onZoned() end
 end)
 
+-- Sing-once bard songs: a sung mark is released -- and the song re-sung --
+-- only after the effect has been SEEN up and then stays gone for
+-- BARD_DROP_GRACE seconds (a single missed read is not a drop). If the client
+-- never shows the song at all, the mark keeps its old life-long meaning, so
+-- an undetectable song can't be respammed.
+local BARD_DROP_GRACE = 2.0
+local function bardSongDropped(key, targetId, spellName)
+    local st = runtime.sungBuffs[key]
+    if type(st) ~= 'table' then return false end
+    local now = os.clock()
+    if buffActive(targetId, spellName) then
+        st.seen = true
+        st.missingSince = nil
+        return false
+    end
+    if not st.seen then return false end
+    st.missingSince = st.missingSince or now
+    if (now - st.missingSince) < BARD_DROP_GRACE then return false end
+    runtime.sungBuffs[key] = nil
+    print(string.format('\ay[Triune bard]\ax %s dropped -- singing it again.', spellName))
+    return true
+end
+
 local function reconcileSungBuffs()
     local found = 0
     local function scanGemTable(gemsTable)
@@ -16436,7 +16898,7 @@ local function reconcileSungBuffs()
                     if id and buffActive(id, g.spell) then
                         local key = sungKey(g.spell, id)
                         if not runtime.sungBuffs[key] then
-                            runtime.sungBuffs[key] = true
+                            runtime.sungBuffs[key] = { at = os.clock(), seen = true }
                             found = found + 1
                         end
                     end
@@ -16487,7 +16949,9 @@ function runtime.conditionMet(when, pct, spellName, targetId, cls, token, extra)
     end
     if when == 'missing buff' then
         if not targetId or targetId <= 0 or not isSpawnAlive(targetId) then return false end
-        if runtime.sungBuffs[sungKey(spellName, targetId)] then return false end -- already sung this life
+        if bardKeepSinging(extra) then return true end -- sung continuously, never gated on the effect
+        local key = sungKey(spellName, targetId)
+        if runtime.sungBuffs[key] and not bardSongDropped(key, targetId, spellName) then return false end -- already sung this life
         local minSec = (not isCombat() and ctrl and tonumber(ctrl.buff_refresh_sec) or 0) or 0
         return not buffActive(targetId, spellName, minSec)
     end
@@ -16652,7 +17116,7 @@ function runtime.castGem(i, g, id)
     local dur = 0
     pcall(function() dur = tonumber(sp.Duration()) or 0 end)
     dur = tonumber(dur) or 0
-    if dur > 0 and buffActive(id, g.spell) and not (g.cls == 'Brd' and g.when == 'twist while fighting') then
+    if dur > 0 and buffActive(id, g.spell) and not bardKeepSinging(g) then
         return false
     end
 
@@ -16750,7 +17214,7 @@ function runtime.castGem(i, g, id)
         castMs = tonumber(castMs) or 0
         if castMs <= 0 or castMs > 6000 then castMs = 2000 end
         runtime.pendingBardSong = {
-            spell = g.spell, id = id, beneficial = sp.Beneficial() == true,
+            spell = g.spell, id = id, beneficial = sp.Beneficial() == true, keep = bardKeepSinging(g),
             since = os.clock(), deadline = os.clock() + (sp.Beneficial() and 4.0 or ((castMs + 300) / 1000)),
         }
     end
@@ -16877,7 +17341,7 @@ function runtime.fireAA(name, a, id)
     return true
 end
 
--- Auto AA engine (scan / prioritise / purchase / MQ2AAspend / Fireworks) lives in
+-- Auto AA engine (scan / prioritise / AA-window purchase / Fireworks) lives in
 -- the auto_aa plugin (lua/tac/auto_aa.lua). It reaches the combat loop only via
 -- runtime.combatHold() and pm.onBetweenPulls().
 
@@ -17563,15 +18027,24 @@ local function maxMeleeDistance(id)
 end
 runtime.maxMeleeDistance = maxMeleeDistance
 
-local function desiredRange(id)
+-- Approach distance for a Ranged/Spell reach (Combat Distance slider, or the
+-- pull Stand Back distance): stop just inside it, mirroring the melee
+-- "userDist - 2" margin in meleeDesiredRange below. moveToward accepts
+-- arrival anywhere up to targetDist + 3, while combatTick's attack/cast reach
+-- check is the raw slider value -- so navigating to the raw value let a bow
+-- user or caster stop in the (slider, slider + 3] window: "arrived" as far as
+-- movement was concerned, yet "out of reach" for the engage gate, which
+-- re-called moveToward, which reported "arrived" again, forever, with nothing
+-- ever firing. Approaching to slider - 3 keeps every accepted arrival inside
+-- the reach the engage gate actually checks.
+local function rangedApproachDist(reach)
+    return math.max(2, math.floor((tonumber(reach) or 40) - 3))
+end
+runtime.rangedApproachDist = rangedApproachDist
+
+-- Melee approach distance (the Melee style branch of desiredRange).
+local function meleeDesiredRange(id)
     local NAV_CONST = pursuit.NAV_CONST
-    if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
-        return ctrl.pull_engage_dist or 100
-    end
-    local style = ctrl and ctrl.combat_style or 'Melee'
-    if style ~= 'Melee' then
-        return ctrl.ranged_dist or 40
-    end
     local userDist = (ctrl and ctrl.melee_dist) or NAV_CONST.MELEE_RANGE
     local spawnReach = 0
     if id and id > 0 then
@@ -17597,7 +18070,34 @@ local function desiredRange(id)
     -- Position slightly inside user's max melee distance to avoid edge jitter
     return math.max(4, math.floor(userDist - 2))
 end
+runtime.meleeDesiredRange = meleeDesiredRange
+
+local function desiredRange(id)
+    if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
+        return rangedApproachDist(ctrl.pull_engage_dist or 100)
+    end
+    local style = ctrl and ctrl.combat_style or 'Melee'
+    if style ~= 'Melee' then
+        return rangedApproachDist(ctrl.ranged_dist or 40)
+    end
+    return meleeDesiredRange(id)
+end
 runtime.desiredRange = desiredRange
+
+-- The distance the active style actually fights from -- the raw slider
+-- value desiredRange() approaches to just inside of. This is the "in reach"
+-- test the engage gates share, so a character is only flagged engaged (and
+-- the gem loop / auto-attack released) once it is where the slider says.
+local function styleReach(id)
+    if ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee' then
+        return ctrl.pull_engage_dist or 100
+    end
+    if (ctrl and ctrl.combat_style or 'Melee') == 'Melee' then
+        return maxMeleeDistance(id)
+    end
+    return (ctrl and ctrl.ranged_dist) or 40
+end
+runtime.styleReach = styleReach
 
 -- ============================================================================
 -- Navigation Intelligence: Hazard Memory, Breadcrumbs & Proactive Clearance
@@ -18600,6 +19100,141 @@ function runtime.ensureRangedAutoAttack(tid)
     if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
 end
 
+-- Melee-style /attack on. If the server is still in Ranged attack mode (a
+-- bow pull-tag just ran, or the style was switched mid-fight) a plain
+-- /attack on would fire the bow at weapon reach, so revert first and let the
+-- caller retry next tick; revertAttackModeToMelee is throttled and only
+-- flips serverAttackMode once the /say actually went out, so the retry is
+-- natural. Returns true once auto-attack is (or already was) on in melee mode.
+function runtime.meleeAttackOn()
+    if runtime.serverAttackMode == 'Ranged' then
+        runtime.revertAttackModeToMelee()
+        return false
+    end
+    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+    return true
+end
+
+-- ----------------------------------------------------------------------------
+-- Puller pull-method helpers (shared by the Camp pullerTick and Hunt mode).
+-- A pull method only decides how the mob gets tagged; once it is tagged the
+-- combat style takes over positioning and attacking.
+-- ----------------------------------------------------------------------------
+
+-- The configured pull spell: saved name first (it follows a re-mem), then
+-- whatever sits in the saved gem slot, then the loadout's primary for it.
+function runtime.pullSpellName()
+    local slot = ctrl.pull_spell_gem or 1
+    local name = ctrl.pull_spell  ---@type string|nil
+    if not name or name == '' then
+        pcall(function() name = mq.TLO.Me.Gem(slot).Name() end)
+    end
+    if not name or name == '' then
+        name = runtime.getPrimarySpellForGem(slot)
+    end
+    if name == '' then name = nil end
+    return name, slot
+end
+
+-- Cast the pull spell at tid (or, with none configured, the first enabled
+-- detrimental gem in the loadout). Returns true if a cast was issued.
+function runtime.castPullSpell(tid)
+    local spellName, slot = runtime.pullSpellName()
+    if spellName then
+        local g = nil
+        if loadout.gems then
+            for _, eg in ipairs(loadout.gems) do
+                if eg and (tonumber(eg.gem) or 1) == slot then g = eg; break end
+            end
+        end
+        return runtime.castGem(slot, g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }, tid) == true
+    end
+    if loadout.gems then
+        for i = 1, #loadout.gems do
+            local lg = loadout.gems[i]
+            local lpct = lg and tonumber(lg.pct)
+            if lpct == nil then lpct = 100 end
+            if lg and lg.spell and lg.spell ~= '' and lpct > 0
+                and runtime.isDetrimentalAction(lg.spell, lg.target, lg)
+                and runtime.castGem(tonumber(lg.gem) or i, lg, tid) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Distance the pull method can actually land its tag from: the Engagement
+-- Distance slider, capped by the pull spell's range (Spell) or the bow +
+-- ammo range (Ranged). Without the cap the puller parked at the slider and
+-- never tagged -- castGem silently refuses an out-of-range spell, and a bow
+-- shot from beyond its reach just reports "too far away" -- with nothing
+-- ever closing the gap.
+function runtime.pullTagReach(pullStyle)
+    local reach = ctrl.pull_engage_dist or 100
+    local cap = 0
+    if pullStyle == 'Spell' then
+        local name = runtime.pullSpellName()
+        if name then
+            pcall(function() cap = tonumber(mq.TLO.Spell(name).Range()) or 0 end)
+        end
+    elseif pullStyle == 'Ranged' then
+        pcall(function()
+            local r = mq.TLO.Me.Inventory('ranged')
+            if r() then
+                cap = tonumber(r.Range()) or 0
+                local a = mq.TLO.Me.Inventory('ammo')
+                if a() then cap = cap + (tonumber(a.Range()) or 0) end
+            end
+        end)
+    end
+    if cap > 0 and cap < reach then return cap end
+    return reach
+end
+
+-- Fire the Ranged pull's tag at tid from where we stand: Throw Stone when
+-- the ability is up, otherwise the bow through the server's ranged attack
+-- mode for EVERY stance (this server ignores /autofire, so the old
+-- "/autofire on for Melee/Spell stances" tag never fired a shot), and plain
+-- melee auto-attack as the last resort when nothing ranged is equipped.
+-- Caller has already stopped moving -- ranged attacks need a standing shot.
+function runtime.pullTagRangedAttack(tid)
+    if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
+    local tsReady = false
+    pcall(function() tsReady = mq.TLO.Me.AbilityReady('Throw Stone')() end)
+    if tsReady then
+        mq.cmd('/doability "Throw Stone"')
+        return
+    end
+    local hasRanged = false
+    pcall(function() hasRanged = mq.TLO.Me.Inventory('ranged')() ~= nil end)
+    if hasRanged then
+        if isCasting() then return end
+        if runtime.engageRangedAttack(tid) and (ctrl.combat_style or 'Melee') ~= 'Ranged' then
+            -- Remember that the pull -- not the stance -- turned the bow on,
+            -- so finishRangedPullTag can hand the toggle back afterwards.
+            runtime.rangedPullAttackOn = true
+        end
+    elseif (ctrl.combat_style or 'Melee') ~= 'Spell' then
+        runtime.meleeAttackOn()
+    end
+end
+
+-- The mob is tagged: hand the attack toggle back to the combat style. A
+-- Ranged stance just keeps firing; Melee/Spell drop the pull's auto-attack
+-- and revert the server attack mode so the fight's /attack on swings a
+-- weapon (Melee) or nothing is left running at all (Spell).
+function runtime.finishRangedPullTag()
+    if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    if (ctrl.combat_style or 'Melee') == 'Ranged' then
+        runtime.rangedPullAttackOn = false
+        return
+    end
+    if runtime.rangedPullAttackOn and mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+    runtime.rangedPullAttackOn = false
+    runtime.revertAttackModeToMelee()
+end
+
 
 -- Same idea for a fixed camp location (used returning from a pull).
 function runtime.moveTowardLoc(x, y, z, dist)
@@ -19054,7 +19689,7 @@ function runtime.checkCombatStall()
     local isPullStandBack = (ctrl.mode == 'Puller' and ctrl.pull_stand_back and (ctrl.pull_style or 'Melee') ~= 'Melee')
     local style = ctrl.combat_style or 'Melee'
     if style == 'Melee' and not isPullStandBack then
-        if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+        if d <= maxMeleeDistance(t.ID()) and not mq.TLO.Me.Combat() then runtime.meleeAttackOn() end
     elseif style == 'Ranged' then
         if d <= (ctrl.ranged_dist or 40) and not isCasting() then
             runtime.engageRangedAttack(t.ID())
@@ -19637,60 +20272,56 @@ function runtime.pullerTick()
             clearTarget()
         else
             local pullStyle = ctrl.pull_style or 'Melee'
+            -- A pull method only decides how the mob gets tagged. The Melee
+            -- method never drags a Ranged/Spell character into weapon reach:
+            -- every stance runs up and stops at its own Combat Distance
+            -- (desiredRange) and only the tag differs -- /attack on for
+            -- Melee, the bow for Ranged, the pull spell for Spell (which never
+            -- turns melee on at all). tagStyle picks that tag branch.
+            -- Ranged / Spell / Pet methods stop at the Engagement Distance
+            -- (capped by what the bow or spell can actually reach), fire the
+            -- tag from there, and then bring the mob home -- the stance takes
+            -- over once the fight starts at camp.
+            local combatStyle = ctrl.combat_style or 'Melee'
+            local tagStyle = pullStyle
+            if pullStyle == 'Melee' and combatStyle == 'Spell' then tagStyle = 'Spell' end
             local reqRange
             if pullStyle == 'Melee' then
                 reqRange = desiredRange(runtime.pullTargetId)
-            elseif pullStyle == 'Ranged' then
-                -- Close all the way to the real ranged engagement distance
-                -- (or the Stand Back distance, if that's enabled) instead of
-                -- parking at the looser pull_engage_dist -- this uses
-                -- ctrl.ranged_dist directly rather than desiredRange() so it
-                -- still closes to bow range even if overall combat_style is
-                -- Melee/Spell (bow-tag-then-melee/spell pulling).
-                reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)
             else
-                reqRange = ctrl.pull_engage_dist or 100
+                reqRange = runtime.rangedApproachDist(runtime.pullTagReach(pullStyle))
             end
 
             local tid = runtime.pullTargetId
             runtime.recordBreadcrumb()
-            local arrived = runtime.moveToward(tid, reqRange)
-            local inRange = arrived or
-                (pullStyle == 'Ranged' and distToId(tid) <= (ctrl.pull_engage_dist or 100) and hasLoS(tid))
+            -- Bow shots and casts need a standing character, so the tag only
+            -- fires once moveToward reports arrival (it stops us itself).
+            local inRange = runtime.moveToward(tid, reqRange)
 
             if inRange then
                 local tagged = false
 
-                if pullStyle == 'Melee' then
-                    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+                if tagStyle == 'Melee' then
+                    if combatStyle == 'Ranged' then
+                        if not isCasting() then runtime.engageRangedAttack(tid) end
+                    else
+                        runtime.meleeAttackOn()
+                    end
                     -- Confirm the tag like the other styles do: the mob is on
                     -- XTarget or has us as its target. Turning around on the
                     -- same tick as /attack on left the puller walking home alone.
-                    local totId = 0
-                    pcall(function() totId = mq.TLO.Spawn(tid).TargetOfTarget.ID() or 0 end)
-                    if isXTargetId(tid) or totId == (mq.TLO.Me.ID() or -1) then
+                    if isXTargetId(tid) or runtime.playerHasAggro(tid) then
                         tagged = true
                     end
-                elseif pullStyle == 'Ranged' then
+                elseif tagStyle == 'Ranged' then
                     mq.cmd('/face fast')
-                    if ctrl.combat_style == 'Ranged' then
-                        -- AutoCombat is set to Ranged: /autofire leaves the
-                        -- character not attacking at all on this server.
-                        -- Use the server's own #attackmode ranged toggle
-                        -- plus plain /attack on instead -- same approach as
-                        -- general Ranged-style combat engagement.
-                        if not isCasting() then runtime.engageRangedAttack(tid) end
-                    else
-                        -- combat_style is Melee/Spell but pull_style is
-                        -- Ranged (bow-tag then melee/spell) -- still uses
-                        -- /autofire for the tag shot.
-                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-                    end
-                    if isXTargetId(tid) or distToId(tid) <= 25 then
-                        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+                    if isXTargetId(tid) or runtime.playerHasAggro(tid) then
                         tagged = true
+                        runtime.finishRangedPullTag()
+                    else
+                        runtime.pullTagRangedAttack(tid)
                     end
-                elseif pullStyle == 'Pet' then
+                elseif tagStyle == 'Pet' then
                     mq.cmd('/face fast')
                     local petId = mq.TLO.Me.Pet.ID() or 0
                     petState.petHoldActive = false
@@ -19705,47 +20336,12 @@ function runtime.pullerTick()
                     if isXTargetId(tid) or distToId(tid) <= 35 or (petTgtId > 0 and petTgtId == tid) then
                         tagged = true
                     end
-                elseif pullStyle == 'Spell' then
-                    stopMoving()
+                elseif tagStyle == 'Spell' then
                     mq.cmd('/face fast')
-                    if isXTargetId(tid) or distToId(tid) <= 30 then
+                    if isXTargetId(tid) or runtime.playerHasAggro(tid) then
                         tagged = true
                     else
-                        local slotToCast = ctrl.pull_spell_gem or 1
-                        local g = nil
-                        if loadout.gems then
-                            for _, eg in ipairs(loadout.gems) do
-                                if eg and (tonumber(eg.gem) or 1) == slotToCast then
-                                    g = eg
-                                    break
-                                end
-                            end
-                        end
-                        local spellName = ctrl.pull_spell  ---@type string|nil
-                        if not spellName or spellName == '' then
-                            pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
-                        end
-                        if not spellName or spellName == '' then
-                            spellName = runtime.getPrimarySpellForGem(slotToCast)
-                        end
-
-                        if spellName and spellName ~= '' then
-                            local dummyEntry = g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }
-                            runtime.castGem(slotToCast, dummyEntry, tid)
-                        else
-                            if loadout.gems then
-                                for i = 1, #loadout.gems do
-                                    local lg = loadout.gems[i]
-                                    local lpct = lg and tonumber(lg.pct)
-                                    if lpct == nil then lpct = 100 end
-                                    if lg and lg.spell and lg.spell ~= '' and lpct > 0 then
-                                        local isDet = runtime.isDetrimentalAction(lg.spell, lg.target, lg)
-                                        local actualSlot = tonumber(lg.gem) or i
-                                        if isDet and runtime.castGem(actualSlot, lg, tid) then break end
-                                    end
-                                end
-                            end
-                        end
+                        runtime.castPullSpell(tid)
                     end
                 end
 
@@ -19789,7 +20385,7 @@ function runtime.pullerTick()
             local tgtId = 0
             pcall(function() tgtId = mq.TLO.Target.ID() or 0 end)
             if ptId > 0 and tgtId == ptId and distToId(ptId) <= (desiredRange() + 4) then
-                mq.cmd('/attack on')
+                runtime.meleeAttackOn()
             end
         end
     end
@@ -19857,6 +20453,7 @@ end
 
 function runtime.checkAggroSwitch()
     if isCastingOrStarting() or getActiveTargetRequiredCastingId() then return false end
+    if runtime.forcedTargetId() then return false end
     if (os.clock() - (runtime.lastAggroSwitchAt or 0)) < 2.0 then return false end
     local cur = mq.TLO.Target
     local curId = (cur() and cur.Type() == 'NPC') and cur.ID() or 0
@@ -20009,6 +20606,8 @@ runtime.onZoned = function()
     petState.lastCmdTargetId = 0
     petState.lastCmdAt = 0
     petState.holdIssuedForId = 0
+    runtime.xtForceId = 0
+    runtime.xtIgnoreIds = {}
     if ctrl.camp_loc then
         print('\ay[Triune]\ax zoned -- clearing camp (it was set in the previous zone). Set a new one if needed.')
         ctrl.camp_loc = nil
@@ -20100,13 +20699,14 @@ function runtime.tickPendingBardSong()
     runtime.pendingBardSong = nil
     mq.cmd('/stopsong')
     if pend.beneficial then
-        runtime.sungBuffs[sungKey(pend.spell, pend.id)] = true
-        local bb, ss
-        pcall(function() bb = mq.TLO.Me.Buff(pend.spell)() end)
-        pcall(function() ss = mq.TLO.Me.Song(pend.spell)() end)
-        print(string.format(
-            '\ay[Triune bard]\ax %s  Buff=%s  Song=%s  (marked sung -- wont resing until zone/death)', pend.spell,
-            tostring(bb), tostring(ss)))
+        local key = sungKey(pend.spell, pend.id)
+        markSung(key, 'Brd')
+        local up = buffActive(pend.id, pend.spell)
+        if up then runtime.sungBuffs[key].seen = true end
+        if not pend.keep then
+            print(string.format(
+                '\ay[Triune bard]\ax %s  up=%s  (marked sung -- resings once it is seen to drop)', pend.spell, tostring(up)))
+        end
     end
 end
 
@@ -20584,6 +21184,28 @@ local function combatTick()
         return
     end
 
+    -- Extended Target window overrides. A forced spawn is targeted here, ahead
+    -- of every mode's own selection, and held until forcedTargetId() releases
+    -- it (dead / gone / unreachable); the mode branches below then treat it
+    -- like any other XTarget. An ignored spawn is dropped the moment it is our
+    -- target so the mode logic goes looking for something else.
+    if os.clock() - (runtime.lastXtPruneAt or 0) > 10 then
+        runtime.lastXtPruneAt = os.clock()
+        runtime.pruneXtOverrides()
+    end
+    local forceId = runtime.forcedTargetId()
+    if forceId and (mq.TLO.Target.ID() or 0) ~= forceId and setTarget(forceId) then
+        stopMoving()
+        pursuit.id = 0
+        pursuit.lastNavTargetId = 0
+        if ctrl.mode == 'Puller' then
+            runtime.pullTargetId = forceId
+            runtime.pullState = 'FIGHTING'
+        end
+        print(string.format('\ay[Triune]\ax Force target: switching to #%d (%s).',
+            forceId, tostring(mq.TLO.Target.CleanName())))
+    end
+
     local t = mq.TLO.Target
     local tDead = false
     local tType = ''
@@ -20597,6 +21219,17 @@ local function combatTick()
     end)
     local isTargetDead = t() and (tDead or tType == 'Corpse' or tState == 'DEAD')
     if isTargetDead then
+        clearTarget()
+    elseif t() and ctrl.mode ~= 'Manual' and runtime.isXtIgnoredId(t.ID() or 0) then
+        -- (Manual keeps whatever the player targeted, like the name ignore
+        -- list does; isHostileTarget() already stops the engine attacking it.)
+        stopMoving()
+        pursuit.id = 0
+        pursuit.lastNavTargetId = 0
+        if ctrl.mode == 'Puller' and runtime.pullTargetId == (t.ID() or 0) then
+            runtime.pullState = 'IDLE'
+            runtime.pullTargetId = 0
+        end
         clearTarget()
     end
     local numXtar = countNPCXtarget()
@@ -20691,8 +21324,15 @@ local function combatTick()
                 local id = pt.ID()
                 if moveToward(id, desiredRange(id)) then
                     engage = true
-                else
+                elseif (ctrl.combat_style or 'Melee') == 'Melee' then
                     engage = (distToId(id) <= maxMeleeDistance(id) or isXTargetId(id))
+                else
+                    -- Ranged/Spell: only engage once inside Combat Distance with
+                    -- LoS. Engaging on "it's on XTarget" while still closing let
+                    -- the gem loop fire from spell range, and each cast halted
+                    -- the nav (stopMovementForCast) -- walk, stop, cast, walk --
+                    -- instead of settling at the slider distance first.
+                    engage = (distToId(id) <= runtime.styleReach(id)) and hasLoS(id)
                 end
             else
                 engage = (runtime.pullState == 'FIGHTING')
@@ -20739,11 +21379,11 @@ local function combatTick()
                     local okZ, sz = pcall(function() return tspawn.Z() end)
                     local tooFarZ = okZ and sz and math.abs(sz - myZ) > (maxHuntZ + 15)
                     local tooFarDist = not isMoveActive() and distToId(tid) > dropDist
-                    local yieldTo = runtime.boxnetYieldTarget(tid)
+                    local yieldTo = (tid ~= forceId) and runtime.boxnetYieldTarget(tid) or nil
                     if yieldTo then
                         runtime.boxnetYieldNow(tid, yieldTo, 'Puller (Hunt)')
                         haveNPC = false
-                    elseif tooFarZ or tooFarDist then
+                    elseif (tooFarZ or tooFarDist) and tid ~= forceId then
                         -- Mark unreachable so findRoamTarget() won't immediately re-acquire the
                         -- same spawn on the very next tick, causing the acquire/drop spam loop.
                         -- The blacklist expires after 60s in case the mob moves closer or a path
@@ -20904,88 +21544,85 @@ local function combatTick()
                     end
                 end
 
-                -- For non-Melee pull styles, approach to engagement distance for the
-                -- initial tag. Once tagged (XTarget) or already in combat, fall back to
-                -- desiredRange() so the post-pull combat_style positioning takes over.
+                -- For non-Melee pull styles, approach to the Engagement Distance
+                -- (capped by what the bow / pull spell can reach) for the initial
+                -- tag. Once tagged, fall back to desiredRange() so the post-pull
+                -- combat_style positioning takes over. "Tagged" means the mob is
+                -- actually on us (XTarget / aggro) -- Me.Combat() alone is our own
+                -- /attack on from a bow tag, which used to count as tagged the tick
+                -- after the shot was queued and walked the puller in before the
+                -- standing shot could ever go off.
+                local tagged = isXTargetId(id) or runtime.playerHasAggro(id)
+                    or (pullStyle ~= 'Ranged' and mq.TLO.Me.Combat())
                 local reqRange
-                if pullStyle == 'Ranged' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
-                    -- Close all the way to the real ranged engagement
-                    -- distance (or Stand Back distance) instead of parking
-                    -- at the looser pull_engage_dist -- uses ctrl.ranged_dist
-                    -- directly so it still closes to bow range even if
-                    -- overall combat_style is Melee/Spell (bow-tag-then-
-                    -- melee/spell pulling).
-                    reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)
-                elseif pullStyle ~= 'Melee' and not isXTargetId(id) and not mq.TLO.Me.Combat() then
-                    reqRange = ctrl.pull_engage_dist or 100
+                if pullStyle ~= 'Melee' and not tagged then
+                    reqRange = runtime.rangedApproachDist(runtime.pullTagReach(pullStyle))
                 else
                     reqRange = desiredRange(id)
                 end
 
                 local arrived = moveToward(id, reqRange)
-                local inRange
-                if pullStyle == 'Melee' then
-                    inRange = arrived or (distToId(id) <= maxMeleeDistance(id) and hasLoS(id))
-                else
-                    inRange = arrived or (distToId(id) <= (ctrl.pull_engage_dist or 100) and hasLoS(id))
-                end
+                local atStyleReach = arrived or (distToId(id) <= runtime.styleReach(id) and hasLoS(id))
+                -- Bow shots and casts need a standing character, so the tag only
+                -- fires once moveToward reports arrival (it stops us itself).
+                local inRange = (pullStyle == 'Melee') and atStyleReach or arrived
 
-                if inRange then
+                if tagged and pullStyle ~= 'Melee' then
+                    -- Post-tag, the combat style owns positioning: reqRange is
+                    -- desiredRange() now, so let moveToward keep closing to
+                    -- the Combat Distance (or Stand Back distance) and only
+                    -- release the engage gate once we're actually there. The
+                    -- old per-style branches ran here too: the Spell one
+                    -- called stopMoving() every tick (cancelling the nav that
+                    -- had just been issued, so a caster stayed parked at the
+                    -- pull distance forever), and all of them flagged engage
+                    -- at pull_engage_dist rather than the fighting distance.
+                    if runtime.rangedPullAttackOn then runtime.finishRangedPullTag() end
+                    if atStyleReach then
+                        engage = true
+                        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+                            pursuit.lastCombatFaceAt = os.clock()
+                            mq.cmd('/face fast')
+                        end
+                        if ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged' and not isCasting() then
+                            -- Me.Combat() reading true doesn't mean we're firing
+                            -- at THIS id (e.g. a fresh adjacent mob picked up as
+                            -- the previous one died) -- route through the ranged
+                            -- engage so a target change still gets its retoggle.
+                            runtime.ensureRangedAutoAttack(id)
+                        end
+                    elseif (ctrl.combat_style or 'Melee') == 'Melee' and isXTargetId(id)
+                        and distToId(id) <= (ctrl.xtar_nav_dist or 150) and hasLoS(id) then
+                        -- Melee keeps its old behaviour: engaged while closing
+                        -- on an XTarget so hybrids can cast on the way in.
+                        engage = true
+                    end
+                elseif inRange then
                     if pullStyle == 'Melee' then
-                        -- Melee pull: unchanged -- close to melee range and attack
+                        -- Melee pull: close to the style's reach and engage.
+                        -- Only a Melee combat style tags with plain /attack on;
+                        -- Ranged goes through the server attack-mode switch
+                        -- (a melee /attack on first left it swinging air at bow
+                        -- range until the retoggle caught up) and Spell never
+                        -- auto-attacks -- its first gem cast is the tag.
                         engage = true
                         mq.cmd('/face fast')
-                        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-                        if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+                        if ctrl.combat_style ~= 'Spell' and (mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking()) then mq.cmd('/stand') end
+                        if (ctrl.combat_style or 'Melee') == 'Melee' then
+                            runtime.meleeAttackOn()
+                        elseif ctrl.combat_style == 'Ranged' then
+                            if not isCasting() then runtime.engageRangedAttack(id) end
+                        end
                     elseif pullStyle == 'Spell' then
-                        -- Spell pull: cast pull spell from engagement range
-                        stopMoving()
+                        -- Spell pull: cast the pull spell from the Engagement
+                        -- Distance; the tagged branch above takes over once it
+                        -- lands (the mob shows on XTarget / turns on us).
                         mq.cmd('/face fast')
-                        if isXTargetId(id) or mq.TLO.Me.Combat() then
-                            engage = true
-                        else
-                            local slotToCast = ctrl.pull_spell_gem or 1
-                            local g = nil
-                            if loadout.gems then
-                                for _, eg in ipairs(loadout.gems) do
-                                if eg and (tonumber(eg.gem) or 1) == slotToCast then
-                                    g = eg
-                                    break
-                                end
-                            end
-                        end
-                        local spellName = ctrl.pull_spell  ---@type string|nil
-                        if not spellName or spellName == '' then
-                            pcall(function() spellName = mq.TLO.Me.Gem(slotToCast).Name() end)
-                        end
-                        if not spellName or spellName == '' then
-                            spellName = runtime.getPrimarySpellForGem(slotToCast)
-                        end
-                        if spellName and spellName ~= '' then
-                            local dummyEntry = g or { spell = spellName, target = 'E: Current Target', cls = 'ALL' }
-                            castGem(slotToCast, dummyEntry, id)
-                        else
-                            -- Fallback: try first detrimental spell in loadout
-                            if loadout.gems then
-                                for i = 1, #loadout.gems do
-                                    local lg = loadout.gems[i]
-                                    local lpct = lg and tonumber(lg.pct)
-                                    if lpct == nil then lpct = 100 end
-                                    if lg and lg.spell and lg.spell ~= '' and lpct > 0 then
-                                        local isDet = isDetrimentalAction(lg.spell, lg.target, lg)
-                                        local actualSlot = tonumber(lg.gem) or i
-                                        if isDet and castGem(actualSlot, lg, id) then break end
-                                    end
-                                end
-                            end
-                        end
-                            -- Check if spell tagged the mob
-                            if isXTargetId(id) then engage = true end
-                        end
+                        runtime.castPullSpell(id)
                     elseif pullStyle == 'Pet' then
                         -- Pet pull: pets already dispatched above during approach
                         mq.cmd('/face fast')
-                        if isXTargetId(id) or distToId(id) <= 35 then
+                        if distToId(id) <= 35 then
                             engage = true
                         else
                             local petTgtId = 0
@@ -20995,54 +21632,24 @@ local function combatTick()
                             end
                         end
                     elseif pullStyle == 'Ranged' then
-                        -- Ranged pull: try Throw Stone first, then bow/autofire, then melee fallback
+                        -- Ranged pull: Throw Stone first, then the bow (through
+                        -- the server ranged attack mode for every stance), then
+                        -- melee as the last resort -- see pullTagRangedAttack.
                         mq.cmd('/face fast')
-                        if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-                        if isXTargetId(id) or mq.TLO.Me.Combat() then
-                            engage = true
-                            -- Already "tagged"/Me.Combat()==true doesn't mean we're
-                            -- actually firing at THIS id -- e.g. a fresh, already-
-                            -- adjacent mob picked up the instant the previous one
-                            -- died, while Me.Combat() is still reading true from
-                            -- that kill. Route through the ranged engage here too
-                            -- so a genuine target change still gets its off/on
-                            -- retoggle even when we think we're already engaged.
-                            if ctrl.combat_style == 'Ranged' and runtime.serverAttackMode == 'Ranged' and not isCasting() then
-                                runtime.ensureRangedAutoAttack(id)
-                            end
-                        else
-                            local tsReady = false
-                            pcall(function() tsReady = mq.TLO.Me.AbilityReady('Throw Stone')() end)
-                            if tsReady then
-                                mq.cmd('/doability "Throw Stone"')
-                            else
-                                -- Fallback to ranged weapon (bow)
-                                local hasRanged = false
-                                pcall(function() hasRanged = mq.TLO.Me.Inventory('ranged')() ~= nil end)
-                                if hasRanged then
-                                    if ctrl.combat_style == 'Ranged' then
-                                        -- AutoCombat is set to Ranged: /autofire leaves
-                                        -- the character not attacking at all on this
-                                        -- server. Use the server's #attackmode ranged
-                                        -- toggle plus plain /attack on instead.
-                                        if not isCasting() then runtime.engageRangedAttack(id) end
-                                    else
-                                        -- combat_style is Melee/Spell but pull_style is
-                                        -- Ranged (bow-tag then melee/spell) -- still
-                                        -- uses /autofire for the tag shot.
-                                        if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-                                    end
-                                else
-                                    -- No ranged option available; fall back to melee
-                                    if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
-                                end
-                            end
-                            -- Check if target was tagged
-                            if isXTargetId(id) then engage = true end
-                        end
+                        runtime.pullTagRangedAttack(id)
                     end
                 elseif isXTargetId(id) then
-                    if distToId(id) <= (ctrl.xtar_nav_dist or 150) and hasLoS(id) then
+                    if (ctrl.combat_style or 'Melee') == 'Melee' then
+                        if distToId(id) <= (ctrl.xtar_nav_dist or 150) and hasLoS(id) then
+                            engage = true
+                        end
+                    elseif atStyleReach then
+                        -- Ranged/Spell: not engaged until inside Combat Distance.
+                        -- Flagging engage on "it's on XTarget" while still
+                        -- closing released the gem loop from spell range, and
+                        -- every cast halted the nav (stopMovementForCast):
+                        -- walk, stop, cast, walk... instead of settling at the
+                        -- slider distance and fighting from there.
                         engage = true
                     end
                 end
@@ -21050,13 +21657,15 @@ local function combatTick()
         end
     elseif ctrl.mode == 'Assist' then
         local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
-        local maId = maTargetId()
+        -- A forced XTarget outranks the Main Assist's target; it is engaged
+        -- like a self-defense target (no assist-at % / engaged gate).
+        local maId = (not forceId) and maTargetId() or nil
         local defendId = nil
-        if not maId and (ctrl.assist_self_defense ~= false) then
+        if not forceId and not maId and (ctrl.assist_self_defense ~= false) then
             defendId = runtime.findSelfDefenseTarget(maxNav)
         end
-        local id = maId or defendId
-        local isSelfDefense = (not maId and defendId ~= nil)
+        local id = forceId or maId or defendId
+        local isSelfDefense = (forceId ~= nil) or (not maId and defendId ~= nil)
 
         if ctrl.submode == 'Backline' then
             local closingOnMob = false
@@ -21223,11 +21832,11 @@ local function combatTick()
                     mq.cmd('/stand')
                 end
                 if style == 'Melee' then
-                    if not mq.TLO.Me.Combat() then
+                    if not mq.TLO.Me.Combat() and runtime.serverAttackMode ~= 'Ranged' then
                         print(string.format('\ag[Triune]\ax Engaging /attack on -> %s (#%d) [dist=%.1f <= reach=%.1f, engage=%s]',
                             tostring(mq.TLO.Target.CleanName()), tid, curDist, maxReach, tostring(engage)))
-                        mq.cmd('/attack on')
                     end
+                    runtime.meleeAttackOn()
                 elseif style == 'Ranged' then
                     if not isCasting() then
                         if runtime.serverAttackMode == 'Ranged' and (tid ~= runtime.lastRangedAttackTargetId or not mq.TLO.Me.Combat()) then
@@ -21265,8 +21874,10 @@ local function combatTick()
                     end
                 end
             elseif not isMoveActive() and curDist > maxReach and tid > 0 then
-                -- Mob moved, was pushed, or is out of striking/ranged reach: re-close distance
-                if ctrl.mode ~= 'Manual' then
+                -- Mob moved, was pushed, or is out of striking/ranged reach: re-close distance.
+                -- Ranged/Spell wait for the current cast to finish first -- starting a
+                -- nav mid-cast just interrupts it for a few units of drift.
+                if ctrl.mode ~= 'Manual' and (style == 'Melee' or not isCasting()) then
                     moveToward(tid, desiredRange(tid))
                 end
             end
@@ -21655,7 +22266,7 @@ local function combatTick()
                                             if g.when == 'missing buff' then
                                                 local bene = false
                                                 pcall(function() bene = mq.TLO.Spell(g.spell).Beneficial() end)
-                                                if bene then runtime.sungBuffs[sungKey(g.spell, id)] = true end
+                                                if bene then markSung(sungKey(g.spell, id), g.cls) end
                                             end
                                             break
                                         end
@@ -21762,7 +22373,6 @@ local function setTriuneMode(arg1, arg2)
     local modeChanged = (ctrl.mode ~= newMode) or (ctrl.submode ~= newSubmode)
     ctrl.mode = newMode
     ctrl.submode = newSubmode
-    if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
     if modeChanged then
         -- A mid-pull mode switch used to leave nav running toward the old mob
         -- and a stale pullState suppressing auto-attack / holding pets.
@@ -22155,9 +22765,6 @@ local function triuneCommand(...)
         local sub = args[2] and string.lower(args[2]) or ''
         local num = tonumber(args[2])
         if num then
-            if not runtime.fovLoaded() then
-                print('\ay[Triune WARNING]\ax MQ2FOV plugin is not loaded! Cannot execute /fov (load via \ay/plugin mq2fov\ax).')
-            end
             if num < 50 then num = 50 end
             if num > 150 then num = 150 end
             ctrl.fov = math.floor(num)
@@ -22166,9 +22773,6 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Field of View set to \ag%d\ax units (Maintain on Zone: ENABLED).', ctrl.fov))
         elseif sub == 'on' or sub == '1' or sub == 'enable' or sub == 'true' then
-            if not runtime.fovLoaded() then
-                print('\ay[Triune WARNING]\ax MQ2FOV plugin is not loaded! Cannot execute /fov (load via \ay/plugin mq2fov\ax).')
-            end
             ctrl.fov_enabled = true
             if runtime.applyFov then runtime.applyFov() end
             runtime.saveLoadout(true)
@@ -22178,9 +22782,8 @@ local function triuneCommand(...)
             runtime.saveLoadout(true)
             print('\ag[Triune]\ax Maintain Field of View: \arDISABLED\ax.')
         else
-            print(string.format('\ag[Triune]\ax Field of View: %d units (Maintain on Zone: %s%s). Usage: /ac fov [50-150|on|off]',
-                ctrl.fov or 100, ctrl.fov_enabled and '\agENABLED\ax' or '\arDISABLED\ax',
-                runtime.fovLoaded() and '' or ' -- \arMQ2FOV NOT LOADED\ax'))
+            print(string.format('\ag[Triune]\ax Field of View: %d units (Maintain on Zone: %s). Usage: /ac fov [50-150|on|off]',
+                ctrl.fov or 100, ctrl.fov_enabled and '\agENABLED\ax' or '\arDISABLED\ax'))
         end
     elseif cmd == 'chasedist' or cmd == 'chaserange' or cmd == 'followdist'
         or (cmd == 'chase' and args[2] and args[2] ~= '') then
@@ -22297,17 +22900,14 @@ local function triuneCommand(...)
             end
         elseif sub == 'on' or sub == '1' or sub == 'enable' then
             ctrl.use_waypoints = true
-            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             runtime.saveLoadout(true)
             print('\ag[Triune]\ax Waypoint Patrol ENABLED.')
         elseif sub == 'off' or sub == '0' or sub == 'disable' then
             ctrl.use_waypoints = false
-            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             runtime.saveLoadout(true)
             print('\ag[Triune]\ax Waypoint Patrol DISABLED.')
         elseif sub == 'toggle' then
             ctrl.use_waypoints = not ctrl.use_waypoints
-            if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
             runtime.saveLoadout(true)
             print(string.format('\ag[Triune]\ax Waypoint Patrol %s.', ctrl.use_waypoints and 'ENABLED' or 'DISABLED'))
         elseif sub == 'radius' or sub == 'arrival' then
@@ -22537,150 +23137,6 @@ end
 runtime.checkStartupPluginStatus()
 
 -- ============================================================================
--- Map Visualization Helper
--- ============================================================================
-
-runtime.clearMapRadiusVisuals = function()
-    if not runtime.mapLoaded() then return end
-    mq.cmd('/maploc remove')
-    mq.cmd('/mapfilter pullradius 0')
-    mq.cmd('/mapfilter castradius 0')
-    runtime.lastMapDraw = { active = false, type = nil, key = '' }
-end
-
-runtime.updateMapRadiusVisuals = function()
-    if not runtime.mapLoaded() then return end
-    if not ctrl.show_map_radius then
-        if runtime.lastMapDraw and runtime.lastMapDraw.active then
-            runtime.clearMapRadiusVisuals()
-        end
-        return
-    end
-
-    local mode = ctrl.mode
-    local submode = ctrl.submode or ''
-    local hasWps = ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0
-    local zoneShort = ''
-    pcall(function() zoneShort = mq.TLO.Zone.ShortName() or '' end)
-
-    local wpsCoordParts = {}
-    if hasWps then
-        for idx, wp in ipairs(ctrl.waypoints) do
-            wpsCoordParts[#wpsCoordParts + 1] = string.format('%d:%.1f,%.1f,%.1f', idx, wp.x or 0, wp.y or 0, wp.z or 0)
-        end
-    end
-    local wpsKey = table.concat(wpsCoordParts, ';')
-
-    local key = string.format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
-        tostring(mode),
-        tostring(submode),
-        tostring(ctrl.use_waypoints),
-        tostring(ctrl.waypoint_scan_radius or 100),
-        tostring(ctrl.waypoint_radius or 20),
-        tostring(ctrl.camp_radius or 100),
-        tostring(ctrl.hunter_radius or 1500),
-        tostring(ctrl.hunter_combat_radius or 0),
-        tostring(ctrl.current_waypoint_idx or 1),
-        tostring(ctrl.xtar_nav_dist or 150),
-        ctrl.camp_loc and
-        string.format('%.1f,%.1f,%.1f', ctrl.camp_loc.x or 0, ctrl.camp_loc.y or 0, ctrl.camp_loc.z or 0) or 'nocamp',
-        ctrl.hunter_combat_loc and
-        string.format('%.1f,%.1f,%.1f', ctrl.hunter_combat_loc.x or 0, ctrl.hunter_combat_loc.y or 0,
-            ctrl.hunter_combat_loc.z or 0) or 'noanchor',
-        zoneShort,
-        wpsKey)
-
-    if runtime.lastMapDraw and runtime.lastMapDraw.active and runtime.lastMapDraw.key == key then
-        return -- State unchanged; do nothing
-    end
-
-    -- Clear all previous map overlays before applying new one
-    runtime.clearMapRadiusVisuals()
-
-    if mode == 'Puller' and hasWps then
-        runtime.syncWaypointMapLines(zoneShort)
-
-        -- 1. Dynamic Scan Radius circle following the player
-        local scanRad = ctrl.waypoint_scan_radius or 100
-        if scanRad > 0 then
-            mq.cmd('/mapfilter castradius color 0 255 0')
-            mq.cmd('/mapfilter castradius show')
-            mq.cmdf('/mapfilter castradius %d', scanRad)
-        end
-
-        -- 2. Draw arrival radius markers for all waypoints in the patrol route
-        for idx, wp in ipairs(ctrl.waypoints) do
-            if wp and wp.x and wp.y and wp.z then
-                local isNext = ((ctrl.current_waypoint_idx or 1) == idx)
-                local rCol = isNext and '255 215 0' or '0 200 255'
-                local label = isNext and ('>> ' .. (wp.name or ('WP ' .. idx))) or (wp.name or ('WP ' .. idx))
-                mq.cmdf('/maploc %f %f %f radius %d rcolor %s color %s label %s',
-                    wp.y, wp.x, wp.z, ctrl.waypoint_radius or 20, rCol, rCol, label)
-            end
-        end
-
-        -- 3. If in Camp submode and camp location exists, draw Camp anchor
-        if submode == 'Camp' and ctrl.camp_loc then
-            mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
-                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.camp_radius or 100)
-        end
-
-        runtime.lastMapDraw = {
-            active = true,
-            type = 'waypoints',
-            key = key
-        }
-        return
-    end
-
-    -- Non-waypoint modes: Clean up any leftover waypoint lines on map file
-    runtime.syncWaypointMapLines(zoneShort)
-
-    if mode == 'Manual' then
-        if ctrl.camp_loc then
-            mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
-                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.camp_radius or 100)
-        else
-            mq.cmd('/mapfilter pullradius color 0 255 0')
-            mq.cmd('/mapfilter pullradius show')
-            mq.cmdf('/mapfilter pullradius %d', ctrl.camp_radius or 100)
-        end
-    elseif mode == 'Puller' then
-        if submode == 'Camp' then
-            if ctrl.camp_loc then
-                mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
-                    ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.camp_radius or 100)
-            else
-                mq.cmd('/mapfilter pullradius color 0 255 0')
-                mq.cmd('/mapfilter pullradius show')
-                mq.cmdf('/mapfilter pullradius %d', ctrl.camp_radius or 100)
-            end
-        else -- Submode 'Hunt'
-            if ctrl.hunter_combat_loc and (ctrl.hunter_combat_radius or 0) > 0 then
-                mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Anchor',
-                    ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.z,
-                    ctrl.hunter_combat_radius)
-            else
-                mq.cmd('/mapfilter castradius color 255 0 0')
-                mq.cmd('/mapfilter castradius show')
-                mq.cmdf('/mapfilter castradius %d', ctrl.hunter_radius or 1500)
-            end
-        end
-    elseif mode == 'Assist' then
-        if submode == 'Camp' and ctrl.camp_loc then
-            mq.cmdf('/maploc %f %f %f radius %d rcolor 0 255 0 color 0 255 0 label Camp',
-                ctrl.camp_loc.y, ctrl.camp_loc.x, ctrl.camp_loc.z, ctrl.xtar_nav_dist or 150)
-        end
-    end
-
-    runtime.lastMapDraw = {
-        active = true,
-        type = mode,
-        key = key
-    }
-end
-
--- ============================================================================
 -- Main loop
 -- ============================================================================
 -- Diagnostic snapshot: everything a bug report needs in one file. Runtime
@@ -22702,6 +23158,19 @@ function runtime.buildDiagnosticDump()
         end)
         live[tlo] = v
     end
+    -- Lua heap size: a large heap makes every allocation-heavy tick pay for
+    -- the incremental GC, which shows up as "everything is slow".
+    pcall(function() live['Lua.HeapMB'] = math.floor(collectgarbage('count') / 1024 * 10 + 0.5) / 10 end)
+    -- MQ2Lua turbo (instructions per forced yield; see ensureLuaTurbo) and a
+    -- raw VM speed check: 100k iterations of plain arithmetic is ~2-5 ms in
+    -- an unthrottled VM. Tens of ms or more means the yield hook dominates.
+    live['Lua.Turbo'] = runtime.luaTurbo() or '<n/a>'
+    pcall(function()
+        local t0 = os.clock()
+        local acc = 0
+        for i = 1, 100000 do acc = acc + (i % 7) end
+        live['Lua.VmLoop100kMs'] = math.floor((os.clock() - t0) * 1000 * 100 + 0.5) / 100
+    end)
     local runtimeScalars = {}
     for k, v in pairs(runtime) do
         local tv = type(v)
@@ -22716,6 +23185,9 @@ function runtime.buildDiagnosticDump()
                     name = p.name, version = p.version, enabled = p.enabled, status = p.status,
                     errorMsg = p.errorMsg, hasThread = p.hasThread, runOutOfCombatOnly = p.runOutOfCombatOnly,
                     lastExecMs = p.lastExecMs, avgExecMs = p.avgExecMs,
+                    -- Per-phase timers a plugin keeps about its own tick
+                    -- (map: scan / nav / los; chat: drain), when it has any.
+                    profile = (p.instance and type(p.instance.profile) == 'table') and p.instance.profile or nil,
                 }
             end
         end
@@ -22767,14 +23239,52 @@ function runtime.dumpDiagnostics(quiet)
     return path, err
 end
 
+-- MQ2Lua suspends a script every `turboNum` VM instructions and resumes it
+-- from the game loop (the "turbo" setting, default 500). At the default every
+-- loop over a few thousand items -- spawn scans, map geometry, chat drains,
+-- ~1000 TLO reads -- pays hundreds of yield round-trips and runs 10-50x
+-- slower than the work justifies, on every character of the install. The
+-- setting is global to MQ2Lua and persisted by /lua conf (config/MQ2Lua.yaml),
+-- so Triune raises it once at startup when it finds a lower value; a value the
+-- user set higher is left alone.
+local LUA_TURBO_TARGET = 25000
+function runtime.luaTurbo()
+    local v = nil
+    pcall(function()
+        local t = mq.TLO.Lua and mq.TLO.Lua.Turbo
+        if t then v = tonumber(t()) end
+    end)
+    return v
+end
+local function ensureLuaTurbo()
+    local turbo = runtime.luaTurbo()
+    if not turbo or turbo >= LUA_TURBO_TARGET then return end
+    mq.cmdf('/lua conf turboNum %d', LUA_TURBO_TARGET)
+    local after = runtime.luaTurbo()
+    if after and after >= LUA_TURBO_TARGET then
+        print(string.format('\ag[Triune]\ax MQ2Lua turbo raised from %d to %d instructions per frame (the default throttles every Lua script; saved in config/MQ2Lua.yaml). Run \ay/lua run triune\ax once if Triune still feels sluggish this session.', turbo, after))
+        tlog.info('core', 'MQ2Lua turboNum raised %d -> %d', turbo, after)
+    else
+        print(string.format('\ar[Triune WARNING]\ax MQ2Lua turbo is %d instructions per frame (default 500) and /lua conf turboNum %d did not take: every Lua loop and TLO read yields to the game constantly, which makes Triune sluggish. Set it by hand with \ay/lua conf turboNum %d\ax, then \ay/lua run triune\ax.', turbo, LUA_TURBO_TARGET, LUA_TURBO_TARGET))
+        tlog.warn('core', 'MQ2Lua turboNum=%d and raising it to %d failed (reads %s afterwards)', turbo, LUA_TURBO_TARGET, tostring(after))
+    end
+end
+
 local function runMainLoop()
+    ensureLuaTurbo()
     while open do
         tlog.tick()
         -- per-pass cache key for memoized resolvers (maTargetId, maPcId,
         -- boxPeersInZone, the XTarget snapshot); UI frames between passes
         -- share the same value.
         runtime.tickSerial = (runtime.tickSerial or 0) + 1
+        -- Pass timing (ms, excluding the trailing mq.delay) for /ac dump: a
+        -- sluggish character is almost always a pass that takes seconds, and
+        -- the per-plugin timers say which part.
+        local passT0 = os.clock()
+        local evT0 = passT0
         mq.doevents()
+        runtime.doeventsMs = (os.clock() - evT0) * 1000
         local nm = mq.TLO.Me.CleanName()
         if nm and nm ~= '' and nm ~= myName then
             myName = nm
@@ -22826,14 +23336,10 @@ local function runMainLoop()
                 runtime.applyFov()
             end
         end
-        -- Map overlays: the key rebuild (a string.format per waypoint) only
-        -- needs to happen ~1x/s; mutators call updateMapRadiusVisuals directly.
-        if (os.clock() - (runtime.lastMapVisualsAt or 0)) >= 1.0 then
-            runtime.lastMapVisualsAt = os.clock()
-            runtime.updateMapRadiusVisuals()
-        end
         if runtime.pluginManager and runtime.pluginManager.tick then
+            local pmT0 = os.clock()
             runtime.pluginManager.tick()
+            runtime.pluginTickMs = (os.clock() - pmT0) * 1000
         end
         -- drain one queued spell-mem per pass, out of combat, while stationary, and while not casting
         local memmed = false
@@ -22854,7 +23360,11 @@ local function runMainLoop()
             end
         end
         if ctrl.running and not memmed and (os.clock() - runtime.lastTick) > 0.4 then
+            local ctT0 = os.clock()
             local ok, err = pcall(combatTick)
+            local ctMs = (os.clock() - ctT0) * 1000
+            runtime.combatTickMs = ctMs
+            runtime.combatTickAvgMs = runtime.combatTickAvgMs and (runtime.combatTickAvgMs * 0.9 + ctMs * 0.1) or ctMs
             if not ok and err then
                 print('\ar[Triune error]\ax combatTick failed: ' .. tostring(err))
             end
@@ -22918,6 +23428,11 @@ local function runMainLoop()
             runtime.saveLoadout(true, true); runtime.autoDirty = false
         end
 
+        local passMs = (os.clock() - passT0) * 1000
+        runtime.loopPassMs = passMs
+        runtime.loopPassAvgMs = runtime.loopPassAvgMs and (runtime.loopPassAvgMs * 0.9 + passMs * 0.1) or passMs
+        if passMs > (runtime.loopPassMaxMs or 0) then runtime.loopPassMaxMs = passMs end
+
         mq.delay(memmed and 200 or 150)
     end
 end
@@ -22934,7 +23449,6 @@ function runtime.onMainLoopError(err)
     return runtime.lastCrash
 end
 if not xpcall(runMainLoop, runtime.onMainLoopError) then error(runtime.lastCrash, 0) end
-if runtime.clearMapRadiusVisuals then runtime.clearMapRadiusVisuals() end
 if runtime.fullStop then pcall(runtime.fullStop) end -- attack / nav / stick were left running on window close
 runtime.saveLoadout(true, true)
 tlog.close('script exit')

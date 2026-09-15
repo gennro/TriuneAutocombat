@@ -212,15 +212,17 @@ local function drawWindow()
         windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
     end
     core.preBeginWindow('cursor')
-    local open, draw = ImGui.Begin('Triune Cursor Manager###TriuneCursorManager', ctrl.show_cursor, windowFlags)
+    local open, draw = ImGui.Begin('Triune Cursor Manager###TriuneCursorManager', ctrl.show_cursor, core.windowFlags and core.windowFlags('cursor', windowFlags) or windowFlags)
     if not open then
         ctrl.show_cursor = false
+        if core.preEndWindow then core.preEndWindow('cursor', false) end
         ImGui.End()
         core.popTheme()
         core.saveLoadout(true)
         return
     end
     if not draw then
+        if core.preEndWindow then core.preEndWindow('cursor', false) end
         ImGui.End()
         core.popTheme()
         return
@@ -348,6 +350,7 @@ local function drawWindow()
         ImGui.EndTable()
     end
 
+    if core.preEndWindow then core.preEndWindow('cursor', false) end
     ImGui.End()
     core.popTheme()
 end

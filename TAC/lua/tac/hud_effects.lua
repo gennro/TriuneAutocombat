@@ -20,6 +20,7 @@ local plugin = {
     tickInterval       = 0.25,
     runOutOfCombatOnly = false,
     hasThread          = false,
+    uses               = { gamedb = 'Display Spell Info opens a database card' },
     -- Window owned by this plugin (drives the main-window header button)
     window             = { label = 'Effects', tooltip = 'Toggles the popout Effects & Songs window.', flag = 'show_effects_window', key = 'effects', lockFlag = 'eff_lock', desc = 'Popout Effects & Songs with timers', headerButton = true, order = 80 },
 }
@@ -415,7 +416,7 @@ function plugin.onDrawUI()
     core.pushTheme()
 
     if ctrl.eff_alpha then
-        ImGui.SetNextWindowBgAlpha(ctrl.eff_alpha)
+        ImGui.SetNextWindowBgAlpha(core.windowBgAlpha and core.windowBgAlpha('effects', ctrl.eff_alpha) or ctrl.eff_alpha)
     end
     ImGui.SetNextWindowSize(core.px(280), core.px(420), ImGuiCond.FirstUseEver)
 
@@ -430,8 +431,9 @@ function plugin.onDrawUI()
     ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, core.px(3), core.px(2))
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, core.px(2), core.px(1))
     local show
-    ctrl.show_effects_window, show = ImGui.Begin('Triune Effects & Songs v' .. (core.VERSION or '') .. '###triuneEffectsWindow', ctrl.show_effects_window, winFlags)
+    ctrl.show_effects_window, show = ImGui.Begin('Triune Effects & Songs v' .. (core.VERSION or '') .. '###triuneEffectsWindow', ctrl.show_effects_window, core.windowFlags and core.windowFlags('effects', winFlags) or winFlags)
     if not ctrl.show_effects_window then
+        if core.preEndWindow then core.preEndWindow('effects', true) end
         ImGui.End()
         ImGui.PopStyleVar(3)
         core.popTheme()
@@ -444,6 +446,10 @@ function plugin.onDrawUI()
 
         if ImGui.BeginPopupContextWindow('##effWinContextMenu') then
             if core.applyWindowScale then core.applyWindowScale('effects') end
+            if core.drawWindowMenuItems then
+                core.drawWindowMenuItems('effects', { header = false, lock = false, scale = false, layout = false, close = false })
+                ImGui.Separator()
+            end
             renderEffSettingsContent()
             ImGui.EndPopup()
         end
@@ -519,7 +525,7 @@ function plugin.onDrawUI()
                             print(string.format('\ag[Triune]\ax Added %s (ID %d) to blocked buffs.', eff.name, eff.spellId))
                         end
                         if ImGui.MenuItem('Display Spell Info##insp_' .. rowKey) then
-                            pcall(function() mq.TLO.Spell(eff.spellId).Inspect() end)
+                            core.inspectSpell(eff.spellId)
                         end
                     end
                     ImGui.EndPopup()
@@ -551,6 +557,8 @@ function plugin.onDrawUI()
             end
         end
     end
+
+    if core.preEndWindow then core.preEndWindow('effects', true) end
 
     ImGui.End()
     ImGui.PopStyleVar(3)

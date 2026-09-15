@@ -10,6 +10,9 @@ Inputs
 
 Outputs (all plain text, no runtime dependencies in Lua)
   <kind>.idx        one line per searchable entry; loaded in game in chunks
+                    (items.idx v2 carries a filter field per item, see
+                    ITEM_FILTER_FIELDS; --reindex-items rebuilds it from the
+                    .dat files already on disk, no dump needed)
   <kind>.<n>.dat    one line per record ("key=value|key=value|..."), chunked
                     so no single file passes GitHub's size limits; the index
                     carries "chunk:offset" so a lookup is one seek + one read
@@ -275,6 +278,51 @@ SPELL_COLS = [
 CLASS_ABBR = ['WAR', 'CLR', 'PAL', 'RNG', 'SHD', 'DRU', 'MNK', 'BRD', 'ROG', 'SHM', 'NEC', 'WIZ', 'MAG', 'ENC', 'BST', 'BER']
 
 
+# items.idx v2 filter field: these values of the item's index row (base tier,
+# or the only tier present), followed by ac,hp,mana of its top tier (L, E or
+# the same row), comma-joined. The Lua side packs them into a few numbers per
+# entry (PARSERS.items in gamedb.lua) for class / race / slot / type / level /
+# flag / stat filtering and sorting without touching the record files.
+ITEM_FILTER_FIELDS = ['classes', 'races', 'slots', 'itemtype', 'reqlevel']
+ITEM_FILTER_STATS = ['ac', 'hp', 'mana']
+# flags bits: 1 NO DROP, 2 MAGIC, 4 LORE, 8 click, 16 proc, 32 worn, 64 focus, 128 quest item
+ITEM_FLAG_BITS = [('NODROP', 1), ('magic', 2), ('LORE', 4), ('clickeffect', 8), ('proceffect', 16), ('worneffect', 32), ('focuseffect', 64), ('questitemflag', 128)]
+
+
+def item_filter_values(get):
+    """(classes, races, slots, itemtype, reqlevel, flags, ac, hp, mana) of one
+    item; `get(col)` returns the column value (None when absent). NODROP and
+    LORE are the .dat record keys (nodrop=0 in the dump means NO DROP; the
+    record carries NODROP=1 for it and loregroup for LORE)."""
+    def num(k):
+        v = get(k)
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                return 0
+    flags = 0
+    for k, bit in ITEM_FLAG_BITS:
+        if k == 'NODROP':
+            on = num('NODROP') > 0
+        elif k == 'LORE':
+            on = num('loregroup') != 0
+        else:
+            on = num(k) > 0
+        if on:
+            flags |= bit
+    return tuple(num(k) for k in ITEM_FILTER_FIELDS) + (flags,) + tuple(num(k) for k in ITEM_FILTER_STATS)
+
+
+def item_filter_text(base, top):
+    """The index field for an item from item_filter_values() of its index
+    row and of its top tier row (the same tuple when it has one tier)."""
+    top = top or base
+    return ','.join(str(v) for v in base + top[-3:])
+
+
 def npc_display_name(raw):
     return raw.lstrip('#').replace('_', ' ').replace('-', '-').strip() if raw else ''
 
@@ -347,16 +395,94 @@ def scan_quests(root):
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+ITEM_FILTER_KEYS = set(ITEM_FILTER_FIELDS + ITEM_FILTER_STATS + [k for k, _ in ITEM_FLAG_BITS] + ['loregroup'])
+
+
+def reindex_items(out_dir):
+    """Rewrites items.idx as v2 from the items.*.dat files already in
+    out_dir: the record refs and names of the existing index are kept, the
+    filter field is read from each record. Lets an installed database gain
+    the item filters without the SQL dump."""
+    t0 = time.time()
+    idx_path = os.path.join(out_dir, 'items.idx')
+    if not os.path.isfile(idx_path):
+        raise SystemExit('no items.idx under %s' % out_dir)
+    print('reindex items: reading records')
+    filt = {}
+    chunk = 1
+    while True:
+        path = os.path.join(out_dir, 'items.%d.dat' % chunk)
+        if not os.path.isfile(path):
+            break
+        with open(path, 'r', encoding='utf-8', newline='\n') as f:
+            for line in f:
+                rec = {}
+                for part in line.rstrip('\n').split('|'):
+                    k, _, v = part.partition('=')
+                    if k in ITEM_FILTER_KEYS or k == 'id':
+                        rec[k] = v
+                rec['LORE'] = rec.get('loregroup')
+                try:
+                    filt[int(rec['id'])] = item_filter_values(rec.get)
+                except (KeyError, ValueError):
+                    continue
+        print('  items.%d.dat (%d records, %.0fs)' % (chunk, len(filt), time.time() - t0))
+        chunk += 1
+    if chunk == 1:
+        raise SystemExit('no items.*.dat under %s' % out_dir)
+    with open(idx_path, 'r', encoding='utf-8', newline='\n') as f:
+        old = f.read().split('\n')
+    header = old[0] if old and old[0].startswith('#') else '#gamedb items v1 count=0'
+    version = int(re.search(r' v(\d+) ', header + ' ').group(1)) if re.search(r' v(\d+) ', header + ' ') else 1
+    nfields = 6 if version >= 2 else 5
+    lines = []
+    missing = 0
+    for line in old[1:]:
+        if not line:
+            continue
+        parts = line.split('|', nfields)
+        if len(parts) != nfields + 1:
+            continue
+        base_id, tiers, rb, re_, rl = parts[0], parts[1], parts[2], parts[3], parts[4]
+        name = parts[-1]
+        base_id = int(base_id)
+        ref = base_id if 'B' in tiers else base_id + (1000000 if 'E' in tiers else 2000000)
+        top = base_id + (2000000 if 'L' in tiers else 1000000 if 'E' in tiers else 0)
+        base = filt.get(ref)
+        if not base:
+            missing += 1
+            base = (0,) * 9
+        lines.append('%d|%s|%s|%s|%s|%s|%s' % (base_id, tiers, rb, re_, rl, item_filter_text(base, filt.get(top)), name))
+    with open(idx_path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('#gamedb items v2 count=%d\n' % len(lines))
+        f.write('\n'.join(lines) + '\n')
+    man_path = os.path.join(out_dir, 'manifest.txt')
+    if os.path.isfile(man_path):
+        with open(man_path, 'r', encoding='utf-8', newline='\n') as f:
+            man = f.read()
+        man = re.sub(r'^format=.*$', 'format=2', man, flags=re.M) if re.search(r'^format=', man, flags=re.M) else man.rstrip('\n') + '\nformat=2\n'
+        with open(man_path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(man)
+    if missing:
+        print('  ! %d index rows without a record (filter field left empty)' % missing)
+    print('done: items.idx v2, %d lines in %.0fs' % (len(lines), time.time() - t0))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--sql', required=True, help='mysqldump .sql of the server database')
+    ap.add_argument('--sql', default=None, help='mysqldump .sql of the server database')
     ap.add_argument('--quests', default=None, help='quest script root (one folder per zone)')
     ap.add_argument('--out', default=os.path.join(os.path.dirname(__file__), '..', 'TAC', 'resources', 'gamedb'))
     ap.add_argument('--chunk-mb', type=int, default=40, help='max size of one .dat chunk')
     ap.add_argument('--max-list', type=int, default=60, help='cap for per-record cross-reference lists')
+    ap.add_argument('--reindex-items', action='store_true', help='only rewrite items.idx (v2, with the filter field) from the .dat files in --out')
     args = ap.parse_args()
 
     out_dir = os.path.abspath(args.out)
+    if args.reindex_items:
+        return reindex_items(out_dir)
+    if not args.sql:
+        ap.error('--sql is required (or use --reindex-items)')
     os.makedirs(out_dir, exist_ok=True)
     for old in os.listdir(out_dir):
         if old.endswith('.dat') or old.endswith('.idx') or old == 'manifest.txt':
@@ -699,6 +825,7 @@ def main():
     icol = col_index('items', ['id'] + ITEM_COLS)
     items_w = ChunkWriter(out_dir, 'items', cap)
     item_at = {}                      # id -> (chunk, off)
+    item_filt = {}                    # id -> item_filter_values() tuple
     tiers_of = defaultdict(str)       # base id -> 'BEL' letters present
     n_items = 0
 
@@ -827,6 +954,10 @@ def main():
             fields.append((k, val))
         tier, base_id = tier_of(item_id)
         tiers_of[base_id] += tier
+        # index filter field: NODROP / LORE the way the record spells them
+        rec = dict(fields)
+        rec['LORE'] = rec.get('loregroup')
+        item_filt[item_id] = item_filter_values(rec.get)
         # E/L rows carry stats only; the reader takes sources (and the name)
         # from the base row. E/L-only items keep everything.
         if tier == 'B' or base_id not in item_name:
@@ -848,7 +979,7 @@ def main():
 
     # items index: one line per base item (plus E/L items with no base)
     with open(os.path.join(out_dir, 'items.idx'), 'w', encoding='utf-8', newline='\n') as f:
-        f.write('#gamedb items v1 count=%d\n' % len(tiers_of))
+        f.write('#gamedb items v2 count=%d\n' % len(tiers_of))
         for base_id in sorted(tiers_of):
             tiers = tiers_of[base_id]
             if 'B' in tiers:
@@ -857,12 +988,14 @@ def main():
                 ref = base_id + 1000000
             else:
                 ref = base_id + 2000000
+            top = base_id + (2000000 if 'L' in tiers else 1000000 if 'E' in tiers else 0)
             refs = []
             for letter, off in (('B', 0), ('E', 1000000), ('L', 2000000)):
                 at = item_at.get(base_id + off)
                 refs.append('%d:%d' % at if at else '')
             name = item_name.get(ref, '')
-            f.write('%d|%s|%s|%s|%s|%s\n' % (base_id, tiers, refs[0], refs[1], refs[2], esc(name)))
+            filt = item_filter_text(item_filt[ref], item_filt.get(top))
+            f.write('%d|%s|%s|%s|%s|%s|%s\n' % (base_id, tiers, refs[0], refs[1], refs[2], filt, esc(name)))
     print('  items written: %d records, %d index lines, %d chunks (%.0fs)' % (n_items, len(tiers_of), items_w.chunk, time.time() - t0))
 
     # ---- NPCs ----------------------------------------------------------------
@@ -981,7 +1114,7 @@ def main():
             f.write('%s|%s\n' % (esc(short), esc(zone_long[short])))
 
     with open(os.path.join(out_dir, 'manifest.txt'), 'w', encoding='utf-8', newline='\n') as f:
-        f.write('built=%s\nsource=%s\nitems=%d\nitem_index=%d\nnpcs=%d\nspells=%d\nformat=1\n' % (
+        f.write('built=%s\nsource=%s\nitems=%d\nitem_index=%d\nnpcs=%d\nspells=%d\nformat=2\n' % (
             time.strftime('%Y-%m-%d'), os.path.basename(args.sql), n_items, len(tiers_of), len(npc_at), len(spell_idx_lines)))
     total = sum(os.path.getsize(os.path.join(out_dir, fn)) for fn in os.listdir(out_dir))
     print('done: %s (%.1f MB) in %.0fs' % (out_dir, total / 1048576.0, time.time() - t0))

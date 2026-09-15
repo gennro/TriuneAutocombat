@@ -624,7 +624,6 @@ local EXPECTED_FIELDS = {
     { 'pull_min_hp_pct',         'number' },
     { 'pet_assist_at',           'number' },
     { 'pet_hold_enabled',        'boolean' },
-    { 'show_map_radius',         'boolean' },
     { 'show_cooldowns',          'boolean' },
     { 'cooldown_alpha',          'number' },
     { 'cooldown_locked',         'boolean' },
@@ -931,9 +930,9 @@ assert_eq(normalizeCommandKey(''), '', 'cmdKey: empty')
 
 -- ============================================================================
 -- 14. setTriuneMode(arg1, arg2) — partial test (mode/submode resolution only)
---     We can't fully test this because it calls setManualHunterPetHold and
---     clearMapRadiusVisuals, but we can test the normalizeCommandKey→mode
---     mapping by checking just the parsing portion.
+--     We can't fully test this because it calls setManualHunterPetHold,
+--     but we can test the normalizeCommandKey→mode mapping by checking
+--     just the parsing portion.
 -- ============================================================================
 print('--- setTriuneMode (mode parsing) ---')
 -- We test via normalizeCommandKey + the known dispatch table documented in the function
@@ -2478,6 +2477,90 @@ do
         isIgnored = function() return true end
     })
     assert_eq(hasActualNPCXtargetIgnored(), false, 'hasActualNPCXtarget: false when all spawns are on ignore list')
+
+    -- 5. Extended Target window overrides: Force / Ignore by spawn id
+    do
+        local function loadFirst(forceId)
+            return loadFunc(src, 'findFirstNPCXtarget', {
+                ctrl = { xtar_nav_dist = 150 },
+                mq = dummyMqXtar,
+                isHostileTarget = dummyIsHostile,
+                xtForceId = forceId,
+            })
+        end
+        -- Forced mob 201 sits at dist 180 (beyond the 150 default) with more HP
+        -- than 202: it still wins.
+        assert_eq(loadFirst(201)(false, nil, nil, nil, nil), 201,
+            'xtarget force: forced spawn wins over distance / lowest-HP selection')
+        -- ...unless it is unreachable, then normal selection resumes.
+        assert_eq(loadFirst(201)(false, nil, function(id) return id == 201 end, nil, nil), 202,
+            'xtarget force: unreachable forced spawn falls back to normal selection')
+        -- A dead forced spawn (203 is a corpse) is skipped too.
+        assert_eq(loadFirst(203)(false, nil, nil, nil, nil), 202,
+            'xtarget force: dead forced spawn falls back to normal selection')
+        assert_eq(loadFirst(0)(false, nil, nil, nil, nil), 202,
+            'xtarget force: no force -> unchanged selection')
+
+        -- Toggle helpers share one runtime table
+        local rt = { xtForceId = 0, xtIgnoreIds = {} }
+        local setXtForce = loadFunc(src, 'setXtForce', { runtime = rt })
+        local setXtIgnore = loadFunc(src, 'setXtIgnore', { runtime = rt })
+        local isXtIgnoredId = loadFunc(src, 'isXtIgnoredId', { runtime = rt })
+        setXtIgnore(202, true)
+        assert_true(isXtIgnoredId(202), 'xtarget ignore: setXtIgnore(on) marks the spawn id')
+        assert_true(not isXtIgnoredId(201), 'xtarget ignore: other spawn ids untouched')
+        setXtForce(202, true)
+        assert_eq(rt.xtForceId, 202, 'xtarget force: setXtForce(on) records the spawn id')
+        assert_true(not isXtIgnoredId(202), 'xtarget force: forcing a spawn clears its ignore')
+        setXtForce(201, true)
+        assert_eq(rt.xtForceId, 201, 'xtarget force: only one forced spawn at a time (latest wins)')
+        setXtIgnore(201, true)
+        assert_eq(rt.xtForceId, 0, 'xtarget ignore: ignoring the forced spawn releases the force')
+        setXtIgnore(201, false)
+        assert_true(not isXtIgnoredId(201), 'xtarget ignore: setXtIgnore(off) clears the spawn id')
+        setXtForce(202, true); setXtForce(999, false)
+        assert_eq(rt.xtForceId, 202, 'xtarget force: setXtForce(off) on another id is a no-op')
+        setXtForce(202, false)
+        assert_eq(rt.xtForceId, 0, 'xtarget force: setXtForce(off) releases')
+
+        -- forcedTargetId(): valid while alive+hostile+reachable, self-releasing otherwise
+        local msgs = {}
+        local forcedTargetId = loadFunc(src, 'forcedTargetId', {
+            runtime = rt,
+            isHostileTarget = function(id) return id == 201 or id == 301 end,
+            isUnreachable = function(id) return id == 301 end,
+            print = function(m) msgs[#msgs + 1] = m end,
+        })
+        assert_eq(forcedTargetId(), nil, 'forcedTargetId: nil with no force set')
+        rt.xtForceId = 201
+        assert_eq(forcedTargetId(), 201, 'forcedTargetId: returns the live, reachable forced spawn')
+        assert_eq(rt.xtForceId, 201, 'forcedTargetId: keeps the force while valid')
+        rt.xtForceId = 301
+        assert_eq(forcedTargetId(), nil, 'forcedTargetId: unreachable forced spawn is released')
+        assert_eq(rt.xtForceId, 0, 'forcedTargetId: release clears xtForceId')
+        assert_true(#msgs == 1 and msgs[1]:find('released', 1, true) ~= nil, 'forcedTargetId: release prints once')
+        rt.xtForceId = 555 -- not hostile (dead / gone)
+        assert_eq(forcedTargetId(), nil, 'forcedTargetId: dead forced spawn is released')
+        assert_eq(#msgs, 2, 'forcedTargetId: dead release prints')
+
+        -- isHostileTarget() treats an id-ignored spawn as not hostile
+        local hostileSpawn = setmetatable({
+            Dead = function() return false end, Type = function() return 'NPC' end, State = function() return 'STAND' end,
+        }, { __call = function() return true end })
+        local isHostileTarget = loadFunc(src, 'isHostileTarget', {
+            runtime = { xtIgnoreIds = { [5] = true } },
+            isSpawnPetOrPlayer = function() return false end,
+            mq = { TLO = { Spawn = function() return hostileSpawn end } },
+        })
+        assert_eq(isHostileTarget(6), true, 'isHostileTarget: live NPC is hostile')
+        assert_eq(isHostileTarget(5), false, 'isHostileTarget: id-ignored spawn is not hostile')
+        local isHostileNoSet = loadFunc(src, 'isHostileTarget', {
+            runtime = {},
+            isSpawnPetOrPlayer = function() return false end,
+            mq = { TLO = { Spawn = function() return hostileSpawn end } },
+        })
+        assert_eq(isHostileNoSet(5), true, 'isHostileTarget: no ignore set -> unchanged')
+    end
 end
 
 -- ============================================================================
@@ -7432,131 +7515,7 @@ do
     mockRecordScannedAAWithSkillFilter(mockRuntime, list2, map2, 'Unknown Non-Existent AA', 0, 1, 1, true, 'General', false, 0)
     assert_eq(#list2, 0, 'Suite 64: non-UI entry without AA ID rejected')
 
-    -- 3. MQ2AAspend delegation logic simulation
-    local commandsIssued = {}
-    local nativeTrained = nil
-    local function mockCmd(str) commandsIssued[#commandsIssued + 1] = str end
-    local function mockCmdf(fmt, ...) commandsIssued[#commandsIssued + 1] = string.format(fmt, ...) end
-
-    local function simulateCheckAutoSpend(ctrl, rt, unspent, pluginLoaded, targetName, now)
-        if not ctrl.auto_spend_aa then return false end
-        if unspent <= 0 then return false end
-        now = now or 100.0
-
-        if ctrl.auto_aa_delegate_aaspend and pluginLoaded then
-            local threshold = tonumber(ctrl.auto_spend_aa_threshold) or 0
-            if unspent >= threshold then
-                local delegTarget = rt.lastAASpendDelegatedTarget
-                local delegAt = rt.lastAASpendDelegatedAt or 0
-                local delegPts = rt.lastAASpendDelegatedPoints or 0
-                if targetName and delegTarget == targetName and (now - delegAt) >= 2.5 and unspent >= delegPts then
-                    rt.lastAASpendDelegatedTarget = nil
-                    nativeTrained = targetName
-                    return true
-                end
-
-                rt.lastAASpendDelegatedAt = now
-                rt.lastAASpendDelegatedTarget = targetName
-                rt.lastAASpendDelegatedPoints = unspent
-                local mode = (ctrl.auto_aa_aaspend_mode == 'brute') and 'brute now' or 'auto now'
-                mockCmdf('/aaspend bank %d', threshold)
-                mockCmd('/aaspend ' .. mode)
-                return true
-            end
-            return false
-        end
-        if targetName then
-            nativeTrained = targetName
-            return true
-        end
-        return false
-    end
-
-    local testCtrl = {
-        auto_spend_aa = true,
-        auto_spend_aa_threshold = 50,
-        auto_aa_delegate_aaspend = true,
-        auto_aa_aaspend_mode = 'auto'
-    }
-
-    -- 3a. Delegated spend below threshold -> no command
-    commandsIssued = {}
-    nativeTrained = nil
-    local res1 = simulateCheckAutoSpend(testCtrl, mockRuntime, 30, true, 'Combat Agility', 100.0)
-    assert_eq(res1, false, 'Suite 64: no spend when unspent < threshold')
-    assert_eq(#commandsIssued, 0, 'Suite 64: no commands issued when below threshold')
-
-    -- 3b. Delegated spend at/above threshold -> issues bank and auto now
-    commandsIssued = {}
-    nativeTrained = nil
-    local res2 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true, 'Combat Agility', 100.0)
-    assert_eq(res2, true, 'Suite 64: auto-spend triggered when unspent >= threshold')
-    assert_eq(#commandsIssued, 2, 'Suite 64: issued 2 commands (/aaspend bank, /aaspend auto now)')
-    assert_eq(commandsIssued[1], '/aaspend bank 50', 'Suite 64: bank set correctly')
-    assert_eq(commandsIssued[2], '/aaspend auto now', 'Suite 64: auto mode triggered')
-
-    -- 3c. Delegated spend in brute mode
-    testCtrl.auto_aa_aaspend_mode = 'brute'
-    commandsIssued = {}
-    nativeTrained = nil
-    local res3 = simulateCheckAutoSpend(testCtrl, mockRuntime, 75, true, 'Combat Agility', 100.0)
-    assert_eq(res3, true, 'Suite 64: brute auto-spend triggered')
-    assert_eq(commandsIssued[2], '/aaspend brute now', 'Suite 64: brute mode triggered')
-
-    -- 3d. Fallback: MQ2AAspend was delegated but points did not drop after >= 2.5s -> triggers native training
-    testCtrl.auto_aa_aaspend_mode = 'auto'
-    commandsIssued = {}
-    nativeTrained = nil
-    mockRuntime.lastAASpendDelegatedTarget = 'Combat Agility'
-    mockRuntime.lastAASpendDelegatedAt = 100.0
-    mockRuntime.lastAASpendDelegatedPoints = 60
-    local res4 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true, 'Combat Agility', 103.0)
-    assert_eq(res4, true, 'Suite 64: fallback triggered after MQ2AAspend stalled')
-    assert_eq(nativeTrained, 'Combat Agility', 'Suite 64: native trainer invoked for stalled target')
-    assert_eq(#commandsIssued, 0, 'Suite 64: no /aaspend command sent on native fallback')
-
-    -- 3e. Direct native spending when delegation is disabled
-    testCtrl.auto_aa_delegate_aaspend = false
-    nativeTrained = nil
-    local res5 = simulateCheckAutoSpend(testCtrl, mockRuntime, 60, true, 'Combat Agility', 104.0)
-    assert_eq(res5, true, 'Suite 64: native spending when delegation off')
-    assert_eq(nativeTrained, 'Combat Agility', 'Suite 64: native trainer invoked directly')
-    testCtrl.auto_aa_delegate_aaspend = true
-
-    -- 4. INI formatting simulation for MQ2AASpend_AAList
-    local function generateAASpendIniLines(priorities, orderMode, bankThreshold, isBrute)
-        local prioList = {}
-        for nm, enabled in pairs(priorities or {}) do
-            if enabled then
-                prioList[#prioList + 1] = { name = nm }
-            end
-        end
-        table.sort(prioList, function(a, b) return a.name:lower() < b.name:lower() end)
-
-        local lines = {}
-        lines[#lines + 1] = '[MQ2AASpend_Settings]'
-        lines[#lines + 1] = 'AutoSpend=1'
-        lines[#lines + 1] = isBrute and 'BruteForce=1' or 'BruteForce=0'
-        lines[#lines + 1] = string.format('BankPoints=%d', bankThreshold or 0)
-        lines[#lines + 1] = '[MQ2AASpend_AAList]'
-        for idx, item in ipairs(prioList) do
-            lines[#lines + 1] = string.format('%d=%s|M', idx, item.name)
-        end
-        return lines
-    end
-
-    local testPrios = {
-        ['Combat Agility'] = true,
-        ['Innate Run Speed'] = true
-    }
-    local iniLines = generateAASpendIniLines(testPrios, 'list', 25, false)
-    assert_eq(iniLines[1], '[MQ2AASpend_Settings]', 'Suite 64: INI settings section present')
-    assert_eq(iniLines[4], 'BankPoints=25', 'Suite 64: BankPoints set in INI')
-    assert_eq(iniLines[5], '[MQ2AASpend_AAList]', 'Suite 64: INI AAList section present')
-    assert_eq(iniLines[6], '1=Combat Agility|M', 'Suite 64: First priority formatted with |M')
-    assert_eq(iniLines[7], '2=Innate Run Speed|M', 'Suite 64: Second priority formatted with |M')
-
-    -- 5. Special tab AA detection & exclusion from MQ2AAspend INI
+    -- 3. Special tab AA detection (Fireworks and anything the scan put on the Special tab)
     local function simulateIsSpecialTabAA(name, cachedData)
         if not name or name == '' then return false end
         local lower = tostring(name):lower()
@@ -7577,48 +7536,31 @@ do
     assert_true(simulateIsSpecialTabAA('Glyph of Courage', sampleCache), 'Suite 64: glyph is special tab')
     assert_true(not simulateIsSpecialTabAA('Combat Agility', sampleCache), 'Suite 64: combat agility is not special tab')
 
-    -- INI sync must exclude Special tab abilities so MQ2AAspend does not fail
-    local mixedPrios = {
-        ['Combat Agility'] = true,
-        ['Alternately Advanced Fireworks'] = true,
-        ['Innate Run Speed'] = true
-    }
-    local function generateFilteredIniLines(priorities, cachedData)
-        local prioList = {}
-        for nm, enabled in pairs(priorities or {}) do
-            if enabled and not simulateIsSpecialTabAA(nm, cachedData) then
-                prioList[#prioList + 1] = { name = nm }
-            end
-        end
-        table.sort(prioList, function(a, b) return a.name:lower() < b.name:lower() end)
-        local lines = {}
-        for idx, item in ipairs(prioList) do
-            lines[#lines + 1] = string.format('%d=%s|M', idx, item.name)
-        end
-        return lines
-    end
-
-    local filteredIni = generateFilteredIniLines(mixedPrios, sampleCache)
-    assert_eq(#filteredIni, 2, 'Suite 64: only 2 non-special AAs written to INI')
-    assert_eq(filteredIni[1], '1=Combat Agility|M', 'Suite 64: first filtered AA')
-    assert_eq(filteredIni[2], '2=Innate Run Speed|M', 'Suite 64: second filtered AA')
-
-    -- 6. Verify triune.lua source tokens
+    -- 4. Source guards: the AA window trainer is the only purchase path.
+    --    Nothing may load, drive or configure MQ2AAspend any more.
     local triuneContent = readFile('TAC/lua/triune.lua')
-    assert_true(AA_CONTENT:find("AA.aaSpendLoaded") ~= nil, 'Suite 64: triune.lua defines AA.aaSpendLoaded')
-    assert_true(triuneContent:find("auto_aa_delegate_aaspend") ~= nil, 'Suite 64: triune.lua configures auto_aa_delegate_aaspend')
-    assert_true(triuneContent:find("auto_aa_aaspend_mode") ~= nil, 'Suite 64: triune.lua configures auto_aa_aaspend_mode')
-    assert_true(AA_CONTENT:find("/aaspend") ~= nil, 'Suite 64: triune.lua contains /aaspend commands')
-    assert_true(AA_CONTENT:find("mq.TLO.Skill%(name%)") ~= nil, 'Suite 64: triune.lua validates against mq.TLO.Skill')
+    local aaLower = AA_CONTENT:lower()
+    assert_true(aaLower:find('/aaspend', 1, true) == nil, 'Suite 64: auto_aa.lua issues no /aaspend command')
+    assert_true(aaLower:find('mq2aaspend load', 1, true) == nil, 'Suite 64: auto_aa.lua never loads the MQ2AAspend plugin')
+    assert_true(aaLower:find('aaspendloaded', 1, true) == nil, 'Suite 64: auto_aa.lua no longer probes for MQ2AAspend')
+    assert_true(aaLower:find('syncaastomq2aaspendini', 1, true) == nil, 'Suite 64: auto_aa.lua no longer writes the MQ2AASpend INI sections')
+    assert_true(aaLower:find('mq2aaspend_aalist', 1, true) == nil, 'Suite 64: no [MQ2AASpend_AAList] writer left')
+    assert_true(aaLower:find('auto_aa_delegate_aaspend', 1, true) == nil, 'Suite 64: no delegation toggle left in auto_aa.lua')
+    assert_true(aaLower:find('auto_aa_aaspend_mode', 1, true) == nil, 'Suite 64: no auto/brute mode left in auto_aa.lua')
+    assert_true(AA_CONTENT:find('Sync to INI', 1, true) == nil, 'Suite 64: Sync to INI button removed')
+    assert_true(AA_CONTENT:find('aaDelegateMaster', 1, true) == nil, 'Suite 64: MQ2AAspend delegation checkbox removed')
+    assert_true(AA_CONTENT:find('function plugin.onLoadoutSaved', 1, true) == nil, 'Suite 64: no loadout-save hook (it only fed the INI)')
+    assert_true(triuneContent:find('auto_aa_delegate_aaspend = true', 1, true) == nil, 'Suite 64: triune.lua no longer defaults delegation on')
+    assert_true(triuneContent:find("auto_aa_aaspend_mode     = 'auto'", 1, true) == nil, 'Suite 64: triune.lua no longer defaults the MQ2AAspend mode')
+    assert_true(triuneContent:find('c.auto_aa_delegate_aaspend = nil', 1, true) ~= nil, 'Suite 64: triune.lua strips the stale delegation key from old loadouts')
+    assert_true(AA_CONTENT:find("mq.TLO.Skill%(name%)") ~= nil, 'Suite 64: auto_aa.lua validates against mq.TLO.Skill')
     assert_true(triuneContent:find("CLASS_AAS") == nil, 'Suite 64: triune.lua purged hardcoded CLASS_AAS')
     assert_true(triuneContent:find("COMMON_AAS") == nil, 'Suite 64: triune.lua purged hardcoded COMMON_AAS')
-    assert_true(AA_CONTENT:find("AA.syncAAsToMQ2AASpendIni") ~= nil, 'Suite 64: triune.lua defines syncAAsToMQ2AASpendIni')
-    assert_true(AA_CONTENT:find("MQ2AASpend_AAList") ~= nil, 'Suite 64: triune.lua writes MQ2AASpend_AAList section')
-    assert_true(AA_CONTENT:find("Sync to INI") ~= nil, 'Suite 64: triune.lua provides Sync to INI button')
-    assert_true(AA_CONTENT:find("AA.isSpecialTabAA") ~= nil, 'Suite 64: triune.lua defines isSpecialTabAA')
-    assert_true(AA_CONTENT:find("Special tab ability") ~= nil, 'Suite 64: triune.lua trains Special tab abilities natively')
-    assert_true(AA_CONTENT:find("MQ2AAspend##aaDelegateMaster") ~= nil, 'Suite 64: triune.lua provides MQ2AAspend delegation checkbox')
-    assert_true(AA_CONTENT:find("falling back to Triune native window trainer") ~= nil, 'Suite 64: triune.lua provides native fallback when MQ2AAspend stalls')
+    assert_true(AA_CONTENT:find("AA.isSpecialTabAA") ~= nil, 'Suite 64: auto_aa.lua defines isSpecialTabAA')
+    assert_true(AA_CONTENT:find("function AA.startAATrainWorkflow") ~= nil, 'Suite 64: auto_aa.lua defines the AA window trainer')
+    assert_true(AA_CONTENT:find("return AA.startAATrainWorkflow(target.name, allowStop)", 1, true) ~= nil, 'Suite 64: prioritized auto-spend goes straight to the window trainer')
+    assert_true(AA_CONTENT:find("return AA.startAATrainWorkflow(effectiveName, allowStop)", 1, true) ~= nil, 'Suite 64: cap spender goes straight to the window trainer')
+    assert_true(AA_CONTENT:find("if unspent < AA.threshold() then return false end", 1, true) ~= nil, 'Suite 64: prioritized auto-spend waits for the Bank threshold')
 end
 
 -- ============================================================================
@@ -9092,8 +9034,8 @@ do
         'Suite 77: Supports /removebuff action')
     assert_true(effContent:find("mq%.cmdf%('/blockspell add me %%d'") ~= nil,
         'Suite 77: Supports /blockspell add me action')
-    assert_true(effContent:find("mq%.TLO%.Spell%(eff%.spellId%)%.Inspect%(%)") ~= nil,
-        'Suite 77: Supports Spell.Inspect action')
+    assert_true(effContent:find("core%.inspectSpell%(eff%.spellId%)") ~= nil,
+        'Suite 77: Display Spell Info goes through core.inspectSpell (database card, else the game window)')
 
     -- 6. Verify right-click context menu sorting controls
     assert_true(effContent:find("ImGui%.Combo%('##effSortCombo', curSortIdx, sortModes%)") ~= nil,
@@ -9224,6 +9166,17 @@ do
     assert_type(xtPlugin.onDrawUI, 'function', 'Suite 78: hud_xtarget defines onDrawUI')
     assert_true(xtContent:find('core%.addIgnore') ~= nil and triuneContent:find('addIgnore%s*=%s*runtime%.addIgnore') ~= nil,
         'Suite 78: hud_xtarget reaches the ignore list through the exported core API')
+    -- Per-row Force / Ignore toggles go through the exported core API too
+    for _, fn in ipairs({ 'setXtForce', 'setXtIgnore', 'isXtIgnoredId', 'getXtForceId' }) do
+        assert_true(xtContent:find('core%.' .. fn) ~= nil, 'Suite 78: hud_xtarget uses core.' .. fn)
+        assert_true(triuneContent:find('%f[%w_]' .. fn .. '%s*=') ~= nil, 'Suite 78: core API exports ' .. fn)
+    end
+    assert_true(xtContent:find("'F##xtForce_'", 1, true) ~= nil and xtContent:find("'I##xtIgnore_'", 1, true) ~= nil,
+        'Suite 78: each XTarget row draws Force and Ignore toggle buttons')
+    assert_true(triuneContent:find('local forceId = runtime.forcedTargetId()', 1, true) ~= nil,
+        'Suite 78: combatTick applies the forced XTarget ahead of mode selection')
+    assert_true(triuneContent:find('if runtime.forcedTargetId() then return false end', 1, true) ~= nil,
+        'Suite 78: checkAggroSwitch never switches away from a forced XTarget')
 
     -- Pet / friendly-PC slots are hidden by default (they are not hostiles)
     do
@@ -9790,14 +9743,73 @@ do
         'Suite 83: onZoned resets lastRangedAttackTargetId')
 
     -- 5. Style-aware engine paths
-    assert_true(triuneContent:find("if style ~= 'Melee' then\n        return ctrl.ranged_dist or 40", 1, true) ~= nil,
-        'Suite 83: desiredRange returns ranged_dist for non-Melee styles')
+    assert_true(triuneContent:find("if style ~= 'Melee' then\n        return rangedApproachDist(ctrl.ranged_dist or 40)", 1, true) ~= nil,
+        'Suite 83: desiredRange approaches to just inside ranged_dist for non-Melee styles')
+    -- Ranged/Spell approach margin: moveToward accepts arrival at target + 3,
+    -- while the engage gate's reach is the raw slider, so the approach must
+    -- sit at least 3 inside the slider or a character can stop "arrived" yet
+    -- "out of reach" and never fire.
+    do
+        local fn = triuneContent:match('local function rangedApproachDist%(reach%)\n(.-)\nend')
+        assert_true(fn ~= nil, 'Suite 83: rangedApproachDist located')
+        local rangedApproachDist = load('return function(reach)\n' .. fn .. '\nend')()
+        assert_eq(rangedApproachDist(40), 37, 'Suite 83: 40-unit slider approaches to 37')
+        assert_eq(rangedApproachDist(200), 197, 'Suite 83: 200-unit slider approaches to 197')
+        assert_eq(rangedApproachDist(5), 2, 'Suite 83: 5-unit slider still keeps the +3 arrival inside reach')
+        assert_eq(rangedApproachDist(nil), 37, 'Suite 83: nil slider falls back to the 40 default')
+        for _, reach in ipairs({ 5, 12, 40, 75, 200 }) do
+            assert_true(rangedApproachDist(reach) + 3 <= reach,
+                'Suite 83: arrival tolerance stays inside reach ' .. reach)
+        end
+    end
     assert_true(triuneContent:find("local isMelee = (not followOnly and (ctrl and ctrl.combat_style or 'Melee') == 'Melee')", 1, true) ~= nil,
         'Suite 83: moveToward arrival tolerance is style-aware')
     assert_true(triuneContent:find("if ctrl.mode == 'Puller' and (ctrl.combat_style or 'Melee') == 'Melee' and not mq.TLO.Me.Combat() then", 1, true) ~= nil,
         'Suite 83: Puller FIGHTING /attack on is Melee-only')
-    assert_true(triuneContent:find("reqRange = ctrl.pull_stand_back and (ctrl.pull_engage_dist or 100) or (ctrl.ranged_dist or 40)", 1, true) ~= nil,
-        'Suite 83: ranged pull closes to ctrl.ranged_dist')
+    -- Ranged / Spell / Pet pull methods stop at the Engagement Distance (capped
+    -- by what the bow or pull spell can reach) and fire the tag from there;
+    -- the combat style only takes over once the mob is tagged.
+    local _, tagReachUses = triuneContent:gsub("reqRange = runtime%.rangedApproachDist%(runtime%.pullTagReach%(pullStyle%)%)", '')
+    assert_eq(tagReachUses, 2, 'Suite 83: Camp and Hunt pulls both approach to pullTagReach (Engagement Distance)')
+    assert_true(triuneContent:find("local tagged = isXTargetId(id) or runtime.playerHasAggro(id)\n                    or (pullStyle ~= 'Ranged' and mq.TLO.Me.Combat())", 1, true) ~= nil,
+        'Suite 83: Hunt ranged pull is tagged by aggro, not by our own /attack on')
+    assert_true(triuneContent:find("mq.cmd('/autofire on')", 1, true) == nil,
+        'Suite 83: bow tag no longer relies on /autofire (this server ignores it)')
+    do
+        local fn = triuneContent:match('function runtime%.pullTagReach%(pullStyle%)\n(.-)\nend')
+        assert_true(fn ~= nil, 'Suite 83: pullTagReach located')
+        assert_true(fn:find("mq.TLO.Spell(name).Range()", 1, true) ~= nil, 'Suite 83: Spell pull reach capped by the pull spell range')
+        assert_true(fn:find("mq.TLO.Me.Inventory('ranged')", 1, true) ~= nil and fn:find("mq.TLO.Me.Inventory('ammo')", 1, true) ~= nil,
+            'Suite 83: Ranged pull reach capped by bow + ammo range')
+        assert_true(fn:find("if cap > 0 and cap < reach then return cap end", 1, true) ~= nil,
+            'Suite 83: pullTagReach only ever lowers the Engagement Distance')
+    end
+    -- After a bow tag, a Melee stance must revert the server attack mode before
+    -- its own /attack on, or it fires the bow at weapon reach.
+    assert_true(triuneContent:find("function runtime.meleeAttackOn()\n    if runtime.serverAttackMode == 'Ranged' then\n        runtime.revertAttackModeToMelee()\n        return false", 1, true) ~= nil,
+        'Suite 83: meleeAttackOn reverts a lingering Ranged attack mode first')
+    local _, rawMeleeAttackOn = triuneContent:gsub("if not mq%.TLO%.Me%.Combat%(%) then mq%.cmd%('/attack on'%) end", '')
+    assert_eq(rawMeleeAttackOn, 2, 'Suite 83: raw melee /attack on only inside meleeAttackOn and ensureRangedAutoAttack')
+    -- The Melee pull method never drags a Ranged/Spell character into weapon
+    -- reach: every stance approaches to its own Combat Distance and only the
+    -- tag differs (Spell stance tags with its pull spell from cast range).
+    assert_true(triuneContent:find("if pullStyle == 'Melee' then\n                reqRange = desiredRange(runtime.pullTargetId)", 1, true) ~= nil,
+        'Suite 83: Melee pull method approaches to the active style\'s desiredRange')
+    assert_true(triuneContent:find("if pullStyle == 'Melee' and combatStyle == 'Spell' then tagStyle = 'Spell' end", 1, true) ~= nil,
+        'Suite 83: Melee pull with Spell stance tags with the pull spell, never melee')
+    assert_true(triuneContent:find("if tagStyle == 'Melee' then\n                    if combatStyle == 'Ranged' then\n                        if not isCasting() then runtime.engageRangedAttack(tid) end", 1, true) ~= nil,
+        'Suite 83: Melee pull with Ranged stance tags via engageRangedAttack')
+    -- Hunt mode: a tagged mob is fought from the style's reach -- no more
+    -- stopMoving() every tick at the pull distance, and no engage flag until
+    -- the character is actually inside Combat Distance.
+    assert_true(triuneContent:find("if tagged and pullStyle ~= 'Melee' then", 1, true) ~= nil,
+        'Suite 83: Hunt post-tag branch defers to combat-style positioning')
+    assert_true(triuneContent:find("local atStyleReach = arrived or (distToId(id) <= runtime.styleReach(id) and hasLoS(id))", 1, true) ~= nil,
+        'Suite 83: Hunt engage gate uses the shared styleReach')
+    assert_true(triuneContent:find("elseif ctrl.combat_style == 'Ranged' then\n                            if not isCasting() then runtime.engageRangedAttack(id) end", 1, true) ~= nil,
+        'Suite 83: Hunt Melee pull routes a Ranged style through engageRangedAttack, not /attack on')
+    assert_true(triuneContent:find("if ctrl.mode ~= 'Manual' and (style == 'Melee' or not isCasting()) then\n                    moveToward(tid, desiredRange(tid))", 1, true) ~= nil,
+        'Suite 83: Ranged/Spell re-close waits for the current cast to finish')
     assert_true(triuneContent:find("or 100) or 40\n", 1, true) == nil,
         'Suite 83: no hard-coded 40 ranged pull distance remains')
     assert_true(triuneContent:find("Spell style: no auto-attack at all", 1, true) ~= nil,
@@ -9865,7 +9877,7 @@ do
     -- 1. Verify bank slider in UI enforces a minimum of 5 AA
     assert_true(AA_CONTENT:find("SliderInt('##autoAaThresh', curThresh, 5, 100, 'Bank: %d')", 1, true) ~= nil,
         'Suite 84: Bank slider enforces 5 minimum AA points in UI')
-    assert_true(AA_CONTENT:find("Reserve/Bank Threshold: %d AA points (min: 5)", 1, true) ~= nil,
+    assert_true(AA_CONTENT:find("Bank threshold: %d AA points (min: 5)", 1, true) ~= nil,
         'Suite 84: Bank slider tooltip indicates 5 minimum AA points')
 
     -- 2. Verify sanitizeCtrl clamps auto_spend_aa_threshold to at least 5
@@ -10381,6 +10393,7 @@ do
         { file = 'map',             id = 'map' },
         { file = 'boxnet',          id = 'boxnet' },
         { file = 'buttons',         id = 'buttons' },
+        { file = 'parcels',         id = 'parcels' },
     }
     for _, sp in ipairs(shipped) do
         local fn = assert(loadfile('TAC/lua/tac/' .. sp.file .. '.lua'))
@@ -10479,7 +10492,7 @@ do
     initPM()
     local pm = rt.pluginManager
     assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
-    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'spellbook' }
+    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'parcels', 'spellbook' }
     for _, id in ipairs(expected) do
         local p = pm.plugins[id]
         assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
@@ -10962,6 +10975,98 @@ do
         print = origPrint
     end
 
+    -- 7b. Map spawn scan: the nearest NPCs come from MQ's own search
+    -- (NearestSpawn, sorted in C++), static fields are read once per ID, and
+    -- the mesh is never queried per NPC (the old PathExists batch was a
+    -- second per tick in a 1500-spawn zone). A 1500-spawn zone used to cost
+    -- ~7000 TLO reads per scan on top of that.
+    do
+        local core, rec, ctrl, mq = makeCore()
+        local map = loadPlugin('map')
+        print = quietPrint
+        map.onInit(core)
+        local ZONE_NPCS = 400
+        local reads = { static = 0, live = 0, nearest = 0, pathExists = 0 }
+        local function spawnObj(id)
+            local d = id * 3 -- distance grows with the id: nearest = lowest ids
+            return setmetatable({
+                ID = function() return id end, Distance3D = function() return d end,
+                CleanName = function() reads.static = reads.static + 1 return 'npc ' .. id end,
+                Level = function() return 50 end, Class = { ShortName = function() return 'WAR' end },
+                ConColor = function() return 'blue' end, Aggressive = function() return id % 2 == 0 end,
+                X = function() reads.live = reads.live + 1 return id end, Y = function() return -id end, Z = function() return 0 end,
+                PctHPs = function() return 100 end, Dead = function() return false end,
+                LineOfSight = function() return true end,
+            }, { __call = function() return true end })
+        end
+        mq.TLO.SpawnCount = function(search) return function() return search:find('^npc') and ZONE_NPCS or 0 end end
+        mq.TLO.NearestSpawn = function(i, search)
+            reads.nearest = reads.nearest + 1
+            if not search:find('^npc radius ') then return setmetatable({}, { __call = function() return false end }) end
+            if i > ZONE_NPCS then return setmetatable({}, { __call = function() return false end }) end
+            return spawnObj(i)
+        end
+        mq.TLO.Spawn = function(id) return spawnObj(id) end
+        mq.TLO.Zone = { Name = function() return 'Plane of Hate' end, ShortName = function() return 'hateplaneb' end, ID = function() return 186 end }
+        mq.TLO.Group = { Members = function() return 0 end }
+        mq.TLO.Navigation = setmetatable({
+            MeshLoaded = function() return true end, Active = function() return false end,
+            PathExists = function() reads.pathExists = reads.pathExists + 1; return function() return true end end,
+            PathLength = function() reads.pathExists = reads.pathExists + 1; return function() return 10 end end,
+        }, { __call = function() return 'MQ2Nav' end })
+        mq.TLO.Plugin = function() return setmetatable({ IsLoaded = function() return true end }, { __call = function() return true end }) end
+        map.state.currentZoneShort = 'hateplaneb'
+        map.resetZoneRuntimeState()
+        map.scanZoneSpawns()
+        local sp = map.spawns
+        assert_eq(#sp.allNPCs, 150, 'Suite 89: scan keeps the 150 nearest NPCs')
+        assert_eq(sp.totalCount, ZONE_NPCS, 'Suite 89: scan reports the zone NPC total from SpawnCount')
+        assert_eq(sp.allNPCs[1].id, 1, 'Suite 89: nearest NPC first (MQ sorted the search)')
+        assert_eq(sp.allNPCs[150].id, 150, 'Suite 89: 150th nearest last')
+        assert_eq(reads.nearest, 150, 'Suite 89: one NearestSpawn call per kept NPC, none for the other ' .. (ZONE_NPCS - 150))
+        assert_eq(reads.static, 150, 'Suite 89: static fields (name / level / class / con) read once per NPC')
+        assert_eq(reads.live, 150, 'Suite 89: live fields (position / HP) read once per NPC')
+        assert_eq(sp.allNPCs[2].cleanName, 'npc 2', 'Suite 89: record carries the NPC name')
+        assert_eq(sp.allNPCs[2].isKos, true, 'Suite 89: record carries the KOS flag')
+        assert_eq(sp.allNPCs[2].conColor, 'BLUE', 'Suite 89: con colour normalised to upper case')
+        assert_eq(sp.allNPCs[7].x, 7, 'Suite 89: record carries the live position')
+        assert_true(map.profile.scanNpcs == 150 and map.profile.zoneSpawns == ZONE_NPCS, 'Suite 89: scan profile records counts')
+        -- second scan within 30 s: only the live fields are re-read
+        rec.nowMs = rec.nowMs + 500
+        map.scanZoneSpawns()
+        assert_eq(reads.static, 150, 'Suite 89: static fields come from the per-ID cache on the next scan')
+        assert_eq(reads.live, 300, 'Suite 89: live fields re-read every scan')
+        -- after 30 s the static fields are refreshed
+        rec.nowMs = rec.nowMs + 31000
+        map.scanZoneSpawns()
+        assert_eq(reads.static, 300, 'Suite 89: static fields refreshed after 30 s')
+        -- zone change drops the cache (spawn IDs restart per zone)
+        map.resetZoneRuntimeState()
+        map.scanZoneSpawns()
+        assert_eq(reads.static, 450, 'Suite 89: zone reset clears the static cache')
+        -- a dead NPC is dropped from the list
+        local origSpawn = spawnObj
+        spawnObj = function(id) local o = origSpawn(id); if id == 3 then o.Dead = function() return true end end; return o end
+        map.scanZoneSpawns()
+        assert_eq(#sp.allNPCs, 149, 'Suite 89: an NPC in its death animation is dropped')
+        spawnObj = origSpawn
+        -- the scan's measured cost stretches its interval (1/4 duty)
+        map.profile.scanAvgMs = 300
+        map.scanZoneSpawns()
+        assert_true(map.profile.scanEveryMs >= 1000, 'Suite 89: a 300 ms scan runs at most every 1.2 s (got ' .. tostring(map.profile.scanEveryMs) .. ')')
+
+        -- The mesh is never queried by the scan or the tick: PathExists /
+        -- PathLength are for click-to-navigate only.
+        map.tick()
+        assert_eq(reads.pathExists, 0, 'Suite 89: no per-NPC navmesh queries from the scan or the tick')
+        assert_true(map.navState.checkQueue == nil and map.navState.cache == nil, 'Suite 89: the PathExists batch queue is gone')
+        local mapSrc2 = readFile('TAC/lua/tac/map.lua')
+        for _, gone in ipairs({ 'processNavBatch', 'pathableOnly', 'COLOR_MODE_OPTIONS', 'Navmesh Status', '[CHECKING]' }) do
+            assert_true(mapSrc2:find(gone, 1, true) == nil, 'Suite 89: map plugin dropped navmesh validation: ' .. gone)
+        end
+        print = origPrint
+    end
+
     -- 8. pm.delay: yields the fiber until the condition / deadline, mq.delay outside a fiber
     do
         local mockMq = {
@@ -11043,7 +11148,7 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 18, 'Suite 89: eighteen shipped plugins own a window')
+        assert_eq(#W.all, 19, 'Suite 89: nineteen shipped plugins own a window')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
@@ -11289,10 +11394,10 @@ end
 
 
 -- ============================================================================
--- Suite 91: MQ2AAspend INI sync only when Auto-Spend is on and something changed
+-- Suite 91: Auto-spend through the AA window only (no MQ2AAspend, Bank gate)
 -- ============================================================================
 do
-    print('--- Suite 91: MQ2AAspend INI sync gating ---')
+    print('--- Suite 91: Auto-spend through the AA window only ---')
     local printed = {}
     local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
     local noop = function() end
@@ -11300,72 +11405,119 @@ do
     local cfgDir = os.getenv('TMPDIR') or '/tmp'
     local iniPath = cfgDir .. '/TestServer_Tester.ini'
     os.remove(iniPath)
+    local unspent = 0
+    local aaInfo = {
+        ['Combat Agility'] = { rank = 1, maxRank = 5, cost = 3, minLevel = 51, id = 101, type = 2 },
+        ['Innate Regeneration'] = { rank = 0, maxRank = 3, cost = 2, minLevel = 51, id = 102, type = 1 },
+        ['Alternately Advanced Fireworks'] = { rank = 0, maxRank = 1, cost = 25, minLevel = 1, id = 17788, type = 4 },
+    }
+    local function altAbility(name)
+        local info = aaInfo[name]
+        if not info then return setmetatable({}, { __call = function() return nil end }) end
+        return setmetatable({
+            Rank = function() return info.rank end, MaxRank = function() return info.maxRank end,
+            Cost = function() return info.cost end, MinLevel = function() return info.minLevel end,
+            CanTrain = function() return true end, ID = function() return info.id end, Type = function() return info.type end,
+        }, { __call = function() return true end })
+    end
     local mq = {
         configDir = cfgDir,
         event = noop, unevent = noop,
         cmd = function(c) cmds[#cmds + 1] = c end,
         cmdf = function(f, ...) cmds[#cmds + 1] = string.format(f, ...) end,
         TLO = {
-            Me = { CleanName = function() return 'Tester' end, Dead = function() return false end, Combat = function() return false end, Moving = function() return false end },
+            Me = {
+                CleanName = function() return 'Tester' end, Dead = function() return false end,
+                Combat = function() return false end, CombatState = function() return 'ACTIVE' end,
+                AutoFire = function() return false end, XTHaterCount = function() return 0 end,
+                Moving = function() return false end, Level = function() return 60 end,
+                AAPoints = function() return unspent end, AAPointsSpent = function() return 10 end,
+                AltAbility = altAbility,
+            },
+            AltAbility = altAbility,
             EverQuest = { Server = function() return 'TestServer' end },
             Plugin = function() return setmetatable({ IsLoaded = function() return true end }, { __call = function() return true end }) end,
         },
     }
     local core = {
-        ctrl = { plugins = {}, auto_spend_aa = false, auto_aa_delegate_aaspend = true, auto_aa_priorities = { ['Combat Agility'] = true, ['Innate Regeneration'] = true }, auto_spend_aa_threshold = 5 },
+        ctrl = { plugins = {}, auto_spend_aa = true, auto_aa_priorities = { ['Combat Agility'] = true, ['Innate Regeneration'] = true }, auto_spend_aa_threshold = 20 },
         mq = mq, ImGui = setmetatable({}, { __index = function() return noop end }),
-        runtime = { isCasting = function() return false end, cachedAAData = { ['Combat Agility'] = { cost = 3 }, ['Innate Regeneration'] = { cost = 2 } } },
+        runtime = {
+            isCasting = function() return false end,
+            cachedAAData = {
+                ['Combat Agility'] = { cost = 3, rank = 1, maxRank = 5, category = 'Archetype' },
+                ['Innate Regeneration'] = { cost = 2, rank = 0, maxRank = 3, category = 'General' },
+                ['Alternately Advanced Fireworks'] = { cost = 25, rank = 0, maxRank = 1, category = 'Special' },
+            },
+        },
         DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '2.15',
     }
     local origPrint = print
     print = quietPrint
+    -- The per-AA retry spacing (30 s) and the cap spender compare against
+    -- os.clock(), which is still tiny this early in the run: push it ahead.
+    local origClock = os.clock
+    os.clock = function() return origClock() + 1000 end
     local aaPlugin = assert(loadfile('TAC/lua/tac/auto_aa.lua'))()
     aaPlugin.onInit(core)
     local AA = aaPlugin.AA
-    local function countLoads()
-        local n = 0
-        for _, c in ipairs(cmds) do if c == '/aaspend load' then n = n + 1 end end
-        return n
+    assert_true(aaPlugin.onLoadoutSaved == nil, 'Suite 91: the plugin has no loadout-save hook any more')
+    local function noAASpendCommands()
+        for _, c in ipairs(cmds) do
+            if c:lower():find('aaspend', 1, true) then return false end
+        end
+        return true
     end
 
-    -- Auto-Spend off: saving the loadout must not touch MQ2AAspend at all
-    aaPlugin.onLoadoutSaved()
-    aaPlugin.onLoadoutSaved()
-    assert_eq(countLoads(), 0, 'Suite 91: no /aaspend load while Auto-Spend is off')
-    assert_true(io.open(iniPath, 'r') == nil, 'Suite 91: INI not written while Auto-Spend is off')
+    -- Below the Bank threshold nothing happens, even with affordable priorities
+    unspent = 12
+    AA.lastAutoSpendAAAt = -100
+    assert_eq(AA.checkAutoSpendAA(), false, 'Suite 91: no purchase below the Bank threshold')
+    assert_true(AA.pendingAATrain == nil, 'Suite 91: no window workflow started below the threshold')
 
-    -- Auto-Spend on: first save syncs once, repeated saves are no-ops
-    core.ctrl.auto_spend_aa = true
-    aaPlugin.onLoadoutSaved()
-    assert_eq(countLoads(), 1, 'Suite 91: first save with Auto-Spend on syncs and reloads MQ2AAspend')
-    local f = io.open(iniPath, 'r')
-    assert_true(f ~= nil, 'Suite 91: INI written on first sync')
-    local iniText = f and f:read('*a') or ''
-    if f then f:close() end
-    assert_true(iniText:find('1=Innate Regeneration|M', 1, true) ~= nil, 'Suite 91: cheapest priority listed first')
-    assert_true(iniText:find('BankPoints=5', 1, true) ~= nil, 'Suite 91: threshold written to BankPoints')
-    for _ = 1, 5 do aaPlugin.onLoadoutSaved() end
-    assert_eq(countLoads(), 1, 'Suite 91: unchanged priorities do not rewrite the INI or reload the plugin')
-    local okSync, wrote = AA.syncAAsToMQ2AASpendIni(true)
-    assert_true(okSync == true and wrote == false, 'Suite 91: sync reports no write when nothing changed')
+    -- At the threshold the cheapest priority goes straight to the window trainer
+    unspent = 20
+    AA.lastAutoSpendAAAt = -100
+    assert_eq(AA.checkAutoSpendAA(), true, 'Suite 91: purchase starts once the pool reaches the threshold')
+    assert_true(AA.pendingAATrain ~= nil, 'Suite 91: the AA window workflow is the purchase path')
+    assert_eq(AA.pendingAATrain and AA.pendingAATrain.name, 'Innate Regeneration', 'Suite 91: cheapest priority first')
+    assert_eq(AA.pendingAATrain and AA.pendingAATrain.step, 'open', 'Suite 91: workflow begins by opening the AA window')
+    assert_true(aaPlugin.wantsCombatHold(), 'Suite 91: combat loop holds while the window workflow runs')
+    assert_true(noAASpendCommands(), 'Suite 91: no /aaspend or plugin-load command issued')
+    AA.abortAATrain(AA.pendingAATrain)
 
-    -- A real change syncs again; a forced manual sync always writes
-    core.ctrl.auto_spend_aa_threshold = 9
-    aaPlugin.onLoadoutSaved()
-    assert_eq(countLoads(), 2, 'Suite 91: changed threshold triggers one more sync')
-    aaPlugin.onLoadoutSaved()
-    assert_eq(countLoads(), 2, 'Suite 91: still idempotent after the change')
-    AA.syncAAsToMQ2AASpendIni(true, true)
-    assert_eq(countLoads(), 3, 'Suite 91: forced (manual) sync rewrites even when unchanged')
+    -- A second call while a workflow is pending does nothing
+    unspent = 40
+    AA.lastAutoSpendAAAt = -100
+    AA.checkAutoSpendAA()
+    local first = AA.pendingAATrain
+    assert_eq(AA.checkAutoSpendAA(), false, 'Suite 91: one workflow at a time')
+    assert_true(AA.pendingAATrain == first, 'Suite 91: pending workflow untouched by the second call')
+    AA.abortAATrain(AA.pendingAATrain)
 
-    -- Delegation off: never sync from the loadout hook
-    core.ctrl.auto_aa_delegate_aaspend = false
-    core.ctrl.auto_spend_aa_threshold = 11
-    aaPlugin.onLoadoutSaved()
-    assert_eq(countLoads(), 3, 'Suite 91: no sync from the loadout hook when MQ2AAspend delegation is off')
+    -- No priorities: the cap spender dumps into Fireworks through the same trainer
+    core.ctrl.auto_aa_priorities = {}
+    unspent = 30
+    AA.lastAutoSpendAAAt = -100
+    assert_eq(AA.checkAutoSpendAA(), true, 'Suite 91: cap spender fires at the threshold with no priorities')
+    assert_eq(AA.pendingAATrain and AA.pendingAATrain.name, 'Alternately Advanced Fireworks', 'Suite 91: cap spender trains the fireworks AA natively')
+    assert_eq(AA.pendingAATrain and AA.pendingAATrain.targetTab, 4, 'Suite 91: fireworks is looked up on the Special tab')
+    AA.abortAATrain(AA.pendingAATrain)
+
+    -- Spend Now ignores the Bank threshold
+    core.ctrl.auto_aa_priorities = { ['Combat Agility'] = true }
+    unspent = 5
+    assert_eq(AA.manualSpendAA(), true, 'Suite 91: Spend Now buys below the threshold')
+    assert_eq(AA.pendingAATrain and AA.pendingAATrain.name, 'Combat Agility', 'Suite 91: Spend Now trains the top priority')
+    AA.abortAATrain(AA.pendingAATrain)
+
+    -- Nothing ever touched MQ2AAspend or the character INI
+    assert_true(noAASpendCommands(), 'Suite 91: never issued an /aaspend command')
+    assert_true(io.open(iniPath, 'r') == nil, 'Suite 91: the character INI is never written')
 
     aaPlugin.onDestroy()
     os.remove(iniPath)
+    os.clock = origClock
     print = origPrint
 end
 
@@ -11816,7 +11968,7 @@ do
     initPM()
     local pm = rt.pluginManager
     S.shipped = #pm.pluginOrder
-    assert_eq(S.shipped, 19, 'Suite 92: all shipped plugins still load under the load-time guards')
+    assert_eq(S.shipped, 20, 'Suite 92: all shipped plugins still load under the load-time guards')
 
     -- Soft plugin dependencies (`uses`): normalised at registration, reverse-listed, state-tracked
     assert_eq(#pm.normalizeUses(nil), 0, 'Suite 92: no uses -> empty list')
@@ -11828,7 +11980,7 @@ do
     assert_eq(S.ids(pm.plugins.buttons.uses), 'boxnet', 'Suite 92: buttons declares it uses boxnet')
     assert_eq(S.ids(pm.plugins.dps.uses), 'boxnet', 'Suite 92: dps declares it uses boxnet')
     assert_eq(S.ids(pm.plugins.hud_group.uses), 'boxnet', 'Suite 92: hud_group declares it uses boxnet')
-    assert_eq(S.ids(pm.plugins.hud_spellgems.uses), 'spellbook', 'Suite 92: hud_spellgems declares it uses spellbook')
+    assert_eq(S.ids(pm.plugins.hud_spellgems.uses), 'gamedb,spellbook', 'Suite 92: hud_spellgems declares it uses gamedb and spellbook')
     assert_eq(#pm.plugins.boxnet.uses, 0, 'Suite 92: boxnet uses nothing')
     assert_eq(S.ids(pm.usedBy('boxnet')), 'buttons,dps,hud_group', 'Suite 92: usedBy(boxnet) lists the three consumers in load order')
     assert_eq(S.ids(pm.usedBy('spellbook')), 'hud_spellgems', 'Suite 92: usedBy(spellbook) lists the gem bar')
@@ -13303,10 +13455,16 @@ end)()
     assert_eq(items[2].sub, 'Haste - Pack 1', 'Suite 96: clicky shows its spell and location')
 
     -- Box Control presets (Box Net quick actions as buttons)
+    assert_eq(T.browser.boxScope, 'bar', 'Suite 96: the Box Control tab defaults to the hotbar switch scope')
     local box = T.scanBoxControl()
     assert_eq(#box, #T.BOX_PRESETS, 'Suite 96: Box Control tab lists every preset')
-    assert_eq(box[1].button.cmd, '/ac net all run', 'Suite 96: Run preset -> /ac net all run')
-    assert_eq(box[1].button.label, 'Run (all)', 'Suite 96: preset label carries the scope')
+    assert_eq(box[1].button.cmd, '/ac net {scope} run', 'Suite 96: hotbar-switch Run preset carries the {scope} token')
+    assert_eq(box[1].button.label, 'Run', 'Suite 96: hotbar-switch presets keep the bare name')
+    assert_true(T.usesBoxScope(box[1].button.cmd) and not T.usesBoxScope('/ac net all run'), 'Suite 96: usesBoxScope spots the token')
+    T.browser.boxScope = 'all'
+    box = T.scanBoxControl()
+    assert_eq(box[1].button.cmd, '/ac net all run', 'Suite 96: Run preset (all) -> /ac net all run')
+    assert_eq(box[1].button.label, 'Run (all)', 'Suite 96: fixed-scope preset label carries the scope')
     local follow = nil
     for _, e in ipairs(box) do if e.name == 'Follow Me' then follow = e end end
     assert_eq(follow.button.cmd, '/ac net all ma ${Me.CleanName}\n/ac net all assist chase', 'Suite 96: Follow Me is ma <me> + assist chase (name expanded per box)')
@@ -13322,10 +13480,53 @@ end)()
     assert_eq(table.concat(cmds, ','), '/ac net all ma ${Me.CleanName},/ac net all assist chase', 'Suite 96: a two-line preset runs both /ac net lines')
     local hbBox = T.hotbars()[1]
     local boxSet = T.addBoxControlSet('all', hbBox)
-    assert_eq(boxSet, 'Box Control', 'Suite 96: Add All creates a Box Control set')
-    assert_eq(T.lastAssignedIndex('Box Control'), #T.BOX_PRESETS, 'Suite 96: the set holds every preset')
-    assert_eq(hbBox.sets[#hbBox.sets], 'Box Control', 'Suite 96: the set is added to the hotbar as a tab')
+    assert_eq(boxSet, 'Box Control (all)', 'Suite 96: Add All names a fixed-scope set after its scope')
+    assert_eq(T.lastAssignedIndex('Box Control (all)'), #T.BOX_PRESETS, 'Suite 96: the set holds every preset')
+    assert_eq(hbBox.sets[#hbBox.sets], 'Box Control (all)', 'Suite 96: the set is added to the hotbar as a tab')
     assert_eq(T.addBoxControlSet('zone', nil), 'Box Control (zone)', 'Suite 96: scoped set names stay unique')
+
+    -- Live scope: `{scope}` buttons follow the hotbar's Group / Zone / All switch at press time
+    assert_eq(T.hotbarUsesBoxScope(hbBox), false, 'Suite 96: fixed-scope sets do not bring up the switch')
+    local liveSet = T.addBoxControlSet('bar', hbBox)
+    assert_eq(liveSet, 'Box Control', 'Suite 96: the hotbar-switch set is plain "Box Control"')
+    assert_eq(T.hotbarUsesBoxScope(hbBox), true, 'Suite 96: a bar holding {scope} buttons shows the switch')
+    assert_eq(T.hotbarBoxScope(hbBox), 'all', 'Suite 96: a new hotbar sends to all boxes')
+    cmds = {}
+    T.fireButton('Box Control', 1, hbBox)
+    assert_eq(cmds[#cmds], '/ac net all run', 'Suite 96: {scope} resolves to the hotbar scope when clicked (all)')
+    assert_eq(T.setHotbarBoxScope(hbBox, 'group', 1), true, 'Suite 96: setHotbarBoxScope switches the bar')
+    assert_eq(T.setHotbarBoxScope(hbBox, 'group', 1), false, 'Suite 96: ...and reports no change when already set')
+    assert_eq(T.setHotbarBoxScope(hbBox, 'bogus', 1), false, 'Suite 96: ...and refuses unknown scopes')
+    assert_eq(T.hotbarBoxScope(hbBox), 'group', 'Suite 96: the switch persists on the hotbar')
+    cmds = {}
+    T.fireButton('Box Control', 1, hbBox)
+    assert_eq(cmds[#cmds], '/ac net group run', 'Suite 96: the same button now goes to the group')
+    local liveFollow = nil
+    for i, key in pairs(T.getDb().sets['Box Control']) do if T.getDb().buttons[key].label == 'Follow Me' then liveFollow = i end end
+    cmds = {}
+    T.fireButton('Box Control', liveFollow, hbBox)
+    assert_eq(table.concat(cmds, ','), '/ac net group ma ${Me.CleanName},/ac net group assist chase', 'Suite 96: every line of a multi-line {scope} button is resolved')
+    cmds = {}
+    T.execBySetIndex('Box Control', 1)
+    assert_eq(cmds[#cmds], '/ac net group run', 'Suite 96: /ac btn exec resolves through the hotbar showing the set')
+    assert_eq(T.resolveBoxScope('/ac net {scope} camp', nil), '/ac net all camp', 'Suite 96: no hotbar -> all')
+    assert_eq(T.resolveBoxScope('/ac pause', hbBox), '/ac pause', 'Suite 96: commands without the token pass through')
+    T.handleCommand({ 'scope', 'zone' })
+    assert_eq(T.hotbarBoxScope(hbBox), 'zone', 'Suite 96: /ac btn scope zone targets the bar holding {scope} buttons')
+    T.handleCommand({ 'scope', 'next' })
+    assert_eq(T.hotbarBoxScope(hbBox), 'all', 'Suite 96: /ac btn scope next cycles group -> zone -> all')
+    T.handleCommand({ 'scope', 'next' })
+    assert_eq(T.hotbarBoxScope(hbBox), 'group', 'Suite 96: ...and wraps around')
+    T.handleCommand({ 'scope', 'grp', '1' })
+    assert_eq(T.hotbarBoxScope(hbBox), 'group', 'Suite 96: grp alias + explicit hotbar number')
+    T.handleCommand({ 'scope', 'all', '99' })
+    assert_eq(T.hotbarBoxScope(hbBox), 'group', 'Suite 96: an unknown hotbar number changes nothing')
+    T.removeSetFromHotbar(hbBox, 'Box Control')
+    assert_eq(T.hotbarUsesBoxScope(hbBox), false, 'Suite 96: removing the set hides the switch again')
+    local reloaded = T.normalizeDb({ version = T.getDb().version, buttons = {}, sets = {}, characters = { [T.charKey()] = { hotbars = { { title = 'x', boxScope = 'nope' }, { title = 'y', boxScope = 'zone' } } } } })
+    local rh = reloaded.characters[T.charKey()].hotbars
+    assert_true(rh[1].boxScope == 'all' and rh[2].boxScope == 'zone' and rh[1].showScopeBar == true, 'Suite 96: load clamps boxScope and defaults showScopeBar')
+    T.browser.boxScope = 'bar'
 
     -- Triune slash commands pick list (curated core list + live plugin help lines)
     core.runtime.pluginManager = { helpLines = function()
@@ -13403,7 +13604,7 @@ end)()
     -- /ac btn add <what> (hotbar 1's only set is the Box Control set added above)
     T.state.activeSet = {}
     inst.onCommand('btn', { 'btn', 'add', 'discs' })
-    assert_true(T.browser.open and T.browser.tab == 'Disc' and T.browser.target and T.browser.target.hbId == 1 and T.browser.target.setName == 'Box Control', 'Suite 96: /ac btn add discs opens the browser on the Discs tab targeting the first hotbar with a set')
+    assert_true(T.browser.open and T.browser.tab == 'Disc' and T.browser.target and T.browser.target.hbId == 1 and T.browser.target.setName == 'Box Control (all)', 'Suite 96: /ac btn add discs opens the browser on the Discs tab targeting the first hotbar with a set')
     inst.onCommand('btn', { 'btn', 'add', 'box' })
     assert_eq(T.browser.tab, 'Box', 'Suite 96: /ac btn add box opens the Box Control tab')
     T.browser.open = false
@@ -13414,6 +13615,16 @@ end)()
     okDraw2, errDraw2 = pcall(inst.onDrawUI)
     assert_true(okDraw2, 'Suite 96: browser window renders under the mock (' .. tostring(errDraw2) .. ')')
     T.browser.open = false
+    -- A bar holding hotbar-switch buttons draws the Group / Zone / All row (both layouts).
+    local hbLive = T.hotbars()[1]
+    T.addBoxControlSet('bar', hbLive)
+    assert_true(T.hotbarUsesBoxScope(hbLive), 'Suite 96: the live-scope set is back on hotbar 1 for the draw pass')
+    okDraw2, errDraw2 = pcall(inst.onDrawUI)
+    assert_true(okDraw2, 'Suite 96: hotbar with the box scope switch renders under the mock (' .. tostring(errDraw2) .. ')')
+    hbLive.compact = true
+    okDraw2, errDraw2 = pcall(inst.onDrawUI)
+    assert_true(okDraw2, 'Suite 96: compact hotbar with the box scope switch renders under the mock (' .. tostring(errDraw2) .. ')')
+    hbLive.compact = false
 
     -- 20. Destroy releases the binds and the Box Network subscription
     inst.onDestroy()
@@ -13755,7 +13966,7 @@ end)()
 
     -- 5. Group HUD box rows and DPS sharing (source contracts + DPS unit run)
     local gwSrc = readFile('TAC/lua/tac/hud_group.lua')
-    assert_true(gwSrc:find("ctrl.gw_show_boxes ~= false and core.boxnet", 1, true) ~= nil, 'Suite 97: Group HUD lists Box Network peers when enabled')
+    assert_true(gwSrc:find("ctrl.gw_show_boxes == true and core.boxnet", 1, true) ~= nil, 'Suite 97: Group HUD lists Box Network peers only when opted in')
     assert_true(gwSrc:find("isBox = true", 1, true) ~= nil, 'Suite 97: box rows are flagged')
     assert_true(gwSrc:find("accent(GOLD, '[Box]')", 1, true) ~= nil, 'Suite 97: box rows carry a [Box] badge')
     assert_true(gwSrc:find("otherZone = not inZone", 1, true) ~= nil, 'Suite 97: boxes in another zone render as other-zone')
@@ -14306,8 +14517,6 @@ end)()
         getMaTargetInfo = function() return S.maInfo end,
         pluginManager = { drawHeaderButtons = function(n) S.hdrBtnArg = n return S.hdrBtnCount or 3 end },
         initPluginManager = function() end,
-        clearMapRadiusVisuals = function() S.mapClears = (S.mapClears or 0) + 1 end,
-        updateMapRadiusVisuals = function() S.mapUpdates = (S.mapUpdates or 0) + 1 end,
         trackStartTime = os.time() - 3600, startAA = 10, currentAA = 14.5, startPlat = 100, currentPlat = 400,
     }
     local UI = {}
@@ -14330,6 +14539,11 @@ end)()
     UI.getConColorRgb = function() return { 1, 1, 1, 1 } end
     UI.drawStatusProgressBar = function(frac, w, h, text) mockImGui.ProgressBar(frac, w, h, text) end
     UI.pushTheme, UI.popTheme, UI.preBeginWindow, UI.postBeginWindow = function() end, function() end, function() end, function() end
+    -- Shared window options (title bar / ghost / menu) are covered by their own suite; pass-through here.
+    UI.preEndWindow = function() end
+    UI.windowFlags = function(_, f) return f end
+    UI.windowBgAlpha = function(_, a) return a end
+    UI.drawWindowMenuItems = function() end
 
     -- MODES table straight from the source, plus the two code blocks under test
     local function slice(startMarker, endMarker)
@@ -14405,7 +14619,6 @@ end)()
     S.comboRet['##primaryMiniMode'] = nil
     assert_eq(ctrl.mode, 'Assist', 'Suite 100: primary combo switches the mode')
     assert_eq(ctrl.submode, 'Chase', 'Suite 100: switching mode resets the submode to its first entry')
-    assert_true((S.mapClears or 0) >= 1, 'Suite 100: mode change clears the map radius visuals')
     S.comboRet['##subMiniMode'] = 3
     draw()
     S.comboRet['##subMiniMode'] = nil
@@ -14541,7 +14754,6 @@ end)()
     draw()
     S.clickLabel = nil
     assert_true(ctrl.camp_loc ~= nil and ctrl.camp_loc.x == 30 and ctrl.camp_loc.y == 40, 'Suite 100: camp row - Set Here uses my position')
-    assert_true((S.mapUpdates or 0) >= 1, 'Suite 100: camp row - Set Here refreshes the map visuals')
     ME.x, ME.y = 0, 0
     out = draw()
     assert_true(out:find('50ft away', 1, true) ~= nil, 'Suite 100: camp row - distance to camp')
@@ -14691,7 +14903,7 @@ end)()
     end
     local code = slice('function UI.setTooltip(fmt, ...)', '\n-- UI: theme and style helpers')
         .. '\n' .. slice('function UI.pushTheme()', 'function UI.pushDisabledSliderStyle()')
-        .. '\n' .. slice('function UI.preBeginWindow(winKey)', 'function runtime.saveWindowPositions(silent)')
+        .. '\n' .. slice('function UI.windowOpts(key, create)', 'function runtime.saveWindowPositions(silent)')
     local chunk = assert((loadstring or load)(code, 'scale'))
     setfenv(chunk, env)
     chunk()
@@ -14966,8 +15178,36 @@ end)()
         { 'Spinevenom bites a sorcerer of hate for 88 points of damage.', 'pet', 'Spinevenom' },
         { 'You try to kick a sorcerer of hate, but miss!', 'melee_you', 'Genro' },
         { 'A sorcerer of hate tries to hit YOU, but misses!', 'melee_taken', 'A sorcerer of hate' },
+        -- pet chatter whose wording does not end in "Master" (and the server drops the closing quote);
+        -- the pet's name is deliberately not in ctx.pets for these
+        { "Glidequill tells you, 'I beg forgiveness, Master. That target is too far away.", 'petchat', 'Glidequill' },
+        { "Glidequill tells you, 'Guarding with my life..oh splendid one.'", 'petchat', 'Glidequill' },
+        { "Glidequill tells you, 'Sorry, Master..I am unable to attack that target.'", 'petchat', 'Glidequill' },
+        { "Glidequill tells you, 'Changing my target to a rat, Master. Attacking now.'", 'petchat', 'Glidequill' },
+        -- lines from the Sep 2026 capture that were unclassified
+        { 'a repulsive rat spurts foul smelling blood, and is still.', 'death' },
+        { 'a loathing lich sags to the ground, defeated.', 'death' },
+        { 'a scorn banshee blinks in confusion, obviously surprised that she has met her end at the hands of mere mortals.', 'death' },
+        { 'a phantom chest screeches and lays broken before you.', 'death' },
+        { 'a forsaken revenant hisses and lunges toward you.', 'npc_say', 'a forsaken revenant' },
+        { 'a phantom chest snaps at you.', 'npc_say', 'a phantom chest' },
+        { 'An abhorrent stumbles backwards.', 'npc_say' },
+        { 'Ability recovery time not yet met.', 'cast' },
+        { 'Genro scores a Finishing Blow!!', 'crit', 'Genro' },
+        { 'Your arcane affliction tears through a vicar of hate with critical force! (6294) (Bite of the Asp)', 'crit', 'Genro' },
+        { 'Gedian (Bard/Magician/Beastlord) has reached Level 65.', 'system' },
+        { 'Raevyndon (Druid) has logged in for the first time.', 'system' },
+        { 'Tildare has discovered: Bulwark of Storms (Legendary).', 'system' },
+        { 'To begin searching for items, select a search parameter from one of the drop down menus or type in an item name in the edit box and click Find.', 'system' },
+        { 'Your spell is ineffective! This opponent will resist all spells cast from outside of melee range.', 'cast' },
+        { 'Your Crippling Strike did not take hold on a_repulsive_rat005. (Blocked by Hobble of Spirits Effect.)', 'cast' },
+        { 'You must first select a target for this spell!', 'cast' },
+        { 'MQ2AASpend :: Settings updated', 'mq' },
+        { "Something about this creature's gaze tells you it cannot be swayed by enchantments!", 'consider' },
+        { "This creature's will is unbreakable - mesmerizing magic would have no effect!", 'consider' },
         { 'Some completely new server message nobody has seen.', 'unknown' },
     }
+
     local misses = {}
     for _, f in ipairs(fixture) do
         local r = plugin.classify(f[1], ctx)
@@ -14978,6 +15218,10 @@ end)()
     assert_eq(#misses, 0, 'Suite 102: classifier fixture (' .. #fixture .. ' lines): ' .. (misses[1] or ''))
     local outgoing = plugin.classify("You say, 'hi'", ctx)
     assert_true(outgoing.outgoing == true and outgoing.sender == 'Genro', 'Suite 102: outgoing lines carry the player as sender')
+    local masterTell = plugin.classify(P('Playerone') .. " tells you, 'can you Master this tradeskill for me?'", ctx)
+    assert_true(masterTell.channel == 'tell_in' and masterTell.sender == 'Playerone', 'Suite 102: a linked player saying Master is still a tell')
+    assert_eq(plugin.classify("Glidequill tells you, 'Master, pull faster.'", ctx).channel, 'petchat', 'Suite 102: an unlinked sender addressing a Master is a pet')
+
     local selfEcho = plugin.classify("Genro tells you, 'did it work?'", ctx)
     assert_true(selfEcho.channel == 'tell_out' and selfEcho.outgoing and selfEcho.sender == nil and selfEcho.selfEcho, 'Suite 102: my own name as the tells-you sender is an echoed outgoing tell')
     assert_eq(plugin.classify(P('Genro') .. " tells you, 'linked'", ctx).channel, 'tell_out', 'Suite 102: echoed self tell with a player link')
@@ -15087,9 +15331,12 @@ end)()
     -- 6. Lifecycle under a mock core
     local S = { events = {}, binds = {}, cmds = {}, saves = 0 }
     local cfgDir = os.getenv('TMPDIR') or '/tmp'
+    -- The clock is frozen unless a test advances S.nowMs: the drain budget
+    -- (12 ms per tick) must not depend on how fast the test machine is.
+    S.nowMs = 0
     local mockMq = {
         configDir = cfgDir,
-        gettime = function() return os.clock() * 1000 end,
+        gettime = function() return S.nowMs end,
         event = function(name, pat, fn, opts) S.events[name] = { pat = pat, fn = fn, opts = opts } end,
         unevent = function(name) S.events[name] = nil end,
         -- doevents(name): deliver the lines MQ has queued for that event only
@@ -15120,6 +15367,8 @@ end)()
         pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop },
         { __index = function(_, k) if k == 'ctrl' then return ctrl end end })
     os.remove(cfgDir .. '/triune_chat_Genro.lua')
+    local histPath = cfgDir .. '/triune_chat_history_Genro.txt'
+    os.remove(histPath)
     print = quiet
     plugin.onInit(core)
     plugin.onInit(core) -- the manager may re-init without onDestroy
@@ -15140,6 +15389,40 @@ end)()
     assert_true(tells.rebuild == true and tells.pendingLast == 0 and tells.last == 0, 'Suite 102: undrawn tab defers to a ring rebuild')
     local sample = rt.ring.items[rt.ring.first]
     assert_true(plugin.renderLine(sample, true):find('^%[%d%d:%d%d:%d%d%] \a#%x%x%x%x%x%x') ~= nil, 'Suite 102: rendered line = timestamp + channel color')
+
+    -- Tell / notification history: written as lines arrive, flushed on the tick
+    local H = plugin.history
+    assert_eq(plugin.sanitizeConfig({}).history.on, true, 'Suite 102: history defaults on')
+    assert_eq(plugin.sanitizeConfig({}).history.lines, 1000, 'Suite 102: history keeps 1000 lines by default')
+    assert_eq(plugin.sanitizeConfig({ history = { on = false, lines = 99999 } }).history.lines, 5000, 'Suite 102: history lines clamped')
+    assert_eq(plugin.sanitizeConfig({ history = { on = false } }).history.on, false, 'Suite 102: history can be turned off')
+    assert_eq(H.path(), histPath, 'Suite 102: history file lives next to the config')
+    local kept = 0
+    for i = rt.ring.first, rt.ring.last do
+        local e = rt.ring.items[i]
+        if not e.muted and (e.channel == 'tell_in' or e.channel == 'tell_out' or e.notify) then kept = kept + 1 end
+    end
+    assert_true(kept >= 2, 'Suite 102: fixture carries tells to keep')
+    local hf = io.open(histPath, 'r')
+    local histLines = {}
+    if hf then for l in hf:lines() do histLines[#histLines + 1] = l end; hf:close() end
+    assert_eq(#histLines, kept, 'Suite 102: one history line per tell / notification, none for other channels')
+    assert_true(rt.hist and rt.hist.last - rt.hist.first + 1 == kept and rt.hist.fileLines == kept, 'Suite 102: in-memory history copy tracks the file')
+    -- encode / decode round trip keeps links, colours, tabs and backslashes
+    local tricky = { t = 1700000000, channel = 'tell_in', sender = 'Bob', outgoing = false, notify = true, mention = true, hl = 'FFA040',
+                     text = "Bob tells you, 'see [Earthen Bracer of Fortitude (Enchanted)]\t\\ok'",
+                     raw = P('Bob') .. " tells you, '" .. ESC .. "00FF00see " .. IT .. "\t\\ok'" }
+    local enc = H.encode(tricky)
+    assert_true(enc:find('\n') == nil and enc:find(L, 1, true) == nil and enc:find(ESC, 1, true) == nil, 'Suite 102: encoded history line is one printable line')
+    local dec = H.decode(enc)
+    assert_true(dec ~= nil and dec.raw == tricky.raw and dec.text == tricky.text and dec.sender == 'Bob' and dec.channel == 'tell_in'
+        and dec.notify == true and dec.mention == true and dec.hl == 'FFA040' and dec.outgoing == false and dec.t == 1700000000 and dec.restored == true,
+        'Suite 102: history round trip keeps every field')
+    assert_eq(dec.player, 'Bob', 'Suite 102: restored tell sender is clickable')
+    assert_true(dec.hms:find('^%d%d/%d%d %d%d:%d%d$') ~= nil, 'Suite 102: a restored line from another day carries its date')
+    local todayEnc = H.encode({ t = os.time(), channel = 'tell_out', sender = 'Bob', outgoing = true, text = "You told Bob, 'hi'", raw = "You told Bob, 'hi'" })
+    assert_true(H.decode(todayEnc).hms:find('^%d%d:%d%d:%d%d$') ~= nil and H.decode(todayEnc).player == 'Bob', 'Suite 102: a restored line from today shows the time; outgoing tell names its recipient')
+    assert_true(H.decode('garbage') == nil and H.decode('1\tnotachannel\t\t0\t\tx\tx') == nil, 'Suite 102: unreadable history lines are skipped')
     assert_true(plugin.renderLine(sample, false):find('^\a#') ~= nil, 'Suite 102: timestamps optional')
     local linkEntry
     for i = rt.ring.first, rt.ring.last do
@@ -15241,7 +15524,10 @@ end)()
     assert_true(#cfg.windows == 2 and w2.title == 'Second' and #w2.tabs == 1 and w2.tabs[1].channels == nil, 'Suite 102: new window seeded with an All tab')
     local t = plugin.addTab(win, 'Extra', 'loot')
     assert_true(#win.tabs == 8 and win.activeTab == 8 and t.channels.loot == true and t.id ~= win.tabs[1].id, 'Suite 102: addTab appends, activates, unique id')
+    rt.tabOrderGen[win.id] = nil
+    rt.selectReq = nil
     assert_true(plugin.moveTab(win, 8, -1) and win.tabs[7] == t and win.activeTab == 7, 'Suite 102: moveTab swaps and follows')
+    assert_true(rt.tabOrderGen[win.id] == 1 and rt.selectReq and rt.selectReq[win.id] == t.id, 'Suite 102: a move renews the tab bar id (ImGui keeps its own order otherwise) and selects the moved tab explicitly')
     assert_eq(plugin.moveTab(win, 1, -1), false, 'Suite 102: moveTab refuses to leave the list')
     assert_true(plugin.moveTabToWindow(win, 7, w2) and #win.tabs == 7 and w2.tabs[2] == t and w2.activeTab == 2, 'Suite 102: tab moved to another window')
 
@@ -15321,6 +15607,169 @@ end)()
     for _, st in pairs(rt.tabs) do st.rebuild = true end
     local okDraw, errDraw = pcall(plugin.onDrawUI)
     assert_true(okDraw, 'Suite 102: inline renderer + tab menu + editor draw without error: ' .. tostring(errDraw))
+
+    -- Ghost windows: the chrome alpha follows the hover state on the mocked clock
+    local G = plugin.ghost
+    local gw = plugin.sanitizeConfig({ windows = { { id = 'a', ghost = true }, { id = 'b', ghost = 'yes' } } }).windows
+    assert_true(gw[1].ghost == true and gw[2].ghost == false, 'Suite 102: ghost is a per-window boolean')
+    local pushes, pops = {}, 0
+    _G.ImGuiHoveredFlags = _G.ImGuiHoveredFlags or { RootAndChildWindows = 3, AllowWhenBlockedByActiveItem = 128, AllowWhenBlockedByPopup = 32 }
+    local hadCol = _G.ImGuiCol
+    _G.ImGuiCol = { Text = 0, TextDisabled = 1, TextLink = 2, Border = 5, TitleBg = 10, TitleBgActive = 11, Tab = 33, TabActive = 35, FrameBg = 7, ScrollbarGrab = 15, Button = 21 }
+    drawMock.GetStyleColorVec4 = function(idx) return { x = 0.5, y = 0.6, z = 0.7, w = 0.9 } end
+    drawMock.PushStyleColor = function(idx, r, g, b, a) pushes[#pushes + 1] = { idx = idx, a = a } end
+    drawMock.PopStyleColor = function(n) pops = pops + (n or 1) end
+    local bgAlpha
+    drawMock.SetNextWindowBgAlpha = function(a) bgAlpha = a end
+    local hovered = false
+    drawMock.IsWindowHovered = function() return hovered end
+    win.ghost = true
+    win.opacity = 0.8
+    rt.tabMenuTarget = nil   -- an open menu of the window would hold it
+    local beginPopup = drawMock.BeginPopup
+    drawMock.BeginPopup = function() return false end
+    drawMock.IsPopupOpen = function() return false end
+    S.nowMs = 1000
+    okDraw, errDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw, 'Suite 102: ghost window draws: ' .. tostring(errDraw))
+    local g = rt.ghost[win.id]
+    assert_true(g ~= nil and g.a == 1 and g.held == false, 'Suite 102: ghost starts fully drawn, not held')
+    assert_true(math.abs(bgAlpha - 0.8) < 0.001, 'Suite 102: background alpha = window opacity while drawn')
+    S.nowMs = 1000 + G.LINGER_MS + 200   -- linger over, 200 ms into the fade-out
+    pushes = {}
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and g.a < 1 and g.a > 0, 'Suite 102: chrome fades once the mouse has been away: ' .. tostring(g.a))
+    assert_true(math.abs(bgAlpha - 0.8 * g.a) < 0.001, 'Suite 102: background alpha follows the fade')
+    S.nowMs = S.nowMs + G.OUT_MS
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and g.a == 0, 'Suite 102: fully faded: only the text is left')
+    pushes = {}
+    pops = 0
+    okDraw = pcall(plugin.onDrawUI)
+    local fadedTitle, fadedTab, textBack, chromeBack = false, false, false, false
+    for _, v in ipairs(pushes) do
+        if v.idx == 10 and v.a == 0 then fadedTitle = true end
+        if v.idx == 33 and v.a == 0 then fadedTab = true end
+        if v.idx == 0 and math.abs(v.a - 0.9) < 0.001 then textBack = true end
+        if v.idx == 10 and math.abs(v.a - 0.9) < 0.001 then chromeBack = true end
+    end
+    assert_true(okDraw and fadedTitle and fadedTab and textBack, 'Suite 102: a faded window pushes its chrome colours at alpha 0 and the text colour back for the log')
+    assert_true(chromeBack == false, 'Suite 102: no menu open: the chrome colours are not pushed back')
+    assert_eq(pops, #pushes, 'Suite 102: every ghost colour push is popped')
+    local styleVarAlpha = false
+    local origPSV = drawMock.PushStyleVar
+    drawMock.PushStyleVar = function(id, v) if id == 0 and v == 0 then styleVarAlpha = true end end
+    okDraw = pcall(plugin.onDrawUI)
+    drawMock.PushStyleVar = origPSV
+    assert_true(okDraw and styleVarAlpha == false, 'Suite 102: the global style alpha is never used (it hid the text in the field)')
+    hovered = true
+    S.nowMs = S.nowMs + 50
+    okDraw = pcall(plugin.onDrawUI)   -- the hover is seen this frame, applied to the alpha next frame
+    S.nowMs = S.nowMs + 50
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and g.held == true and g.a > 0, 'Suite 102: hovering fades the chrome back in: ' .. tostring(g.a))
+    S.nowMs = S.nowMs + G.IN_MS
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and g.a == 1, 'Suite 102: fully back under the mouse')
+    hovered = false
+    rt.activeInputWin = nil
+    -- typing in the window holds it even with the mouse away
+    local activeInput = true
+    drawMock.IsItemActive = function() return activeInput end
+    S.nowMs = S.nowMs + G.LINGER_MS + G.OUT_MS + 100
+    okDraw = pcall(plugin.onDrawUI)
+    S.nowMs = S.nowMs + 50
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and g.held == true and g.a == 1, 'Suite 102: an active input holds a ghost window: ' .. tostring(g.a))
+    activeInput = false
+    drawMock.IsItemActive = nil
+    win.ghost = false
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and math.abs(bgAlpha - 0.8) < 0.001, 'Suite 102: ghost off: drawn in full again')
+    -- an open menu of the window holds it too
+    win.ghost = true
+    drawMock.BeginPopup = beginPopup
+    drawMock.IsPopupOpen = function() return true end
+    rt.tabMenuTarget = { win = win, ti = 1 }
+    S.nowMs = S.nowMs + G.LINGER_MS + G.OUT_MS + 100
+    okDraw = pcall(plugin.onDrawUI)
+    S.nowMs = S.nowMs + 50
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and g.held == true and g.a == 1, 'Suite 102: an open menu holds a ghost window: ' .. tostring(g.a))
+    -- with the menu open the chrome colours come back for it
+    pushes = {}
+    okDraw = pcall(plugin.onDrawUI)
+    chromeBack = false
+    for _, v in ipairs(pushes) do if v.idx == 10 and math.abs(v.a - 0.9) < 0.001 then chromeBack = true end end
+    assert_true(okDraw and (g.a >= 1 or chromeBack), 'Suite 102: an open menu draws with the original colours')
+    win.ghost = false
+    win.opacity = nil
+    _G.ImGuiCol = hadCol
+    drawMock.IsPopupOpen = nil
+    drawMock.GetStyleColorVec4, drawMock.PushStyleColor, drawMock.PopStyleColor = nil, nil, nil
+    drawMock.SetNextWindowBgAlpha, drawMock.IsWindowHovered = nil, nil
+    print = quiet
+    plugin.chatCommand('ghost')
+    print = origPrint
+    assert_eq(cfg.windows[1].ghost, true, 'Suite 102: /tacchat ghost toggles the first window')
+    print = quiet
+    plugin.chatCommand('ghost', cfg.windows[1].title)
+    plugin.chatCommand('ghost', 'no such window')
+    print = origPrint
+    assert_eq(cfg.windows[1].ghost, false, 'Suite 102: /tacchat ghost <title> toggles that window; an unknown name changes nothing')
+
+    -- Tells and notifications outlive the main ring: a conversation tab is
+    -- not emptied by a fight's worth of combat lines.
+    local function tabNamed(w, name) for i, t in ipairs(w.tabs) do if t.name == name then return t, i end end end
+    local tellsTab = tabNamed(win, 'Tells')
+    local socialTab = tabNamed(win, 'Social')
+    local notifyTab = tabNamed(win, 'Notifications')
+    assert_true(plugin.tabSource(tellsTab) == rt.keep and plugin.tabSource(notifyTab) == rt.keep and plugin.tabSource(socialTab) == rt.ring
+        and plugin.tabSource({ tellWith = 'Bob', channels = nil }) == rt.keep and plugin.tabSource({ channels = { tell_in = true, say = true } }) == rt.ring,
+        'Suite 102: conversation, Tells and Notifications tabs read from the kept ring; mixed tabs from the main ring')
+    cfg.maxLines = 200
+    rt.ring.cap = 200
+    cfg.tellPopouts = true
+    rt.ring = plugin.newRing(200)
+    rt.keep = plugin.newRing(cfg.history.lines)
+    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    S.events.TACChatAll.fn(P('Alice') .. " tells you, 'remember me'")
+    S.events.TACChatAll.fn(P('Alice') .. " says, 'Genro are you there'")   -- a mention: a notification
+    plugin.onTick()
+    local tw = plugin.findTellWindow()
+    local aliceTab = tw and plugin.findTellTab(tw, 'Alice')
+    assert_true(aliceTab ~= nil, 'Suite 102: the tell opened a conversation tab')
+    okDraw = pcall(plugin.onDrawUI)   -- every tab builds from its ring (the mock selects them all)
+    local aliceSt = rt.tabs[tw.id .. '/' .. aliceTab.id]
+    local tellsSt2 = rt.tabs[win.id .. '/' .. tellsTab.id]
+    local notifySt = rt.tabs[win.id .. '/' .. notifyTab.id]
+    local socialSt = rt.tabs[win.id .. '/' .. socialTab.id]
+    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and tellsSt2.last - tellsSt2.first + 1 == 1 and notifySt.last - notifySt.first + 1 == 1
+        and socialSt.last - socialSt.first + 1 == 2, 'Suite 102: the tell and the mention land in their tabs')
+    for i = 1, 300 do
+        S.events.TACChatAll.fn(P('Someone') .. " says, 'spam line " .. i .. "'")
+        if i % 100 == 0 then plugin.onTick() end
+    end
+    plugin.onTick()
+    assert_true(rt.ring.first > 2, 'Suite 102: the main ring evicted the tell and the mention')
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and aliceSt.entries[aliceSt.first].text:find('remember me', 1, true) ~= nil,
+        'Suite 102: the conversation tab still holds the tell after 300 lines of chat')
+    assert_true(tellsSt2.last - tellsSt2.first + 1 == 1 and notifySt.last - notifySt.first + 1 == 1,
+        'Suite 102: the Tells and Notifications tabs keep theirs too')
+    assert_true(socialSt.entries[socialSt.first].text:find('spam line', 1, true) ~= nil, 'Suite 102: a general tab mirrors the main ring as before')
+    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and tellsSt2.last - tellsSt2.first + 1 == 1,
+        'Suite 102: a rebuild (filter / timestamp change) refills a conversation tab from the kept ring')
+    S.events.TACChatAll.fn(P('Bob') .. " tells you, 'new person'")
+    plugin.onTick()
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and plugin.findTellTab(tw, 'Bob') ~= nil, 'Suite 102: a tell from someone else leaves the other conversation intact')
+    assert_eq(rt.keep.cap, cfg.history.lines, 'Suite 102: the kept ring is bounded by the history line count')
+    cfg.tellPopouts = false
+    cfg.maxLines = 2000
+    rt.ring.cap = 2000
     -- a config with no windows at draw time is reported and reloaded instead of crashing the draw
     local savedWindows = cfg.windows
     cfg.windows = nil
@@ -15420,16 +15869,32 @@ end)()
     cfg.maxLines = 300
     rt.ring.cap = 300
     for i = 1, 900 do S.events.TACChatAll.fn('You receive ' .. i .. ' gold.') end
+    -- A drain is budgeted (at most 400 lines / 12 ms per tick, the rest stays
+    -- queued in order), so a burst takes a few ticks; the tick stays short.
     plugin.onTick()
+    assert_true(plugin.profile.drainLines == 400 and #rt.queue == 500 and plugin.profile.deferred == 500,
+        string.format('Suite 102: one tick drains at most 400 lines and keeps the rest queued (drained %d, queued %d)', plugin.profile.drainLines, #rt.queue))
+    assert_true(rt.queue[1] == 'You receive 401 gold.' and rt.queue[#rt.queue] == 'You receive 900 gold.', 'Suite 102: deferred lines keep their order')
+    local ticks = 0
+    while #rt.queue > 0 and ticks < 10 do plugin.onTick(); ticks = ticks + 1 end
+    assert_true(#rt.queue == 0 and ticks == 2, 'Suite 102: the backlog drains over the next ticks (' .. ticks .. ')')
     okDraw, errDraw = pcall(plugin.onDrawUI)
     assert_true(okDraw, 'Suite 102: draw after eviction: ' .. tostring(errDraw))
     assert_true(allSt.first <= allSt.last and allSt.entries[allSt.last] ~= nil and allSt.entries[allSt.last].text == 'You receive 900 gold.', 'Suite 102: newest line still at the end of the tab queue after eviction')
     assert_true(allSt.entries[allSt.first].id >= rt.ring.first, 'Suite 102: evicted lines trimmed from the front')
     assert_true(allSt.last - allSt.first + 1 <= 300, 'Suite 102: tab queue bounded by the ring')
     for i = 1, 600 do S.events.TACChatAll.fn('You receive ' .. (900 + i) .. ' gold.') end
-    plugin.onTick()
+    ticks = 0
+    while #rt.queue > 0 and ticks < 10 do plugin.onTick(); ticks = ticks + 1 end
     okDraw, errDraw = pcall(plugin.onDrawUI)
     assert_true(okDraw and allSt.entries[allSt.last].text == 'You receive 1500 gold.' and allSt.first == 1, 'Suite 102: queue compacts and keeps rendering the newest lines: ' .. tostring(errDraw))
+    -- The event queue itself is capped: a stall that piles up more than 3000
+    -- lines drops the oldest half rather than growing without bound.
+    local dropsBefore = plugin.profile.dropped
+    for i = 1, 3001 do S.events.TACChatAll.fn('spam ' .. i) end
+    assert_true(#rt.queue == 1501 and plugin.profile.dropped - dropsBefore == 1500 and rt.queue[1] == 'spam 1501' and rt.queue[#rt.queue] == 'spam 3001',
+        string.format('Suite 102: event queue capped at 3000 (queued %d, dropped %d)', #rt.queue, plugin.profile.dropped - dropsBefore))
+    rt.queue = {}
     cfg.maxLines = 2000
     rt.ring.cap = 2000
     cfg.renderer = 'console'
@@ -15569,9 +16034,22 @@ end)()
     S.events.TACChatAll.fn("Genro tells you, 'back at you'")
     plugin.onTick()
     assert_eq(rt.ring.items[rt.ring.last].sender, 'Playerthree', 'Suite 102: /r replies resolve to the last person who sent a tell')
+    -- pet chatter is never a tell: no Tells tab, not in recent tells, and the pet is remembered for the session
+    local recentBefore = #cfg.recentTells
+    assert_true(rt.pets.Xorbaz == nil, 'Suite 102: Xorbaz is not a polled pet name')
+    S.events.TACChatAll.fn("Xorbaz tells you, 'I beg forgiveness, Master. That target is too far away.")
+    S.events.TACChatAll.fn('Xorbaz scores a critical hit! (400)')
+    plugin.onTick()
+    assert_true(plugin.findTellTab(tw, 'Xorbaz') == nil and #cfg.recentTells == recentBefore, 'Suite 102: a pet line with the Master mid-sentence opens no conversation')
+    assert_true(rt.ring.items[rt.ring.last - 1].channel == 'petchat' and rt.ring.items[rt.ring.last].channel == 'pet', 'Suite 102: the pet is learned from its chatter, so its crits file under Pet: ' .. rt.ring.items[rt.ring.last].channel)
+    plugin.onZoned()
+    assert_true(rt.pets.Xorbaz == true, 'Suite 102: learned pets survive the name refresh')
+    rt.learnedPets = nil
+    plugin.onZoned()
     plugin.closeWindow(tw)
     cfg.tellPopouts = false
     assert_true(plugin.findTellWindow() == nil and #cfg.windows == 1, 'Suite 102: Tells window closed')
+
     -- the log height leaves room for the status row and the input frame
     local chatSrc = readFile('TAC/lua/tac/chat.lua')
     assert_true(chatSrc:find('GetFrameHeightWithSpacing', 1, true) ~= nil and chatSrc:find('GetTextLineHeightWithSpacing)', 1, true) ~= nil, 'Suite 102: input row height is measured, not guessed')
@@ -15620,7 +16098,10 @@ end)()
     local notifySt = rt.tabs[win.id .. '/' .. notifyTab.id]
     local flagged = 0
     for i = rt.ring.first, rt.ring.last do if rt.ring.items[i].notify and not rt.ring.items[i].muted then flagged = flagged + 1 end end
-    assert_true(okDraw and notifySt ~= nil and notifySt.last == flagged and flagged >= 4, 'Suite 102: the Notifications tab rebuilds from the ring with every flagged line: ' .. tostring(notifySt and notifySt.last) .. ' vs ' .. flagged)
+    local keptFlagged = 0
+    for i = rt.keep.first, rt.keep.last do if rt.keep.items[i].notify then keptFlagged = keptFlagged + 1 end end
+    assert_true(okDraw and notifySt ~= nil and notifySt.last == keptFlagged and keptFlagged >= flagged and flagged >= 4,
+        'Suite 102: the Notifications tab rebuilds from the kept ring with every flagged line: ' .. tostring(notifySt and notifySt.last) .. ' vs ' .. keptFlagged)
     assert_true(plugin.renderLine(m1, false):find('^\a#FFA040') ~= nil, 'Suite 102: the classic renderer uses the highlight colour too')
     cfg.mention.on = false
     S.events.TACChatAll.fn(P('Groupguy') .. " tells the group, 'Genro?'")
@@ -15715,10 +16196,99 @@ end)()
     os.remove(logPath)
     assert_true(next(S.events) == nil and next(S.binds) == nil, 'Suite 102: events and binds released on destroy')
 
+    -- More history lines than the cap in the file: the next start keeps the
+    -- last cfg.history.lines and trims the file.
+    local pad = io.open(histPath, 'a')
+    for i = 1, 150 do
+        pad:write(H.encode({ t = os.time(), channel = 'tell_in', sender = 'Pad' .. i, outgoing = false, text = 'Pad' .. i .. " tells you, 'line " .. i .. "'", raw = 'Pad' .. i .. " tells you, 'line " .. i .. "'" }), '\n')
+    end
+    pad:close()
+    local savedCfg = io.open(cfgDir .. '/triune_chat_Genro.lua', 'r'):read('*a')
+    local capped = io.open(cfgDir .. '/triune_chat_Genro.lua', 'w')
+    capped:write((savedCfg:gsub('(history = {%s*)lines = 1000,', '%1lines = 100,', 1)))
+    capped:close()
+
     local plugin2 = assert(loadfile('TAC/lua/tac/chat.lua'))()
     print = quiet
     plugin2.onInit(core)
     print = origPrint
+    assert_eq(plugin2.cfg.history.lines, 100, 'Suite 102: history line cap persisted')
+    local ring2 = plugin2.rt.keep
+    assert_eq(ring2.last - ring2.first + 1, 100, 'Suite 102: the last 100 history lines are back in the kept ring before any new line')
+    assert_eq(plugin2.rt.ring.last - plugin2.rt.ring.first + 1, 0, 'Suite 102: restored lines stay out of the main ring (not in All / Social)')
+    assert_true(ring2.items[ring2.first].restored == true and ring2.items[ring2.last].sender == 'Pad150' and ring2.items[ring2.first].sender == 'Pad51',
+        'Suite 102: restored oldest first, newest last')
+    assert_true(ring2.items[ring2.first].id < 0 and ring2.items[ring2.first].keepPos == ring2.first, 'Suite 102: restored entries carry their own ids and their kept position')
+    local announced = false
+    for i = math.max(1, #printed - 3), #printed do
+        if printed[i]:find('restored 100 tell / notification lines', 1, true) then announced = true end
+    end
+    assert_true(announced, 'Suite 102: restore announced before the loaded line')
+    local hf2 = io.open(histPath, 'r')
+    local n2 = 0
+    for _ in hf2:lines() do n2 = n2 + 1 end
+    hf2:close()
+    assert_eq(n2, 100, 'Suite 102: history file trimmed to the cap on load')
+    local win2 = plugin2.cfg.windows[1]
+    local tellsTab2 = win2.tabs[5]
+    local seen = 0
+    for i = ring2.first, ring2.last do if plugin2.tabAccepts(tellsTab2, ring2.items[i]) then seen = seen + 1 end end
+    assert_eq(seen, 100, 'Suite 102: the Tells tab shows the restored conversation')
+    -- New lines land after the restored ones and keep being logged
+    S.events.TACChatAll.fn(P('Bob') .. " tells you, 'still there?'")
+    plugin2.onTick()
+    assert_true(ring2.items[ring2.last].sender == 'Bob' and ring2.items[ring2.last].restored == nil and ring2.items[ring2.last].keepPos == ring2.last, 'Suite 102: a fresh tell lands after the restored lines')
+    assert_eq(plugin2.rt.hist.fileLines, 101, 'Suite 102: the fresh tell is logged too')
+    -- history off: nothing more is written; clear empties the file
+    print = quiet
+    plugin2.chatCommand('history', 'off')
+    print = origPrint
+    assert_eq(plugin2.cfg.history.on, false, 'Suite 102: /tacchat history off')
+    S.events.TACChatAll.fn(P('Bob') .. " tells you, 'not logged'")
+    plugin2.onTick()
+    assert_eq(plugin2.rt.hist.fileLines, 101, 'Suite 102: nothing logged while history is off')
+    print = quiet
+    plugin2.chatCommand('history', 'clear')
+    print = origPrint
+    local hf3 = io.open(histPath, 'r')
+    assert_true(hf3 ~= nil and hf3:read('*a') == '', 'Suite 102: history clear empties the file')
+    if hf3 then hf3:close() end
+    print = quiet
+    plugin2.chatCommand('history', 'on')
+    print = origPrint
+    assert_eq(plugin2.cfg.history.on, true, 'Suite 102: /tacchat history on')
+    -- Clear notifications: notifications leave the kept ring and the file; tells stay
+    S.events.TACChatAll.fn(P('Alice') .. " says, 'Genro ping'")
+    S.events.TACChatAll.fn(P('Alice') .. " tells you, 'Genro a tell that mentions you'")
+    S.events.TACChatAll.fn(P('Alice') .. " tells you, 'plain tell'")
+    plugin2.onTick()
+    local keep2 = plugin2.rt.keep
+    local notes, tellsKept = 0, 0
+    for i = keep2.first, keep2.last do
+        local e = keep2.items[i]
+        if plugin2.history.isNotification(e) then notes = notes + 1 elseif e.channel == 'tell_in' then tellsKept = tellsKept + 1 end
+    end
+    assert_true(notes == 1 and tellsKept >= 3, 'Suite 102: one notification and the tells kept before clearing (' .. notes .. '/' .. tellsKept .. ')')
+    local tellsBefore = tellsKept
+    local cleared = plugin2.history.clearNotifications()
+    assert_eq(cleared, 1, 'Suite 102: Clear notifications drops the notification')
+    keep2 = plugin2.rt.keep
+    notes, tellsKept = 0, 0
+    for i = keep2.first, keep2.last do
+        local e = keep2.items[i]
+        if plugin2.history.isNotification(e) then notes = notes + 1 elseif e.channel == 'tell_in' then tellsKept = tellsKept + 1 end
+    end
+    assert_true(notes == 0 and tellsKept == tellsBefore, 'Suite 102: ...and keeps every tell, a mention in a tell included')
+    local hfN = io.open(histPath, 'r')
+    local fileNotes, fileLines = 0, 0
+    for l in hfN:lines() do
+        fileLines = fileLines + 1
+        local e = plugin2.history.decode(l)
+        if e and plugin2.history.isNotification(e) then fileNotes = fileNotes + 1 end
+    end
+    hfN:close()
+    assert_true(fileNotes == 0 and fileLines == 2, 'Suite 102: the history file is rewritten without the notifications (' .. fileLines .. ' lines)')
+    assert_true(plugin2.rt.hist.last - plugin2.rt.hist.first + 1 == 2, 'Suite 102: the in-memory history copy matches')
     assert_eq(plugin2.cfg.timestamps, false, 'Suite 102: timestamps persisted per character')
     assert_eq(plugin2.cfg.windows[1].activeTab, 5, 'Suite 102: active tab persisted')
     assert_eq(plugin2.cfg.windows[1].tabs[5].tellTarget, 'Bob', 'Suite 102: tell target persisted')
@@ -15727,6 +16297,7 @@ end)()
     assert_true(okSettings, 'Suite 102: settings page renders under the mock: ' .. tostring(errSettings))
     plugin2.onDestroy()
     os.remove(cfgDir .. '/triune_chat_Genro.lua')
+    os.remove(histPath)
 end)()
 
 
@@ -15976,6 +16547,65 @@ end)()
     res = DB.search('spells', '', function(ixs, n) return (ixs.extra[n] or ''):find('%f[%d]2:') ~= nil end)
     assert_eq(#res, 2, 'Suite 103: class filter over the index class string')
 
+    -- 4b. items.idx v2: filter field (classes,races,slots,itemtype,reqlevel,flags,ac,hp,mana,acT,hpT,manaT)
+    assert_eq(DB.hasItemFilters(), false, 'Suite 103: v1 index has no item filters')
+    assert_eq(DB.itemFilter({}), nil, 'Suite 103: no filter settings -> nil filter')
+    writeFile('items.idx', {
+        '#gamedb items v2 count=4',
+        '1001|B|1:' .. offsets[1001] .. '|||65535,65535,4,10,0,0,2,0,0,2,0,0|Cloth Cap',
+        '2735|BEL|1:' .. offsets[2735] .. '|1:' .. offsets[1002735] .. '|1:' .. offsets[2002735] .. '|50175,65535,131072,10,20,9,21,0,0,42,10,0|Fungus Covered Scale Tunic',
+        '3000|B|1:' .. offsets[3000] .. '|||65535,65535,0,11,0,0,0,0,0,0,0,0|Silk Thread',
+        '4000|E||1:' .. offsets[1004000] .. '||2,1,2,1,5,2,-3,0,0,1,0,0|Only Enchanted Thing (Enchanted)',
+    })
+    DB.kinds.items = nil
+    assert_true(DB.loadNow('items'), 'Suite 103: v2 items index loads')
+    ix = DB.kinds.items
+    assert_eq(ix.version, 2, 'Suite 103: index version read from the header')
+    assert_eq(ix.count, 4, 'Suite 103: v2 index entry count')
+    assert_true(DB.hasItemFilters(), 'Suite 103: v2 index offers item filters')
+    assert_eq(ix.ids[DB.search('items', 'fungus')[1]], 2735, 'Suite 103: v2 names search the same')
+    assert_eq(ENC.num(DB.itemRecord(2735, 'L'), 'hp'), 10, 'Suite 103: v2 refs still reach the records')
+    local n2735 = ix.byId[2735]
+    local classes, races, slots, itype, req, flags = DB.itemAttrs(ix, n2735)
+    assert_eq(table.concat({ classes, races, slots, itype, req, flags }, ','), '50175,65535,131072,10,20,9', 'Suite 103: packed attributes unpack')
+    local ac, hp, mana = DB.itemStats(ix, n2735, false)
+    assert_eq(table.concat({ ac, hp, mana }, ','), '21,0,0', 'Suite 103: base tier stats')
+    ac, hp, mana = DB.itemStats(ix, n2735, true)
+    assert_eq(table.concat({ ac, hp, mana }, ','), '42,10,0', 'Suite 103: top tier stats')
+    ac = DB.itemStats(ix, ix.byId[4000], false)
+    assert_eq(ac, 0, 'Suite 103: negative stats clamp to zero')
+    local function count(f) return #DB.search('items', '', DB.itemFilter(f)) end
+    assert_eq(count({ class = 2 }), 4, 'Suite 103: class filter (CLR fits every fixture item)')
+    assert_eq(count({ class = 11 }), 2, 'Suite 103: class filter excludes items without the class bit')
+    assert_eq(count({ race = 9 }), 3, 'Suite 103: race filter')
+    assert_eq(count({ slots = 2 + 16 }), 1, 'Suite 103: slot filter matches either ear bit')
+    assert_eq(count({ types = { [10] = true } }), 2, 'Suite 103: item type filter')
+    assert_eq(count({ minLvl = 10 }), 1, 'Suite 103: minimum required level')
+    assert_eq(count({ maxLvl = 5 }), 3, 'Suite 103: maximum required level')
+    assert_eq(count({ tradeable = true }), 3, 'Suite 103: tradeable hides NO DROP')
+    assert_eq(count({ effect = 3 }), 1, 'Suite 103: click effect filter')
+    assert_eq(count({ effect = 2 }), 1, 'Suite 103: any-effect filter')
+    assert_eq(count({ effect = 7 }), 3, 'Suite 103: no-effect filter')
+    assert_eq(count({ minAC = 30 }), 0, 'Suite 103: min AC against base stats')
+    assert_eq(count({ minAC = 30, topTier = true }), 1, 'Suite 103: min AC against top tier stats')
+    assert_eq(count({ minHP = 5, topTier = true }), 1, 'Suite 103: min HP')
+    assert_eq(count({ class = 2, types = { [10] = true }, minLvl = 1 }), 1, 'Suite 103: filters combine')
+    local sorted, total = DB.sortItems(DB.search('items', '', DB.itemFilter({ class = 2 }), math.huge), 'ac', false, 2)
+    assert_eq(#sorted .. '/' .. total, '2/4', 'Suite 103: sort cuts to the limit and reports the total')
+    assert_eq(ix.ids[sorted[1]] .. ',' .. ix.ids[sorted[2]], '2735,1001', 'Suite 103: sort by AC, highest first')
+    sorted = DB.sortItems(DB.search('items', '', DB.itemFilter({ class = 2 }), math.huge), 'level', false, 10)
+    assert_eq(ix.ids[sorted[1]] .. ',' .. ix.ids[sorted[2]], '2735,4000', 'Suite 103: sort by required level')
+    sorted = DB.sortItems({ 3, 1 }, 'match', false, 10)
+    assert_eq(sorted[1] .. ',' .. sorted[2], '3,1', 'Suite 103: best-match sort keeps search order')
+    local sItems = plugin.state.items
+    sItems.query, sItems.class, sItems.minLvl, sItems.sort = '', 2, 1, 2
+    plugin.runSearch('items')
+    assert_eq(#sItems.results .. '/' .. sItems.total, '2/2', 'Suite 103: pane search applies the item filters')
+    assert_eq(ix.ids[sItems.results[1]], 2735, 'Suite 103: pane search applies the sort')
+    sItems.class, sItems.minLvl, sItems.sort = 0, 0, 1
+    plugin.runSearch('items')
+    assert_eq(#sItems.results, 0, 'Suite 103: cleared filters with an empty query list nothing')
+
     -- 5. plugin surface under a mock core
     -- ImGui.Selectable returns (selected, pressed) in MQ's binding: a mock that
     -- reports the selected row as "true" every frame must not re-open it.
@@ -15985,7 +16615,7 @@ end)()
     local core = {
         ctrl = ctrl, mq = { TLO = { Cursor = setmetatable({ ID = function() return 2002735 end }, { __call = function() return true end }) } },
         ImGui = mockImGui, runtime = {}, colors = {}, px = function(n) return n end,
-        pushTheme = noop, popTheme = noop, accent = noop, preBeginWindow = noop, postBeginWindow = noop,
+        pushTheme = noop, popTheme = noop, accent = noop, preBeginWindow = noop, postBeginWindow = noop, setTooltip = noop,
         saveLoadout = function() saves = saves + 1 end,
     }
     print = quiet
@@ -16048,7 +16678,8 @@ end)()
     for _, n in ipairs(enumNames) do rawset(_G, n, savedEnums[n]) end
     rawset(_G, 'ImVec2', savedVec)
     if not savedBit then rawset(_G, 'bit', nil) end
-    assert_true(pcall(plugin.onDrawSettings), 'Suite 103: settings page draws under the mock')
+    local okSet, errSet = pcall(plugin.onDrawSettings)
+    assert_true(okSet, 'Suite 103: settings page draws under the mock: ' .. tostring(errSet))
     plugin.onTick()
     assert_eq(plugin.onSaveSettings().tab, plugin.state.tab, 'Suite 103: active tab saved')
     plugin.onLoadSettings({ tab = 'spells' })
@@ -16106,6 +16737,65 @@ end)()
     assert_eq(ssum and ssum[1], 'Increase Hitpoints by 7500', 'Suite 103: spell summary effect line')
     assert_eq(ssum and ssum[2], 'No scroll item teaches this spell', 'Suite 103: spell summary reports missing scrolls')
     assert_eq(plugin.spellSummary(424242), nil, 'Suite 103: unknown spell has no summary')
+
+    -- Spell Info replacement: STML parsing, the window's spell name, the
+    -- watcher closing the game window for a known spell, and inspectSpell
+    local lines = plugin.stmlToLines('<c "#F0F000">Complete Heal</c><br>Mana: 400<br><br>Classes: CLR/39 &amp; more')
+    assert_eq(#lines, 3, 'Suite 103: STML blank lines dropped')
+    assert_eq(lines[1], 'Complete Heal', 'Suite 103: STML tags stripped')
+    assert_eq(lines[3], 'Classes: CLR/39 & more', 'Suite 103: STML entities decoded')
+    assert_eq(plugin.spellWindowName(' Ice Comet ', nil), 'Ice Comet', 'Suite 103: window title is the spell name')
+    assert_eq(plugin.spellWindowName('Spell Display Window', '<b>Minor Healing</b><br>x'), 'Minor Healing', 'Suite 103: generic title falls back to the description')
+    assert_eq(plugin.spellWindowName('', ''), nil, 'Suite 103: nothing to read gives no name')
+    print = quiet
+    plugin.closePopouts()
+    local wnd = { open = false, title = '', closed = 0 }
+    local wndTLO = setmetatable({
+        Open = function() return wnd.open end,
+        Text = function() return wnd.title end,
+        DoClose = function() wnd.closed = wnd.closed + 1; wnd.open = false end,
+        Child = function() return { Text = function() return '' end } end,
+    }, { __call = function() return wnd.open end })
+    core.mq.TLO.Window = function() return wndTLO end
+    core.mq.TLO.Me = { Level = function() return 39 end, Gem = function() return setmetatable({}, { __call = function() return 3 end }) end, Book = function() return setmetatable({}, { __call = function() return 12 end }) end }
+    plugin.watchSpellWindow()
+    assert_eq(#plugin.state.popouts, 0, 'Suite 103: closed game window opens nothing')
+    wnd.open, wnd.title = true, 'Complete Heal'
+    plugin.watchSpellWindow()
+    assert_eq(wnd.closed, 1, 'Suite 103: the game window is closed for a known spell')
+    assert_eq(#plugin.state.popouts, 1, 'Suite 103: and its card opens')
+    assert_eq(plugin.state.popouts[1].kind .. ':' .. plugin.state.popouts[1].sel, 'spells:13', 'Suite 103: the card is the named spell')
+    wnd.open, wnd.title = true, 'Not A Spell'
+    plugin.watchSpellWindow()
+    plugin.watchSpellWindow()
+    assert_eq(wnd.closed, 1, 'Suite 103: an unknown spell keeps the game window')
+    assert_eq(#plugin.state.popouts, 1, 'Suite 103: and opens no card')
+    wnd.title = 'Ice Comet'
+    plugin.watchSpellWindow()
+    assert_eq(wnd.closed, 2, 'Suite 103: a new spell in the open window is swapped too')
+    assert_eq(#plugin.state.popouts, 2, 'Suite 103: second card')
+    plugin.state.spellWindow = false
+    wnd.open, wnd.title = true, 'Complete Heal'
+    plugin.watchSpellWindow()
+    assert_eq(wnd.closed, 2, 'Suite 103: replacement off leaves the game window alone')
+    assert_true(not plugin.inspectSpell(13), 'Suite 103: inspectSpell declines while the replacement is off')
+    plugin.state.spellWindow = true
+    assert_true(plugin.inspectSpell('minor healing'), 'Suite 103: inspectSpell by name')
+    assert_eq(#plugin.state.popouts, 3, 'Suite 103: name opens a card')
+    assert_true(plugin.inspectSpell(13), 'Suite 103: inspectSpell by id')
+    assert_eq(#plugin.state.popouts, 3, 'Suite 103: an existing card is reused')
+    assert_true(not plugin.inspectSpell(424242), 'Suite 103: inspectSpell declines an unknown id')
+    assert_true(not plugin.inspectSpell('nothing here'), 'Suite 103: inspectSpell declines an unknown name')
+    assert_true(plugin.onCommand('spellwindow', { 'spellwindow' }), 'Suite 103: /ac spellwindow handled')
+    assert_eq(plugin.state.spellWindow, false, 'Suite 103: /ac spellwindow toggles the replacement')
+    plugin.onCommand('spellwindow', { 'spellwindow' })
+    assert_eq(plugin.onSaveSettings().spellWindow, true, 'Suite 103: replacement flag saved')
+    plugin.onLoadSettings({ spellWindow = false })
+    assert_eq(plugin.state.spellWindow, false, 'Suite 103: replacement flag restored')
+    plugin.state.spellWindow = true
+    plugin.closePopouts()
+    core.mq.TLO.Window = nil
+    print = origPrint
 
     -- immunities: spawn -> NPC resolution and ability -> SPA rules
     assert_eq(DB.npcIdFor('myconid_spore_king', 'sebilis', 56), 5, 'Suite 103: spawn name with underscores resolves to the database NPC')
@@ -16187,6 +16877,99 @@ end)()
     assert_true(plugin.state.lootAdvisor, 'Suite 103: loot advisor preference restored')
     print = origPrint
 
+    -- chat links: the client's \x12 text for items (77-byte body, id as
+    -- eight hex digits) and spells, name / id resolution for the commands,
+    -- and where a link goes (Chat Windows input line, a channel, clipboard)
+    local L = string.char(18)
+    local bracer = 'Earthen Bracer of Fortitude (Enchanted)'
+    local bracerLink = D.itemLinkText(1032100, bracer)
+    assert_eq(bracerLink, L .. '0000FBFA4' .. string.rep('0', 68) .. bracer .. L, 'Suite 103: item link is type 0, eight hex digits of id, zero padding to 77, name')
+    assert_eq(#bracerLink:match(L .. '(.-)' .. L) - #bracer, 77, 'Suite 103: item link body is 77 bytes before the name')
+    assert_eq(D.itemLinkText(0, 'x'), nil, 'Suite 103: no link for id 0')
+    assert_eq(D.spellLinkText(13, 'Complete Heal'), '[Complete Heal]', 'Suite 103: spell link is plain bracketed text (the client has no spell links)')
+    assert_eq(D.spellLinkText(13, ''), nil, 'Suite 103: no spell link without a name')
+    assert_eq(D.spellLinkName('[Complete Heal]'), 'Complete Heal', 'Suite 103: spellLinkName reads the bracketed name')
+    assert_eq(D.spellLinkName('Complete Heal'), nil, 'Suite 103: unbracketed text is not a spell link')
+    assert_eq(D.spellLinkName('[a [b] c]'), nil, 'Suite 103: nested brackets are not a spell link')
+    assert_eq(plugin.itemLink(2002735), D.itemLinkText(2002735, 'Fungus Covered Scale Tunic (Legendary)'), 'Suite 103: itemLink names the tier from the id')
+    assert_eq(plugin.itemLink(999999), nil, 'Suite 103: itemLink declines an unknown item')
+    assert_eq(plugin.spellLink(13), '[Complete Heal]', 'Suite 103: spellLink is the bracketed spell name')
+    assert_eq(plugin.spellLink(424242), nil, 'Suite 103: spellLink declines an unknown spell')
+    assert_eq(plugin.spellLinkId('[Complete Heal]'), 13, 'Suite 103: spellLinkId resolves a bracketed known name')
+    assert_eq(plugin.spellLinkId('[complete heal]'), 13, 'Suite 103: spellLinkId is case-insensitive')
+    assert_eq(plugin.spellLinkId('[Triune]'), nil, 'Suite 103: other bracketed text is not a spell')
+    assert_eq(select(2, plugin.spellLinkId('[Triune]')), true, 'Suite 103: and reports the index as ready')
+    assert_eq(plugin.spellLinkId('Complete Heal'), nil, 'Suite 103: unbracketed text is never a spell link')
+    assert_eq(D.npcLinkText(6, 'Crow', 'North Qeynos'), '[Crow (North Qeynos)]', 'Suite 103: NPC link is the name with the zone in parentheses')
+    assert_eq(D.npcLinkText(6, 'Crow', ''), '[Crow]', 'Suite 103: NPC link without a zone is the bare name')
+    assert_eq(plugin.npcLink(6), '[Crow (North Qeynos)]', 'Suite 103: npcLink uses the zone long name')
+    assert_eq(plugin.npcLink(7), '[a gnoll (qeytoqrg)]', 'Suite 103: an unknown zone keeps its short name')
+    assert_eq(plugin.npcLink(999999), nil, 'Suite 103: npcLink declines an unknown NPC')
+    assert_eq(plugin.npcLinkId('[Crow (North Qeynos)]'), 6, 'Suite 103: npcLinkId resolves name and zone long name')
+    assert_eq(plugin.npcLinkId('[crow (qeynos2)]'), 6, 'Suite 103: npcLinkId takes the short zone name, any case')
+    assert_eq(plugin.npcLinkId('[Crow]'), 6, 'Suite 103: npcLinkId without a zone falls back to the name')
+    assert_eq(plugin.npcLinkId('[Crow (Nowhere)]'), 6, 'Suite 103: a zone with no such NPC falls back to the name')
+    assert_eq(plugin.npcLinkId('[Nobody (North Qeynos)]'), nil, 'Suite 103: unknown NPC name')
+    assert_eq(plugin.npcLinkId('Crow'), nil, 'Suite 103: unbracketed text is never an NPC link')
+    assert_eq(select(1, plugin.textLinkTarget('[Complete Heal]')) .. select(2, plugin.textLinkTarget('[Complete Heal]')), 'spells13', 'Suite 103: textLinkTarget finds spells')
+    assert_eq(select(1, plugin.textLinkTarget('[Crow (North Qeynos)]')) .. select(2, plugin.textLinkTarget('[Crow (North Qeynos)]')), 'npcs6', 'Suite 103: textLinkTarget finds NPCs')
+    local tk, tid, tready = plugin.textLinkTarget('[Triune]')
+    assert_true(tk == nil and tid == nil and tready == true, 'Suite 103: textLinkTarget reports nothing, ready, for other brackets')
+    assert_eq(select(3, plugin.textLinkTarget('plain')), true, 'Suite 103: unbracketed text is ready and nothing')
+    assert_eq(plugin.lookupId('npcs', 'crow'), 6, 'Suite 103: lookupId finds NPCs by name')
+    assert_eq(plugin.lookupId('npcs', '7'), 7, 'Suite 103: lookupId numeric NPC id')
+    assert_eq(plugin.lookupId('items', '2735'), 2735, 'Suite 103: lookupId takes a numeric item id')
+    assert_eq(plugin.lookupId('items', '1002735'), 1002735, 'Suite 103: lookupId keeps a tier offset')
+    assert_eq(plugin.lookupId('items', 'fungus covered scale tunic (Enchanted)'), 1002735, 'Suite 103: lookupId reads the tier suffix the client shows')
+    assert_eq(plugin.lookupId('items', 'Fungus Covered Scale Tunic'), 2735, 'Suite 103: lookupId by name')
+    assert_eq(plugin.lookupId('items', 'nothing here'), nil, 'Suite 103: lookupId with no match')
+    assert_eq(plugin.lookupId('spells', 'complete heal'), 13, 'Suite 103: lookupId finds spells too')
+    assert_eq(plugin.lookupId('spells', '13'), 13, 'Suite 103: lookupId numeric spell id')
+    assert_eq(plugin.lookupId('spells', '424242'), nil, 'Suite 103: lookupId rejects an unknown spell id')
+    local inserted, sent = {}, {}
+    core.mq.cmdf = function(fmt, ...) sent[#sent + 1] = string.format(fmt, ...) end
+    core.runtime.pluginManager = { plugins = { chat = { enabled = true, instance = { insertLink = function(text, name) inserted[#inserted + 1] = { text = text, name = name }; return true end } } } }
+    print = quiet
+    assert_true(plugin.linkToChat('items', 2735), 'Suite 103: linkToChat places an item link')
+    assert_eq(inserted[1] and inserted[1].text, plugin.itemLink(2735), 'Suite 103: the Chat Windows plugin gets the raw link')
+    assert_eq(inserted[1] and inserted[1].name, 'Fungus Covered Scale Tunic', 'Suite 103: and the display name')
+    assert_true(plugin.linkToChat('spells', 13, '/g'), 'Suite 103: linkToChat sends to a channel')
+    assert_eq(sent[1], '/g ' .. plugin.spellLink(13), 'Suite 103: the channel command carries the link')
+    assert_true(plugin.linkToChat('spells', 13, 'gu'), 'Suite 103: a channel without its slash is accepted')
+    assert_eq(sent[2], '/gu ' .. plugin.spellLink(13), 'Suite 103: and gets the slash back')
+    assert_true(not plugin.linkToChat('items', 999999), 'Suite 103: linkToChat declines an unknown item')
+    assert_eq(#inserted + #sent, 3, 'Suite 103: nothing is sent for an unknown item')
+    assert_true(plugin.onCommand('linkitem', { 'linkitem', 'fungus', 'covered', 'scale', 'tunic' }), 'Suite 103: /ac linkitem handled')
+    assert_eq(inserted[2] and inserted[2].text, plugin.itemLink(2735), 'Suite 103: /ac linkitem by name goes to the input line')
+    plugin.onCommand('linkitem', { 'linkitem', '/tell', 'Bob', '2002735' })
+    assert_eq(sent[3], '/tell Bob ' .. plugin.itemLink(2002735), 'Suite 103: /ac linkitem /tell Name sends the tell')
+    plugin.onCommand('linkspell', { 'linkspell', '/rs', 'complete', 'heal' })
+    assert_eq(sent[4], '/rs ' .. plugin.spellLink(13), 'Suite 103: /ac linkspell /rs sends to raid')
+    plugin.onCommand('linkcursor', { 'linkcursor' })
+    assert_eq(inserted[3] and inserted[3].text, plugin.itemLink(2002735), 'Suite 103: /ac linkcursor links the cursor item at its tier')
+    plugin.onCommand('linknpc', { 'linknpc', '/g', 'crow' })
+    assert_eq(sent[5], '/g [Crow (North Qeynos)]', 'Suite 103: /ac linknpc sends the NPC link')
+    plugin.onCommand('linktarget', { 'linktarget' })
+    assert_eq(inserted[4] and inserted[4].text, '[myconid spore king (The Ruins of Sebilis)]', 'Suite 103: /ac linktarget links the database NPC behind the target')
+    assert_true(plugin.linkToChat('npcs', 6, '/gu'), 'Suite 103: linkToChat handles NPCs')
+    assert_eq(sent[6], '/gu [Crow (North Qeynos)]', 'Suite 103: NPC link sent to guild')
+    local before = #inserted + #sent
+    plugin.onCommand('linkitem', { 'linkitem', 'nothing', 'here' })
+    plugin.onCommand('linkitem', { 'linkitem' })
+    assert_eq(#inserted + #sent, before, 'Suite 103: /ac linkitem with no match or no text sends nothing')
+    core.runtime.pluginManager = nil
+    local clip = nil
+    core.ImGui.SetClipboardText = function(t) clip = t end
+    assert_true(plugin.linkToChat('items', 2735), 'Suite 103: without Chat Windows the link goes to the clipboard')
+    assert_eq(clip, plugin.itemLink(2735), 'Suite 103: clipboard holds the raw link')
+    core.ImGui.SetClipboardText = nil
+    core.mq.cmdf = nil
+    print = origPrint
+    local gsrcLink = readFile('TAC/lua/tac/gamedb.lua')
+    assert_true(gsrcLink:find("drawLinkButton('items', card.fullId, st.key or 'main')", 1, true) ~= nil, 'Suite 103: item cards carry the Link to chat button')
+    assert_true(gsrcLink:find("drawLinkButton('spells', id, st.key or 'main')", 1, true) ~= nil, 'Suite 103: spell cards carry the Link to chat button')
+    assert_true(gsrcLink:find("drawLinkButton('npcs', id, st.key or 'main')", 1, true) ~= nil, 'Suite 103: NPC cards carry the Link to chat button')
+
     -- 6. missing data is reported, not fatal
     DB.setDir(dir .. 'missing/')
     assert_true(not DB.readManifest().present, 'Suite 103: missing manifest flagged')
@@ -16266,6 +17049,80 @@ end)()
     print = origPrint
     assert_eq(popped, 'items:1032100', 'Suite 103: a chat item link opens a database card for the exact id')
     assert_true(chat.lookupInDatabase({ name = 'x', payload = '00000F23C' .. string.rep('0', 68) }), 'Suite 103: Look up in Database resolves by id')
+    -- links handed in by the database land in the input line as [Name] and
+    -- become the raw link when the line is sent
+    chatCore.ctrl.show_chat = false
+    local link1 = L .. '0000FBFA4' .. string.rep('0', 68) .. bracer .. L
+    local link2 = '[Complete Heal]'
+    assert_true(chat.insertLink(link1, bracer), 'Suite 103: insertLink places an item link')
+    local fkey = chat.focusTargetKey()
+    local fwin, ftab = chat.tabByKey(fkey)
+    assert_true(fwin ~= nil and ftab ~= nil, 'Suite 103: the link went to the focus target tab')
+    local fst = chat.rt.tabs[fkey]
+    assert_eq(fst and fst.input, '[' .. bracer .. ']', 'Suite 103: the input line shows the link as [Name]')
+    assert_eq(fst and fst.links[bracer], link1, 'Suite 103: the raw link waits in the tab')
+    assert_eq(chatCore.ctrl.show_chat, true, 'Suite 103: inserting a link shows the chat window')
+    assert_eq(chat.rt.focusKey, fkey, 'Suite 103: and asks for the input to take focus')
+    assert_true(chat.insertLink(link2), 'Suite 103: insertLink reads a spell link name from its brackets')
+    assert_eq(fst.input, '[' .. bracer .. '] [Complete Heal]', 'Suite 103: a second link follows after a space')
+    assert_eq(chat.expandLinks(fst, fst.input .. ' for sale'), link1 .. ' ' .. link2 .. ' for sale', 'Suite 103: sending swaps the item placeholder for the raw link and leaves the spell text')
+    assert_nil(fst.links, 'Suite 103: the link table is cleared with the draft')
+    assert_eq(chat.expandLinks(fst, '[not a link]'), '[not a link]', 'Suite 103: brackets with no link are plain text')
+    assert_true(not chat.insertLink('', 'x'), 'Suite 103: empty text is refused')
+    fst.input = ''
+    -- "[Spell Name]" / "[NPC (Zone)]" in a received line is a text link when
+    -- the database knows the name; other brackets stay text; lines seen
+    -- before the indexes were in are tokenized again once they are
+    local dbReady = true
+    local targets = { ['[Complete Heal]'] = { 'spells', 13 }, ['[Ice Comet]'] = { 'spells', 732 }, ['[Crow (North Qeynos)]'] = { 'npcs', 6 } }
+    chatCore.runtime.pluginManager.plugins.gamedb.instance.textLinkTarget = function(text)
+        if not dbReady then return nil, nil, false end
+        local t = targets[text]
+        if t then return t[1], t[2], true end
+        return nil, nil, true
+    end
+    chatCore.runtime.pluginManager.plugins.gamedb.instance.DB = { isLoaded = function() return dbReady end }
+    local se = { raw = "Bob says, 'try [Complete Heal] or [Ice Comet] [not a spell] on [Crow (North Qeynos)]'", text = '', id = 1 }
+    local toks = chat.tokenize(se)
+    assert_eq(#se.links, 3, 'Suite 103: two spell links and an NPC link found in the line')
+    assert_eq(se.links[1].dbId .. '/' .. se.links[2].dbId .. '/' .. se.links[3].kind .. se.links[3].dbId, '13/732/npcs6', 'Suite 103: text links carry kind and id')
+    local words = {}
+    for _, t in ipairs(toks) do words[#words + 1] = t.t .. (t.link and ('<' .. t.link .. '>') or '') end
+    assert_eq(table.concat(words, ' '), "Bob says, 'try Complete<1> Heal<1> or Ice<2> Comet<2> [not a spell] on Crow<3> (North<3> Qeynos)<3> '", 'Suite 103: link names are link words without brackets, other brackets stay text')
+    assert_nil(se.linkRetry, 'Suite 103: a resolved line needs no retry')
+    local itemAndSpell = { raw = 'Loot ' .. link1 .. ' and [Complete Heal]', text = '', id = 2 }
+    chat.tokenize(itemAndSpell)
+    assert_eq(#itemAndSpell.links, 2, 'Suite 103: item and text links share one link list')
+    assert_eq(itemAndSpell.links[1].name .. '|' .. tostring(itemAndSpell.links[2].dbId), bracer .. '|13', 'Suite 103: item link first, spell link second')
+    local triuneLine = { raw = '[Triune] cast [Complete Heal]', text = '', id = 4, channel = 'triune' }
+    chat.tokenize(triuneLine)
+    assert_eq(#triuneLine.links, 0, 'Suite 103: Triune output lines are never scanned for text links')
+    dbReady = false
+    chat.rt.textIndexReady = nil
+    local early = { raw = 'early [Complete Heal] line', text = '', id = 3 }
+    chat.tokenize(early)
+    assert_eq(#early.links, 0, 'Suite 103: before the indexes are in, brackets stay text')
+    assert_true(early.linkRetry, 'Suite 103: and the line is marked for a retry')
+    early.layouts, early.layoutKeys = { x = 1 }, { 'x' }
+    chat.rt.ring.items[chat.rt.ring.last + 1] = early
+    chat.rt.ring.last = chat.rt.ring.last + 1
+    chat.retryTextLinks()
+    assert_true(early.tokens ~= nil, 'Suite 103: retry does nothing while the indexes load')
+    dbReady = true
+    chat.retryTextLinks()
+    assert_nil(early.tokens, 'Suite 103: once the indexes are in, the marked line drops its tokens')
+    assert_nil(early.layouts, 'Suite 103: and its cached layouts')
+    chat.tokenize(early)
+    assert_eq(#early.links, 1, 'Suite 103: re-tokenized, the spell link is found')
+    chat.openTextLink(early.links[1])
+    popped = nil
+    chat.runPendingLink()
+    assert_eq(popped, 'spells:13', 'Suite 103: clicking a spell link opens the spell card')
+    chat.openTextLink(se.links[3])
+    chat.runPendingLink()
+    assert_eq(popped, 'npcs:6', 'Suite 103: clicking an NPC link opens the NPC card')
+    chat.rt.ring.items[chat.rt.ring.last] = nil
+    chat.rt.ring.last = chat.rt.ring.last - 1
     print = quiet
     chat.onDestroy()
     print = origPrint
@@ -16367,6 +17224,315 @@ end)()
     assert_true(src:find('xpcall(p.instance.onTick, debug.traceback)', 1, true) ~= nil, 'Suite 104: plugin hooks run under xpcall for tracebacks')
 end)()
 
+
+-- ==========================================================================
+-- Suite 105: Bard songs -- keep singing vs sing once and resing on drop
+-- ==========================================================================
+;(function()
+    print('--- Suite 105: Bard keep singing / sing once ---')
+    local bardKeepSinging = loadFunc(src, 'bardKeepSinging', {})
+    assert_true(bardKeepSinging({ cls = 'Brd', keep_singing = true, when = 'always' }), 'Suite 105: Brd gem with the box checked keeps singing')
+    assert_true(bardKeepSinging({ cls = 'Brd', when = 'twist while fighting' }), 'Suite 105: legacy twist while fighting still keeps singing')
+    assert_eq(bardKeepSinging({ cls = 'Brd', when = 'missing buff' }), false, 'Suite 105: unchecked Brd gem sings once')
+    assert_eq(bardKeepSinging({ cls = 'Brd', keep_singing = false, when = 'in combat' }), false, 'Suite 105: box explicitly off sings once')
+    assert_eq(bardKeepSinging({ cls = 'Clr', keep_singing = true }), false, 'Suite 105: non-bard gems never keep singing')
+    assert_eq(bardKeepSinging(nil), false, 'Suite 105: nil gem is safe')
+
+    local rt = { sungBuffs = {} }
+    local clock = 100
+    local env = { runtime = rt, os = setmetatable({ clock = function() return clock end }, { __index = os }) }
+    local markSung = loadFunc(src, 'markSung', env)
+    markSung('1_Aegolism', 'Clr')
+    assert_eq(rt.sungBuffs['1_Aegolism'], true, 'Suite 105: non-bard marks stay a plain true')
+    markSung('1_Selo', 'Brd')
+    local st = rt.sungBuffs['1_Selo']
+    assert_type(st, 'table', 'Suite 105: bard marks are a record')
+    assert_eq(st.at, 100, 'Suite 105: record remembers when it was sung')
+    assert_eq(st.seen, false, 'Suite 105: record starts unseen')
+    st.seen = true
+    markSung('1_Selo', 'Brd')
+    assert_true(rt.sungBuffs['1_Selo'] == st, 'Suite 105: re-marking keeps the existing record')
+
+    local up = false
+    env.buffActive = function() return up end
+    env.print = function() end
+    env.BARD_DROP_GRACE = 2.0 -- module upvalue, supplied through the sandbox
+    local bardSongDropped = loadFunc(src, 'bardSongDropped', env)
+    rt.sungBuffs = {}
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: no mark -> nothing to drop')
+    markSung('1_Selo', 'Brd')
+    clock = 110
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: never seen up -> mark holds (undetectable song)')
+    clock = 200
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: still never seen -> holds for the life, as before')
+    up = true
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: song up -> holds')
+    assert_eq(rt.sungBuffs['1_Selo'].seen, true, 'Suite 105: song was seen')
+    up = false
+    clock = 201
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: one missed read is not a drop')
+    assert_eq(rt.sungBuffs['1_Selo'].missingSince, 201, 'Suite 105: miss is timestamped')
+    up = true
+    clock = 202
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: song back -> holds')
+    assert_nil(rt.sungBuffs['1_Selo'].missingSince, 'Suite 105: a flicker resets the miss timer')
+    up = false
+    clock = 203
+    bardSongDropped('1_Selo', 1, 'Selo')
+    clock = 204.5
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), false, 'Suite 105: inside the grace window -> holds')
+    clock = 205.1
+    assert_eq(bardSongDropped('1_Selo', 1, 'Selo'), true, 'Suite 105: gone past the grace window -> dropped')
+    assert_nil(rt.sungBuffs['1_Selo'], 'Suite 105: drop releases the mark so the song is re-sung')
+    rt.sungBuffs['1_Old'] = true
+    assert_eq(bardSongDropped('1_Old', 1, 'Old'), false, 'Suite 105: a plain true mark is never released')
+
+    -- wiring
+    assert_true(src:find("if dur > 0 and buffActive(id, g.spell) and not bardKeepSinging(g) then", 1, true) ~= nil, 'Suite 105: castGem lets a keep-singing song recast over its own effect')
+    assert_true(src:find("if bardKeepSinging(extra) then return true end", 1, true) ~= nil, 'Suite 105: missing buff never gates a keep-singing song')
+    assert_true(src:find("if runtime.sungBuffs[key] and not bardSongDropped(key, targetId, spellName) then return false end", 1, true) ~= nil, 'Suite 105: missing buff releases a sung mark on drop')
+    assert_true(src:find("ImGui.Checkbox('Twist##ks', ksCur)", 1, true) ~= nil, 'Suite 105: Spell Gems row has the Twist box for bards')
+    assert_true(src:find("if cls == 'Brd' then g.keep_singing = not lu.bene end", 1, true) ~= nil, 'Suite 105: picking a song defaults the box from beneficial/detrimental')
+    assert_true(src:find("keep_singing = (cls == 'Brd' and not bene) or nil,", 1, true) ~= nil, 'Suite 105: Import Bar defaults the box the same way')
+    assert_true(src:find("tostring(g.keep_singing)", 1, true) ~= nil, 'Suite 105: the box is part of the loadout signature')
+end)()
+
+-- ==========================================================================
+-- Suite 106: shared window options (title bar, ghost, lock) and the
+-- right-click menu every window gets, riding on the Begin / End hooks
+-- ==========================================================================
+;(function()
+    print('--- Suite 106: window options ---')
+    local S = { cols = {}, popCols = 0, saves = 0, tooltips = {}, menuItems = {}, clicks = {}, popupOpen = false, hovered = false, released = false, anyItem = false, now = 0 }
+    local mockImGui = setmetatable({
+        PushStyleVar = function() end, PopStyleVar = function() end,
+        PushStyleColor = function(idx, r, g, b, a) S.cols[#S.cols + 1] = { idx = idx, a = a } end,
+        PopStyleColor = function(n) S.popCols = S.popCols + (n or 1); for _ = 1, (n or 1) do table.remove(S.cols) end end,
+        GetStyleColorVec4 = function(idx) return { x = 0.2, y = 0.3, z = 0.4, w = 0.8 } end,
+        IsWindowHovered = function() return S.hovered end,
+        IsMouseReleased = function() return S.released end,
+        IsAnyItemHovered = function() return S.anyItem end,
+        IsPopupOpen = function() return S.popupOpen end,
+        OpenPopup = function(id) S.opened = id end,
+        BeginPopup = function(id) return S.opened == id end,
+        EndPopup = function() S.opened = nil end,
+        MenuItem = function(label, _, checked) S.menuItems[#S.menuItems + 1] = { label = label, checked = checked }; return S.clicks[label] == true end,
+        BeginMenu = function() return true end, EndMenu = function() end,
+        IsItemHovered = function() return false end,
+        TextDisabled = function(t) S.header = t end,
+        Separator = function() end, SetWindowFontScale = function() end, SetNextItemWidth = function() end,
+        Combo = function(_, idx) return idx end,
+    }, { __index = function() return function() end end })
+    local ctrl = { ui_scale = 1.0, window_scale = {}, window_opts = {}, saved_window_positions = {} }
+    local defs = {
+        { key = 'group', name = 'Group Window', canLock = true, getLock = function() return S.locked == true end, setLock = function(v) S.locked = v end, setOpen = function(v) S.open = v end },
+        { key = 'plain', name = 'Plain Window', canLock = false, setOpen = function(v) S.open = v end },
+    }
+    local runtime = {
+        saveLoadout = function() S.saves = S.saves + 1 end, checkDisplaySizeChange = function() end,
+        getManagedWindows = function() return defs end,
+        saveWindowPositions = function() S.savedPositions = true end, triggerRestoreWindows = function() S.restored = true end,
+    }
+    local UI = {}
+    local env = setmetatable({
+        ctrl = ctrl, runtime = runtime, ImGui = mockImGui, UI = UI, mq = { gettime = function() return S.now end },
+        ImGuiCol = { WindowBg = 2, Border = 5, TitleBg = 10, TitleBgActive = 11, Text = 0, Button = 21, ButtonHovered = 22, ScrollbarGrab = 15 },
+        ImGuiWindowFlags = { NoTitleBar = 1, NoResize = 2, NoMove = 4 },
+        ImGuiHoveredFlags = { RootAndChildWindows = 3, AllowWhenBlockedByActiveItem = 128, AllowWhenBlockedByPopup = 32 },
+        ImGuiPopupFlags = { AnyPopupId = 128, AnyPopupLevel = 256 },
+        ImGuiStyleVar = setmetatable({}, { __index = function(_, k) return k end }),
+    }, { __index = _G })
+    local function slice(startMarker, endMarker)
+        local a = assert(src:find(startMarker, 1, true), 'Suite 106: source marker ' .. startMarker)
+        local b = assert(src:find(endMarker, a, true), 'Suite 106: source marker ' .. endMarker)
+        return src:sub(a, b - 1)
+    end
+    local code = slice('function UI.setTooltip(fmt, ...)', '\n-- UI: theme and style helpers')
+        .. '\n' .. slice('function UI.pushTheme()', 'function UI.pushDisabledSliderStyle()')
+        .. '\n' .. slice('function UI.windowOpts(key, create)', 'function runtime.saveWindowPositions(silent)')
+    local chunk = assert((loadstring or load)(code, 'winopts'))
+    setfenv(chunk, env)
+    chunk()
+    UI.setTooltip = function(t) S.tooltips[#S.tooltips + 1] = t end
+
+    -- 1. Core wiring
+    assert_true(src:find("if type(ctrl.window_opts) ~= 'table' then ctrl.window_opts = {} end", 1, true) ~= nil, 'Suite 106: sanitize seeds window_opts')
+    for _, k in ipairs({ 'preEndWindow', 'windowFlags', 'windowBgAlpha', 'drawWindowMenuItems', 'windowOpts', 'setWindowOpt' }) do
+        assert_true(src:find('            ' .. k .. ' ', 1, true) ~= nil or src:find('            ' .. k .. '=', 1, true) ~= nil, 'Suite 106: core API exposes ' .. k)
+    end
+    assert_true(src:find("ImGui.Begin(winTitle, open, UI.windowFlags('main', winFlags))", 1, true) ~= nil, 'Suite 106: main window takes the shared flags')
+    assert_true(src:find("UI.preEndWindow('main')", 1, true) ~= nil and src:find("UI.preEndWindow('mini', true)", 1, true) ~= nil, 'Suite 106: core windows call the pre-End hook')
+    assert_true(src:find("UI.windowBgAlpha('mini', ctrl.mini_alpha or 0.92)", 1, true) ~= nil, 'Suite 106: mini HUD opacity rides the ghost fade')
+    -- every hooked plugin window: flags through the core, pre-End hook before End
+    local hooked = { 'auto_accept', 'boxnet', 'hud_spellgems', 'buffbot', 'hud_cooldowns', 'hud_unitframes', 'cursor', 'hud_effects', 'hud_xtarget', 'auto_aa', 'spellbook', 'hud_group', 'dps', 'inventory', 'gamedb', 'map', 'buttons' }
+    for _, f in ipairs(hooked) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        assert_true(psrc:find('core.windowFlags(', 1, true) ~= nil, 'Suite 106: ' .. f .. ' passes its window flags through core.windowFlags')
+        assert_true(psrc:find('core.preEndWindow(', 1, true) ~= nil, 'Suite 106: ' .. f .. ' calls core.preEndWindow before End')
+        local nPre = select(2, psrc:gsub('core%.preBeginWindow%(', ''))
+        local nEnd = select(2, psrc:gsub('core%.preEndWindow%(', ''))
+        assert_true(nEnd >= nPre, 'Suite 106: ' .. f .. ' has a pre-End call for each hooked window (' .. nEnd .. ' vs ' .. nPre .. ')')
+    end
+    for _, f in ipairs({ 'hud_effects', 'hud_unitframes', 'hud_spellgems', 'hud_xtarget', 'hud_group', 'buttons' }) do
+        local psrc = readFile('TAC/lua/tac/' .. f .. '.lua')
+        assert_true(psrc:find('core.drawWindowMenuItems(', 1, true) ~= nil and psrc:find("core%.preEndWindow%([^)]-, true%)") ~= nil, 'Suite 106: ' .. f .. ' folds the shared items into its own menu and keeps the core one off')
+    end
+    for _, f in ipairs({ 'hud_effects', 'hud_unitframes', 'hud_spellgems', 'hud_xtarget', 'hud_group', 'hud_cooldowns' }) do
+        assert_true(readFile('TAC/lua/tac/' .. f .. '.lua'):find('core.windowBgAlpha(', 1, true) ~= nil, 'Suite 106: ' .. f .. ' opacity rides the ghost fade')
+    end
+
+    -- 2. Options and flags
+    assert_eq(UI.windowFlags('group', 8), 8, 'Suite 106: no options: flags pass through')
+    UI.setWindowOpt('group', 'notitle', true)
+    assert_eq(UI.windowFlags('group', 8), 9, 'Suite 106: Hide title bar adds NoTitleBar')
+    assert_eq(S.saves, 1, 'Suite 106: an option change saves the loadout')
+    UI.setWindowOpt('group', 'lock', true)
+    assert_eq(UI.windowFlags('group', 0), 7, 'Suite 106: core lock adds NoMove + NoResize')
+    UI.setWindowOpt('group', 'notitle', false)
+    UI.setWindowOpt('group', 'lock', false)
+    assert_nil(ctrl.window_opts.group, 'Suite 106: cleared options drop the record')
+    assert_eq(S.saves, 4, 'Suite 106: each change saved once')
+    UI.setWindowOpt('group', 'lock', false)
+    assert_eq(S.saves, 4, 'Suite 106: no change, no save')
+
+    -- 3. Ghost: frame colours pushed before Begin at the fade, content colours pushed back after, balanced by preEnd + popTheme
+    UI.setWindowOpt('group', 'ghost', true)
+    S.now = 1000
+    S.hovered = false
+    UI.pushTheme()
+    UI.preBeginWindow('group')
+    assert_true(runtime.ghost.group ~= nil and runtime.ghost.group.a == 1, 'Suite 106: ghost starts fully drawn')
+    assert_true(runtime.ghostPush.group == nil, 'Suite 106: nothing pushed while fully drawn')
+    UI.postBeginWindow('group')
+    UI.preEndWindow('group')
+    UI.popTheme()
+    S.now = 1000 + runtime.GHOST.LINGER_MS + runtime.GHOST.OUT_MS + 50   -- the mouse has been away: fully faded
+    S.cols, S.popCols = {}, 0
+    UI.pushTheme()
+    local themeCols = #S.cols
+    UI.preBeginWindow('group')
+    local g = runtime.ghost.group
+    assert_true(g.a == 0, 'Suite 106: fully faded after linger + fade time: ' .. tostring(g.a))
+    local gp = runtime.ghostPush.group
+    assert_true(gp ~= nil and gp.frameN == #S.cols - themeCols and gp.frameN >= 7, 'Suite 106: frame colours pushed before Begin: ' .. tostring(gp and gp.frameN))
+    local titleFaded, textFaded = false, false
+    for _, c in ipairs(S.cols) do
+        if c.idx == 10 and c.a == 0 then titleFaded = true end
+        if c.idx == 0 and c.a == 0 then textFaded = true end
+    end
+    assert_true(titleFaded and textFaded, 'Suite 106: title bar and its text are at alpha 0 for Begin')
+    assert_true(math.abs(UI.windowBgAlpha('group', 0.9)) < 0.001, 'Suite 106: the window\'s own opacity is scaled by the fade')
+    assert_eq(UI.windowBgAlpha('other', 0.9), 0.9, 'Suite 106: a window without ghost keeps its opacity')
+    UI.postBeginWindow('group')
+    assert_true(gp.contentN >= 3, 'Suite 106: content colours (text, buttons) pushed back after Begin: ' .. tostring(gp.contentN))
+    local textBack = false
+    for _, c in ipairs(S.cols) do if c.idx == 0 and math.abs(c.a - 0.8) < 0.001 then textBack = true end end
+    assert_true(textBack, 'Suite 106: the text colour is back at its original alpha for the content')
+    local before = #S.cols
+    UI.preEndWindow('group')
+    assert_eq(#S.cols, before - 3, 'Suite 106: preEndWindow pops the content colours (inside the window)')
+    assert_eq(gp.contentN, 0, 'Suite 106: content count cleared')
+    UI.popTheme()
+    assert_eq(#S.cols, 0, 'Suite 106: popTheme pops the frame colours and the theme: stack balanced')
+    assert_nil(runtime.ghostPush.group, 'Suite 106: push record released')
+    -- hover brings it back
+    S.hovered = true
+    S.now = S.now + 10
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.preEndWindow('group'); UI.popTheme()
+    assert_true(g.held == true, 'Suite 106: hovered window is held')
+    S.now = S.now + runtime.GHOST.IN_MS
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.preEndWindow('group'); UI.popTheme()
+    assert_true(g.a == 1 and #S.cols == 0, 'Suite 106: fully back under the mouse, nothing left on the stack')
+    -- a popup anywhere holds it
+    S.hovered = false
+    S.popupOpen = true
+    S.now = S.now + runtime.GHOST.LINGER_MS + runtime.GHOST.OUT_MS
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.preEndWindow('group'); UI.popTheme()
+    S.now = S.now + 50
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.preEndWindow('group'); UI.popTheme()
+    assert_true(g.held == true and g.a == 1, 'Suite 106: an open popup holds a ghost window')
+    S.popupOpen = false
+    -- a window that skips preEndWindow is still balanced by popTheme
+    S.now = S.now + runtime.GHOST.LINGER_MS + runtime.GHOST.OUT_MS + 50
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.popTheme()
+    assert_eq(#S.cols, 0, 'Suite 106: popTheme pops content colours a window forgot (stack stays balanced)')
+    UI.setWindowOpt('group', 'ghost', false)
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.preEndWindow('group'); UI.popTheme()
+    assert_nil(runtime.ghost.group, 'Suite 106: ghost off drops the fade state')
+
+    -- 4. The shared menu: opens on a right-click over the window that no item took
+    S.hovered, S.released, S.anyItem = true, true, true
+    UI.pushTheme(); UI.preBeginWindow('plain'); UI.postBeginWindow('plain'); UI.preEndWindow('plain'); UI.popTheme()
+    assert_nil(S.opened, 'Suite 106: right-click over an item does not open the window menu')
+    S.anyItem = false
+    S.menuItems = {}
+    UI.pushTheme(); UI.preBeginWindow('plain'); UI.postBeginWindow('plain'); UI.preEndWindow('plain'); UI.popTheme()
+    assert_true(S.opened == nil and #S.menuItems >= 5, 'Suite 106: right-click over empty window space opens the shared menu (' .. #S.menuItems .. ' items)')
+    assert_eq(S.header, 'Plain Window', 'Suite 106: the menu is headed with the window name')
+    local labels = {}
+    for _, m in ipairs(S.menuItems) do labels[m.label] = m end
+    assert_true(labels['Hide title bar'] and labels['Ghost: fade the frame when the mouse is away'] and labels['Lock position & size'] and labels['Close window'] and labels['Save all window positions'],
+        'Suite 106: menu offers title bar, ghost, lock, layout and close')
+    S.released = false
+    S.clicks = { ['Hide title bar'] = true }
+    S.opened = '##tacWindowMenu_plain'
+    UI.pushTheme(); UI.preBeginWindow('plain'); UI.postBeginWindow('plain'); UI.preEndWindow('plain'); UI.popTheme()
+    assert_true(ctrl.window_opts.plain and ctrl.window_opts.plain.notitle == true, 'Suite 106: Hide title bar from the menu sets the option')
+    S.clicks = { ['Close window'] = true }
+    S.opened = '##tacWindowMenu_plain'
+    UI.pushTheme(); UI.preBeginWindow('plain'); UI.postBeginWindow('plain'); UI.preEndWindow('plain'); UI.popTheme()
+    assert_eq(S.open, false, 'Suite 106: Close window closes through the Window Layout entry')
+    S.clicks = { ['Lock position & size'] = true }
+    S.opened = '##tacWindowMenu_group'
+    UI.pushTheme(); UI.preBeginWindow('group'); UI.postBeginWindow('group'); UI.preEndWindow('group'); UI.popTheme()
+    assert_true(S.locked == true and ctrl.window_opts.group == nil, 'Suite 106: a window with its own lock locks through it, not the core option')
+    S.clicks = {}
+    S.opened = nil
+    -- a window with its own menu keeps the core one off
+    S.released, S.hovered, S.anyItem = true, true, false
+    UI.pushTheme(); UI.preBeginWindow('plain'); UI.postBeginWindow('plain'); UI.preEndWindow('plain', true); UI.popTheme()
+    assert_nil(S.opened, 'Suite 106: ownMenu windows do not get the core menu')
+    -- drawWindowMenuItems with items turned off (as the HUD menus use it)
+    S.menuItems = {}
+    UI.drawWindowMenuItems('group', { header = false, lock = false, scale = false, layout = false, close = false })
+    assert_eq(#S.menuItems, 2, 'Suite 106: HUD menus get just Hide title bar + Ghost')
+
+    -- 5. Windows outside the Window Layout table: a name and a close action of their own
+    S.menuItems, S.closedCompact = {}, false
+    S.clicks = { ['Close window'] = true }
+    UI.drawWindowMenuItems('dps_compact', { name = 'DPS compact window', onClose = function() S.closedCompact = true end })
+    assert_true(S.header == 'DPS compact window' and S.closedCompact == true, 'Suite 106: an unmanaged window names itself and closes through its own action')
+    S.clicks = {}
+    S.menuItems = {}
+    UI.drawWindowMenuItems('gamedb_pop', { name = 'Database cards', close = false })
+    local hasClose = false
+    for _, m in ipairs(S.menuItems) do if m.label == 'Close window' then hasClose = true end end
+    assert_true(S.header == 'Database cards' and not hasClose, 'Suite 106: close can be left out (the cards close with their X)')
+    -- several windows under one theme scope: postEndWindow pops each one's ghost colours right after its End
+    UI.setWindowOpt('gamedb_pop', 'ghost', true)
+    S.hovered, S.popupOpen = false, false
+    S.now = S.now + 10
+    UI.pushTheme(); UI.preBeginWindow('gamedb_pop'); UI.postBeginWindow('gamedb_pop'); UI.preEndWindow('gamedb_pop', false, { close = false }); UI.postEndWindow('gamedb_pop'); UI.popTheme()
+    S.now = S.now + runtime.GHOST.LINGER_MS + runtime.GHOST.OUT_MS + 50
+    S.cols = {}
+    UI.pushTheme()
+    local base = #S.cols
+    for _ = 1, 3 do
+        UI.preBeginWindow('gamedb_pop')
+        assert_true(#S.cols > base, 'Suite 106: each card pushes its frame colours')
+        UI.postBeginWindow('gamedb_pop'); UI.preEndWindow('gamedb_pop', false, { close = false }); UI.postEndWindow('gamedb_pop')
+        assert_eq(#S.cols, base, 'Suite 106: postEndWindow pops them before the next card')
+    end
+    assert_eq(#runtime.ghostStack, 0, 'Suite 106: nothing left for popTheme to pop')
+    UI.popTheme()
+    assert_eq(#S.cols, 0, 'Suite 106: theme scope balanced across three cards')
+    UI.setWindowOpt('gamedb_pop', 'ghost', false)
+    local dsrc = readFile('TAC/lua/tac/dps.lua')
+    assert_true(dsrc:find("core.preBeginWindow('dps_compact')", 1, true) ~= nil and dsrc:find("core.windowFlags('dps_compact', flags)", 1, true) ~= nil and dsrc:find("name = 'DPS compact window', onClose = closeCompact", 1, true) ~= nil,
+        'Suite 106: the DPS compact window has its own layout key with the shared options and menu')
+    local gsrc = readFile('TAC/lua/tac/gamedb.lua')
+    assert_true(gsrc:find("core.preBeginWindow('gamedb_pop')", 1, true) ~= nil and gsrc:find("core.postEndWindow('gamedb_pop')", 1, true) ~= nil, 'Suite 106: database cards share one key and pop per card')
+end)()
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))
 if fail > 0 then
