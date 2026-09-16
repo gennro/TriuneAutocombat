@@ -56,8 +56,9 @@ local function dbg(fmt, ...)
     if verbose then print(string.format('\a-w[Triune Update]\ax ' .. fmt, ...)) end
 end
 
+-- mq.gettime() is steady_clock milliseconds (returned as a uint64 cdata).
 local function nowMs()
-    if mq.gettime then return mq.gettime() / 1000 end
+    if mq.gettime then return tonumber(mq.gettime()) end
     return os.clock() * 1000
 end
 

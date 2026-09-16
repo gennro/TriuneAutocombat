@@ -641,6 +641,7 @@ local EXPECTED_FIELDS = {
     { 'uf_show_xp',              'boolean' },
     { 'uf_hide_empty_pets',      'boolean' },
     { 'uf_buff_max',             'number' },
+    { 'uf_target_buff_rows',     'number' },
     { 'show_group_window',       'boolean' },
     { 'gw_lock',                 'boolean' },
     { 'gw_alpha',                'number' },
@@ -8817,6 +8818,7 @@ do
     assert_eq(testDc.uf_show_xp, true, 'Suite 75: defaultCtrl.uf_show_xp is true')
     assert_eq(testDc.uf_hide_empty_pets, true, 'Suite 75: defaultCtrl.uf_hide_empty_pets is true')
     assert_eq(testDc.uf_buff_max, 30, 'Suite 75: defaultCtrl.uf_buff_max is 30')
+    assert_eq(testDc.uf_target_buff_rows, 2, 'Suite 75: defaultCtrl.uf_target_buff_rows is 2')
 
     assert_true(triuneContent:find('show_unit_frames%s*=%s*false') ~= nil,
         'Suite 75: defaultCtrl sets show_unit_frames to false')
@@ -8834,10 +8836,69 @@ do
         'Suite 75: defaultCtrl sets uf_hide_empty_pets to true')
     assert_true(triuneContent:find('uf_buff_max%s*=%s*30') ~= nil,
         'Suite 75: defaultCtrl sets uf_buff_max to 30')
+    assert_true(triuneContent:find('uf_target_buff_rows%s*=%s*2') ~= nil,
+        'Suite 75: defaultCtrl sets uf_target_buff_rows to 2')
 
     -- 2. Verify window definition and autonomous plugin architecture
     local fUf = assert(io.open('TAC/lua/tac/hud_unitframes.lua', 'r'))
     local ufContent = fUf:read('*all')
+    assert_true(ufContent:find("ImGui.BeginChild(boxId or '##ufTargetBox'", 1, true) ~= nil,
+        'Suite 75: target section is drawn inside a fixed-height child box')
+    assert_true(ufContent:find("drawTargetSection(barH, ctrl.uf_target_buff_rows or 2, '##ufTargetBox', { showCast = ctrl.uf_show_castbar ~= false })", 1, true) ~= nil,
+        'Suite 75: HUD target box height honours uf_target_buff_rows')
+    -- Target popout: the same section in a window of its own
+    assert_true(ufContent:find("key = 'target_window'", 1, true) ~= nil and ufContent:find("flag = 'show_target_window'", 1, true) ~= nil,
+        'Suite 75: hud_unitframes declares the Target popout as an extra window')
+    assert_true(ufContent:find("drawTargetSection(core.px(ctrl.tw_bar_height or 22), ctrl.tw_buff_rows or 2, '##twTargetBox'", 1, true) ~= nil,
+        'Suite 75: the Target popout draws the shared target section with its own bar height and rows')
+    assert_true(ufContent:find("###triuneTargetWindow", 1, true) ~= nil,
+        'Suite 75: the Target popout has its own ImGui window id')
+    assert_true(ufContent:find("core.preBeginWindow('target_window')", 1, true) ~= nil and ufContent:find("core.preEndWindow('target_window', true)", 1, true) ~= nil,
+        'Suite 75: the Target popout is wired to the core window hooks under its own layout key')
+    assert_true(ufContent:find("if not ctrl.show_unit_frames and not ctrl.show_target_window then", 1, true) ~= nil,
+        'Suite 75: the snapshot stays warm while either window is open')
+    assert_true(triuneContent:find("'WindowBg', 'ChildBg',", 1, true) ~= nil,
+        'Suite 75: the ghost fade includes ChildBg so the fixed target box fades with the window')
+    local mapSrc = readFile('TAC/lua/tac/map.lua')
+    assert_true(mapSrc:find("core.windowBgAlpha('map', 1.0)", 1, true) ~= nil and mapSrc:find("GetColorU32(0.035, 0.050, 0.075, ghostA)", 1, true) ~= nil,
+        'Suite 75: the map canvas fill follows the window ghost alpha')
+    assert_true(mapSrc:find("ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90 * ghostA)", 1, true) ~= nil,
+        'Suite 75: the map on-canvas panels fade with the window')
+    assert_true(triuneContent:find("cmd == 'target' or cmd == 'tw'", 1, true) ~= nil,
+        'Suite 75: /ac target toggles the Target popout')
+    assert_eq(testDc.show_target_window, false, 'Suite 75: defaultCtrl.show_target_window is false')
+    assert_eq(testDc.tw_bar_height, 22, 'Suite 75: defaultCtrl.tw_bar_height is 22')
+    assert_eq(testDc.tw_buff_rows, 2, 'Suite 75: defaultCtrl.tw_buff_rows is 2')
+    assert_eq(testDc.tw_show_tot, true, 'Suite 75: defaultCtrl.tw_show_tot is true')
+    assert_eq(testDc.tw_show_buffs, true, 'Suite 75: defaultCtrl.tw_show_buffs is true')
+    -- Cast bars: player (own cast, authoritative end) and target (from first sight over the cast time)
+    assert_eq(testDc.uf_show_castbar, true, 'Suite 75: defaultCtrl.uf_show_castbar is true')
+    assert_eq(testDc.tw_show_castbar, true, 'Suite 75: defaultCtrl.tw_show_castbar is true')
+    assert_true(ufContent:find('local function drawCastBarRow(barH, label, name, startAt, totalSec, endAt, r, g, b)', 1, true) ~= nil,
+        'Suite 75: shared cast bar row drawer')
+    assert_true(ufContent:find('mq.TLO.Me.CastTimeLeft()', 1, true) ~= nil and ufContent:find('c.MyCastTime() or c.CastTime()', 1, true) ~= nil,
+        'Suite 75: the player cast uses CastTimeLeft and MyCastTime')
+    assert_true(ufContent:find('mq.TLO.Target.Casting', 1, true) ~= nil,
+        'Suite 75: the target cast is read from Target.Casting')
+    assert_true(ufContent:find("drawCastBarRow(barH, 'Casting: ', snap.tCastName, snap.tCastStart, snap.tCastTotal, nil,", 1, true) ~= nil,
+        'Suite 75: the target box has a cast bar row')
+    assert_true(ufContent:find("drawCastBarRow(barH, 'Casting: ', snap.myCastName, snap.myCastStart, snap.myCastTotal, snap.myCastEnd,", 1, true) ~= nil,
+        'Suite 75: the player section has a cast bar row')
+    assert_true(ufContent:find('if showCast then targetBoxH = targetBoxH + barH + spacingY end', 1, true) ~= nil,
+        'Suite 75: the target box reserves the cast bar row')
+    assert_true(ufContent:find('ImGui.Dummy(0, barH)', 1, true) ~= nil,
+        'Suite 75: an idle cast bar row keeps its space so nothing below moves')
+    -- Pets: every pet of ours, not only the trio slot list (which folds same names and sweeps 150 units)
+    assert_true(ufContent:find("local filter = 'pet radius 400'", 1, true) ~= nil and ufContent:find('mq.TLO.NearestSpawn(i, filter)', 1, true) ~= nil,
+        'Suite 75: the HUD sweeps nearby pets itself')
+    assert_true(ufContent:find('(m.ID() or 0) == myId', 1, true) ~= nil and ufContent:find('sid == myPetId', 1, true) ~= nil,
+        'Suite 75: swept pets are matched by Master or Me.Pet')
+    assert_true(ufContent:find('if sid > 0 and not seenPetIds[sid] then', 1, true) ~= nil,
+        'Suite 75: swept pets are deduplicated by spawn id only')
+    assert_true(ufContent:find("string.format('Pets (%d):', #activePets)", 1, true) ~= nil,
+        'Suite 75: the pet section shows a count header')
+    assert_true(ufContent:find('PET_SWEEP_MAX = 40', 1, true) ~= nil,
+        'Suite 75: the pet sweep is capped')
     fUf:close()
 
     assert_true(triuneContent:find("TriunePluginsUI") ~= nil,
@@ -10492,7 +10553,7 @@ do
     initPM()
     local pm = rt.pluginManager
     assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
-    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'parcels', 'spellbook' }
+    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'parcels', 'spellbook', 'update_check' }
     for _, id in ipairs(expected) do
         local p = pm.plugins[id]
         assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
@@ -11148,7 +11209,7 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 19, 'Suite 89: nineteen shipped plugins own a window')
+        assert_eq(#W.all, 20, 'Suite 89: nineteen shipped plugins own a window, plus the unit frames Target popout')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
@@ -11164,6 +11225,28 @@ do
         pm.setHeaderButton('hud_group', false)
         assert_eq(pm.headerButtonEnabled('hud_group'), false, 'Suite 89: saved preference overrides the plugin default')
         assert_eq(#pm.windowPlugins(true), 17, 'Suite 89: disabling the preference removes the button')
+
+        -- extra windows (plugin.windows) are addressed as '<plugin>:<key>'
+        local tw = pm.getWindow('hud_unitframes:target_window')
+        assert_eq(tw and tw.flag, 'show_target_window', 'Suite 89: plugin.windows entries resolve through pm.getWindow by composite id')
+        assert_eq(pm.getWindow('hud_unitframes:nope'), nil, 'Suite 89: an unknown extra window key resolves to nil')
+        W.twEntry = nil
+        for i, e in ipairs(W.all) do if e.id == 'hud_unitframes:target_window' then W.twEntry = e; W.twIdx = i end end
+        assert_true(W.twEntry ~= nil and W.twEntry.pluginId == 'hud_unitframes', 'Suite 89: windowPlugins lists the extra window under its plugin id')
+        assert_eq(W.all[W.twIdx - 1].id, 'hud_unitframes', 'Suite 89: an extra window follows its plugin main window in header order')
+        assert_eq(pm.headerButtonEnabled('hud_unitframes:target_window'), false, 'Suite 89: the Target popout header button is off by default')
+        pm.setHeaderButton('hud_unitframes:target_window', true)
+        assert_eq(W.ctrl.plugins.hud_unitframes.windowHeader.target_window, true, 'Suite 89: extra window header choice is kept under ctrl.plugins[plugin].windowHeader[key]')
+        assert_eq(W.ctrl.plugins['hud_unitframes:target_window'], nil, 'Suite 89: no composite ctrl.plugins entry is created for an extra window')
+        assert_eq(pm.headerButtonEnabled('hud_unitframes:target_window'), true, 'Suite 89: the saved choice turns the extra window header button on')
+        assert_eq(#pm.windowPlugins(true), 18, 'Suite 89: the extra window header button counts like any other')
+        pm.setHeaderButton('hud_unitframes:target_window', false)
+        assert_eq(#pm.windowPlugins(true), 17, 'Suite 89: and can be turned off again')
+        assert_eq(pm.isWindowOpen('hud_unitframes:target_window'), false, 'Suite 89: Target popout closed initially')
+        pm.toggleWindow('hud_unitframes:target_window')
+        assert_eq(W.ctrl.show_target_window, true, 'Suite 89: toggleWindow opens an extra window via its ctrl flag')
+        pm.setWindowOpen('hud_unitframes:target_window', false)
+        assert_eq(W.ctrl.show_target_window, false, 'Suite 89: setWindowOpen(false) closes an extra window')
 
         -- open / close through the manager writes the ctrl flag
         assert_eq(pm.isWindowOpen('map'), false, 'Suite 89: map window closed initially')
@@ -11249,6 +11332,9 @@ do
             assert_true(W.byKey[k] ~= nil, 'Suite 89: registry lists window key ' .. k)
         end
         assert_eq(W.byKey.unit_frames.pluginId, 'hud_unitframes', 'Suite 89: window.key maps hud_unitframes to the unit_frames position key')
+        assert_true(W.byKey.target_window ~= nil and W.byKey.target_window.pluginId == 'hud_unitframes:target_window' and W.byKey.target_window.canLock == true,
+            'Suite 89: the Target popout has its own lockable layout entry')
+        assert_eq(W.byKey.target_window.name, 'Target Window', 'Suite 89: an extra window names its layout entry itself')
         assert_eq(W.byKey.unit_frames.canLock, true, 'Suite 89: lockFlag makes the entry lockable')
         assert_eq(W.byKey.map.canLock, false, 'Suite 89: windows without a lock flag are not lockable')
         assert_eq(W.byKey.buffbot ~= nil, true, 'Suite 89: header-button-off plugins still appear in the layout registry')
@@ -11968,7 +12054,7 @@ do
     initPM()
     local pm = rt.pluginManager
     S.shipped = #pm.pluginOrder
-    assert_eq(S.shipped, 20, 'Suite 92: all shipped plugins still load under the load-time guards')
+    assert_eq(S.shipped, 21, 'Suite 92: all shipped plugins still load under the load-time guards')
 
     -- Soft plugin dependencies (`uses`): normalised at registration, reverse-listed, state-tracked
     assert_eq(#pm.normalizeUses(nil), 0, 'Suite 92: no uses -> empty list')
@@ -11982,7 +12068,8 @@ do
     assert_eq(S.ids(pm.plugins.hud_group.uses), 'boxnet', 'Suite 92: hud_group declares it uses boxnet')
     assert_eq(S.ids(pm.plugins.hud_spellgems.uses), 'gamedb,spellbook', 'Suite 92: hud_spellgems declares it uses gamedb and spellbook')
     assert_eq(#pm.plugins.boxnet.uses, 0, 'Suite 92: boxnet uses nothing')
-    assert_eq(S.ids(pm.usedBy('boxnet')), 'buttons,dps,hud_group', 'Suite 92: usedBy(boxnet) lists the three consumers in load order')
+    assert_eq(S.ids(pm.plugins.inventory.uses), 'boxnet,gamedb', 'Suite 92: inventory declares it uses boxnet and gamedb')
+    assert_eq(S.ids(pm.usedBy('boxnet')), 'buttons,dps,hud_group,inventory', 'Suite 92: usedBy(boxnet) lists the four consumers in load order')
     assert_eq(S.ids(pm.usedBy('spellbook')), 'hud_spellgems', 'Suite 92: usedBy(spellbook) lists the gem bar')
     assert_eq(#pm.usedBy('cursor'), 0, 'Suite 92: cursor is used by nobody')
     assert_eq(pm.useState('boxnet'), 'active', 'Suite 92: an enabled plugin is an active dependency')
@@ -12809,7 +12896,7 @@ end
     -- 19. Core wiring
     assert_true(src:find("'boxnet.lua',", 1, true) ~= nil, 'Suite 95: core discover() probes boxnet.lua')
     assert_true(src:find("cmd = '/ac net [all|zone|group|Name] [command]'", 1, true) ~= nil, 'Suite 95: help table documents /ac net')
-    assert_true(src:find('|buffbot|net|btn|clearcursor|', 1, true) ~= nil, 'Suite 95: /ac usage line lists net')
+    assert_true(src:find('|buffbot|net|btn|update|clearcursor|', 1, true) ~= nil, 'Suite 95: /ac usage line lists net')
     local bnSrc = readFile('TAC/lua/tac/boxnet.lua')
     assert_true(bnSrc:find('mq.delay(', 1, true) == nil and bnSrc:find('core.delay(', 1, true) == nil, 'Suite 95: boxnet never calls mq.delay / core.delay (forbidden in actor handlers)')
     assert_true(bnSrc:find('core.pushTheme()', 1, true) ~= nil, 'Suite 95: window uses the core theme')
@@ -14544,6 +14631,13 @@ end)()
     UI.windowFlags = function(_, f) return f end
     UI.windowBgAlpha = function(_, a) return a end
     UI.drawWindowMenuItems = function() end
+    S.winOpts = {}
+    UI.windowOpts = function(key) return S.winOpts[key] end
+    UI.setWindowOpt = function(key, name, val)
+        if val == false then val = nil end
+        S.winOpts[key] = S.winOpts[key] or {}
+        if S.winOpts[key][name] ~= val then S.winOpts[key][name] = val; S.optSets = (S.optSets or 0) + 1 end
+    end
 
     -- MODES table straight from the source, plus the two code blocks under test
     local function slice(startMarker, endMarker)
@@ -14567,10 +14661,12 @@ end)()
     end
 
     -- 1. Defaults in the core
-    for _, k in ipairs({ 'mini_lock', 'mini_titlebar', 'mini_alpha', 'mini_show_activity', 'mini_show_target', 'mini_show_vitals', 'mini_show_camp', 'mini_show_tracker', 'mini_show_buttons' }) do
+    for _, k in ipairs({ 'mini_lock', 'mini_titlebar', 'mini_ghost', 'mini_alpha', 'mini_show_activity', 'mini_show_target', 'mini_show_vitals', 'mini_show_camp', 'mini_show_tracker', 'mini_show_buttons' }) do
         assert_true(src:find('        ' .. k .. ' ', 1, true) ~= nil, 'Suite 100: defaultCtrl seeds ' .. k)
     end
     assert_true(src:find("if c.mini_lock == nil then c.mini_lock = false end", 1, true) ~= nil, 'Suite 100: sanitize seeds mini_lock')
+    assert_true(src:find("if c.mini_ghost == nil then", 1, true) ~= nil and src:find("c.mini_ghost = (type(wo) == 'table' and wo.ghost == true)", 1, true) ~= nil, 'Suite 100: sanitize seeds mini_ghost from the shared window option')
+    assert_true(src:find("elseif cmd == 'ghost' or cmd == 'minighost' then", 1, true) ~= nil, 'Suite 100: /ac ghost command')
     assert_true(src:find("if type(c.mini_alpha) ~= 'number' then c.mini_alpha = 0.92 end", 1, true) ~= nil, 'Suite 100: sanitize seeds mini_alpha')
     assert_eq(#UI.MINI_SECTIONS, 6, 'Suite 100: six toggleable rows')
     assert_true(src:find("UI.drawStartPauseButton('##btnRun', 130, 24)", 1, true) ~= nil, 'Suite 100: full window action bar uses the shared START / PAUSE button')
@@ -14834,6 +14930,20 @@ end)()
     draw()
     S.checkRet['Title bar##miniTitle'] = nil
     assert_eq(ctrl.mini_titlebar, false, 'Suite 100: menu - title bar toggle persisted')
+    S.checkRet['Ghost mode##miniGhost'] = true
+    draw()
+    S.checkRet['Ghost mode##miniGhost'] = nil
+    assert_eq(ctrl.mini_ghost, true, 'Suite 100: menu - ghost mode persisted')
+    assert_eq(S.winOpts.mini and S.winOpts.mini.ghost, true, 'Suite 100: menu - ghost mode mirrored into the shared window option')
+    S.optSets = 0
+    draw()
+    assert_eq(S.optSets, 0, 'Suite 100: ghost sync is idle while the two agree')
+    S.winOpts.mini.ghost = nil   -- the shared option lost (another loadout): the saved switch wins next frame
+    draw()
+    assert_eq(S.winOpts.mini.ghost, true, 'Suite 100: ghost sync restores the shared option from mini_ghost')
+    UI.setMiniGhost(false)
+    assert_eq(ctrl.mini_ghost, false, 'Suite 100: setMiniGhost off')
+    assert_nil(S.winOpts.mini.ghost, 'Suite 100: setMiniGhost off clears the shared option')
     S.sliderRet = 0.5
     draw()
     S.sliderRet = nil
@@ -17136,7 +17246,7 @@ end)()
     assert_true(isrc:find('db.itemSummary(it.id)', 1, true) ~= nil, 'Suite 103: inventory tooltips show the database summary')
     assert_true(select(2, isrc:gsub('shiftHeld%(%) and openDatabaseCard%(it%)', '')) == 2, 'Suite 103: bag and bank slots open the card on Shift+Right-click')
     assert_true(isrc:find('if ImGui.IsItemClicked(1) then openDatabaseCard(it) end', 1, true) ~= nil, 'Suite 103: list rows open the card on right-click')
-    assert_true(isrc:find('uses               = { gamedb =', 1, true) ~= nil, 'Suite 103: inventory declares its gamedb use')
+    assert_true(isrc:find("gamedb = 'Database lines in item tooltips", 1, true) ~= nil, 'Suite 103: inventory declares its gamedb use')
     local msrc = readFile('TAC/lua/tac/map.lua')
     assert_true(msrc:find('function plugin.showZone(zoneShort)', 1, true) ~= nil, 'Suite 103: map plugin exposes showZone for NPC spawn rows')
     assert_true(gsrc:find("map.showZone(s[1])", 1, true) ~= nil, 'Suite 103: NPC spawn rows carry a Map button')
@@ -17533,6 +17643,554 @@ end)()
     local gsrc = readFile('TAC/lua/tac/gamedb.lua')
     assert_true(gsrc:find("core.preBeginWindow('gamedb_pop')", 1, true) ~= nil and gsrc:find("core.postEndWindow('gamedb_pop')", 1, true) ~= nil, 'Suite 106: database cards share one key and pop per card')
 end)()
+
+-- ============================================================================
+-- Suite 107: Update Checker plugin (tac/update_check.lua) -- version compare,
+-- release JSON parsing, settings round-trip, and the non-blocking contract.
+-- ============================================================================
+do
+    print('--- Suite 107: Update Checker plugin ---')
+    local P = assert(loadfile('TAC/lua/tac/update_check.lua'))()
+    assert_eq(P.id, 'update_check', 'Suite 107: plugin id')
+    assert_true(P.onInit ~= nil and P.onTick ~= nil and P.onDrawUI ~= nil and P.onDrawSettings ~= nil and P.onDestroy ~= nil
+        and P.onCommand ~= nil and P.onSaveSettings ~= nil and P.onLoadSettings ~= nil, 'Suite 107: full plugin lifecycle')
+    assert_eq(P.runOutOfCombatOnly, false, 'Suite 107: polling ticks are microseconds, so the plugin keeps ticking in combat')
+    assert_eq(P.hasThread, false, 'Suite 107: no fiber; the request is a state machine driven by onTick')
+
+    -- Version comparison: tags are 'V2.14' / 'v2.15' / '2.0.3'
+    local c = P.compareVersions
+    assert_true(c('V2.16', '2.15') > 0, 'Suite 107: V2.16 is newer than 2.15')
+    assert_true(c('v2.15', '2.15') == 0, 'Suite 107: v prefix is ignored')
+    assert_true(c('V2.14', '2.15') < 0, 'Suite 107: V2.14 is older than 2.15')
+    assert_true(c('3', '2.99') > 0, 'Suite 107: major wins over minor')
+    assert_true(c('2.15.1', '2.15') > 0, 'Suite 107: extra patch component counts as newer')
+    assert_true(c('2.15', '2.15-beta') == 0, 'Suite 107: suffixes without digits are ignored')
+    assert_eq(#P.parseVersion('V2.0.3'), 3, 'Suite 107: parseVersion keeps every numeric component')
+
+    -- Release JSON: only what the GitHub /releases/latest payload provides
+    local payload = '{"url":"https://api.github.com/x","tag_name":"V2.16","name":"Release \\"V2.16\\"",'
+        .. '"html_url":"https://github.com/gennro/TriuneAutocombat/releases/tag/V2.16","published_at":"2026-09-20T10:00:00Z",'
+        .. '"body":"## 2026-09-20\\n\\n- **Thing** (`x.lua`).\\n  - Detail with a } brace\\n\\n---\\n\\n## Install\\n1. ignore","assets":[{"name":"a.zip"}]}'
+    assert_true(P.jsonComplete(payload), 'Suite 107: complete payload passes jsonComplete')
+    assert_true(not P.jsonComplete(payload:sub(1, #payload - 5)), 'Suite 107: truncated payload fails jsonComplete')
+    assert_true(not P.jsonComplete(payload:sub(1, 60)), 'Suite 107: payload cut inside a string fails jsonComplete')
+    assert_true(P.jsonComplete('  {"a":"}"}  '), 'Suite 107: braces inside strings do not count')
+    assert_eq(P.jsonString(payload, 'tag_name'), 'V2.16', 'Suite 107: tag_name extracted')
+    assert_eq(P.jsonString(payload, 'name'), 'Release "V2.16"', 'Suite 107: escaped quotes unescaped')
+    assert_eq(P.jsonString(payload, 'published_at'), '2026-09-20T10:00:00Z', 'Suite 107: published_at extracted')
+    assert_eq(P.jsonString(payload, 'missing'), nil, 'Suite 107: missing key returns nil')
+    local notes = P.summarizeNotes(P.jsonString(payload, 'body'))
+    assert_true(notes:find('2026-09-20', 1, true) ~= nil and notes:find('- Thing (x.lua).', 1, true) ~= nil,
+        'Suite 107: notes summary strips markdown markers')
+    assert_true(notes:find('Install', 1, true) == nil, 'Suite 107: notes summary stops at the --- install section')
+    assert_eq(P.summarizeNotes(''), nil, 'Suite 107: empty notes give nil')
+
+    -- Settings round-trip
+    P.onLoadSettings({ autoCheck = false, frequency = 'weekly', popup = false, skipTag = 'V2.16', lastCheckAt = 123, lastTag = 'V2.14' })
+    local saved = P.onSaveSettings()
+    assert_true(saved.autoCheck == false and saved.frequency == 'weekly' and saved.popup == false and saved.skipTag == 'V2.16'
+        and saved.lastCheckAt == 123 and saved.lastTag == 'V2.14', 'Suite 107: settings round-trip')
+    P.onLoadSettings({ frequency = 'bogus', skipTag = '' })
+    saved = P.onSaveSettings()
+    assert_eq(saved.frequency, 'weekly', 'Suite 107: unknown frequency is ignored')
+    assert_eq(saved.skipTag, nil, 'Suite 107: empty skipTag clears the skip')
+    assert_true(P.onCommand('nope', { 'nope' }) == false, 'Suite 107: unrelated commands are not claimed')
+
+    -- Non-blocking contract: no process spawn, no mq.delay, async COM polling
+    local src = readFile('TAC/lua/tac/update_check.lua')
+    assert_true(src:find('io.popen', 1, true) == nil and src:find('os.execute', 1, true) == nil,
+        'Suite 107: the update checker never spawns a process')
+    assert_true(src:find('mq.delay', 1, true) == nil, 'Suite 107: the update checker never calls mq.delay')
+    assert_true(src:find("variant(VT_BOOL, 'boolVal', -1)", 1, true) ~= nil, 'Suite 107: WinHttpRequest is opened in async mode')
+    assert_true(src:find('succeeded[0] = -1', 1, true) ~= nil, 'Suite 107: WaitForResponse out-param is pre-set for Wine')
+    assert_true(src:find("if not http.headers then", 1, true) ~= nil and src:find('vt.get_Status(req, s)', 1, true) ~= nil,
+        'Suite 107: Status is polled before the body is touched')
+    assert_true(src:find("pcall(ffi.typeof, 'IWinHttpRequest')", 1, true) ~= nil, 'Suite 107: cdef is guarded against plugin reloads')
+    assert_true(src:find("'User-Agent'", 1, true) ~= nil, 'Suite 107: GitHub API requests carry a User-Agent')
+end
+
+-- ============================================================================
+-- Suite 108: Inventory & Bank Manager -- Box Inventories (snapshot codec,
+-- paging, box search, give workflow over a scripted client, trade accept,
+-- trust gating, settings round-trip, commands).
+-- ============================================================================
+print('--- Suite 108: Inventory Box Inventories ---')
+do
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local noop = function() end
+    local passthrough = function(_, v) return v end
+    local mockImGui = setmetatable({
+        Checkbox = passthrough, Button = function() return false end, SmallButton = function() return false end,
+        IsItemHovered = function() return false end, BeginTable = function() return false end,
+        Begin = function() return false, false end, BeginPopup = function() return false end,
+        SliderInt = function(_, v) return v, false end, InputTextWithHint = function(_, _, v) return v, false end,
+        RadioButton = function() return false end, Selectable = function() return false end,
+        BeginChild = function() return true end, BeginTabBar = function() return true end, BeginTabItem = function() return true end,
+    }, { __index = function() return function() end end })
+
+    -- A scripted client: cursor / target / spawns / trade window are plain
+    -- fields the test flips, and every mq command is recorded.
+    local function makeWorld()
+        local w = { cmds = {}, cursorId = 0, targetId = 0, tradeOpen = false, hisName = '', spawns = {}, items = {}, saves = 0, nowMs = 100000 }
+        local mq = {
+            configDir = './tests/__nonexistent_cfg__',
+            cmd = function(c) w.cmds[#w.cmds + 1] = c end,
+            cmdf = function(f, ...) w.cmds[#w.cmds + 1] = string.format(f, ...) end,
+            gettime = function() return w.nowMs end,
+            TLO = {
+                Me = { CleanName = function() return 'Giver' end, X = function() return 0 end, Y = function() return 0 end, Z = function() return 0 end },
+                Zone = { ShortName = function() return 'poknowledge' end },
+                Cursor = setmetatable({ ID = function() return w.cursorId end }, { __call = function() return w.cursorId > 0 end }),
+                Target = { ID = function() return w.targetId end },
+                Window = function(name)
+                    if name == 'TradeWnd' then
+                        return setmetatable({ Open = function() return w.tradeOpen end,
+                            Child = function() return setmetatable({ Text = function() return w.hisName end }, { __call = function() return true end }) end },
+                            { __call = function() return true end })
+                    end
+                    return setmetatable({ Open = function() return false end }, { __call = function() return true end })
+                end,
+                Spawn = function(q)
+                    local name = q:match('^pc =(.+)$') or q:match('^pc (.+)$')
+                    local sp = name and w.spawns[name]
+                    if not sp then return setmetatable({}, { __call = function() return false end }) end
+                    return setmetatable({ ID = function() return sp.id end, Distance3D = function() return sp.dist end, Distance = function() return sp.dist end },
+                        { __call = function() return true end })
+                end,
+            },
+        }
+        local ctrl = { plugins = {}, show_inv = true }
+        local core = {
+            VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
+            px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+            preBeginWindow = noop, postBeginWindow = noop,
+            saveLoadout = function() w.saves = w.saves + 1 end,
+            -- Cooperative delay stand-in: advance the scripted world, then test the condition.
+            delay = function(ms, cond)
+                if w.onDelay then w.onDelay(ms) end
+                if cond then local ok, r = pcall(cond) return ok and r == true end
+                return false
+            end,
+        }
+        return core, w, ctrl
+    end
+
+    -- A fake boxnet API: records sends, exposes peers and trust.
+    local function makeBoxnet(me, peers)
+        local bn = { sent = {}, broadcasts = {}, subs = {}, gen = 1, trust = true, peersList = peers or {} }
+        function bn.available() return true end
+        function bn.myName() return me end
+        function bn.peers() return bn.peersList end
+        function bn.peer(name) for _, p in ipairs(bn.peersList) do if p.name:lower() == name:lower() then return p end end return nil end
+        function bn.generation() return bn.gen end
+        function bn.trusted() return bn.trust end
+        function bn.send(name, kind, data) bn.sent[#bn.sent + 1] = { to = name, kind = kind, data = data } return true end
+        function bn.broadcast(kind, data) bn.broadcasts[#bn.broadcasts + 1] = { kind = kind, data = data } return true end
+        function bn.command(name, line) bn.sent[#bn.sent + 1] = { to = name, kind = 'cmd', data = line } return true end
+        function bn.subscribe(kind, fn) bn.subs[kind] = fn return function() bn.subs[kind] = nil end end
+        return bn
+    end
+
+    local function loadInv()
+        local fn = assert(loadfile('TAC/lua/tac/inventory.lua'))
+        local origPrint = print
+        print = quietPrint
+        local ok, inst = pcall(fn)
+        print = origPrint
+        assert_true(ok and type(inst) == 'table', 'Suite 108: inventory.lua loads')
+        return inst
+    end
+
+    local origPrint = print
+    print = quietPrint
+
+    -- 1. Codec: describeLocation, pack / unpack round trip, flags
+    do
+        local inv = loadInv()
+        local L = inv.invLogic
+        assert_eq(select(2, L.describeLocation('INVENTORY', 3, 4)), 'in pack3 4', 'Suite 108: bag slot notify address')
+        assert_eq(L.describeLocation('INVENTORY', 3, 4), 'Bag 3 [Slot 4]', 'Suite 108: bag slot label')
+        assert_eq(select(2, L.describeLocation('INVENTORY', 5)), 'pack5', 'Suite 108: loose pack slot address')
+        assert_eq(select(2, L.describeLocation('WORN', 13)), '13', 'Suite 108: worn slot address is the slot number')
+        assert_eq(L.describeLocation('WORN', 13), 'Worn [Main Hand]', 'Suite 108: worn slot label')
+        assert_eq(select(2, L.describeLocation('BANK', 2, 7)), 'in bank2 7', 'Suite 108: bank slot address')
+        assert_eq(select(2, L.describeLocation('SHAREDBANK', 1, 2)), 'in sharedbank1 2', 'Suite 108: shared bank slot address')
+        assert_eq(select(2, L.describeLocation('CURSOR', 0)), '', 'Suite 108: cursor has no notify address')
+        local it = { id = 1001, icon = 500, name = 'Peridot', location = 'INVENTORY', slotIndex = 2, subSlot = 5, count = 7, stackable = true,
+            stackSize = 20, weight = 0.1, value = 1000, type = 'Gem', category = 'Gem', lore = false, nodrop = false, tradeskill = true,
+            magic = true, clicky = nil, augs = { { slot = 1, name = 'Aug A' }, { slot = 2, name = 'Aug B' } } }
+        local p = L.packItem(it)
+        assert_eq(#p, 15, 'Suite 108: packed item has 15 fields')
+        assert_eq(p[4], 'I', 'Suite 108: location packs to a code')
+        assert_eq(p[13], L.FLAG.tradeskill + L.FLAG.stackable + L.FLAG.magic, 'Suite 108: flags pack to a bit set')
+        assert_eq(p[15], 'Aug A|Aug B', 'Suite 108: augs pack as |-separated text')
+        local u = L.unpackItem(p, 'Bob')
+        assert_eq(u.name, 'Peridot', 'Suite 108: unpack keeps the name')
+        assert_eq(u.owner, 'Bob', 'Suite 108: unpack tags the owner')
+        assert_true(u.remote == true, 'Suite 108: unpacked items are marked remote')
+        assert_eq(u.notifyCmd, 'in pack2 5', 'Suite 108: unpack rebuilds the notify address')
+        assert_eq(u.displayLocation, 'Bag 2 [Slot 5]', 'Suite 108: unpack rebuilds the label')
+        assert_true(u.tradeskill and u.stackable and u.magic and not u.lore and not u.nodrop, 'Suite 108: unpack restores the flags')
+        assert_eq(u.qtyText, '7/20', 'Suite 108: unpacked items are decorated for the list')
+        assert_eq(#u.augs, 2, 'Suite 108: unpack parses the aug names')
+        assert_eq(L.unpackItem(L.packItem({ id = 5, name = 'Sword', location = 'WORN', slotIndex = 13 }), 'X').wornSlot, 'Main Hand', 'Suite 108: worn items keep their slot name')
+        assert_nil(L.unpackItem('junk', 'X'), 'Suite 108: unpack rejects non-tables')
+        -- Content signature: order-insensitive, changes with counts / slots
+        local a = L.contentSignature({ { id = 1, count = 2, notifyCmd = 'in pack1 1' }, { id = 2, count = 1, notifyCmd = 'in pack1 2' } })
+        local b = L.contentSignature({ { id = 2, count = 1, notifyCmd = 'in pack1 2' }, { id = 1, count = 2, notifyCmd = 'in pack1 1' } })
+        local c = L.contentSignature({ { id = 1, count = 3, notifyCmd = 'in pack1 1' }, { id = 2, count = 1, notifyCmd = 'in pack1 2' } })
+        assert_eq(a, b, 'Suite 108: signature ignores scan order')
+        assert_neq(a, c, 'Suite 108: signature changes when a stack count changes')
+    end
+
+    -- 2. Paging + merge + container rebuild
+    do
+        local inv = loadInv()
+        local L = inv.invLogic
+        assert_eq(#L.paginate({}, 3), 1, 'Suite 108: an empty list is one empty page')
+        local pages = L.paginate({ 1, 2, 3, 4, 5, 6, 7 }, 3)
+        assert_eq(#pages, 3, 'Suite 108: 7 items in pages of 3 -> 3 pages')
+        assert_eq(#pages[3], 1, 'Suite 108: the last page holds the remainder')
+        local st = {
+            items = {
+                { id = 1, name = 'A', location = 'INVENTORY', slotIndex = 1, subSlot = 1, count = 1 },
+                { id = 2, name = 'B', location = 'INVENTORY', slotIndex = 1, subSlot = 3, count = 1 },
+                { id = 3, name = 'C', location = 'BANK', slotIndex = 2, subSlot = 1, count = 1 },
+                { id = 4, name = 'D', location = 'INVENTORY', slotIndex = 4, count = 1 },
+            },
+            containers = {
+                inventory = { { slot = 1, name = 'Backpack', capacity = 8, used = 2, slots = {} }, { slot = 4, name = 'D', capacity = 1, used = 1, slots = {} } },
+                bank = { { slot = 2, name = 'Bank Bag', capacity = 10, used = 1, slots = {} } },
+                sharedBank = {},
+            },
+            counts = { total = 4, freeInvSlots = 6, totalInvSlots = 9 },
+            bankLive = false, bankLastSync = '2026-09-15 10:00:00',
+        }
+        local snap = L.buildSnapshot(st, 123)
+        assert_eq(#snap.items, 4, 'Suite 108: snapshot packs every item')
+        assert_eq(snap.meta.counts.freeInvSlots, 6, 'Suite 108: snapshot meta carries the counts')
+        assert_eq(#snap.meta.inventory, 2, 'Suite 108: snapshot meta lists the bags')
+        assert_nil(snap.meta.inventory[1].slots, 'Suite 108: snapshot bags carry no slot maps')
+        assert_eq(snap.meta.bankSync, '2026-09-15 10:00:00', 'Suite 108: snapshot meta carries the bank sync time')
+        local pg = L.paginate(snap.items, 3)
+        local rec = { name = 'Bob' }
+        assert_true(L.mergePage(rec, { gen = 7, page = 2, pages = 2, items = pg[2] }, 50) == false, 'Suite 108: a partial snapshot is not complete')
+        assert_nil(rec.items, 'Suite 108: nothing published until every page is in')
+        assert_true(L.mergePage(rec, { gen = 7, page = 2, pages = 2, items = pg[2] }, 50) == false, 'Suite 108: a duplicate page is ignored')
+        assert_true(L.mergePage(rec, { gen = 7, page = 1, pages = 2, meta = snap.meta, items = pg[1] }, 60) == true, 'Suite 108: the last page completes the snapshot')
+        assert_eq(#rec.items, 4, 'Suite 108: pages assemble in order regardless of arrival')
+        assert_eq(rec.items[1].name, 'A', 'Suite 108: page 1 items come first')
+        assert_eq(rec.at, 60, 'Suite 108: completion time recorded')
+        assert_eq(rec.gen, 7, 'Suite 108: snapshot generation recorded')
+        assert_nil(rec.partial, 'Suite 108: partial buffer cleared')
+        assert_eq(rec.containers.inventory[1].slots[3].name, 'B', 'Suite 108: bag slot maps rebuilt from the items')
+        assert_eq(rec.containers.inventory[2].slots[1].name, 'D', 'Suite 108: a loose pack item fills its 1-slot container')
+        assert_eq(rec.containers.bank[1].slots[1].name, 'C', 'Suite 108: bank slot maps rebuilt too')
+        -- A newer generation restarts the assembly
+        assert_true(L.mergePage(rec, { gen = 8, page = 1, pages = 2, items = {} }, 70) == false, 'Suite 108: a new generation starts over')
+        assert_eq(rec.partial.gen, 8, 'Suite 108: partial tracks the new generation')
+        assert_eq(#rec.items, 4, 'Suite 108: the complete older snapshot stays until the new one completes')
+    end
+
+    -- 3. Box search / sort, give blockers, distance
+    do
+        local inv = loadInv()
+        local L = inv.invLogic
+        local items = {
+            { owner = 'Zed', name = 'Peridot', location = 'INVENTORY', notifyCmd = 'in pack1 1', displayLocation = 'Bag 1' },
+            { owner = 'Amy', name = 'Peridot', location = 'BANK', notifyCmd = 'in bank1 1', displayLocation = 'Bank 1' },
+            { owner = 'Amy', name = 'Sword', location = 'WORN', notifyCmd = '13', displayLocation = 'Worn' },
+            { owner = 'Amy', name = 'Pearl', location = 'SHAREDBANK', notifyCmd = 'in sharedbank1 1', displayLocation = 'Shared' },
+        }
+        local rows = L.filterBoxItems(items, 'peridot', 'ALL', 'ALL')
+        assert_eq(#rows, 2, 'Suite 108: search matches across owners')
+        assert_eq(rows[1].owner .. '/' .. rows[2].owner, 'Amy/Zed', 'Suite 108: rows sort by owner')
+        assert_eq(#L.filterBoxItems(items, '', 'BANK', 'ALL'), 2, 'Suite 108: Bank filter includes the shared bank')
+        assert_eq(#L.filterBoxItems(items, '', 'ALL', 'amy'), 3, 'Suite 108: owner filter is case-insensitive')
+        assert_eq(#L.filterBoxItems(items, '', 'WORN', 'zed'), 0, 'Suite 108: owner + location combine')
+        assert_nil(L.giveBlocker({ id = 1, location = 'INVENTORY' }), 'Suite 108: a bag item can be given')
+        assert_eq(L.giveBlocker({ id = 1, location = 'INVENTORY', nodrop = true }), 'NO TRADE item', 'Suite 108: NO TRADE blocks a give')
+        assert_true(L.giveBlocker({ id = 1, location = 'BANK' }) ~= nil, 'Suite 108: bank items cannot be given directly')
+        assert_true(L.giveBlocker({ id = 1, location = 'SHAREDBANK' }) ~= nil, 'Suite 108: shared bank items cannot be given directly')
+        assert_true(L.giveBlocker({ id = 0, location = 'INVENTORY' }) ~= nil, 'Suite 108: unknown ids cannot be given')
+        assert_eq(L.dist3({ x = 0, y = 0, z = 0 }, { x = 3, y = 4, z = 0 }), 5, 'Suite 108: dist3')
+        assert_nil(L.dist3({ x = 0 }, { x = 1, y = 1 }), 'Suite 108: dist3 needs both positions')
+    end
+
+    -- 4. Give workflow on the scripted client: happy path
+    do
+        local core, w, ctrl = makeWorld()
+        local inv = loadInv()
+        local bn = makeBoxnet('Giver', { { name = 'Taker', hb = { zone = 'poknowledge', x = 5, y = 0, z = 0 } } })
+        rawset(core, 'boxnet', bn)
+        inv.onInit(core)
+        inv.scanner.scanAll = function() inv.state.lastScanTime = os.time() end
+        inv.probe.locate = function(id, cmd) return { cmd = cmd, name = 'Peridot', count = 5, stackable = true, nodrop = false } end
+        w.spawns.Taker = { id = 77, dist = 8 }
+        -- The world reacts to each command as the game would.
+        w.onDelay = function()
+            local last = w.cmds[#w.cmds] or ''
+            if last:find('/itemnotify', 1, true) then w.cursorId = 1001
+            elseif last:find('/target id 77', 1, true) then w.targetId = 77
+            elseif last == '/click left target' then w.tradeOpen = true
+            elseif last:find('TRDW_Trade_Button', 1, true) then w.tradeOpen = false w.cursorId = 0 end
+        end
+        local it = { id = 1001, name = 'Peridot', location = 'INVENTORY', notifyCmd = 'in pack1 1', count = 5, stackable = true }
+        local ok, why = inv.net.requestGive(it, 'Taker')
+        assert_true(ok, 'Suite 108: a local give is queued (' .. tostring(why) .. ')')
+        assert_eq(#inv.state.net.gives, 1, 'Suite 108: give job in the queue')
+        assert_true(inv.net.requestGive(it, 'Giver') == false, 'Suite 108: cannot give to yourself')
+        inv.net.processGives()
+        assert_eq(#inv.state.net.gives, 0, 'Suite 108: the queue drains')
+        local joined = table.concat(w.cmds, '\n')
+        assert_true(joined:find('/shiftkey /itemnotify in pack1 1 leftmouseup', 1, true) ~= nil, 'Suite 108: whole stack picked up with shift')
+        assert_true(joined:find('/target id 77', 1, true) ~= nil, 'Suite 108: receiver targeted by spawn id')
+        assert_true(joined:find('/click left target', 1, true) ~= nil, 'Suite 108: trade opened with /click left target')
+        assert_true(joined:find('/notify TradeWnd TRDW_Trade_Button leftmouseup', 1, true) ~= nil, 'Suite 108: giver clicks Trade')
+        assert_true(joined:find('/autoinventory', 1, true) == nil, 'Suite 108: nothing to clean up after a good trade')
+        local accept = nil
+        for _, m in ipairs(bn.sent) do if m.kind == 'inv:trade_accept' then accept = m end end
+        assert_true(accept ~= nil and accept.to == 'Taker' and accept.data.name == 'Peridot', 'Suite 108: receiver told to accept the trade')
+        assert_true(inv.state.net.log[1].text:find('Gave Peridot to Taker', 1, true) ~= nil, 'Suite 108: success logged')
+        -- Cursor-occupied guard on the next job
+        w.cursorId = 500
+        inv.net.enqueueGive({ itemId = 1001, notifyCmd = 'in pack1 1', name = 'Peridot', to = 'Taker' })
+        inv.net.processGives()
+        assert_true(inv.state.net.log[1].text:find('cursor is already holding', 1, true) ~= nil, 'Suite 108: a busy cursor refuses the give')
+        w.cursorId = 0
+        -- Out of range
+        w.spawns.Taker.dist = 40
+        inv.net.enqueueGive({ itemId = 1001, notifyCmd = 'in pack1 1', name = 'Peridot', to = 'Taker' })
+        inv.net.processGives()
+        assert_true(inv.state.net.log[1].text:find('trade range', 1, true) ~= nil, 'Suite 108: out of range refuses the give')
+        -- Not in zone
+        w.spawns.Taker = nil
+        inv.net.enqueueGive({ itemId = 1001, notifyCmd = 'in pack1 1', name = 'Peridot', to = 'Taker' })
+        inv.net.processGives()
+        assert_true(inv.state.net.log[1].text:find('not in this zone', 1, true) ~= nil, 'Suite 108: a receiver in another zone refuses the give')
+    end
+
+    -- 5. Give workflow: receiver never accepts -> cancel + autoinventory; partial quantity
+    do
+        local core, w = makeWorld()
+        local inv = loadInv()
+        local bn = makeBoxnet('Giver', { { name = 'Taker', hb = { zone = 'poknowledge' } } })
+        rawset(core, 'boxnet', bn)
+        inv.onInit(core)
+        inv.scanner.scanAll = function() inv.state.lastScanTime = os.time() end
+        inv.probe.locate = function(id, cmd) return { cmd = cmd, name = 'Peridot', count = 5, stackable = true, nodrop = false } end
+        w.spawns.Taker = { id = 77, dist = 3 }
+        w.onDelay = function()
+            local last = w.cmds[#w.cmds] or ''
+            if last:find('/itemnotify', 1, true) then w.cursorId = 1001
+            elseif last:find('/target id 77', 1, true) then w.targetId = 77
+            elseif last == '/click left target' then w.tradeOpen = true
+            elseif last:find('TRDW_Cancel_Button', 1, true) then w.tradeOpen = false
+            elseif last == '/autoinventory' then w.cursorId = 0 end
+        end
+        inv.net.enqueueGive({ itemId = 1001, notifyCmd = 'in pack1 1', name = 'Peridot', to = 'Taker', count = 2, requestedBy = 'Boss' })
+        inv.net.processGives()
+        local joined = table.concat(w.cmds, '\n')
+        assert_true(joined:find('/nomodkey /itemnotify in pack1 1 leftmouseup', 1, true) ~= nil, 'Suite 108: a partial quantity uses the quantity dialog')
+        assert_true(joined:find('TRDW_Cancel_Button', 1, true) ~= nil, 'Suite 108: an unaccepted trade is cancelled')
+        assert_true(joined:find('/autoinventory', 1, true) ~= nil, 'Suite 108: the item goes back to the bags')
+        assert_true(inv.state.net.log[1].text:find('did not accept', 1, true) ~= nil, 'Suite 108: failure reason logged')
+        local res = nil
+        for _, m in ipairs(bn.sent) do if m.kind == 'inv:give_result' then res = m end end
+        assert_true(res ~= nil and res.to == 'Boss' and res.data.ok == false, 'Suite 108: the remote requester gets the failure')
+        -- Single item uses ctrl
+        w.tradeOpen = false
+        w.onDelay = function()
+            local last = w.cmds[#w.cmds] or ''
+            if last:find('/itemnotify', 1, true) then w.cursorId = 1001
+            elseif last:find('/target id 77', 1, true) then w.targetId = 77
+            elseif last == '/click left target' then w.tradeOpen = true
+            elseif last:find('TRDW_Trade_Button', 1, true) then w.tradeOpen = false w.cursorId = 0 end
+        end
+        w.cmds = {}
+        inv.net.enqueueGive({ itemId = 1001, notifyCmd = 'in pack1 1', name = 'Peridot', to = 'Taker', count = 1 })
+        inv.net.processGives()
+        assert_true(table.concat(w.cmds, '\n'):find('/ctrlkey /itemnotify in pack1 1 leftmouseup', 1, true) ~= nil, 'Suite 108: one item picked up with ctrl')
+        -- NO TRADE seen on the live item
+        inv.probe.locate = function(id, cmd) return { cmd = cmd, name = 'Soulbound', count = 1, stackable = false, nodrop = true } end
+        inv.net.enqueueGive({ itemId = 1002, notifyCmd = 'in pack1 2', name = 'Soulbound', to = 'Taker' })
+        inv.net.processGives()
+        assert_true(inv.state.net.log[1].text:find('NO TRADE', 1, true) ~= nil, 'Suite 108: the live NO TRADE flag stops the give')
+        assert_eq(#bn.broadcasts, 0, 'Suite 108: no change hint before anyone asked for our snapshot')
+    end
+
+    -- 6. Message handlers: request -> pages, give (trusted / untrusted), trade accept, result, changed
+    do
+        local core, w, ctrl = makeWorld()
+        local inv = loadInv()
+        local bn = makeBoxnet('Giver', { { name = 'Taker', hb = { zone = 'poknowledge' } }, { name = 'Boss', hb = { zone = 'poknowledge' } } })
+        rawset(core, 'boxnet', bn)
+        inv.onInit(core)
+        inv.scanner.scanAll = function()
+            inv.state.lastScanTime = os.time()
+            inv.state.items = {}
+            for i = 1, 170 do inv.state.items[i] = { id = i, name = 'Item ' .. i, location = 'INVENTORY', slotIndex = 1, subSlot = i, count = 1 } end
+            inv.state.contentGen = 3
+        end
+        inv.net.ensureSubscriptions()
+        assert_true(bn.subs['inv:request'] ~= nil and bn.subs['inv:give'] ~= nil and bn.subs['inv:page'] ~= nil, 'Suite 108: handlers subscribed')
+        bn.subs['inv:request']({ want = 'all' }, { character = 'Boss' })
+        bn.subs['inv:request']({ want = 'all' }, { character = 'Boss' })
+        assert_eq(#inv.state.net.pendingRequests, 2, 'Suite 108: requests queue for the tick')
+        inv.net.serveRequests()
+        local pages = {}
+        for _, m in ipairs(bn.sent) do if m.kind == 'inv:page' then pages[#pages + 1] = m end end
+        assert_eq(#pages, 3, 'Suite 108: 170 items -> 3 pages (duplicate request served once)')
+        assert_true(pages[1].data.meta ~= nil and pages[2].data.meta == nil, 'Suite 108: only the first page carries meta')
+        assert_eq(pages[1].data.pages, 3, 'Suite 108: pages announce the total')
+        assert_eq(pages[3].to, 'Boss', 'Suite 108: pages go to the asker')
+        assert_eq(#pages[3].data.items, 10, 'Suite 108: the last page holds the remainder')
+        assert_true(inv.state.net.served.boss == true, 'Suite 108: the asker is remembered for change hints')
+        inv.state.contentGen = 4
+        inv.net.announceChanged()
+        assert_eq(#bn.broadcasts, 1, 'Suite 108: a content change is announced once someone asked')
+        inv.net.announceChanged()
+        assert_eq(#bn.broadcasts, 1, 'Suite 108: the same generation is not announced twice')
+        -- Sharing off refuses
+        inv.cfg.share = false
+        bn.sent = {}
+        bn.subs['inv:request']({}, { character = 'Boss' })
+        inv.net.serveRequests()
+        assert_true(bn.sent[1].kind == 'inv:page' and bn.sent[1].data.refused == true, 'Suite 108: sharing off answers with a refusal')
+        inv.cfg.share = true
+        -- Pages arriving from a peer assemble into its record
+        local snapItems = {}
+        for i = 1, 5 do snapItems[i] = inv.invLogic.packItem({ id = 100 + i, name = 'Gem ' .. i, location = 'INVENTORY', slotIndex = 1, subSlot = i, count = 1 }) end
+        bn.subs['inv:page']({ gen = 1, page = 1, pages = 1, meta = { counts = { freeInvSlots = 3 }, inventory = { { slot = 1, name = 'Bag', capacity = 8, used = 5 } } }, items = snapItems }, { character = 'Taker' })
+        local rec = inv.state.net.peers.taker
+        assert_true(rec ~= nil and #rec.items == 5, 'Suite 108: a peer page lands in its record')
+        assert_eq(rec.containers.inventory[1].slots[2].name, 'Gem 2', 'Suite 108: peer bag grid rebuilt')
+        assert_eq(#inv.net.allBoxItems(), 175, 'Suite 108: All boxes lists mine plus the peer snapshot')
+        assert_eq(inv.net.allBoxItems()[1].owner, 'Giver', 'Suite 108: my rows are tagged with my name')
+        -- Refused page
+        bn.subs['inv:page']({ refused = true, reason = 'sharing is off on Boss' }, { character = 'Boss' })
+        assert_eq(inv.state.net.peers.boss.refused, 'sharing is off on Boss', 'Suite 108: a refusal is recorded on the peer')
+        -- Changed hint marks the snapshot stale
+        bn.subs['inv:changed']({ gen = 2 }, { character = 'Taker' })
+        assert_true(rec.stale == true, 'Suite 108: a change hint marks the snapshot stale')
+        -- Remote give request: trusted -> queued; untrusted -> refused with a result
+        bn.subs['inv:give']({ itemId = 101, notifyCmd = 'in pack1 1', name = 'Gem 1', to = 'Taker' }, { character = 'Boss' })
+        assert_eq(#inv.state.net.gives, 1, 'Suite 108: a trusted give request is queued')
+        assert_eq(inv.state.net.gives[1].requestedBy, 'Boss', 'Suite 108: the requester is remembered')
+        bn.trust = false
+        bn.sent = {}
+        bn.subs['inv:give']({ itemId = 101, notifyCmd = 'in pack1 1', name = 'Gem 1', to = 'Taker' }, { character = 'Boss' })
+        assert_eq(#inv.state.net.gives, 1, 'Suite 108: an untrusted give request is not queued')
+        assert_true(bn.sent[1].kind == 'inv:give_result' and bn.sent[1].data.ok == false and bn.sent[1].data.reason == 'not trusted', 'Suite 108: untrusted requester gets a refusal')
+        bn.trust = true
+        inv.cfg.acceptGives = false
+        bn.sent = {}
+        bn.subs['inv:give']({ itemId = 101, notifyCmd = 'in pack1 1', name = 'Gem 1', to = 'Taker' }, { character = 'Boss' })
+        assert_true(bn.sent[1].data.reason:find('gives are off', 1, true) ~= nil, 'Suite 108: the Accept Gives switch refuses')
+        inv.cfg.acceptGives = true
+        -- Asking a remote owner to give sends inv:give to that box
+        bn.sent = {}
+        local okR, whyR = inv.net.requestGive({ id = 101, name = 'Gem 1', location = 'INVENTORY', notifyCmd = 'in pack1 1', owner = 'Taker' }, 'Boss')
+        assert_true(okR, 'Suite 108: a remote give is sent (' .. tostring(whyR) .. ')')
+        assert_true(bn.sent[1].kind == 'inv:give' and bn.sent[1].to == 'Taker' and bn.sent[1].data.to == 'Boss', 'Suite 108: the owner box is asked to give to the receiver')
+        assert_true(inv.net.requestGive({ id = 101, name = 'Gem 1', location = 'INVENTORY', notifyCmd = 'in pack1 1', owner = 'Taker' }, 'Taker') == false, 'Suite 108: giving a box its own item is refused')
+        -- Give result from a remote giver
+        bn.subs['inv:give_result']({ ok = true, name = 'Gem 1', to = 'Boss' }, { character = 'Taker' })
+        assert_true(inv.state.net.log[1].text:find('Taker gave Gem 1 to Boss', 1, true) ~= nil, 'Suite 108: a remote result is logged')
+        -- Trade accept: click Trade once the giver's window shows their name, then log the receipt
+        bn.subs['inv:trade_accept']({ name = 'Gem 1' }, { character = 'Taker' })
+        w.cmds = {}
+        inv.net.processTradeAccepts()
+        assert_eq(#w.cmds, 0, 'Suite 108: no Trade click while no trade window is open')
+        w.tradeOpen = true
+        w.hisName = 'Someone'
+        inv.net.processTradeAccepts()
+        assert_eq(#w.cmds, 0, 'Suite 108: a trade from someone else is left alone')
+        w.hisName = 'Taker'
+        inv.net.processTradeAccepts()
+        assert_eq(w.cmds[1], '/notify TradeWnd TRDW_Trade_Button leftmouseup', 'Suite 108: the expected giver\'s trade is accepted')
+        inv.net.processTradeAccepts()
+        assert_eq(#w.cmds, 1, 'Suite 108: Trade is not clicked again within a second')
+        w.tradeOpen = false
+        inv.net.processTradeAccepts()
+        assert_true(inv.state.net.acceptTrades.taker == nil, 'Suite 108: the accept entry clears when the window closes')
+        assert_true(inv.state.net.log[1].text:find('Received Gem 1 from Taker', 1, true) ~= nil, 'Suite 108: receipt logged')
+        -- Expiry
+        bn.subs['inv:trade_accept']({ name = 'Gem 2' }, { character = 'Taker' })
+        w.nowMs = w.nowMs + 60000
+        inv.net.processTradeAccepts()
+        assert_true(inv.state.net.acceptTrades.taker == nil, 'Suite 108: an accept that never saw a trade expires')
+        -- Re-subscribe on a boxnet reload; destroy unsubscribes
+        bn.gen = 2
+        inv.net.ensureSubscriptions()
+        assert_true(bn.subs['inv:request'] ~= nil, 'Suite 108: subscriptions renewed after a boxnet reload')
+        inv.onDestroy()
+        assert_true(bn.subs['inv:request'] == nil, 'Suite 108: destroy drops the subscriptions')
+    end
+
+    -- 7. Settings round-trip, commands, and no plugin / no network degrade
+    do
+        local core, w, ctrl = makeWorld()
+        local inv = loadInv()
+        inv.onInit(core)
+        inv.state.autoScan = true
+        inv.state.autoScanInterval = 20
+        inv.cfg.share = false
+        inv.cfg.tradeRange = 12
+        inv.cfg.autoRefreshSec = 45
+        local saved = inv.onSaveSettings()
+        assert_true(saved.autoScan == true and saved.autoScanInterval == 20 and saved.share == false and saved.tradeRange == 12 and saved.autoRefreshSec == 45 and saved.acceptGives == true,
+            'Suite 108: settings save')
+        inv.onLoadSettings({ autoScan = false, autoScanInterval = 999, share = true, acceptGives = false, tradeRange = 1, autoRefreshSec = -5, announce = false })
+        assert_true(inv.state.autoScan == false and inv.state.autoScanInterval == 60 and inv.cfg.share == true and inv.cfg.acceptGives == false
+            and inv.cfg.tradeRange == 5 and inv.cfg.autoRefreshSec == 0 and inv.cfg.announce == false, 'Suite 108: settings load and clamp')
+        inv.cfg.acceptGives = true
+        -- Without boxnet: tick runs, gives refuse cleanly, tab degrades
+        inv.scanner.scanAll = function() inv.state.lastScanTime = os.time() end
+        inv.onTick()
+        local ok, why = inv.net.requestGive({ id = 1, name = 'X', location = 'INVENTORY', notifyCmd = 'in pack1 1', owner = 'Other' }, 'Me')
+        assert_true(ok == false and why == 'Box Network not connected', 'Suite 108: remote give without boxnet is refused')
+        -- Commands
+        local bn = makeBoxnet('Tester', { { name = 'Taker', hb = { zone = 'z' } } })
+        rawset(core, 'boxnet', bn)
+        inv.state.items = { { id = 55, name = 'Peridot', location = 'INVENTORY', notifyCmd = 'in pack1 1', displayLocation = 'Bag 1 [Slot 1]', count = 3, stackable = true },
+                            { id = 56, name = 'Pearl', location = 'INVENTORY', notifyCmd = 'in pack1 2', displayLocation = 'Bag 1 [Slot 2]', count = 1 },
+                            { id = 57, name = 'Peridot Ring', location = 'BANK', notifyCmd = 'in bank1 1', displayLocation = 'Bank 1 [Slot 1]', count = 1 } }
+        inv.state.lastScanTime = os.time()
+        assert_true(inv.onCommand('inv', { 'inv', 'give', 'Taker', 'pearl' }), 'Suite 108: /ac inv give handled')
+        assert_eq(#inv.state.net.gives, 1, 'Suite 108: /ac inv give queues the item by name')
+        assert_eq(inv.state.net.gives[1].itemId, 56, 'Suite 108: name match picks the right item')
+        inv.onCommand('inv', { 'inv', 'give', 'Taker', 'peridot', '2' })
+        assert_eq(#inv.state.net.gives, 2, 'Suite 108: exact name wins over a longer partial match')
+        assert_eq(inv.state.net.gives[2].count, 2, 'Suite 108: trailing number is the quantity')
+        printed = {}
+        inv.onCommand('inv', { 'inv', 'give', 'Taker', 'pe' })
+        assert_eq(#inv.state.net.gives, 2, 'Suite 108: an ambiguous name queues nothing')
+        assert_true(printed[#printed]:find('items match', 1, true) ~= nil, 'Suite 108: ambiguity is explained')
+        inv.onCommand('inv', { 'inv', 'give', 'Taker', '55' })
+        assert_eq(inv.state.net.gives[3].itemId, 55, 'Suite 108: give by item id')
+        assert_true(inv.onCommand('inv', { 'inv', 'refresh' }), 'Suite 108: /ac inv refresh handled')
+        assert_true(bn.sent[1] ~= nil and bn.sent[1].kind == 'inv:request', 'Suite 108: refresh asks the boxes')
+        printed = {}
+        assert_true(inv.onCommand('inv', { 'inv', 'find', 'peridot' }), 'Suite 108: /ac inv find handled')
+        assert_true(printed[1]:find('2 match', 1, true) ~= nil, 'Suite 108: find counts matches across boxes')
+        local shown = ctrl.show_inv
+        assert_true(inv.onCommand('inv', { 'inv' }), 'Suite 108: bare /ac inv still toggles the window')
+        assert_eq(ctrl.show_inv, not shown, 'Suite 108: window toggled')
+        assert_true(inv.onCommand('dps', { 'dps' }) == false, 'Suite 108: other commands ignored')
+        -- Boxnet exposes the trust check the give handler relies on
+        local bsrc = readFile('TAC/lua/tac/boxnet.lua')
+        assert_true(bsrc:find('function api.trusted(sender, payload)', 1, true) ~= nil, 'Suite 108: boxnet publishes api.trusted')
+        local isrc = readFile('TAC/lua/tac/inventory.lua')
+        assert_true(isrc:find('mq.delay(', 1, true) == nil, 'Suite 108: the give workflow never blocks the core with mq.delay')
+        assert_true(select(2, isrc:gsub('UI%.drawBagGrid%(', '')) >= 5, 'Suite 108: one bag grid renderer serves bags, bank, shared bank and peers')
+        assert_true(isrc:find("BeginTabItem(\"Box Inventories##tabBoxes\")", 1, true) ~= nil, 'Suite 108: the Box Inventories tab is registered')
+    end
+
+    print = origPrint
+end
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))
 if fail > 0 then

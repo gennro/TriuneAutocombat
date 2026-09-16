@@ -13,19 +13,40 @@
 -- it). Window visibility is ctrl.show_inv (header button, Settings ->
 -- External Tools, /ac inv, and the Window Layout manager flip it); the first
 -- scan runs when the window is opened.
+--
+-- Box Inventories (needs the boxnet plugin): the "Box Inventories" tab shows
+-- every other Triune box's bags / bank / worn gear and can move items between
+-- characters through the game's trade window.
+--   * Pull model: a box asks a peer with `inv:request`; the peer answers with
+--     `inv:page` messages (packed items, INV_PAGE_SIZE per page, see
+--     invLogic.packItem) so one message never carries a whole bank. Nothing
+--     is sent unless someone is looking. `inv:changed` is a broadcast hint
+--     that a box's items moved, so open viewers refresh.
+--   * Give: `inv:give` asks the box that HOLDS the item to hand it to another
+--     character (the giver may be this box, a remote box, and the requester a
+--     third one). The giver picks the item up, targets the receiver, opens the
+--     trade with /click left target, clicks Trade, and tells the receiver
+--     (`inv:trade_accept`) to click its own Trade button; the outcome goes
+--     back to the requester as `inv:give_result`. Both boxes must be in the
+--     same zone within cfg.tradeRange, checked on the giver.
+--   * Remote requests honour boxnet's trust settings (core.boxnet.trusted) and
+--     the plugin's own Share / Accept Gives switches.
 -- ============================================================================
 
 local plugin = {
     id                 = 'inventory',
     name               = 'Inventory & Bank Manager',
-    version            = '2.0.0',
+    version            = '2.1.0',
     author             = 'Triune',
-    description        = 'Inventory / bank / shared bank search, container visualizer, and organization assistant with an offline bank cache.',
+    description        = 'Inventory / bank / shared bank search, container visualizer, organization assistant with an offline bank cache, and every other box\'s inventory with item transfers between characters.',
     defaultEnabled     = true,
     tickInterval       = 0.05,
     runOutOfCombatOnly = false,
     hasThread          = true,
-    uses               = { gamedb = 'Database lines in item tooltips, Shift+Right-click / list right-click item cards' },
+    uses               = {
+        gamedb = 'Database lines in item tooltips, Shift+Right-click / list right-click item cards',
+        boxnet = 'Box Inventories tab: view other boxes\' items and move items between characters',
+    },
     -- Window owned by this plugin (drives the main-window header button)
     window             = { label = 'Inv Manager', tooltip = 'Toggles the Inventory & Bank Manager window (inventory plugin).', flag = 'show_inv', desc = 'Inventory / bank search, visualizer & organizer', headerButton = true, order = 110 },
 }
@@ -35,8 +56,8 @@ local plugin = {
 local core = nil  ---@type table
 local ctrl, ImGui, mq = nil, nil, nil  ---@type table, table, table
 
--- Version
-local VERSION = '1.0.0'
+-- Version shown in the window header (kept in step with plugin.version)
+local VERSION = plugin.version
 
 local function refresh()
     ctrl = core.ctrl
@@ -94,7 +115,12 @@ local function col32(r, g, b, a)
 end
 
 local function textWidth(str)
-    return #(tostring(str or '')) * 7
+    str = tostring(str or '')
+    if ImGui and ImGui.CalcTextSize then
+        local ok, w = pcall(ImGui.CalcTextSize, str)
+        if ok and type(w) == 'number' then return w end
+    end
+    return #str * 7
 end
 
 -- Visualizer slot colors (ImU32), computed once instead of per slot per frame.
@@ -305,7 +331,46 @@ local state = {
     lastScanTime = 0,
     autoScan = false,
     autoScanInterval = 15, -- seconds (slider range 5..60)
+    -- Box Inventories (boxnet). Settings live in cfg below; this is runtime.
+    net = {
+        peers = {},          -- [lowerName] = peer snapshot record (see netPeerRecord)
+        selected = 'ALL',    -- 'ALL' | lowerName of the box whose items are shown
+        view = 'list',       -- 'list' | 'grid'
+        search = '',
+        loc = 'ALL',         -- ALL | INVENTORY | BANK | WORN
+        pendingRequests = {},-- names that asked for our snapshot; served on the tick
+        gives = {},          -- queued give jobs on THIS box (we hold the item)
+        activeGive = nil,    -- the job being executed
+        acceptTrades = {},   -- [lowerName] = { until = sec, item = name }: click Trade for this giver
+        log = {},            -- newest first: { time, text, level }
+        givePopup = nil,     -- item the Give popup is open for
+        subGen = -1,         -- boxnet generation the subscriptions belong to
+        unsubs = {},
+        lastAutoRefresh = 0,
+        served = {},         -- [lowerName] = true once a box has asked us (gets inv:changed hints)
+        lastChangedGen = -1, -- contentGen last announced with inv:changed
+        tableCache = { key = '', rows = {} },
+        status = '',
+    },
 }
+
+-- Persisted settings (onSaveSettings / onLoadSettings).
+local cfg = {
+    share          = true,  -- answer other boxes' inventory requests
+    acceptGives    = true,  -- execute give requests from other boxes (also gated by boxnet trust)
+    tradeRange     = 15,    -- max distance to the receiver for a trade (game refuses beyond ~15)
+    autoRefreshSec = 30,    -- re-request open box snapshots this often (0 = manual)
+    announce       = true,  -- print transfers to chat
+}
+
+-- Box Inventories helpers the item list uses; defined in that section below.
+local boxnet, openGivePopup, drawGivePopup
+
+local INV_PAGE_SIZE      = 80    -- packed items per inv:page message
+local NET_REQUEST_MIN_SEC = 2.0  -- never ask the same box more often than this
+local NET_SNAPSHOT_MAX_AGE = 3   -- rescan before serving when our data is older (seconds)
+local NET_LOG_MAX        = 40
+local TRADE_ACCEPT_SEC   = 25    -- receiver waits this long for the giver's trade window
 
 -- Marks the filtered table and organizer caches stale.
 local function markDirty()
@@ -650,6 +715,298 @@ function invLogic.findHeaviestItems(items, limit)
     return res
 end
 
+-- ----------------------------------------------------------------------------
+-- Location strings: the label the list shows and the /itemnotify address of a
+-- slot, from its type / bag / sub-slot. Used by the scanner and to rebuild
+-- items from a peer's packed snapshot.
+-- ----------------------------------------------------------------------------
+function invLogic.describeLocation(locType, slotIdx, subIdx)
+    slotIdx = tonumber(slotIdx) or 0
+    subIdx = tonumber(subIdx)
+    if subIdx and subIdx <= 0 then subIdx = nil end
+    if locType == 'WORN' then
+        return string.format('Worn [%s]', WORN_SLOTS[slotIdx] or tostring(slotIdx)), string.format('%d', slotIdx)
+    elseif locType == 'INVENTORY' then
+        if subIdx then
+            return string.format('Bag %d [Slot %d]', slotIdx, subIdx), string.format('in pack%d %d', slotIdx, subIdx)
+        end
+        return string.format('Pack Slot %d', slotIdx), string.format('pack%d', slotIdx)
+    elseif locType == 'BANK' then
+        if subIdx then
+            return string.format('Bank %d [Slot %d]', slotIdx, subIdx), string.format('in bank%d %d', slotIdx, subIdx)
+        end
+        return string.format('Bank Slot %d', slotIdx), string.format('bank%d', slotIdx)
+    elseif locType == 'SHAREDBANK' then
+        if subIdx then
+            return string.format('SharedBank %d [Slot %d]', slotIdx, subIdx), string.format('in sharedbank%d %d', slotIdx, subIdx)
+        end
+        return string.format('SharedBank Slot %d', slotIdx), string.format('sharedbank%d', slotIdx)
+    elseif locType == 'CURSOR' then
+        return 'Cursor', ''
+    end
+    return tostring(locType or ''), ''
+end
+
+-- ----------------------------------------------------------------------------
+-- Box snapshot codec. An item travels as a positional array (about half the
+-- bytes of a keyed table once serialized) in this order:
+--   1 id, 2 icon, 3 name, 4 location code, 5 slotIndex, 6 subSlot (0 = none),
+--   7 count, 8 stackSize, 9 weight, 10 value, 11 type, 12 category, 13 flags,
+--   14 clicky spell, 15 aug names
+-- flags is a bit set: 1 lore, 2 nodrop, 4 tradeskill, 8 stackable, 16 magic,
+-- 32 norent, 64 attunable.
+-- ----------------------------------------------------------------------------
+local LOC_CODE = { INVENTORY = 'I', BANK = 'B', SHAREDBANK = 'S', WORN = 'W', CURSOR = 'C' }
+local CODE_LOC = { I = 'INVENTORY', B = 'BANK', S = 'SHAREDBANK', W = 'WORN', C = 'CURSOR' }
+local FLAG = { lore = 1, nodrop = 2, tradeskill = 4, stackable = 8, magic = 16, norent = 32, attunable = 64 }
+invLogic.FLAG = FLAG
+
+local function hasFlag(bits, bit)
+    return (math.floor((tonumber(bits) or 0) / bit) % 2) == 1
+end
+
+function invLogic.packItem(it)
+    if not it then return nil end
+    local flags = 0
+    for name, bit in pairs(FLAG) do
+        if it[name] then flags = flags + bit end
+    end
+    return {
+        tonumber(it.id) or 0,
+        tonumber(it.icon) or 0,
+        tostring(it.name or ''),
+        LOC_CODE[it.location] or 'I',
+        tonumber(it.slotIndex) or 0,
+        tonumber(it.subSlot) or 0,
+        tonumber(it.count) or 1,
+        tonumber(it.stackSize) or 1,
+        tonumber(it.weight) or 0,
+        tonumber(it.value) or 0,
+        tostring(it.type or ''),
+        tostring(it.category or 'Misc'),
+        flags,
+        tostring(it.clicky or ''),
+        (invLogic.formatAugs(it):gsub(', ', '|')),   -- parseAugs splits on '|'
+    }
+end
+
+-- The inverse: a plain item table in the shape the list / tooltip / filters
+-- expect, tagged with the owning character.
+function invLogic.unpackItem(p, owner)
+    if type(p) ~= 'table' then return nil end
+    local loc = CODE_LOC[p[4]] or 'INVENTORY'
+    local slot = tonumber(p[5]) or 0
+    local sub = tonumber(p[6]) or 0
+    if sub <= 0 then sub = nil end
+    local flags = tonumber(p[13]) or 0
+    local disp, cmd = invLogic.describeLocation(loc, slot, sub)
+    local it = {
+        id = tonumber(p[1]) or 0,
+        icon = tonumber(p[2]) or 0,
+        name = tostring(p[3] or ''),
+        location = loc,
+        slotIndex = slot,
+        subSlot = sub,
+        wornSlot = loc == 'WORN' and (WORN_SLOTS[slot] or tostring(slot)) or nil,
+        displayLocation = disp,
+        notifyCmd = cmd,
+        count = tonumber(p[7]) or 1,
+        stackSize = tonumber(p[8]) or 1,
+        weight = tonumber(p[9]) or 0,
+        value = tonumber(p[10]) or 0,
+        type = tostring(p[11] or ''),
+        category = tostring(p[12] or 'Misc'),
+        clicky = (p[14] ~= nil and p[14] ~= '') and tostring(p[14]) or nil,
+        augs = invLogic.parseAugs(p[15]),
+        owner = owner,
+        remote = true,
+    }
+    for name, bit in pairs(FLAG) do it[name] = hasFlag(flags, bit) end
+    return invLogic.decorateItem(it)
+end
+
+-- Splits a list into pages of `size`; page tables are new arrays.
+function invLogic.paginate(list, size)
+    size = math.max(1, tonumber(size) or INV_PAGE_SIZE)
+    local pages = {}
+    local n = #(list or {})
+    if n == 0 then return { {} } end
+    for i = 1, n, size do
+        local page = {}
+        for j = i, math.min(n, i + size - 1) do page[#page + 1] = list[j] end
+        pages[#pages + 1] = page
+    end
+    return pages
+end
+
+-- The snapshot a box sends about itself: meta (counts, containers without
+-- their slot maps, bank status) and packed items. `containers` is only the
+-- bag list (slot, name, capacity, used) - the viewer rebuilds slot maps from
+-- the items' slot / subSlot.
+function invLogic.buildSnapshot(st, scanAt)
+    local function bagList(list)
+        local out = {}
+        for _, c in ipairs(list or {}) do
+            out[#out + 1] = { slot = c.slot, name = tostring(c.name or ''), capacity = tonumber(c.capacity) or 0, used = tonumber(c.used) or 0 }
+        end
+        return out
+    end
+    local items = {}
+    for _, it in ipairs(st.items or {}) do items[#items + 1] = invLogic.packItem(it) end
+    local counts = {}
+    for k, v in pairs(st.counts or {}) do
+        if type(v) == 'number' then counts[k] = v end
+    end
+    return {
+        meta = {
+            counts = counts,
+            inventory = bagList(st.containers and st.containers.inventory),
+            bank = bagList(st.containers and st.containers.bank),
+            sharedBank = bagList(st.containers and st.containers.sharedBank),
+            bankLive = st.bankLive == true,
+            bankSync = tostring(st.bankLastSync or ''),
+            scanAt = tonumber(scanAt) or 0,
+        },
+        items = items,
+    }
+end
+
+-- Rebuilds a peer's bag lists (with slot maps) from its meta + unpacked items.
+function invLogic.rebuildContainers(meta, items)
+    local function withSlots(list, loc)
+        local out = {}
+        local bySlot = {}
+        for _, c in ipairs(list or {}) do
+            local bag = { slot = c.slot, name = c.name, capacity = c.capacity or 0, used = c.used or 0, slots = {} }
+            out[#out + 1] = bag
+            bySlot[c.slot] = bag
+        end
+        for _, it in ipairs(items or {}) do
+            if it.location == loc then
+                local bag = bySlot[it.slotIndex]
+                if bag then
+                    if it.subSlot then
+                        bag.slots[it.subSlot] = it
+                    elseif (bag.capacity or 0) <= 1 then
+                        bag.slots[1] = it
+                    end
+                end
+            end
+        end
+        table.sort(out, function(a, b) return (a.slot or 0) < (b.slot or 0) end)
+        return out
+    end
+    meta = meta or {}
+    return {
+        inventory = withSlots(meta.inventory, 'INVENTORY'),
+        bank = withSlots(meta.bank, 'BANK'),
+        sharedBank = withSlots(meta.sharedBank, 'SHAREDBANK'),
+    }
+end
+
+-- Applies one inv:page to a peer record. A page from a different snapshot
+-- generation than the partial one restarts the assembly. Returns true when
+-- the snapshot is complete (rec.items / containers / meta / at are then set).
+function invLogic.mergePage(rec, data, nowSecs)
+    if type(rec) ~= 'table' or type(data) ~= 'table' then return false end
+    local gen = tonumber(data.gen) or 0
+    local page = tonumber(data.page) or 1
+    local pages = math.max(1, tonumber(data.pages) or 1)
+    local part = rec.partial
+    if not part or part.gen ~= gen or part.pages ~= pages then
+        part = { gen = gen, pages = pages, got = 0, seen = {}, items = {}, meta = nil }
+        rec.partial = part
+    end
+    if part.seen[page] then return false end
+    part.seen[page] = true
+    part.got = part.got + 1
+    if type(data.meta) == 'table' then part.meta = data.meta end
+    part.items[page] = {}
+    for _, p in ipairs(data.items or {}) do
+        local it = invLogic.unpackItem(p, rec.name)
+        if it then part.items[page][#part.items[page] + 1] = it end
+    end
+    if part.got < pages then return false end
+    local items = {}
+    for i = 1, pages do
+        for _, it in ipairs(part.items[i] or {}) do items[#items + 1] = it end
+    end
+    rec.items = items
+    rec.meta = part.meta or {}
+    rec.containers = invLogic.rebuildContainers(rec.meta, items)
+    rec.gen = gen
+    rec.at = tonumber(nowSecs) or 0
+    rec.stale = false
+    rec.pendingSince = nil
+    rec.refused = nil
+    rec.partial = nil
+    return true
+end
+
+-- A string that changes when any item, stack count or slot changes: what
+-- the Box Inventories "changed" hint and the snapshot generation key off, so
+-- a periodic rescan that finds everything in place announces nothing.
+function invLogic.contentSignature(items)
+    local parts = {}
+    for _, it in ipairs(items or {}) do
+        parts[#parts + 1] = string.format('%s:%s:%s', tostring(it.id or 0), tostring(it.count or 1), tostring(it.notifyCmd or it.location or ''))
+    end
+    table.sort(parts)
+    return table.concat(parts, ',')
+end
+
+-- 3D distance between two { x, y, z } tables (nil when either is missing).
+function invLogic.dist3(a, b)
+    if type(a) ~= 'table' or type(b) ~= 'table' then return nil end
+    local ax, ay, az = tonumber(a.x), tonumber(a.y), tonumber(a.z) or 0
+    local bx, by, bz = tonumber(b.x), tonumber(b.y), tonumber(b.z) or 0
+    if not (ax and ay and bx and by) then return nil end
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Filters + sorts a list of (remote or local) items for the Box tab: search
+-- text, location filter, owner ('ALL' or a lowercase name). Rows sort by
+-- owner, then name, then location.
+function invLogic.filterBoxItems(items, search, locFilter, owner)
+    local out = {}
+    local needle = search and search ~= '' and string.lower(search) or nil
+    for _, it in ipairs(items or {}) do
+        local ok = true
+        if owner and owner ~= 'ALL' and string.lower(tostring(it.owner or '')) ~= owner then ok = false end
+        if ok and locFilter and locFilter ~= 'ALL' then
+            local loc = string.upper(it.location or '')
+            if locFilter == 'BANK' then
+                if loc ~= 'BANK' and loc ~= 'SHAREDBANK' then ok = false end
+            elseif loc ~= locFilter then
+                ok = false
+            end
+        end
+        if ok and needle then
+            ok = invLogic.matchesFilter(it, search, 'ALL', 'ALL', nil)
+        end
+        if ok then out[#out + 1] = it end
+    end
+    table.sort(out, function(a, b)
+        local oa, ob = string.lower(tostring(a.owner or '')), string.lower(tostring(b.owner or ''))
+        if oa ~= ob then return oa < ob end
+        local na, nb = string.lower(a.name or ''), string.lower(b.name or '')
+        if na ~= nb then return na < nb end
+        return (a.notifyCmd or '') < (b.notifyCmd or '')
+    end)
+    return out
+end
+
+-- Why an item cannot be given (nil when it can). `bankLive` is the giver's.
+function invLogic.giveBlocker(it)
+    if not it then return 'no item' end
+    if it.nodrop then return 'NO TRADE item' end
+    if it.location == 'BANK' or it.location == 'SHAREDBANK' then return 'in the bank - move it to a bag first' end
+    if it.location == 'CURSOR' then return 'on the cursor' end
+    if (tonumber(it.id) or 0) <= 0 then return 'unknown item id' end
+    return nil
+end
+
 -- Scanner Engine
 local scanner = {}
 
@@ -665,11 +1022,12 @@ end
 local inMemoryBankCache = nil
 local lastSavedBankCount = -1
 
-function scanner.saveBankCache(bankItems, bankContainers, force)
+function scanner.saveBankCache(bankItems, bankContainers, force, sharedContainers)
     inMemoryBankCache = {
         syncTime = os.date('%Y-%m-%d %H:%M:%S'),
         items = bankItems,
         containers = bankContainers,
+        sharedContainers = sharedContainers or {},
     }
     if not force and lastSavedBankCount == #bankItems then
         return true
@@ -713,6 +1071,11 @@ function scanner.saveBankCache(bankItems, bankContainers, force)
     end
     f:write('  },\n  containers = {\n')
     for _, c in ipairs(bankContainers) do
+        f:write(string.format('    { slot=%d, name=%q, capacity=%d, used=%d },\n',
+            c.slot, c.name or '', c.capacity or 0, c.used or 0))
+    end
+    f:write('  },\n  sharedContainers = {\n')
+    for _, c in ipairs(sharedContainers or {}) do
         f:write(string.format('    { slot=%d, name=%q, capacity=%d, used=%d },\n',
             c.slot, c.name or '', c.capacity or 0, c.used or 0))
     end
@@ -951,39 +1314,7 @@ local function extractItemData(itemObj, locType, slotIdx, subIdx, containerName,
         end)
     end
 
-    local dispLoc = ''
-    local notifyCmd = ''
-    if locType == 'WORN' then
-        dispLoc = string.format('Worn [%s]', WORN_SLOTS[slotIdx] or tostring(slotIdx))
-        notifyCmd = string.format('%d', slotIdx)
-    elseif locType == 'INVENTORY' then
-        if subIdx then
-            dispLoc = string.format('Bag %d [Slot %d]', slotIdx, subIdx)
-            notifyCmd = string.format('in pack%d %d', slotIdx, subIdx)
-        else
-            dispLoc = string.format('Pack Slot %d', slotIdx)
-            notifyCmd = string.format('pack%d', slotIdx)
-        end
-    elseif locType == 'BANK' then
-        if subIdx then
-            dispLoc = string.format('Bank %d [Slot %d]', slotIdx, subIdx)
-            notifyCmd = string.format('in bank%d %d', slotIdx, subIdx)
-        else
-            dispLoc = string.format('Bank Slot %d', slotIdx)
-            notifyCmd = string.format('bank%d', slotIdx)
-        end
-    elseif locType == 'SHAREDBANK' then
-        if subIdx then
-            dispLoc = string.format('SharedBank %d [Slot %d]', slotIdx, subIdx)
-            notifyCmd = string.format('in sharedbank%d %d', slotIdx, subIdx)
-        else
-            dispLoc = string.format('SharedBank Slot %d', slotIdx)
-            notifyCmd = string.format('sharedbank%d', slotIdx)
-        end
-    elseif locType == 'CURSOR' then
-        dispLoc = 'Cursor'
-        notifyCmd = ''
-    end
+    local dispLoc, notifyCmd = invLogic.describeLocation(locType, slotIdx, subIdx)
 
     -- Augment slots: only walked when the item can actually hold augments
     -- (Augs() > 0 on the accessor; items with no aug slots skip the 6-slot loop).
@@ -1230,7 +1561,7 @@ function scanner.scanAll(opts)
             breathe()
         end
 
-        -- Shared Bank
+        -- Shared Bank (containers shown under the bank in the visualizer)
         for sb = 1, 4 do
             local ok, sbBag = pcall(function() return mq.TLO.Me.SharedBank(sb) end)
             local sbBagId = (ok and sbBag and sbBag() and sbBag.ID()) or 0
@@ -1241,6 +1572,8 @@ function scanner.scanAll(opts)
                 pcall(function() bagName = tostring(sbBag.Name() or 'Shared Bank Container') end)
 
                 if bagCap > 0 then
+                    local usedInBag = 0
+                    local bagSlots = {}
                     for s = 1, bagCap do
                         local okSub, subItem = pcall(function() return sbBag.Item(s) end)
                         local subId = (okSub and subItem and subItem() and subItem.ID()) or 0
@@ -1249,22 +1582,26 @@ function scanner.scanAll(opts)
                             if it then
                                 table.insert(liveBankItems, it)
                                 bankItemCount = bankItemCount + 1
+                                usedInBag = usedInBag + 1
+                                bagSlots[s] = it
                             end
                         end
                     end
+                    table.insert(sharedContainers, { slot = sb, name = bagName, capacity = bagCap, used = usedInBag, slots = bagSlots })
                 else
                     local it = extractItemData(sbBag, 'SHAREDBANK', sb, nil, 'Shared Bank Slot', 'sharedbank' .. sb, sbBagId)
                     if it then
                         table.insert(liveBankItems, it)
                         bankItemCount = bankItemCount + 1
                     end
+                    table.insert(sharedContainers, { slot = sb, name = it and it.name or 'Item', capacity = 1, used = 1, slots = { [1] = it } })
                 end
             end
             breathe()
         end
 
         -- Persist live bank scan
-        scanner.saveBankCache(liveBankItems, bankContainers)
+        scanner.saveBankCache(liveBankItems, bankContainers, false, sharedContainers)
         for _, it in ipairs(liveBankItems) do
             table.insert(scannedItems, it)
         end
@@ -1281,12 +1618,13 @@ function scanner.scanAll(opts)
                 end
             end
             if cached.containers then
-                local bankSlotsByBag = {}
+                local bankSlotsByBag, sharedSlotsByBag = {}, {}
                 if cached.items then
                     for _, it in ipairs(cached.items) do
-                        if it.location == 'BANK' and it.slotIndex and it.subSlot then
-                            if not bankSlotsByBag[it.slotIndex] then bankSlotsByBag[it.slotIndex] = {} end
-                            bankSlotsByBag[it.slotIndex][it.subSlot] = it
+                        local byBag = (it.location == 'BANK' and bankSlotsByBag) or (it.location == 'SHAREDBANK' and sharedSlotsByBag) or nil
+                        if byBag and it.slotIndex then
+                            if not byBag[it.slotIndex] then byBag[it.slotIndex] = {} end
+                            byBag[it.slotIndex][it.subSlot or 1] = it
                         end
                     end
                 end
@@ -1295,6 +1633,10 @@ function scanner.scanAll(opts)
                     table.insert(bankContainers, c)
                     totalBankCapacity = totalBankCapacity + (c.capacity or 0)
                     totalBankUsed = totalBankUsed + (c.used or 0)
+                end
+                for _, c in ipairs(cached.sharedContainers or {}) do
+                    c.slots = sharedSlotsByBag[c.slot] or {}
+                    table.insert(sharedContainers, c)
                 end
             end
         end
@@ -1345,6 +1687,11 @@ function scanner.scanAll(opts)
     state.counts.invPlat = myPlat
     state.counts.bankPlat = bPlat
     state.lastScanTime = os.time()
+    local sig = invLogic.contentSignature(scannedItems)
+    if sig ~= state.contentSig then
+        state.contentSig = sig
+        state.contentGen = (state.contentGen or 0) + 1
+    end
     markDirty()
 end
 
@@ -1407,7 +1754,7 @@ function UI.drawHeader()
     ImGui.Dummy(0, core.px(4))
 
     -- Search and Filter Controls
-    ImGui.PushItemWidth(220)
+    ImGui.PushItemWidth(core.px(220))
     local newSearch, searchChanged = ImGui.InputTextWithHint("##InvSearch", "Search item, type, clicky...", state.searchFilter or '')
     if searchChanged and type(newSearch) == 'string' then
         state.searchFilter = newSearch
@@ -1444,7 +1791,7 @@ function UI.drawHeader()
     end
 
     -- Category Dropdown
-    ImGui.PushItemWidth(120)
+    ImGui.PushItemWidth(core.px(120))
     local cats = { 'ALL', 'Weapon', 'Armor', 'Jewelry', 'Bag', 'Consumable', 'Tradeskill', 'Spell', 'Gem', 'Aug', 'Misc' }
     if ImGui.BeginCombo("##CatCombo", state.catFilter) then
         for _, c in ipairs(cats) do
@@ -1497,12 +1844,16 @@ local function shiftHeld()
     return held
 end
 
-function UI.drawTooltip(it)
+function UI.drawTooltip(it, hint)
     ImGui.BeginTooltip()
 
     -- Item name in gold
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], it.name or 'Item')
-    ImGui.TextDisabled(string.format("ID: %d | Type: %s | Location: %s", it.id or 0, it.type or 'Misc', it.displayLocation or ''))
+    if it.owner then
+        ImGui.TextDisabled(string.format("ID: %d | Type: %s | %s's %s", it.id or 0, it.type or 'Misc', tostring(it.owner), it.displayLocation or ''))
+    else
+        ImGui.TextDisabled(string.format("ID: %d | Type: %s | Location: %s", it.id or 0, it.type or 'Misc', it.displayLocation or ''))
+    end
 
     -- Tags line
     local tags = {}
@@ -1670,7 +2021,12 @@ function UI.drawTooltip(it)
     end
 
     -- Interaction hint
-    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Left-Click: Pick up / Place | Right-Click: Inspect | Drag: Move' .. (db and ' | Shift+Right-Click: Database card' or ''))
+    if it.remote then
+        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Click: Give to a character' .. (db and ' | Shift+Right-Click: Database card' or ''))
+    else
+        ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], 'Left-Click: Pick up / Place | Right-Click: Inspect | Drag: Move' .. (db and ' | Shift+Right-Click: Database card' or ''))
+    end
+    if hint then ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], hint) end
     ImGui.EndTooltip()
 end
 
@@ -1779,6 +2135,8 @@ function UI.drawItemsTable()
     end
 
     local filtered = tc.filtered
+    local bn = boxnet()
+    local hasBoxPeers = bn ~= nil and bn.available() and #bn.peers() > 0
 
     ImGui.TextDisabled(string.format("Showing %d matching items", #filtered))
     ImGui.Dummy(0, core.px(2))
@@ -1791,7 +2149,7 @@ function UI.drawItemsTable()
         ImGui.TableSetupColumn("Qty##colQty", ImGuiTableColumnFlags.WidthFixed, core.px(55))
         ImGui.TableSetupColumn("Wt##colWt", ImGuiTableColumnFlags.WidthFixed, core.px(45))
         ImGui.TableSetupColumn("Value##colVal", ImGuiTableColumnFlags.WidthFixed, core.px(75))
-        ImGui.TableSetupColumn("Actions##colAct", ImGuiTableColumnFlags.WidthFixed, core.px(140))
+        ImGui.TableSetupColumn("Actions##colAct", ImGuiTableColumnFlags.WidthFixed, core.px(180))
         ImGui.TableHeadersRow()
         applyTableSortSpecs()
 
@@ -1850,8 +2208,15 @@ function UI.drawItemsTable()
 
             -- Col 6: Actions (PushID(idx) above keeps the labels unique)
             ImGui.TableSetColumnIndex(6)
+            local inBank = it.location == 'BANK' or it.location == 'SHAREDBANK'
+            local canInspect = not inBank or state.bankLive
+            if not canInspect then ImGui.BeginDisabled() end
             if ImGui.SmallButton("Inspect") then
                 state.pendingAction = { type = 'inspect', item = it }
+            end
+            if not canInspect then
+                ImGui.EndDisabled()
+                if ImGui.IsItemHovered() then core.setTooltip('Bank is closed: cached bank items cannot be inspected.') end
             end
             ImGui.SameLine()
             if it.location == 'INVENTORY' and it.subSlot then
@@ -1862,10 +2227,15 @@ function UI.drawItemsTable()
                 if ImGui.SmallButton("Pick") then
                     state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                 end
-            elseif it.location == 'BANK' and state.bankLive and it.subSlot then
+            elseif (it.location == 'WORN' or (inBank and state.bankLive)) and it.notifyCmd ~= '' then
                 if ImGui.SmallButton("Pick") then
                     state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
                 end
+            end
+            if hasBoxPeers and not invLogic.giveBlocker(it) then
+                ImGui.SameLine()
+                if ImGui.SmallButton("Give") then openGivePopup(it) end
+                if ImGui.IsItemHovered() then core.setTooltip('Hand this item to one of your other boxes (Box Inventories).') end
             end
             ImGui.PopID()
         end
@@ -1889,6 +2259,7 @@ function UI.drawItemsTable()
 
         ImGui.EndTable()
     end
+    drawGivePopup()
 end
 
 local function optimisticTakeSlot(bag, s)
@@ -1902,14 +2273,16 @@ local function optimisticTakeSlot(bag, s)
 end
 
 local function findContainerBag(location, slotIndex)
-    local list = (location == 'BANK') and state.containers.bank or state.containers.inventory
+    local list = (location == 'BANK') and state.containers.bank
+        or (location == 'SHAREDBANK') and state.containers.sharedBank
+        or state.containers.inventory
     for _, bag in ipairs(list or {}) do
         if bag.slot == slotIndex then return bag end
     end
     return nil
 end
 
-local function optimisticSwapToSlot(destBag, destSlot, destItem, destCmd)
+local function optimisticSwapToSlot(destBag, destSlot, destItem, destCmd, destLocation)
     local src = state.dragSource
     if not src or not src.slotIndex or not src.subSlot then return end
     local srcBag = findContainerBag(src.location, src.slotIndex)
@@ -1928,12 +2301,184 @@ local function optimisticSwapToSlot(destBag, destSlot, destItem, destCmd)
     src.slotIndex = destBag.slot
     src.subSlot = destSlot
     src.notifyCmd = destCmd
-    if destCmd:find('bank', 1, true) then
-        src.location = 'BANK'
-    else
-        src.location = 'INVENTORY'
-    end
+    src.location = destLocation
+        or (destCmd:find('sharedbank', 1, true) and 'SHAREDBANK')
+        or (destCmd:find('bank', 1, true) and 'BANK')
+        or 'INVENTORY'
     markDirty()
+end
+
+-- ----------------------------------------------------------------------------
+-- Bag grid: one bag's slots as icon tiles. Shared by the local bags, the bank
+-- (live or cached), the shared bank and a peer's snapshot. ctx:
+--   palette       'inv' | 'bank'            colour set
+--   idPrefix      unique per grid            ('b', 'bk', 'sb', 'r'...)
+--   interactive   clicks / drags drive the game (false: cached bank, peers)
+--   cursorHasItem, cursorItemName            place-mode hints
+--   emptyCmd(bag, s)                         /itemnotify address of slot s
+--   location      'INVENTORY' | 'BANK' | 'SHAREDBANK' (optimistic moves)
+--   onClick(it, bag, s, button)              read-only grids: 0 left, 1 right
+--   hint          tooltip line for read-only grids
+-- ----------------------------------------------------------------------------
+local function slotColors(palette)
+    if palette == 'bank' then
+        return SLOT_COL.bankBgActive, SLOT_COL.bankBgHover, SLOT_COL.bankBg, SLOT_COL.bankEmptyHover, SLOT_COL.bankEmpty,
+            SLOT_COL.bankBdrPlace, SLOT_COL.bankBdrHover, SLOT_COL.bankBdr, SLOT_COL.bankBdrEmpty, SLOT_COL.bankNum
+    end
+    return SLOT_COL.invBgActive, SLOT_COL.invBgHover, SLOT_COL.invBg, SLOT_COL.invEmptyHover, SLOT_COL.invEmpty,
+        SLOT_COL.invBdrPlace, SLOT_COL.invBdrHover, SLOT_COL.invBdr, SLOT_COL.invBdrEmpty, SLOT_COL.invNum
+end
+
+local function readDragPayload(payload)
+    local fromCmd = (type(payload) == 'table' and payload.Data)
+        or (type(payload) == 'userdata' and payload.Data)
+        or (state.dragSource and state.dragSource.notifyCmd)
+        or payload
+    return tostring(fromCmd or '')
+end
+
+function UI.drawBagGrid(bag, ctx)
+    local cap = tonumber(bag and bag.capacity) or 0
+    if cap <= 0 then return end
+    local cols = math.min(cap, 10)
+    local SZ = core.px(34)
+    local ICON = core.px(30)
+    local bgActive, bgHover, bgItem, bgEmptyHover, bgEmpty, bdrPlace, bdrHover, bdrItem, bdrEmpty, numCol = slotColors(ctx.palette)
+    local btnIds = bag.btnIds
+    if not btnIds or btnIds.prefix ~= ctx.idPrefix then
+        btnIds = { prefix = ctx.idPrefix }
+        bag.btnIds = btnIds
+    end
+    local interactive = ctx.interactive == true
+    local placeMode = interactive and ctx.cursorHasItem == true
+
+    for s = 1, cap do
+        local it = bag.slots and bag.slots[s]
+        local btnId = btnIds[s]
+        if not btnId then
+            btnId = string.format('##%s%ds%d', ctx.idPrefix, bag.slot, s)
+            btnIds[s] = btnId
+        end
+        local startX, startY = ImGui.GetCursorScreenPos()
+        local clicked = ImGui.InvisibleButton(btnId, SZ, SZ)
+        local hovered = ImGui.IsItemHovered()
+        local active  = ImGui.IsItemActive()
+        local endX, endY = ImGui.GetCursorScreenPos()
+        local dl = ImGui.GetWindowDrawList()
+
+        local bgCol
+        if it then
+            bgCol = active and bgActive or (hovered and bgHover or bgItem)
+        else
+            bgCol = hovered and bgEmptyHover or bgEmpty
+        end
+        dl:AddRectFilled(ImVec2(startX, startY), ImVec2(startX + SZ, startY + SZ), bgCol, 3)
+        local bdrCol
+        if hovered then
+            bdrCol = placeMode and bdrPlace or bdrHover
+        else
+            bdrCol = it and bdrItem or bdrEmpty
+        end
+        dl:AddRect(ImVec2(startX, startY), ImVec2(startX + SZ, startY + SZ), bdrCol, 3)
+
+        local iconDrawn = false
+        if it and it.icon and it.icon > 0 then
+            iconDrawn = renderSlotIcon(it.icon, startX, startY, endX, endY, dl, ICON)
+        end
+        if not iconDrawn then
+            local sStr = tostring(s)
+            local sw = textWidth(sStr)
+            dl:AddText(ImVec2(startX + math.max(0, (SZ - sw) / 2), startY + SZ * 0.3), it and numCol or SLOT_COL.numEmpty, sStr)
+        end
+        if it and it.stackable and it.count and it.count > 1 then
+            local cStr = tostring(it.count)
+            local cw = textWidth(cStr)
+            dl:AddRectFilled(ImVec2(startX + SZ - cw - 4, startY + SZ - 12), ImVec2(startX + SZ - 1, startY + SZ - 1), SLOT_COL.badgeBg, 2)
+            dl:AddText(ImVec2(startX + SZ - cw - 2, startY + SZ - 13), SLOT_COL.badgeText, cStr)
+        end
+
+        if hovered then
+            if it then
+                UI.drawTooltip(it, ctx.hint)
+            elseif placeMode then
+                ImGui.SetTooltip('%s', string.format('%s %d Slot %d: Click to place %s', ctx.label or 'Bag', bag.slot, s, ctx.cursorItemName or 'item'))
+            else
+                ImGui.SetTooltip('%s', string.format('%s %d Slot %d: Empty', ctx.label or 'Bag', bag.slot, s))
+            end
+        end
+
+        if interactive then
+            if it and ImGui.BeginDragDropSource() then
+                ImGui.SetDragDropPayload('TRIUNE_INV_SLOT', it.notifyCmd)
+                state.dragSource = it
+                ImGui.Text(string.format('Moving: %s', it.name or 'Item'))
+                ImGui.EndDragDropSource()
+            end
+            if ImGui.BeginDragDropTarget() then
+                local payload = ImGui.AcceptDragDropPayload('TRIUNE_INV_SLOT')
+                if payload then
+                    local fromCmd = readDragPayload(payload)
+                    local toCmd = it and it.notifyCmd or ctx.emptyCmd(bag, s)
+                    if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
+                        optimisticSwapToSlot(bag, s, it, toCmd, ctx.location)
+                        state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd,
+                            fromId = state.dragSource and state.dragSource.id or nil }
+                    end
+                    state.dragSource = nil
+                end
+                ImGui.EndDragDropTarget()
+            end
+        end
+
+        local rClicked = ImGui.IsItemClicked(1)
+        if interactive then
+            if clicked and not state.pendingAction then
+                if ctx.cursorHasItem then
+                    state.pendingAction = { type = 'pickup', notifyCmd = it and it.notifyCmd or ctx.emptyCmd(bag, s) }
+                elseif it then
+                    optimisticTakeSlot(bag, s)
+                    state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
+                end
+            elseif rClicked and it and not state.pendingAction then
+                if not (shiftHeld() and openDatabaseCard(it)) then
+                    state.pendingAction = { type = 'inspect', item = it }
+                end
+            end
+        elseif it and ctx.onClick then
+            if clicked then ctx.onClick(it, bag, s, 0)
+            elseif rClicked then ctx.onClick(it, bag, s, 1) end
+        elseif it and rClicked and shiftHeld() then
+            openDatabaseCard(it)
+        end
+
+        if s % cols ~= 0 and s < cap then
+            ImGui.SameLine(0, core.px(4))
+        end
+    end
+end
+
+-- Bag title line: "<Label> N: name (used/cap)" coloured by fill level.
+local function drawBagTitle(label, bag)
+    local pct = bag.capacity > 0 and (bag.used / bag.capacity) or 0
+    local barCol = pct >= 1.0 and ERR or (pct >= 0.75 and WARN or GOOD)
+    ImGui.TextColored(barCol[1], barCol[2], barCol[3], barCol[4], string.format('%s %d: %s', label, bag.slot, bag.name))
+    ImGui.SameLine()
+    ImGui.TextDisabled(string.format('(%d/%d slots)', bag.used, bag.capacity))
+end
+
+local function drawSortButtons(bag, packKind, idSuffix)
+    local canSort = (bag.used or 0) >= 2
+    if not canSort then ImGui.BeginDisabled() end
+    if ImGui.SmallButton('Sort A-Z##sort' .. idSuffix) then
+        local moves = invLogic.planBagAlphaSort(bag, packKind)
+        if #moves > 0 then state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 } end
+    end
+    ImGui.SameLine()
+    if ImGui.SmallButton('Sort Type##sortType' .. idSuffix) then
+        local moves = invLogic.planBagAlphaSort(bag, packKind, 'type')
+        if #moves > 0 then state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 } end
+    end
+    if not canSort then ImGui.EndDisabled() end
 end
 
 function UI.drawVisualizer()
@@ -1952,7 +2497,7 @@ function UI.drawVisualizer()
     if cursorHasItem then
         ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.14, 0.11, 0.05, 0.85)
         ImGui.PushStyleColor(ImGuiCol.Border, 0.75, 0.60, 0.20, 0.90)
-        ImGui.BeginChild("CursorBanner", ImVec2(0, 32), true)
+        ImGui.BeginChild("CursorBanner", ImVec2(0, core.px(32)), true)
         local cText = string.format("CURSOR: %s%s", cursorItemName, cursorItemCount > 1 and string.format(" (x%d)", cursorItemCount) or "")
         ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], cText)
         ImGui.SameLine()
@@ -1970,7 +2515,7 @@ function UI.drawVisualizer()
     end
 
     local availWidth = ImGui.GetContentRegionAvail()
-    local halfWidth = math.floor((availWidth - 16) / 2)
+    local halfWidth = math.floor((availWidth - core.px(16)) / 2)
 
     -- Left Child: Inventory Bags
     ImGui.BeginChild("InvVisualizerChild", ImVec2(halfWidth, 0), true)
@@ -1978,345 +2523,75 @@ function UI.drawVisualizer()
     ImGui.Separator()
     ImGui.Dummy(0, core.px(4))
 
+    local invCtx = {
+        palette = 'inv', idPrefix = 'b', label = 'Bag', location = 'INVENTORY', interactive = true,
+        cursorHasItem = cursorHasItem, cursorItemName = cursorItemName,
+        emptyCmd = function(bag, s) return string.format('in pack%d %d', bag.slot, s) end,
+    }
     for bIdx, bag in ipairs(state.containers.inventory) do
         if bag.capacity > 0 then
-            local pct = bag.capacity > 0 and (bag.used / bag.capacity) or 0
-            local barCol = pct >= 1.0 and ERR or (pct >= 0.75 and WARN or GOOD)
-
-            ImGui.TextColored(barCol[1], barCol[2], barCol[3], barCol[4], string.format("Bag %d: %s", bag.slot, bag.name))
-            ImGui.SameLine()
-            ImGui.TextDisabled(string.format("(%d/%d slots)", bag.used, bag.capacity))
+            drawBagTitle('Bag', bag)
             ImGui.SameLine()
             if ImGui.SmallButton("Open##openBag" .. bIdx) then
                 state.pendingAction = { type = 'open_bag', slot = bag.slot }
             end
             ImGui.SameLine()
-            local canSort = (bag.used or 0) >= 2
-            if not canSort then ImGui.BeginDisabled() end
-            if ImGui.SmallButton("Sort A-Z##sortBag" .. bIdx) then
-                local moves = invLogic.planBagAlphaSort(bag, 'pack')
-                if #moves > 0 then
-                    state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
-                end
-            end
-            ImGui.SameLine()
-            if ImGui.SmallButton("Sort Type##sortBagType" .. bIdx) then
-                local moves = invLogic.planBagAlphaSort(bag, 'pack', 'type')
-                if #moves > 0 then
-                    state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
-                end
-            end
-            if not canSort then ImGui.EndDisabled() end
-
-            -- Slot grid (up to 10 columns)
-            local cols = math.min(bag.capacity, 10)
-            if cols > 0 then
-                local btnIds = bag.btnIds
-                if not btnIds then
-                    btnIds = {}
-                    bag.btnIds = btnIds
-                end
-                for s = 1, bag.capacity do
-                    local it = bag.slots and bag.slots[s]
-                    local btnId = btnIds[s]
-                    if not btnId then
-                        btnId = string.format("##b%ds%d", bag.slot, s)
-                        btnIds[s] = btnId
-                    end
-                    local startX, startY = ImGui.GetCursorScreenPos()
-
-                    local clicked = ImGui.InvisibleButton(btnId, core.px(34), core.px(34))
-                    local hovered = ImGui.IsItemHovered()
-                    local active  = ImGui.IsItemActive()
-                    local endX, endY = ImGui.GetCursorScreenPos()
-
-                    local dl = ImGui.GetWindowDrawList()
-
-                    -- Slot background
-                    local bgCol
-                    if it then
-                        bgCol = active and SLOT_COL.invBgActive
-                             or (hovered and SLOT_COL.invBgHover
-                             or SLOT_COL.invBg)
-                    else
-                        bgCol = hovered and SLOT_COL.invEmptyHover
-                             or SLOT_COL.invEmpty
-                    end
-                    dl:AddRectFilled(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bgCol, 3)
-
-                    -- Slot border
-                    local bdrCol
-                    if hovered then
-                        bdrCol = cursorHasItem and SLOT_COL.invBdrPlace or SLOT_COL.invBdrHover
-                    else
-                        bdrCol = it and SLOT_COL.invBdr or SLOT_COL.invBdrEmpty
-                    end
-                    dl:AddRect(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bdrCol, 3)
-
-                    -- Item icon or fallback slot number
-                    local iconDrawn = false
-                    if it and it.icon and it.icon > 0 then
-                        iconDrawn = renderSlotIcon(it.icon, startX, startY, endX, endY, dl, 30)
-                    end
-
-                    if not iconDrawn then
-                        local sStr = tostring(s)
-                        local sw = textWidth(sStr)
-                        local numCol = it and SLOT_COL.invNum or SLOT_COL.numEmpty
-                        dl:AddText(ImVec2(startX + math.max(0, (34 - sw) / 2), startY + 10), numCol, sStr)
-                    end
-
-                    -- Stack count badge
-                    if it and it.stackable and it.count and it.count > 1 then
-                        local cStr = tostring(it.count)
-                        local cw = textWidth(cStr)
-                        dl:AddRectFilled(ImVec2(startX + 34 - cw - 4, startY + 34 - 12), ImVec2(startX + 34 - 1, startY + 34 - 1), SLOT_COL.badgeBg, 2)
-                        dl:AddText(ImVec2(startX + 34 - cw - 2, startY + 34 - 13), SLOT_COL.badgeText, cStr)
-                    end
-
-                    -- Tooltip
-                    if hovered then
-                        if it then
-                            UI.drawTooltip(it)
-                        elseif cursorHasItem then
-                            ImGui.SetTooltip('%s', string.format("Bag %d Slot %d: Click to place %s", bag.slot, s, cursorItemName))
-                        else
-                            ImGui.SetTooltip('%s', string.format("Bag %d Slot %d: Empty", bag.slot, s))
-                        end
-                    end
-
-                    -- Drag & Drop Source
-                    if it and ImGui.BeginDragDropSource() then
-                        ImGui.SetDragDropPayload("TRIUNE_INV_SLOT", it.notifyCmd)
-                        state.dragSource = it
-                        ImGui.Text(string.format("Moving: %s", it.name or "Item"))
-                        ImGui.EndDragDropSource()
-                    end
-
-                    -- Drag & Drop Target
-                    if ImGui.BeginDragDropTarget() then
-                        local payload = ImGui.AcceptDragDropPayload("TRIUNE_INV_SLOT")
-                        if payload then
-                            local fromCmd = (type(payload) == 'table' and payload.Data)
-                                or (type(payload) == 'userdata' and payload.Data)
-                                or (state.dragSource and state.dragSource.notifyCmd)
-                                or payload
-                            fromCmd = tostring(fromCmd or '')
-                            local toCmd = it and it.notifyCmd or string.format('in pack%d %d', bag.slot, s)
-                            if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
-                                optimisticSwapToSlot(bag, s, it, toCmd)
-                                state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd,
-                                    fromId = state.dragSource and state.dragSource.id or nil }
-                            end
-                            state.dragSource = nil
-                        end
-                        ImGui.EndDragDropTarget()
-                    end
-
-                    -- Click handling (Left: Pickup/Place/Swap, Right: Inspect)
-                    local rClicked = ImGui.IsItemClicked(1)
-                    if clicked and not state.pendingAction then
-                        if cursorHasItem then
-                            local targetCmd = it and it.notifyCmd or string.format('in pack%d %d', bag.slot, s)
-                            state.pendingAction = { type = 'pickup', notifyCmd = targetCmd }
-                        elseif it then
-                            optimisticTakeSlot(bag, s)
-                            state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
-                        end
-                    elseif rClicked and it and not state.pendingAction then
-                        if not (shiftHeld() and openDatabaseCard(it)) then
-                            state.pendingAction = { type = 'inspect', item = it }
-                        end
-                    end
-
-                    if s % cols ~= 0 and s < bag.capacity then
-                        ImGui.SameLine(0, core.px(4))
-                    end
-                end
-            end
+            drawSortButtons(bag, 'pack', 'Bag' .. bIdx)
+            UI.drawBagGrid(bag, invCtx)
             ImGui.Dummy(0, core.px(6))
         end
     end
-
     ImGui.EndChild()
 
     ImGui.SameLine(0, core.px(16))
 
-    -- Right Child: Bank Containers
+    -- Right Child: Bank + Shared Bank Containers
     ImGui.BeginChild("BankVisualizerChild", ImVec2(halfWidth, 0), true)
     local bankTitle = state.bankLive and "BANK STORAGE (LIVE)" or "BANK STORAGE (CACHED)"
     ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], bankTitle)
     ImGui.Separator()
     ImGui.Dummy(0, core.px(4))
 
-    if #state.containers.bank == 0 then
+    if #state.containers.bank == 0 and #state.containers.sharedBank == 0 then
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], "No bank data available.\nVisit a banker in any major city to sync your bank inventory!")
     else
+        local bankHint = (not state.bankLive) and '(Bank is closed — visit a banker to move bank items)' or nil
+        local bankCtx = {
+            palette = 'bank', idPrefix = 'bk', label = 'Bank', location = 'BANK', interactive = state.bankLive == true,
+            cursorHasItem = cursorHasItem, cursorItemName = cursorItemName, hint = bankHint,
+            emptyCmd = function(bag, s) return string.format('in bank%d %d', bag.slot, s) end,
+            onClick = function(it, _, _, button)
+                if button == 1 then
+                    if not (shiftHeld() and openDatabaseCard(it)) then state.statusMsg = 'Bank is closed: ' .. it.name .. ' cannot be inspected from the cache.' end
+                end
+            end,
+        }
         for _, bag in ipairs(state.containers.bank) do
             if bag.capacity > 0 then
-                local pct = bag.capacity > 0 and (bag.used / bag.capacity) or 0
-                local barCol = pct >= 1.0 and ERR or (pct >= 0.75 and WARN or GOOD)
-
-                ImGui.TextColored(barCol[1], barCol[2], barCol[3], barCol[4], string.format("Bank %d: %s", bag.slot, bag.name))
-                ImGui.SameLine()
-                ImGui.TextDisabled(string.format("(%d/%d slots)", bag.used, bag.capacity))
+                drawBagTitle('Bank', bag)
                 if state.bankLive then
                     ImGui.SameLine()
-                    local canSortBank = (bag.used or 0) >= 2
-                    if not canSortBank then ImGui.BeginDisabled() end
-                    if ImGui.SmallButton("Sort A-Z##sortBank" .. tostring(bag.slot)) then
-                        local moves = invLogic.planBagAlphaSort(bag, 'bank')
-                        if #moves > 0 then
-                            state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
-                        end
-                    end
-                    ImGui.SameLine()
-                    if ImGui.SmallButton("Sort Type##sortBankType" .. tostring(bag.slot)) then
-                        local moves = invLogic.planBagAlphaSort(bag, 'bank', 'type')
-                        if #moves > 0 then
-                            state.pendingAction = { type = 'sort_bag', moves = moves, index = 1 }
-                        end
-                    end
-                    if not canSortBank then ImGui.EndDisabled() end
+                    drawSortButtons(bag, 'bank', 'Bank' .. tostring(bag.slot))
                 end
-
-                local cols = math.min(bag.capacity, 10)
-                if cols > 0 then
-                    local btnIds = bag.btnIds
-                    if not btnIds then
-                        btnIds = {}
-                        bag.btnIds = btnIds
-                    end
-                    for s = 1, bag.capacity do
-                        local it = bag.slots and bag.slots[s]
-                        local btnId = btnIds[s]
-                        if not btnId then
-                            btnId = string.format("##bk%ds%d", bag.slot, s)
-                            btnIds[s] = btnId
-                        end
-                        local startX, startY = ImGui.GetCursorScreenPos()
-
-                        local clicked = ImGui.InvisibleButton(btnId, core.px(34), core.px(34))
-                        local hovered = ImGui.IsItemHovered()
-                        local active  = ImGui.IsItemActive()
-                        local endX, endY = ImGui.GetCursorScreenPos()
-
-                        local dl = ImGui.GetWindowDrawList()
-
-                        -- Slot background
-                        local bgCol
-                        if it then
-                            bgCol = active and SLOT_COL.bankBgActive
-                                 or (hovered and SLOT_COL.bankBgHover
-                                 or SLOT_COL.bankBg)
-                        else
-                            bgCol = hovered and SLOT_COL.bankEmptyHover
-                                 or SLOT_COL.bankEmpty
-                        end
-                        dl:AddRectFilled(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bgCol, 3)
-
-                        -- Slot border
-                        local bdrCol
-                        if hovered then
-                            bdrCol = (cursorHasItem and state.bankLive) and SLOT_COL.bankBdrPlace or SLOT_COL.bankBdrHover
-                        else
-                            bdrCol = it and SLOT_COL.bankBdr or SLOT_COL.bankBdrEmpty
-                        end
-                        dl:AddRect(ImVec2(startX, startY), ImVec2(startX + 34, startY + 34), bdrCol, 3)
-
-                        -- Item icon or fallback slot number
-                        local iconDrawn = false
-                        if it and it.icon and it.icon > 0 then
-                            iconDrawn = renderSlotIcon(it.icon, startX, startY, endX, endY, dl, 30)
-                        end
-
-                        if not iconDrawn then
-                            local sStr = tostring(s)
-                            local sw = textWidth(sStr)
-                            local numCol = it and SLOT_COL.bankNum or SLOT_COL.numEmpty
-                            dl:AddText(ImVec2(startX + math.max(0, (34 - sw) / 2), startY + 10), numCol, sStr)
-                        end
-
-                        -- Stack count badge
-                        if it and it.stackable and it.count and it.count > 1 then
-                            local cStr = tostring(it.count)
-                            local cw = textWidth(cStr)
-                            dl:AddRectFilled(ImVec2(startX + 34 - cw - 4, startY + 34 - 12), ImVec2(startX + 34 - 1, startY + 34 - 1), SLOT_COL.badgeBg, 2)
-                            dl:AddText(ImVec2(startX + 34 - cw - 2, startY + 34 - 13), SLOT_COL.badgeText, cStr)
-                        end
-
-                        -- Tooltip
-                        if hovered then
-                            if it then
-                                UI.drawTooltip(it)
-                                if not state.bankLive then
-                                    ImGui.BeginTooltip()
-                                    ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], "(Bank is closed — Visit a banker to move bank items)")
-                                    ImGui.EndTooltip()
-                                end
-                            elseif cursorHasItem and state.bankLive then
-                                ImGui.SetTooltip('%s', string.format("Bank %d Slot %d: Click to place %s", bag.slot, s, cursorItemName))
-                            else
-                                ImGui.SetTooltip('%s', string.format("Bank %d Slot %d: Empty", bag.slot, s))
-                            end
-                        end
-
-                        -- Bank Drag & Drop (only when bank is live)
-                        if state.bankLive then
-                            if it and ImGui.BeginDragDropSource() then
-                                ImGui.SetDragDropPayload("TRIUNE_INV_SLOT", it.notifyCmd)
-                                state.dragSource = it
-                                ImGui.Text(string.format("Moving: %s", it.name or "Item"))
-                                ImGui.EndDragDropSource()
-                            end
-
-                            if ImGui.BeginDragDropTarget() then
-                                local payload = ImGui.AcceptDragDropPayload("TRIUNE_INV_SLOT")
-                                if payload then
-                                    local fromCmd = (type(payload) == 'table' and payload.Data)
-                                        or (type(payload) == 'userdata' and payload.Data)
-                                        or (state.dragSource and state.dragSource.notifyCmd)
-                                        or payload
-                                    fromCmd = tostring(fromCmd or '')
-                                    local toCmd = it and it.notifyCmd or string.format('in bank%d %d', bag.slot, s)
-                                    if fromCmd ~= '' and toCmd ~= '' and fromCmd ~= toCmd then
-                                        optimisticSwapToSlot(bag, s, it, toCmd)
-                                        state.pendingAction = { type = 'move', fromCmd = fromCmd, toCmd = toCmd,
-                                            fromId = state.dragSource and state.dragSource.id or nil }
-                                    end
-                                    state.dragSource = nil
-                                end
-                                ImGui.EndDragDropTarget()
-                            end
-                        end
-
-                        -- Click handling
-                        local rClicked = ImGui.IsItemClicked(1)
-                        if clicked and not state.pendingAction then
-                            if state.bankLive then
-                                if cursorHasItem then
-                                    local targetCmd = it and it.notifyCmd or string.format('in bank%d %d', bag.slot, s)
-                                    state.pendingAction = { type = 'pickup', notifyCmd = targetCmd }
-                                elseif it then
-                                    optimisticTakeSlot(bag, s)
-                                    state.pendingAction = { type = 'pickup', notifyCmd = it.notifyCmd }
-                                end
-                            elseif it then
-                                -- Bank cached: clicking inspects
-                                state.pendingAction = { type = 'inspect', item = it }
-                            end
-                        elseif rClicked and it and not state.pendingAction then
-                            if not (shiftHeld() and openDatabaseCard(it)) then
-                                state.pendingAction = { type = 'inspect', item = it }
-                            end
-                        end
-
-                        if s % cols ~= 0 and s < bag.capacity then
-                            ImGui.SameLine(0, core.px(4))
-                        end
-                    end
-                end
+                UI.drawBagGrid(bag, bankCtx)
                 ImGui.Dummy(0, core.px(6))
+            end
+        end
+        if #state.containers.sharedBank > 0 then
+            ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], "SHARED BANK")
+            ImGui.Separator()
+            local sharedCtx = {
+                palette = 'bank', idPrefix = 'sb', label = 'Shared', location = 'SHAREDBANK', interactive = state.bankLive == true,
+                cursorHasItem = cursorHasItem, cursorItemName = cursorItemName, hint = bankHint,
+                emptyCmd = function(bag, s) return string.format('in sharedbank%d %d', bag.slot, s) end,
+                onClick = bankCtx.onClick,
+            }
+            for _, bag in ipairs(state.containers.sharedBank) do
+                if bag.capacity > 0 then
+                    drawBagTitle('Shared', bag)
+                    UI.drawBagGrid(bag, sharedCtx)
+                    ImGui.Dummy(0, core.px(6))
+                end
             end
         end
     end
@@ -2479,15 +2754,27 @@ function UI.drawSettings()
     ImGui.Separator()
     ImGui.Dummy(0, core.px(6))
 
-    state.autoScan = ImGui.Checkbox("Enable Background Auto-Scan##autoScan", state.autoScan)
+    local autoScan = ImGui.Checkbox("Enable Background Auto-Scan##autoScan", state.autoScan)
+    if autoScan ~= state.autoScan then
+        state.autoScan = autoScan
+        core.saveLoadout(true)
+    end
     if state.autoScan then
-        ImGui.PushItemWidth(180)
+        ImGui.PushItemWidth(core.px(180))
         local newInterval, intChanged = ImGui.SliderInt("Scan Interval (sec)##scanInt", tonumber(state.autoScanInterval) or 15, 5, 60)
         if intChanged and type(newInterval) == 'number' then
             state.autoScanInterval = newInterval
+            core.saveLoadout(true)
         end
         ImGui.PopItemWidth()
     end
+
+    ImGui.Dummy(0, core.px(10))
+    ImGui.Separator()
+    ImGui.Dummy(0, core.px(6))
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], "BOX INVENTORIES (BOX NETWORK)")
+    ImGui.Dummy(0, core.px(4))
+    UI.drawNetSettings()
 
     if state.statusMsg ~= '' then
         ImGui.Dummy(0, core.px(8))
@@ -2495,63 +2782,33 @@ function UI.drawSettings()
     end
 end
 
-local function DrawInventoryManagerUI()
-    if not ctrl.show_inv then return end
-
-    core.pushTheme()
-
-    ImGui.SetNextWindowCollapsed(false, ImGuiCond.Appearing)
-    ImGui.SetNextWindowSize(core.px(780), core.px(520), ImGuiCond.FirstUseEver)
-    local windowFlags = 0
-    if ImGuiWindowFlags then
-        windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
-    end
-
-    core.preBeginWindow('inventory')
-    local open, draw = ImGui.Begin("Triune Inventory & Bank Manager###TriuneInventoryManager", ctrl.show_inv, core.windowFlags and core.windowFlags('inventory', windowFlags) or windowFlags)
-    if not open then
-        ctrl.show_inv = false
-        if core.preEndWindow then core.preEndWindow('inventory', false) end
-        ImGui.End()
-        core.popTheme()
-        core.saveLoadout(true)
-        return
-    end
-
-    if draw then
-        core.postBeginWindow('inventory')
-        UI.drawHeader()
-
-        if ImGui.BeginTabBar("InvMainTabBar", ImGuiTabBarFlags.None) then
-            if ImGui.BeginTabItem("Items List##tabItems") then
-                UI.drawItemsTable()
-                ImGui.EndTabItem()
-            end
-
-            if ImGui.BeginTabItem("Container Visualizer##tabVis") then
-                UI.drawVisualizer()
-                ImGui.EndTabItem()
-            end
-
-            if ImGui.BeginTabItem("Organization Assistant##tabOrg") then
-                UI.drawOrganizer()
-                ImGui.EndTabItem()
-            end
-
-            if ImGui.BeginTabItem("Settings & Cache##tabSet") then
-                UI.drawSettings()
-                ImGui.EndTabItem()
-            end
-
-            ImGui.EndTabBar()
+-- Box Inventories switches (Settings tab and the Plugins page).
+function UI.drawNetSettings()
+    local function check(label, key, tip)
+        local v = ImGui.Checkbox(label, cfg[key] == true)
+        if v ~= (cfg[key] == true) then
+            cfg[key] = v
+            core.saveLoadout(true)
         end
+        if tip and ImGui.IsItemHovered() then core.setTooltip(tip) end
     end
-
-    if core.preEndWindow then core.preEndWindow('inventory', false) end
-    ImGui.End()
-    core.popTheme()
+    check('Share my inventory with my other boxes##invNetShare', 'share',
+        'Answer snapshot requests from the other boxes on this MacroQuest launcher. Off: they see "sharing is off".')
+    check('Accept give requests from my other boxes##invNetGives', 'acceptGives',
+        'Let another box ask this character to hand an item to someone (through the trade window).\nAlso gated by Box Network -> Accept remote commands / allowlist.')
+    check('Print transfers to chat##invNetAnnounce', 'announce', nil)
+    ImGui.SetNextItemWidth(core.px(160))
+    local range, rangeChanged = ImGui.SliderInt('Trade range##invNetRange', tonumber(cfg.tradeRange) or 15, 5, 50)
+    if rangeChanged and type(range) == 'number' then
+        cfg.tradeRange = range
+        core.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then core.setTooltip('A give is refused when the receiver is farther than this (the game itself refuses trades beyond about 15).') end
 end
 
+-- ============================================================================
+-- Click helpers shared by the queued actions and the give workflow
+-- ============================================================================
 local function quantityWndOpen()
     local open = false
     pcall(function()
@@ -2609,6 +2866,1073 @@ local function cursorMatches(expectedId)
     end
     state.statusMsg = string.format('Aborted move: cursor held item %d, expected %d', curId, expectedId)
     return false
+end
+
+-- ============================================================================
+-- Box Inventories: snapshots of the other boxes and item transfers
+-- ============================================================================
+local function nowSec()
+    if mq and mq.gettime then
+        local ok, ms = pcall(mq.gettime)
+        if ok and type(ms) == 'number' then return ms / 1000 end
+    end
+    return os.clock()
+end
+
+local function lower(s) return tostring(s or ''):lower() end
+
+-- The boxnet API when the plugin is loaded and connected; nil otherwise.
+function boxnet()
+    local bn = core and rawget(core, 'boxnet')
+    if type(bn) ~= 'table' or type(bn.available) ~= 'function' then return nil end
+    return bn
+end
+
+local function myName()
+    local bn = boxnet()
+    if bn and bn.myName then
+        local ok, n = pcall(bn.myName)
+        if ok and type(n) == 'string' and n ~= '' then return n end
+    end
+    local ok, n = pcall(function() return mq.TLO.Me.CleanName() end)
+    if ok and n then return tostring(n) end
+    return ''
+end
+
+local function netLog(text, level)
+    local log = state.net.log
+    table.insert(log, 1, { time = os.date('%H:%M:%S'), text = tostring(text), level = level or 'info' })
+    while #log > NET_LOG_MAX do table.remove(log) end
+    state.net.status = tostring(text)
+end
+
+local function chat(fmt, ...)
+    if not cfg.announce then return end
+    print(string.format('\ag[Triune Inv]\ax ' .. fmt, ...))
+end
+
+-- Game reads the give workflow depends on, in one table so tests can drive a
+-- scripted client through plugin.probe.
+local probe = {}
+
+function probe.cursorId()
+    local id = 0
+    pcall(function()
+        if mq.TLO.Cursor() then id = tonumber(mq.TLO.Cursor.ID()) or 0 end
+    end)
+    return id
+end
+
+function probe.targetId()
+    local id = 0
+    pcall(function() id = tonumber(mq.TLO.Target.ID()) or 0 end)
+    return id
+end
+
+-- A player spawn by name: { id, dist } or nil when not in this zone.
+function probe.spawn(name)
+    if not name or name == '' then return nil end
+    local out = nil
+    pcall(function()
+        local sp = mq.TLO.Spawn('pc =' .. name)
+        if not (sp and sp() and (sp.ID() or 0) > 0) then sp = mq.TLO.Spawn('pc ' .. name) end
+        if sp and sp() and (sp.ID() or 0) > 0 then
+            local dist = nil
+            pcall(function() dist = tonumber(sp.Distance3D()) end)
+            if not dist then pcall(function() dist = tonumber(sp.Distance()) end) end
+            out = { id = sp.ID() or 0, dist = dist or 0 }
+        end
+    end)
+    return out
+end
+
+function probe.tradeOpen()
+    local open = false
+    pcall(function()
+        local w = mq.TLO.Window('TradeWnd')
+        open = (w and w() and w.Open()) == true
+    end)
+    return open
+end
+
+function probe.tradeHisName()
+    local name = ''
+    pcall(function()
+        local lbl = mq.TLO.Window('TradeWnd').Child('TRDW_HisName')
+        if lbl and lbl() then name = tostring(lbl.Text() or '') end
+    end)
+    return name:match('^%S+') or ''
+end
+
+function probe.myPos()
+    local pos = nil
+    pcall(function()
+        pos = { x = mq.TLO.Me.X() or 0, y = mq.TLO.Me.Y() or 0, z = mq.TLO.Me.Z() or 0, zone = tostring(mq.TLO.Zone.ShortName() or '') }
+    end)
+    return pos
+end
+
+-- Where item `id` is right now: prefers the slot the snapshot named when it
+-- still holds that id, else FindItem. Returns { cmd, name, count, stackable,
+-- nodrop } or nil when the item is not in the bags / worn slots.
+function probe.locate(id, preferredCmd)
+    id = tonumber(id) or 0
+    if id <= 0 then return nil end
+    local function describe(itemObj, cmd)
+        local out = nil
+        pcall(function()
+            if not (itemObj and itemObj() and (tonumber(itemObj.ID()) or 0) == id) then return end
+            out = {
+                cmd = cmd,
+                name = tostring(itemObj.Name() or ''),
+                count = tonumber(itemObj.Stack()) or 1,
+                stackable = itemObj.Stackable() == true,
+                nodrop = itemObj.NoDrop() == true,
+            }
+        end)
+        return out
+    end
+    local cmd = tostring(preferredCmd or '')
+    if cmd ~= '' then
+        local pack, sub = cmd:match('^in pack(%d+) (%d+)$')
+        local found = nil
+        if pack then
+            found = describe(mq.TLO.Me.Inventory('pack' .. pack).Item(tonumber(sub)), cmd)
+        elseif cmd:match('^pack%d+$') then
+            found = describe(mq.TLO.Me.Inventory(cmd), cmd)
+        elseif cmd:match('^%d+$') then
+            found = describe(mq.TLO.Me.Inventory(tonumber(cmd)), cmd)
+        end
+        if found then return found end
+    end
+    local found = nil
+    pcall(function()
+        local fi = mq.TLO.FindItem(id)
+        if not (fi and fi() and (tonumber(fi.ID()) or 0) == id) then return end
+        local slot = tonumber(fi.ItemSlot()) or -1
+        local sub = tonumber(fi.ItemSlot2()) or -1
+        local c
+        if slot >= 23 and slot <= 32 then
+            c = (sub >= 0) and string.format('in pack%d %d', slot - 22, sub + 1) or string.format('pack%d', slot - 22)
+        elseif slot >= 0 and slot <= 22 then
+            c = tostring(slot)
+        else
+            return -- bank / elsewhere
+        end
+        found = describe(fi, c)
+    end)
+    return found
+end
+
+-- Peer snapshot record for a box (created on demand).
+local function netPeerRecord(name, create)
+    local key = lower(name)
+    if key == '' then return nil end
+    local rec = state.net.peers[key]
+    if not rec and create then
+        rec = { name = name, items = nil, containers = nil, meta = nil, at = 0, gen = 0 }
+        state.net.peers[key] = rec
+    end
+    if rec and name and name ~= '' then rec.name = name end
+    return rec
+end
+
+-- The roster entry (heartbeat) for a box, nil when it is not on the network.
+local function onlinePeer(name)
+    local bn = boxnet()
+    if not bn or not bn.peer then return nil end
+    local ok, p = pcall(bn.peer, name)
+    if ok and type(p) == 'table' then return p end
+    return nil
+end
+
+local function peerPos(name)
+    if lower(name) == lower(myName()) then return probe.myPos() end
+    local p = onlinePeer(name)
+    local hb = p and p.hb
+    if type(hb) ~= 'table' then return nil end
+    return { x = hb.x, y = hb.y, z = hb.z, zone = tostring(hb.zone or '') }
+end
+
+-- Distance between two characters from their reported positions: dist,
+-- sameZone. dist is nil when a position is unknown or the zones differ.
+local function charDistance(a, b)
+    local pa, pb = peerPos(a), peerPos(b)
+    if not pa or not pb then return nil, false end
+    if lower(pa.zone) ~= lower(pb.zone) then return nil, false end
+    return invLogic.dist3(pa, pb), true
+end
+
+local function fmtAge(sec)
+    sec = math.max(0, math.floor(tonumber(sec) or 0))
+    if sec < 60 then return string.format('%ds ago', sec) end
+    if sec < 3600 then return string.format('%dm ago', math.floor(sec / 60)) end
+    return string.format('%dh ago', math.floor(sec / 3600))
+end
+
+-- Asks a box for its snapshot (rate limited; `force` bypasses the limit).
+local function requestSnapshot(name, force)
+    local bn = boxnet()
+    if not bn or not bn.available() then return false, 'Box Network not connected' end
+    if lower(name) == lower(myName()) then return false, 'that is this character' end
+    local rec = netPeerRecord(name, true)
+    local t = nowSec()
+    if not force and rec.pendingSince and (t - rec.pendingSince) < 10 then return false, 'request in flight' end
+    if not force and (t - (rec.requestedAt or -1e9)) < NET_REQUEST_MIN_SEC then return false, 'asked a moment ago' end
+    rec.requestedAt = t
+    rec.pendingSince = t
+    rec.refused = nil
+    local ok = bn.send(rec.name, 'inv:request', { want = 'all' })
+    if not ok then rec.pendingSince = nil end
+    return ok == true
+end
+
+local function requestAllSnapshots(force)
+    local bn = boxnet()
+    if not bn then return 0 end
+    local n = 0
+    for _, p in ipairs(bn.peers()) do
+        if requestSnapshot(p.name, force) then n = n + 1 end
+    end
+    return n
+end
+
+-- Answers queued inv:request messages (tick, fiber): rescans when our data
+-- is stale, then streams the packed snapshot in pages.
+local function serveRequests()
+    local queue = state.net.pendingRequests
+    if #queue == 0 then return end
+    state.net.pendingRequests = {}
+    local bn = boxnet()
+    if not bn then return end
+    if not cfg.share then
+        for _, name in ipairs(queue) do
+            bn.send(name, 'inv:page', { refused = true, reason = 'sharing is off on ' .. myName() })
+        end
+        return
+    end
+    if (os.time() - (tonumber(state.lastScanTime) or 0)) >= NET_SNAPSHOT_MAX_AGE then
+        scanner.scanAll({ yield = true })
+    end
+    local snap = invLogic.buildSnapshot(state, state.lastScanTime)
+    local pages = invLogic.paginate(snap.items, INV_PAGE_SIZE)
+    local seen = {}
+    for _, name in ipairs(queue) do
+        local key = lower(name)
+        if not seen[key] then
+            seen[key] = true
+            state.net.served[key] = true
+            for i, page in ipairs(pages) do
+                bn.send(name, 'inv:page', {
+                    gen = state.contentGen or 0, page = i, pages = #pages,
+                    meta = (i == 1) and snap.meta or nil,
+                    items = page,
+                })
+            end
+            state.net.lastChangedGen = state.contentGen or 0
+        end
+    end
+end
+
+-- Broadcast "my items changed" once per data generation, only when some box
+-- has asked for our snapshot before (viewers refresh; nobody else cares).
+local function announceChanged()
+    if next(state.net.served) == nil then return end
+    local gen = state.contentGen or 0
+    if state.net.lastChangedGen == gen then return end
+    local bn = boxnet()
+    if not bn or not bn.available() then return end
+    state.net.lastChangedGen = gen
+    bn.broadcast('inv:changed', { gen = gen })
+end
+
+-- ----------------------------------------------------------------------------
+-- Give: this box hands an item to another character through the trade window
+-- ----------------------------------------------------------------------------
+local function tradeCleanup()
+    if probe.tradeOpen() then
+        pcall(function() mq.cmd('/notify TradeWnd TRDW_Cancel_Button leftmouseup') end)
+        delay(400)
+    end
+    if probe.cursorId() > 0 then
+        pcall(function() mq.cmd('/autoinventory') end)
+        delay(150)
+    end
+end
+
+-- Runs one give job on the fiber. Returns ok, reason.
+local function runGive(job)
+    local to = tostring(job.to or '')
+    if to == '' then return false, 'no receiver' end
+    if lower(to) == lower(myName()) then return false, 'cannot give to yourself' end
+    local sp = probe.spawn(to)
+    if not sp then return false, to .. ' is not in this zone' end
+    if sp.dist > cfg.tradeRange then
+        return false, string.format('%s is %.0f away (trade range %d)', to, sp.dist, cfg.tradeRange)
+    end
+    if probe.cursorId() > 0 then return false, 'the cursor is already holding an item' end
+    local loc = probe.locate(job.itemId, job.notifyCmd)
+    if not loc then return false, (job.name or 'item') .. ' is not in the bags any more' end
+    if loc.nodrop then return false, loc.name .. ' is NO TRADE' end
+    local name = loc.name ~= '' and loc.name or (job.name or 'item')
+
+    -- Pick it up: whole stack (shift), one (ctrl) or a quantity via the dialog.
+    local want = tonumber(job.count)
+    local have = tonumber(loc.count) or 1
+    if not loc.stackable or not want or want >= have then
+        mq.cmdf('/shiftkey /itemnotify %s leftmouseup', loc.cmd)
+        acceptQuantityWnd()
+    elseif want <= 1 then
+        mq.cmdf('/ctrlkey /itemnotify %s leftmouseup', loc.cmd)
+    else
+        mq.cmdf('/nomodkey /itemnotify %s leftmouseup', loc.cmd)
+        if delay(600, quantityWndOpen) then
+            mq.cmdf('/notify QuantityWnd QTYW_SliderInput newvalue %d', want)
+            delay(100)
+            mq.cmd('/notify QuantityWnd QTYW_Accept_Button leftmouseup')
+        end
+    end
+    if not delay(1500, function() return probe.cursorId() == job.itemId end) then
+        tradeCleanup()
+        return false, 'could not pick up ' .. name
+    end
+
+    mq.cmdf('/target id %d', sp.id)
+    if not delay(1500, function() return probe.targetId() == sp.id end) then
+        tradeCleanup()
+        return false, 'could not target ' .. to
+    end
+
+    -- The receiver box clicks its Trade button once our window reaches it.
+    local bn = boxnet()
+    if bn and bn.available() then bn.send(to, 'inv:trade_accept', { name = name, count = want or have }) end
+
+    mq.cmd('/click left target')
+    if not delay(3000, probe.tradeOpen) then
+        tradeCleanup()
+        return false, 'the trade window did not open (out of range, or ' .. to .. ' is busy)'
+    end
+    delay(250)
+    mq.cmd('/notify TradeWnd TRDW_Trade_Button leftmouseup')
+    if not delay(12000, function() return not probe.tradeOpen() end) then
+        tradeCleanup()
+        return false, to .. ' did not accept the trade'
+    end
+    delay(300)
+    if probe.cursorId() == job.itemId then
+        tradeCleanup()
+        return false, 'the trade was cancelled (' .. to .. ' may be full)'
+    end
+    return true, name
+end
+
+local function reportGive(job, ok, detail)
+    local me = myName()
+    local itemName = ok and detail or (job.name or 'item')
+    local text
+    if ok then
+        text = string.format('Gave %s to %s', itemName, job.to)
+    else
+        text = string.format('Could not give %s to %s: %s', itemName, job.to, tostring(detail))
+    end
+    netLog(text, ok and 'info' or 'warn')
+    chat('%s', text)
+    local bn = boxnet()
+    local requester = job.requestedBy
+    if requester and lower(requester) ~= lower(me) and bn and bn.available() then
+        bn.send(requester, 'inv:give_result', { ok = ok, reason = (not ok) and tostring(detail) or nil, name = itemName, to = job.to })
+    end
+end
+
+-- Queues a give on THIS box (we hold the item). Returns ok, reason.
+local function enqueueGive(job)
+    local blocker = invLogic.giveBlocker(job.item or { id = job.itemId, location = job.location or 'INVENTORY', nodrop = job.nodrop })
+    if blocker then return false, blocker end
+    job.item = nil
+    job.queuedAt = nowSec()
+    table.insert(state.net.gives, job)
+    netLog(string.format('Queued: %s -> %s%s', job.name or ('item ' .. tostring(job.itemId)), job.to,
+        job.requestedBy and (' (asked by ' .. job.requestedBy .. ')') or ''))
+    return true
+end
+
+-- Asks for `it` (mine or a peer's) to be handed to `toName`. Returns ok, why.
+local function requestGive(it, toName, count)
+    if not it then return false, 'no item' end
+    local blocker = invLogic.giveBlocker(it)
+    if blocker then return false, blocker end
+    local me = myName()
+    local owner = it.owner or me
+    if lower(toName) == lower(owner) then return false, owner .. ' already has it' end
+    local job = { itemId = it.id, notifyCmd = it.notifyCmd, name = it.name, count = count, to = toName, location = it.location, nodrop = it.nodrop }
+    if lower(owner) == lower(me) then
+        return enqueueGive(job)
+    end
+    local bn = boxnet()
+    if not bn or not bn.available() then return false, 'Box Network not connected' end
+    if not onlinePeer(owner) then return false, owner .. ' is not on the Box Network' end
+    job.location, job.nodrop = nil, nil
+    local ok = bn.send(owner, 'inv:give', job)
+    if ok then netLog(string.format('Asked %s to give %s to %s', owner, it.name or 'item', toName)) end
+    return ok == true, (not ok) and 'send failed' or nil
+end
+
+local function processGives()
+    if state.net.activeGive then return end
+    local job = table.remove(state.net.gives, 1)
+    if not job then return end
+    state.net.activeGive = job
+    local ok, detail = runGive(job)
+    state.net.activeGive = nil
+    reportGive(job, ok, detail)
+    scanner.scanAll({ yield = true })
+    announceChanged()
+    -- The receiver's snapshot (when we hold one) is out of date now.
+    local rec = netPeerRecord(job.to, false)
+    if rec and rec.items then rec.stale = true end
+end
+
+-- Receiver side: click Trade when the giver's window reaches us.
+local function processTradeAccepts()
+    local accepts = state.net.acceptTrades
+    if next(accepts) == nil then return end
+    local t = nowSec()
+    local open = probe.tradeOpen()
+    for key, a in pairs(accepts) do
+        if a.lastClick and not open then
+            accepts[key] = nil
+            netLog(string.format('Received %s from %s', a.item or 'an item', a.from))
+            chat('Received %s from %s.', a.item or 'an item', a.from)
+        elseif t > a.expires then
+            accepts[key] = nil
+            netLog(string.format('%s never opened a trade (%s)', a.from, a.item or 'item'), 'warn')
+        end
+    end
+    if not open then return end
+    local his = lower(probe.tradeHisName())
+    local a = his ~= '' and accepts[his] or nil
+    if not a then return end
+    if (t - (a.lastClick or -1e9)) < 1.0 then return end
+    a.lastClick = t
+    pcall(function() mq.cmd('/notify TradeWnd TRDW_Trade_Button leftmouseup') end)
+end
+
+-- ----------------------------------------------------------------------------
+-- Subscriptions (handlers run in boxnet's tick: queue, never delay)
+-- ----------------------------------------------------------------------------
+local function senderName(sender, data)
+    local n = sender and sender.character
+    if type(n) ~= 'string' or n == '' then n = data and data.from end
+    return type(n) == 'string' and n or ''
+end
+
+local function onRequest(data, sender)
+    local from = senderName(sender, data)
+    if from == '' then return end
+    table.insert(state.net.pendingRequests, from)
+end
+
+local function onPage(data, sender)
+    local from = senderName(sender, data)
+    if from == '' or type(data) ~= 'table' then return end
+    local rec = netPeerRecord(from, true)
+    if data.refused then
+        rec.pendingSince = nil
+        rec.refused = tostring(data.reason or 'refused')
+        netLog(from .. ': ' .. rec.refused, 'warn')
+        return
+    end
+    if invLogic.mergePage(rec, data, nowSec()) then
+        state.net.tableCache.key = ''
+    end
+end
+
+local function onGive(data, sender)
+    local from = senderName(sender, data)
+    local bn = boxnet()
+    if from == '' or type(data) ~= 'table' or not bn then return end
+    local function refuse(reason)
+        netLog(string.format('Refused give from %s: %s', from, reason), 'warn')
+        bn.send(from, 'inv:give_result', { ok = false, reason = reason, name = data.name, to = data.to })
+    end
+    if not cfg.acceptGives then return refuse('gives are off on ' .. myName()) end
+    if bn.trusted and not bn.trusted(sender, data) then return refuse('not trusted') end
+    local ok, why = enqueueGive({
+        itemId = tonumber(data.itemId) or 0, notifyCmd = tostring(data.notifyCmd or ''), name = tostring(data.name or ''),
+        count = tonumber(data.count), to = tostring(data.to or ''), requestedBy = from,
+    })
+    if not ok then refuse(why or 'cannot give') end
+end
+
+local function onTradeAccept(data, sender)
+    local from = senderName(sender, data)
+    if from == '' then return end
+    state.net.acceptTrades[lower(from)] = { from = from, item = data and data.name or nil, expires = nowSec() + TRADE_ACCEPT_SEC }
+end
+
+local function onGiveResult(data, sender)
+    local from = senderName(sender, data)
+    if type(data) ~= 'table' then return end
+    local text
+    if data.ok then
+        text = string.format('%s gave %s to %s', from, tostring(data.name or 'item'), tostring(data.to or '?'))
+    else
+        text = string.format('%s could not give %s to %s: %s', from, tostring(data.name or 'item'), tostring(data.to or '?'), tostring(data.reason or '?'))
+    end
+    netLog(text, data.ok and 'info' or 'warn')
+    chat('%s', text)
+    for _, n in ipairs({ from, data.to }) do
+        local rec = n and netPeerRecord(n, false)
+        if rec and rec.items then rec.stale = true end
+    end
+end
+
+local function onChanged(data, sender)
+    local from = senderName(sender, data)
+    local rec = from ~= '' and netPeerRecord(from, false)
+    if rec and rec.items then rec.stale = true end
+end
+
+local NET_HANDLERS = {
+    ['inv:request']      = onRequest,
+    ['inv:page']         = onPage,
+    ['inv:give']         = onGive,
+    ['inv:trade_accept'] = onTradeAccept,
+    ['inv:give_result']  = onGiveResult,
+    ['inv:changed']      = onChanged,
+}
+
+local function dropSubscriptions()
+    for _, unsub in ipairs(state.net.unsubs) do pcall(unsub) end
+    state.net.unsubs = {}
+    state.net.subGen = -1
+end
+
+-- (Re)subscribes whenever the boxnet plugin (re)loads.
+local function ensureSubscriptions()
+    local bn = boxnet()
+    if not bn or type(bn.subscribe) ~= 'function' then return end
+    local gen = bn.generation and bn.generation() or 0
+    if state.net.subGen == gen then return end
+    dropSubscriptions()
+    for kind, fn in pairs(NET_HANDLERS) do
+        local ok, unsub = pcall(bn.subscribe, kind, fn)
+        if ok and type(unsub) == 'function' then table.insert(state.net.unsubs, unsub) end
+    end
+    state.net.subGen = gen
+end
+
+-- Stale / auto-refresh maintenance for the Box tab (tick).
+local function refreshSnapshots()
+    local bn = boxnet()
+    if not bn or not ctrl.show_inv then return end
+    local t = nowSec()
+    if (t - (state.net.lastRefreshCheck or -1e9)) < 1.0 then return end
+    state.net.lastRefreshCheck = t
+    for _, p in ipairs(bn.peers()) do
+        local rec = netPeerRecord(p.name, false)
+        if rec and rec.items and rec.stale then
+            requestSnapshot(p.name, false)
+        elseif rec and rec.items and cfg.autoRefreshSec > 0 and (t - (rec.at or 0)) >= cfg.autoRefreshSec then
+            requestSnapshot(p.name, false)
+        end
+    end
+end
+
+-- Items of every box (mine included) for the All boxes view; peers' lists are
+-- shared by reference, mine are thin proxies tagged with the owner.
+local function allBoxItems()
+    local me = myName()
+    local out = {}
+    local mine = state.net.myRows
+    if not mine or mine.gen ~= state.dataGen or mine.owner ~= me then
+        mine = { gen = state.dataGen, owner = me, rows = {} }
+        for _, it in ipairs(state.items) do
+            mine.rows[#mine.rows + 1] = setmetatable({ owner = me }, { __index = it })
+        end
+        state.net.myRows = mine
+    end
+    for _, it in ipairs(mine.rows) do out[#out + 1] = it end
+    for _, rec in pairs(state.net.peers) do
+        for _, it in ipairs(rec.items or {}) do out[#out + 1] = it end
+    end
+    return out
+end
+
+-- ----------------------------------------------------------------------------
+-- Box Inventories tab
+-- ----------------------------------------------------------------------------
+-- The popup is opened by drawGivePopup() in the scope that draws it (the
+-- ImGui id stack differs between a table row and the tab that owns the popup).
+function openGivePopup(it)
+    state.net.givePopup = { item = it, count = tonumber(it.count) or 1, openedAt = nowSec(), dists = nil, pendingOpen = true }
+end
+
+-- Candidate receivers for the popup, with distances from the giver
+-- (refreshed once a second).
+local function giveCandidates(pop)
+    local it = pop.item
+    local me = myName()
+    local owner = it.owner or me
+    local t = nowSec()
+    if pop.dists and (t - (pop.distsAt or 0)) < 1.0 then return pop.dists end
+    local out = {}
+    local names = {}
+    if lower(owner) ~= lower(me) then names[#names + 1] = me end
+    local bn = boxnet()
+    if bn then
+        for _, p in ipairs(bn.peers()) do
+            if lower(p.name) ~= lower(owner) then names[#names + 1] = p.name end
+        end
+    end
+    for _, n in ipairs(names) do
+        local dist, sameZone
+        if lower(owner) == lower(me) then
+            local sp = probe.spawn(n)
+            if sp then dist, sameZone = sp.dist, true else dist, sameZone = nil, false end
+        else
+            dist, sameZone = charDistance(owner, n)
+        end
+        out[#out + 1] = { name = n, dist = dist, sameZone = sameZone, inRange = dist ~= nil and dist <= cfg.tradeRange }
+    end
+    pop.dists, pop.distsAt = out, t
+    return out
+end
+
+function drawGivePopup()
+    local pop = state.net.givePopup
+    if not pop then return end
+    if pop.pendingOpen then
+        pop.pendingOpen = nil
+        ImGui.OpenPopup('##invGivePopup')
+    end
+    if not ImGui.BeginPopup('##invGivePopup') then
+        state.net.givePopup = nil
+        return
+    end
+    local it = pop.item
+    local me = myName()
+    local owner = it.owner or me
+    ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], tostring(it.name or 'Item'))
+    ImGui.SameLine()
+    ImGui.TextDisabled(string.format('%s | %s', owner, it.displayLocation or ''))
+    local blocker = invLogic.giveBlocker(it)
+    if blocker then
+        ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], 'Cannot give: ' .. blocker)
+        ImGui.EndPopup()
+        return
+    end
+    if it.stackable and (tonumber(it.count) or 1) > 1 then
+        ImGui.SetNextItemWidth(core.px(90))
+        local q = ImGui.InputInt('Quantity##invGiveQty', pop.count)
+        if type(q) == 'number' and q ~= pop.count then pop.count = math.max(1, math.min(tonumber(it.count) or 1, q)) end
+        ImGui.SameLine()
+        ImGui.TextDisabled(string.format('of %d', it.count))
+    end
+    ImGui.Separator()
+    ImGui.TextDisabled(string.format('Give to (trade range %d):', cfg.tradeRange))
+    local cands = giveCandidates(pop)
+    if #cands == 0 then
+        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'No other box on the network.')
+    end
+    for i, c in ipairs(cands) do
+        ImGui.PushID(i)
+        local label = c.name
+        if c.dist then
+            label = string.format('%s  (%.0f ft%s)', c.name, c.dist, c.inRange and '' or ', too far')
+        elseif not c.sameZone then
+            label = c.name .. '  (other zone / unknown)'
+        end
+        local col = c.inRange and GOOD or (c.sameZone and WARN or MUTED)
+        if ImGui.Button('Give##give', core.px(50), core.px(20)) then
+            local count = (it.stackable and (tonumber(it.count) or 1) > 1) and pop.count or nil
+            local ok, why = requestGive(it, c.name, count)
+            if not ok then netLog('Give not started: ' .. tostring(why), 'warn') end
+            ImGui.CloseCurrentPopup()
+        end
+        ImGui.SameLine()
+        ImGui.TextColored(col[1], col[2], col[3], col[4], label)
+        if c.sameZone and not c.inRange then
+            ImGui.SameLine()
+            if ImGui.SmallButton('Come to ' .. owner .. '##come') then
+                local bn = boxnet()
+                if bn and bn.command then pcall(bn.command, c.name, 'cometo ' .. owner) end
+            end
+            if ImGui.IsItemHovered() then core.setTooltip(string.format('Send %s to %s with /ac cometo (MQ2Nav).', c.name, owner)) end
+        end
+        ImGui.PopID()
+    end
+    ImGui.EndPopup()
+end
+
+local function drawBoxList()
+    local bn = boxnet()
+    local me = myName()
+    local n = state.net
+    local function row(key, label, sub, tooltip)
+        local sel = n.selected == key
+        if ImGui.Selectable(label .. '##box' .. key, sel) then
+            n.selected = key
+            n.tableCache.key = ''
+            -- Selecting a box fetches what we do not have yet.
+            if key == 'ALL' then
+                for _, p in ipairs(bn and bn.peers() or {}) do
+                    local r = netPeerRecord(p.name, true)
+                    if not r.items then requestSnapshot(p.name, false) end
+                end
+            elseif key ~= lower(me) then
+                local r = netPeerRecord(key, false)
+                if r and not r.items then requestSnapshot(r.name, false) end
+            end
+        end
+        if tooltip and ImGui.IsItemHovered() then core.setTooltip(tooltip) end
+        if sub then ImGui.TextDisabled('   ' .. sub) end
+    end
+    row('ALL', 'All boxes', string.format('%d character(s)', 1 + #(bn and bn.peers() or {})), 'Every box in one list - search across all inventories.')
+    row(lower(me), me .. ' (me)', string.format('%d items | %d free', state.counts.total or 0, state.counts.freeInvSlots or 0))
+    local peers = bn and bn.peers() or {}
+    for _, p in ipairs(peers) do
+        local rec = netPeerRecord(p.name, true)
+        local hb = p.hb or {}
+        local dist = charDistance(me, p.name)
+        local sub
+        if rec.items then
+            local c = rec.meta and rec.meta.counts or {}
+            sub = string.format('%d items | %d free | %s%s', #rec.items, c.freeInvSlots or 0, fmtAge(nowSec() - (rec.at or 0)), rec.stale and ' *' or '')
+        elseif rec.refused then
+            sub = rec.refused
+        elseif rec.pendingSince then
+            sub = 'fetching...'
+        else
+            sub = 'no snapshot yet'
+        end
+        local where = tostring(hb.zone or '?') .. (dist and string.format(' | %.0f ft', dist) or '')
+        row(lower(p.name), p.name, where .. '\n   ' .. sub,
+            string.format('%s - %s\n%s\nClick to view; Refresh asks the box for a fresh snapshot.', p.name,
+                type(hb.classes) == 'table' and table.concat(hb.classes, '/') or '?', sub))
+    end
+    -- Boxes we have a snapshot of but that are offline now
+    for key, rec in pairs(n.peers) do
+        local online = false
+        for _, p in ipairs(peers) do if lower(p.name) == key then online = true break end end
+        if not online and rec.items then
+            row(key, rec.name .. ' (offline)', string.format('%d items | %s', #rec.items, fmtAge(nowSec() - (rec.at or 0))))
+        end
+    end
+end
+
+local function boxTableRows()
+    local n = state.net
+    local gens = {}
+    for key, rec in pairs(n.peers) do gens[#gens + 1] = key .. '=' .. tostring(rec.gen or 0) .. (rec.items and #rec.items or 0) end
+    table.sort(gens)
+    local key = table.concat({ n.selected, n.search, n.loc, tostring(state.dataGen), table.concat(gens, ',') }, '|')
+    if n.tableCache.key == key then return n.tableCache.rows end
+    local rows = invLogic.filterBoxItems(allBoxItems(), n.search, n.loc, n.selected)
+    n.tableCache.key = key
+    n.tableCache.rows = rows
+    return rows
+end
+
+local function drawBoxItemsTable(rows, showOwner)
+    local cols = showOwner and 7 or 6
+    local flags = ImGuiTableFlags.Borders + ImGuiTableFlags.RowBg + ImGuiTableFlags.Resizable + ImGuiTableFlags.ScrollY
+    if not ImGui.BeginTable('BoxItemsTable', cols, flags, ImVec2(0, -core.px(96))) then return end
+    if showOwner then ImGui.TableSetupColumn('Character', ImGuiTableColumnFlags.WidthFixed, core.px(90)) end
+    ImGui.TableSetupColumn('Location', ImGuiTableColumnFlags.WidthFixed, core.px(110))
+    ImGui.TableSetupColumn('Item Name', ImGuiTableColumnFlags.WidthStretch)
+    ImGui.TableSetupColumn('Qty', ImGuiTableColumnFlags.WidthFixed, core.px(55))
+    ImGui.TableSetupColumn('Wt', ImGuiTableColumnFlags.WidthFixed, core.px(45))
+    ImGui.TableSetupColumn('Value', ImGuiTableColumnFlags.WidthFixed, core.px(75))
+    ImGui.TableSetupColumn('Give', ImGuiTableColumnFlags.WidthFixed, core.px(50))
+    ImGui.TableHeadersRow()
+
+    local function drawRow(idx, it)
+        ImGui.TableNextRow()
+        ImGui.PushID(idx)
+        local col = 0
+        if showOwner then
+            ImGui.TableSetColumnIndex(0)
+            ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], tostring(it.owner or ''))
+            col = 1
+        end
+        ImGui.TableSetColumnIndex(col)
+        local locColor = it.location == 'INVENTORY' and ARC or ((it.location == 'BANK' or it.location == 'SHAREDBANK') and GOLD or (it.location == 'WORN' and GOOD or WARN))
+        ImGui.TextColored(locColor[1], locColor[2], locColor[3], locColor[4], it.displayLocation or '')
+        ImGui.TableSetColumnIndex(col + 1)
+        if drawTableItemIcon(it.icon, 18) then ImGui.SameLine() end
+        local nameCol = it.nodrop and MUTED or (it.clicky and GOLD or (it.tradeskill and ARC or GOOD))
+        ImGui.TextColored(nameCol[1], nameCol[2], nameCol[3], nameCol[4], it.name or 'Unknown')
+        if ImGui.IsItemHovered() then
+            UI.drawTooltip(it)
+            if ImGui.IsItemClicked(1) then openDatabaseCard(it) end
+        end
+        ImGui.TableSetColumnIndex(col + 2)
+        if it.stackable then ImGui.Text(it.qtyText or tostring(it.count or 1)) else ImGui.TextDisabled('1') end
+        ImGui.TableSetColumnIndex(col + 3)
+        ImGui.Text(it.weightText or string.format('%.1f', it.weight or 0))
+        ImGui.TableSetColumnIndex(col + 4)
+        ImGui.TextDisabled(it.valueText or invLogic.formatMoney(it.value or 0))
+        ImGui.TableSetColumnIndex(col + 5)
+        local blocker = invLogic.giveBlocker(it)
+        if blocker then ImGui.BeginDisabled() end
+        if ImGui.SmallButton('Give') then openGivePopup(it) end
+        if blocker then
+            ImGui.EndDisabled()
+        elseif ImGui.IsItemHovered() then
+            core.setTooltip('Hand this item to another character on the Box Network.')
+        end
+        ImGui.PopID()
+    end
+
+    local clipper = nil
+    local ClipperClass = ImGui.ListClipper or (mq.imgui and mq.imgui.ListClipper) or _G['ImGuiListClipper']
+    if ClipperClass and ClipperClass.new then
+        local okC, c = pcall(ClipperClass.new)
+        if okC and c then clipper = c end
+    end
+    if clipper then
+        clipper:Begin(#rows)
+        while clipper:Step() do
+            for idx = clipper.DisplayStart + 1, clipper.DisplayEnd do
+                if rows[idx] then drawRow(idx, rows[idx]) end
+            end
+        end
+        clipper:End()
+    else
+        for idx, it in ipairs(rows) do drawRow(idx, it) end
+    end
+    ImGui.EndTable()
+end
+
+-- A peer's bags / bank as grids (read-only; click a slot to give).
+local function drawPeerGrid(rec)
+    local ctx = {
+        palette = 'inv', idPrefix = 'r' .. lower(rec.name), label = 'Bag', interactive = false,
+        onClick = function(it, _, _, button)
+            if button == 1 and shiftHeld() then openDatabaseCard(it) return end
+            openGivePopup(it)
+        end,
+    }
+    ImGui.BeginChild('PeerGrid', ImVec2(0, -core.px(96)), true)
+    local c = rec.containers or {}
+    ImGui.TextColored(ARC[1], ARC[2], ARC[3], ARC[4], string.format("%s'S BAGS", string.upper(rec.name)))
+    ImGui.Separator()
+    for _, bag in ipairs(c.inventory or {}) do
+        if (bag.capacity or 0) > 0 then
+            drawBagTitle('Bag', bag)
+            UI.drawBagGrid(bag, ctx)
+            ImGui.Dummy(0, core.px(6))
+        end
+    end
+    if #(c.bank or {}) > 0 or #(c.sharedBank or {}) > 0 then
+        ImGui.Dummy(0, core.px(4))
+        local meta = rec.meta or {}
+        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], string.format('BANK (%s)', meta.bankLive and 'live' or ('cached ' .. tostring(meta.bankSync or '?'))))
+        ImGui.Separator()
+        local bankCtx = { palette = 'bank', idPrefix = 'rb' .. lower(rec.name), label = 'Bank', interactive = false, hint = 'Bank items must be moved to a bag before they can be given.', onClick = ctx.onClick }
+        for _, bag in ipairs(c.bank or {}) do
+            if (bag.capacity or 0) > 0 then
+                drawBagTitle('Bank', bag)
+                UI.drawBagGrid(bag, bankCtx)
+                ImGui.Dummy(0, core.px(6))
+            end
+        end
+        local sharedCtx = { palette = 'bank', idPrefix = 'rs' .. lower(rec.name), label = 'Shared', interactive = false, hint = bankCtx.hint, onClick = ctx.onClick }
+        for _, bag in ipairs(c.sharedBank or {}) do
+            if (bag.capacity or 0) > 0 then
+                drawBagTitle('Shared', bag)
+                UI.drawBagGrid(bag, sharedCtx)
+                ImGui.Dummy(0, core.px(6))
+            end
+        end
+    end
+    ImGui.EndChild()
+end
+
+local function drawTransferLog()
+    local n = state.net
+    ImGui.Separator()
+    local queued = #n.gives + (n.activeGive and 1 or 0)
+    if n.activeGive then
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], string.format('Giving %s to %s...', n.activeGive.name or 'item', n.activeGive.to))
+        ImGui.SameLine()
+    elseif queued > 0 then
+        ImGui.TextDisabled(string.format('%d give(s) queued', queued))
+        ImGui.SameLine()
+    end
+    if queued > 0 then
+        if ImGui.SmallButton('Clear queue##invGiveClear') then n.gives = {} end
+        ImGui.SameLine()
+    end
+    ImGui.TextDisabled('Transfers:')
+    ImGui.BeginChild('InvNetLog', ImVec2(0, core.px(60)), false)
+    for i, e in ipairs(n.log) do
+        if i > 12 then break end
+        local col = e.level == 'warn' and WARN or (e.level == 'error' and ERR or MUTED)
+        ImGui.TextColored(col[1], col[2], col[3], col[4], string.format('[%s] %s', e.time, e.text))
+    end
+    if #n.log == 0 then ImGui.TextDisabled('No transfers yet.') end
+    ImGui.EndChild()
+end
+
+function UI.drawBoxTab()
+    local bn = boxnet()
+    if not bn then
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'The Box Network plugin (boxnet) is not loaded or is disabled.')
+        ImGui.TextDisabled('Enable it on Settings -> Plugins to see your other characters\' inventories here.')
+        return
+    end
+    if not bn.available() then
+        ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'Box Network is not connected (open the Box Net window for details).')
+        return
+    end
+    local n = state.net
+    local me = myName()
+    -- First look at the tab: ask every box once.
+    if not n.tabSeen then
+        n.tabSeen = true
+        requestAllSnapshots(false)
+    end
+
+    -- Toolbar
+    if ImGui.Button('Refresh##invNetRefresh', core.px(70), core.px(22)) then
+        if n.selected == 'ALL' then requestAllSnapshots(true)
+        elseif n.selected ~= lower(me) then requestSnapshot(n.selected, true) end
+    end
+    if ImGui.IsItemHovered() then core.setTooltip('Ask the selected box (or every box) for a fresh inventory snapshot.') end
+    ImGui.SameLine()
+    if ImGui.Button('Refresh All##invNetRefreshAll', core.px(80), core.px(22)) then requestAllSnapshots(true) end
+    ImGui.SameLine(0, core.px(12))
+    ImGui.SetNextItemWidth(core.px(140))
+    local auto, autoChanged = ImGui.SliderInt('Auto-refresh (s)##invNetAuto', cfg.autoRefreshSec, 0, 120)
+    if autoChanged and type(auto) == 'number' then
+        cfg.autoRefreshSec = auto
+        core.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then core.setTooltip('Re-request open snapshots this often while this window is open. 0 = only on Refresh (boxes still announce their changes).') end
+    ImGui.SameLine(0, core.px(12))
+    ImGui.SetNextItemWidth(core.px(200))
+    local newSearch, searchChanged = ImGui.InputTextWithHint('##invNetSearch', 'Search every box...', n.search or '')
+    if searchChanged and type(newSearch) == 'string' then n.search = newSearch end
+    ImGui.SameLine()
+    if ImGui.Button('X##invNetClear', core.px(22), core.px(22)) then n.search = '' end
+    ImGui.SameLine(0, core.px(12))
+    for _, l in ipairs({ { 'ALL', 'All' }, { 'INVENTORY', 'Bags' }, { 'BANK', 'Bank' }, { 'WORN', 'Worn' } }) do
+        local sel = n.loc == l[1]
+        if sel then ImGui.PushStyleColor(ImGuiCol.Button, 0.16, 0.50, 0.75, 0.8) end
+        if ImGui.Button(l[2] .. '##invNetLoc' .. l[1]) then n.loc = l[1] end
+        if sel then ImGui.PopStyleColor(1) end
+        ImGui.SameLine()
+    end
+    ImGui.SameLine(0, core.px(12))
+    local canGrid = n.selected ~= 'ALL' and n.selected ~= lower(me)
+    if not canGrid then n.view = 'list' end
+    if not canGrid then ImGui.BeginDisabled() end
+    if ImGui.RadioButton('List##invNetList', n.view == 'list') then n.view = 'list' end
+    ImGui.SameLine()
+    if ImGui.RadioButton('Bags##invNetGrid', n.view == 'grid') then n.view = 'grid' end
+    if not canGrid then ImGui.EndDisabled() end
+    ImGui.Separator()
+
+    -- Left: boxes; right: items
+    ImGui.BeginChild('InvBoxList', ImVec2(core.px(230), 0), true)
+    drawBoxList()
+    ImGui.EndChild()
+    ImGui.SameLine()
+    ImGui.BeginChild('InvBoxItems', ImVec2(0, 0), false)
+    local rec = (n.selected ~= 'ALL' and n.selected ~= lower(me)) and netPeerRecord(n.selected, false) or nil
+    if rec and not rec.items then
+        if rec.pendingSince then
+            ImGui.TextColored(WARN[1], WARN[2], WARN[3], WARN[4], 'Waiting for ' .. rec.name .. '\'s snapshot...')
+        elseif rec.refused then
+            ImGui.TextColored(ERR[1], ERR[2], ERR[3], ERR[4], rec.name .. ': ' .. rec.refused)
+        else
+            ImGui.TextDisabled('No snapshot from ' .. rec.name .. ' yet.')
+            ImGui.SameLine()
+            if ImGui.SmallButton('Fetch##invNetFetch') then requestSnapshot(rec.name, true) end
+        end
+        if onlinePeer(rec.name) == nil then ImGui.TextDisabled(rec.name .. ' is not on the network right now.') end
+        ImGui.Dummy(0, core.px(4))
+    elseif rec then
+        local meta = rec.meta or {}
+        local c = meta.counts or {}
+        ImGui.TextDisabled(string.format('%s: %d items | bags %d/%d free | bank %s | %s%s', rec.name, #rec.items,
+            c.freeInvSlots or 0, c.totalInvSlots or 0, meta.bankLive and 'live' or ('cached ' .. tostring(meta.bankSync or '?')),
+            fmtAge(nowSec() - (rec.at or 0)), rec.stale and ' (changed since - refreshing)' or ''))
+    end
+    if n.view == 'grid' and rec and rec.items then
+        drawPeerGrid(rec)
+    else
+        local rows = boxTableRows()
+        ImGui.TextDisabled(string.format('Showing %d item(s)', #rows))
+        drawBoxItemsTable(rows, n.selected == 'ALL')
+    end
+    drawTransferLog()
+    drawGivePopup()
+    ImGui.EndChild()
+end
+
+local function DrawInventoryManagerUI()
+    if not ctrl.show_inv then return end
+
+    core.pushTheme()
+
+    ImGui.SetNextWindowCollapsed(false, ImGuiCond.Appearing)
+    ImGui.SetNextWindowSize(core.px(780), core.px(520), ImGuiCond.FirstUseEver)
+    local windowFlags = 0
+    if ImGuiWindowFlags then
+        windowFlags = bit.bor(ImGuiWindowFlags.AlwaysUseWindowPadding) ---@diagnostic disable-line: deprecated
+    end
+
+    core.preBeginWindow('inventory')
+    local open, draw = ImGui.Begin("Triune Inventory & Bank Manager###TriuneInventoryManager", ctrl.show_inv, core.windowFlags and core.windowFlags('inventory', windowFlags) or windowFlags)
+    if not open then
+        ctrl.show_inv = false
+        if core.preEndWindow then core.preEndWindow('inventory', false) end
+        ImGui.End()
+        core.popTheme()
+        core.saveLoadout(true)
+        return
+    end
+
+    if draw then
+        core.postBeginWindow('inventory')
+        UI.drawHeader()
+
+        if ImGui.BeginTabBar("InvMainTabBar", ImGuiTabBarFlags.None) then
+            if ImGui.BeginTabItem("Items List##tabItems") then
+                UI.drawItemsTable()
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem("Container Visualizer##tabVis") then
+                UI.drawVisualizer()
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem("Organization Assistant##tabOrg") then
+                UI.drawOrganizer()
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem("Box Inventories##tabBoxes") then
+                UI.drawBoxTab()
+                ImGui.EndTabItem()
+            end
+
+            if ImGui.BeginTabItem("Settings & Cache##tabSet") then
+                UI.drawSettings()
+                ImGui.EndTabItem()
+            end
+
+            ImGui.EndTabBar()
+        end
+    end
+
+    if core.preEndWindow then core.preEndWindow('inventory', false) end
+    ImGui.End()
+    core.popTheme()
 end
 
 -- ============================================================================
@@ -2790,6 +4114,17 @@ local function tick()
             scanner.scanAll({ yield = true })
         end
     end
+
+    -- Box Inventories: serve snapshot requests, run queued gives, accept the
+    -- trades we were told about, keep open snapshots fresh.
+    ensureSubscriptions()
+    if boxnet() then
+        serveRequests()
+        processTradeAccepts()
+        processGives()
+        announceChanged()
+        refreshSnapshots()
+    end
 end
 
 -- ============================================================================
@@ -2807,6 +4142,33 @@ end
 function plugin.onDestroy()
     state.pendingAction = nil
     state.combineAllActive = false
+    state.net.gives = {}
+    state.net.activeGive = nil
+    state.net.pendingRequests = {}
+    dropSubscriptions()
+end
+
+function plugin.onSaveSettings()
+    return {
+        autoScan         = state.autoScan == true,
+        autoScanInterval = tonumber(state.autoScanInterval) or 15,
+        share            = cfg.share == true,
+        acceptGives      = cfg.acceptGives == true,
+        tradeRange       = tonumber(cfg.tradeRange) or 15,
+        autoRefreshSec   = tonumber(cfg.autoRefreshSec) or 30,
+        announce         = cfg.announce == true,
+    }
+end
+
+function plugin.onLoadSettings(s)
+    if type(s) ~= 'table' then return end
+    if s.autoScan ~= nil then state.autoScan = (s.autoScan == true) end
+    if type(s.autoScanInterval) == 'number' then state.autoScanInterval = math.max(5, math.min(60, math.floor(s.autoScanInterval))) end
+    if s.share ~= nil then cfg.share = (s.share == true) end
+    if s.acceptGives ~= nil then cfg.acceptGives = (s.acceptGives == true) end
+    if type(s.tradeRange) == 'number' then cfg.tradeRange = math.max(5, math.min(50, math.floor(s.tradeRange))) end
+    if type(s.autoRefreshSec) == 'number' then cfg.autoRefreshSec = math.max(0, math.min(120, math.floor(s.autoRefreshSec))) end
+    if s.announce ~= nil then cfg.announce = (s.announce == true) end
 end
 
 function plugin.onTick()
@@ -2841,12 +4203,82 @@ function plugin.onDrawSettings()
     ImGui.SameLine()
     ImGui.TextDisabled(string.format('%d items | Bank: %s | %s', state.counts.total or 0,
         state.bankLive and 'live' or ('cached ' .. tostring(state.bankLastSync)), tostring(state.statusMsg or '')))
+    UI.drawNetSettings()
 end
 
--- /ac inv | inventory | invui toggles the window (was: /lua run triune_inv)
-function plugin.onCommand(cmd)
+-- Finds one of my items by id or (partial, case-insensitive) name for the
+-- give command: exact name first, then a unique prefix / substring match.
+local function findMyItem(text)
+    text = tostring(text or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if text == '' then return nil, 'no item named' end
+    local id = tonumber(text)
+    local exact, partial = nil, {}
+    for _, it in ipairs(state.items) do
+        if it.location == 'INVENTORY' or it.location == 'WORN' then
+            if id and it.id == id then return it end
+            local n = lower(it.name)
+            if n == lower(text) then exact = exact or it
+            elseif n:find(lower(text), 1, true) then partial[#partial + 1] = it end
+        end
+    end
+    if exact then return exact end
+    if #partial == 1 then return partial[1] end
+    if #partial > 1 then return nil, #partial .. ' items match "' .. text .. '" - be more specific' end
+    return nil, 'no item matching "' .. text .. '" in the bags'
+end
+
+-- /ac inv                              -> toggle the window
+-- /ac inv give <Name> <item|id> [qty]   -> hand one of my items to a box
+-- /ac inv find <text>                   -> search every box's snapshot
+-- /ac inv refresh [Name]                -> ask the boxes for fresh snapshots
+function plugin.onCommand(cmd, args)
     if cmd ~= 'inv' and cmd ~= 'inventory' and cmd ~= 'invui' and cmd ~= 'bank' then return false end
     refresh()
+    local sub = lower(args and args[2] or '')
+    if sub == 'give' then
+        local to = tostring(args[3] or '')
+        -- A trailing number is the quantity only when something precedes it
+        -- (so "give Bob 1234" is item id 1234, "give Bob Peridot 5" is five).
+        local qty = (#args >= 5) and tonumber(args[#args]) or nil
+        local last = qty and (#args - 1) or #args
+        local text = table.concat(args, ' ', 4, last)
+        if to == '' or text == '' then
+            print('\ay[Triune Inv]\ax usage: /ac inv give <Name> <item name|id> [quantity]')
+            return true
+        end
+        if (tonumber(state.lastScanTime) or 0) == 0 then scanner.scanAll() end
+        local it, why = findMyItem(text)
+        if not it then
+            print('\ar[Triune Inv]\ax ' .. tostring(why))
+            return true
+        end
+        local ok, err = requestGive(it, to, qty)
+        if ok then
+            print(string.format('\ag[Triune Inv]\ax Giving %s to %s.', it.name, to))
+        else
+            print(string.format('\ar[Triune Inv]\ax Cannot give %s: %s', it.name, tostring(err)))
+        end
+        return true
+    elseif sub == 'find' then
+        local text = table.concat(args, ' ', 3)
+        if text == '' then
+            print('\ay[Triune Inv]\ax usage: /ac inv find <text>')
+            return true
+        end
+        if (tonumber(state.lastScanTime) or 0) == 0 then scanner.scanAll() end
+        local rows = invLogic.filterBoxItems(allBoxItems(), text, 'ALL', 'ALL')
+        print(string.format('\ag[Triune Inv]\ax %d match(es) for "%s" across %d box snapshot(s):', #rows, text, 1 + (function() local n = 0 for _, r in pairs(state.net.peers) do if r.items then n = n + 1 end end return n end)()))
+        for i, it in ipairs(rows) do
+            if i > 25 then print('  ...') break end
+            print(string.format('  \ay%s\ax  %s  \at%s\ax%s', it.owner or '?', it.displayLocation or '', it.name or '?', it.stackable and (' x' .. tostring(it.count or 1)) or ''))
+        end
+        return true
+    elseif sub == 'refresh' then
+        local name = args[3]
+        local n = name and (requestSnapshot(name, true) and 1 or 0) or requestAllSnapshots(true)
+        print(string.format('\ag[Triune Inv]\ax Asked %d box(es) for a fresh inventory snapshot.', n))
+        return true
+    end
     ctrl.show_inv = not ctrl.show_inv
     core.saveLoadout(true)
     print(string.format('\ag[Triune]\ax Inventory & Bank Manager %s.', ctrl.show_inv and 'OPENED' or 'CLOSED'))
@@ -2855,12 +4287,30 @@ end
 
 plugin.help = {
     '  \ag/ac inv | inventory | bank\ax - Toggle the Inventory & Bank Manager window',
+    '  \ag/ac inv give <Name> <item|id> [qty]\ax - Hand one of your items to another box (trade window)',
+    '  \ag/ac inv find <text>\ax - Search every box\'s inventory snapshot for an item',
+    '  \ag/ac inv refresh [Name]\ax - Ask your other boxes for fresh inventory snapshots',
 }
 
 -- Exposed for tests
 plugin.state = state
+plugin.cfg = cfg
 plugin.invLogic = invLogic
 plugin.scanner = scanner
 plugin.tick = tick
+plugin.probe = probe
+plugin.net = {
+    handlers = NET_HANDLERS,
+    requestSnapshot = requestSnapshot,
+    requestGive = requestGive,
+    enqueueGive = enqueueGive,
+    runGive = runGive,
+    processGives = processGives,
+    processTradeAccepts = processTradeAccepts,
+    serveRequests = serveRequests,
+    announceChanged = announceChanged,
+    ensureSubscriptions = ensureSubscriptions,
+    allBoxItems = allBoxItems,
+}
 
 return plugin

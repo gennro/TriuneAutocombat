@@ -2612,9 +2612,14 @@ local function DrawMapCanvas(availW, availH)
     -- Push Clipping Rectangle to strictly contain map canvas
     drawList:PushClipRect(canvasPos, ImVec2(cX + availW, cY + availH), true)
 
-    -- Canvas Background (Dark charcoal / navy)
-    local bgCol = ImGui.GetColorU32(0.035, 0.050, 0.075, 1.0)
-    drawList:AddRectFilled(canvasPos, ImVec2(cX + availW, cY + availH), bgCol, 0.0)
+    -- Canvas Background (Dark charcoal / navy). The fill is the window's
+    -- own background as far as the ghost option is concerned: it follows the
+    -- window's fade so a ghosted map leaves only its lines and markers.
+    local ghostA = (core.windowBgAlpha and core.windowBgAlpha('map', 1.0)) or 1.0
+    local bgCol = ImGui.GetColorU32(0.035, 0.050, 0.075, ghostA)
+    if ghostA > 0.001 then
+        drawList:AddRectFilled(canvasPos, ImVec2(cX + availW, cY + availH), bgCol, 0.0)
+    end
 
     -- Draw Grid Lines (if enabled)
     if cfg.showGrid then
@@ -3099,8 +3104,8 @@ local now = mq.gettime()
     -- On-Canvas Floor Navigation Widget (Top Right Pill)
     if cfg.zFilterMode ~= 3 then
         ImGui.SetCursorScreenPos(ImVec2(badgeX, badgeY))
-        ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90)
-        ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90 * ghostA)
+        ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80 * ghostA)
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 3)
         local floorNavFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)
@@ -3135,8 +3140,8 @@ local now = mq.gettime()
 
     -- On-Canvas Floating Control Widget (Bottom-Right)
     ImGui.SetCursorScreenPos(ImVec2(zoomX, zoomY))
-    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90)
-    ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.04, 0.07, 0.12, 0.90 * ghostA)
+    ImGui.PushStyleColor(ImGuiCol.Border, 0.20, 0.40, 0.60, 0.80 * ghostA)
     ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 4.0)
     ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 4, 4)
     local overlayFlags = bit.bor(ImGuiWindowFlags.NoScrollbar or 0, ImGuiWindowFlags.NoScrollWithMouse or 0)

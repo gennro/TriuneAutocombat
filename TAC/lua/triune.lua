@@ -261,6 +261,11 @@ local function sanitizeModeConfig(c)
     end
     if c.mini_lock == nil then c.mini_lock = false end
     if c.mini_titlebar == nil then c.mini_titlebar = true end
+    if c.mini_ghost == nil then
+        -- older loadouts only had the shared window option
+        local wo = type(c.window_opts) == 'table' and c.window_opts.mini
+        c.mini_ghost = (type(wo) == 'table' and wo.ghost == true)
+    end
     if type(c.mini_alpha) ~= 'number' then c.mini_alpha = 0.92 end
     for _, k in ipairs({ 'mini_show_activity', 'mini_show_target', 'mini_show_vitals', 'mini_show_camp', 'mini_show_tracker', 'mini_show_buttons' }) do
         if c[k] == nil then c[k] = true end
@@ -447,6 +452,16 @@ local function defaultCtrl()
         uf_show_xp               = true,
         uf_hide_empty_pets       = true,
         uf_buff_max              = 30,
+        uf_target_buff_rows      = 2,
+        uf_show_castbar          = true,
+        show_target_window       = false,
+        tw_lock                  = false,
+        tw_alpha                 = 0.85,
+        tw_bar_height            = 22,
+        tw_buff_rows             = 2,
+        tw_show_buffs            = true,
+        tw_show_tot              = true,
+        tw_show_castbar          = true,
         show_group_window        = false,
         gw_lock                  = false,
         gw_alpha                 = 0.85,
@@ -485,6 +500,7 @@ local function defaultCtrl()
         window_scale             = {},
         mini_lock                = false,
         mini_titlebar            = true,
+        mini_ghost               = false,
         mini_alpha               = 0.92,
         mini_show_activity       = true,
         mini_show_target         = true,
@@ -7434,13 +7450,36 @@ function runtime.initPluginManager()
     -- Plugins page lets the user pick which of these get a toggle button on
     -- the main window header (ctrl.plugins[id].headerButton, defaulting to
     -- window.headerButton ~= false).
+    -- A plugin with more than one window lists the others in
+    --   plugin.windows = { { key = 'target_window', label = 'Target', flag = ..., ... }, ... }
+    -- (same shape, `key` required and unique: it is the layout key). Each is
+    -- addressed everywhere as '<pluginId>:<key>'; its header-button choice is
+    -- kept in ctrl.plugins[pluginId].windowHeader[key].
     -- ------------------------------------------------------------------
-    function pm.getWindow(id)
-        local p = pm.plugins[id]
-        local w = p and p.instance and p.instance.window
+    local function splitWindowId(id)
+        local pid, sub = tostring(id):match('^([^:]+):(.+)$')
+        if pid then return pid, sub end
+        return id, nil
+    end
+    pm.splitWindowId = splitWindowId
+
+    local function windowDecl(w)
         if type(w) ~= 'table' then return nil end
         if type(w.flag) ~= 'string' and type(w.isOpen) ~= 'function' then return nil end
         return w
+    end
+
+    function pm.getWindow(id)
+        local pid, sub = splitWindowId(id)
+        local p = pm.plugins[pid]
+        local inst = p and p.instance
+        if not inst then return nil end
+        if not sub then return windowDecl(inst.window) end
+        if type(inst.windows) ~= 'table' then return nil end
+        for _, w in ipairs(inst.windows) do
+            if type(w) == 'table' and w.key == sub then return windowDecl(w) end
+        end
+        return nil
     end
 
     function pm.isWindowOpen(id)
@@ -7473,7 +7512,14 @@ function runtime.initPluginManager()
     function pm.headerButtonEnabled(id)
         local w = pm.getWindow(id)
         if not w then return false end
-        local saved = ctrl.plugins and ctrl.plugins[id] and ctrl.plugins[id].headerButton
+        local pid, sub = splitWindowId(id)
+        local pc = ctrl.plugins and ctrl.plugins[pid]
+        local saved
+        if sub then
+            saved = pc and type(pc.windowHeader) == 'table' and pc.windowHeader[sub] or nil
+        else
+            saved = pc and pc.headerButton
+        end
         if saved ~= nil then return saved == true end
         return w.headerButton ~= false
     end
@@ -7481,19 +7527,40 @@ function runtime.initPluginManager()
     function pm.setHeaderButton(id, val)
         if pm.invalidateHeaderButtons then pm.invalidateHeaderButtons() end
         if not ctrl.plugins then ctrl.plugins = {} end
-        if not ctrl.plugins[id] then ctrl.plugins[id] = {} end
-        ctrl.plugins[id].headerButton = (val == true)
+        local pid, sub = splitWindowId(id)
+        if not ctrl.plugins[pid] then ctrl.plugins[pid] = {} end
+        if sub then
+            if type(ctrl.plugins[pid].windowHeader) ~= 'table' then ctrl.plugins[pid].windowHeader = {} end
+            ctrl.plugins[pid].windowHeader[sub] = (val == true)
+        else
+            ctrl.plugins[pid].headerButton = (val == true)
+        end
         runtime.saveLoadout(true)
     end
 
-    -- Active plugins with a window, in header order (window.order, then load order).
+    -- Active plugins with a window, in header order (window.order, then load
+    -- order); a plugin's extra windows follow its main one.
     function pm.windowPlugins(headerOnly)
         local out = {}
         for i, id in ipairs(pm.pluginOrder) do
             local p = pm.plugins[id]
-            local w = pm.getWindow(id)
-            if p and w and p.enabled and p.status ~= 'Error' and (not headerOnly or pm.headerButtonEnabled(id)) then
-                out[#out + 1] = { id = id, window = w, order = tonumber(w.order) or 100, idx = i }
+            if p and p.enabled and p.status ~= 'Error' then
+                local w = pm.getWindow(id)
+                if w and (not headerOnly or pm.headerButtonEnabled(id)) then
+                    out[#out + 1] = { id = id, pluginId = id, window = w, order = tonumber(w.order) or 100, idx = i }
+                end
+                local extra = p.instance and p.instance.windows
+                if type(extra) == 'table' then
+                    for j, x in ipairs(extra) do
+                        if type(x) == 'table' and type(x.key) == 'string' then
+                            local xid = id .. ':' .. x.key
+                            local xw = pm.getWindow(xid)
+                            if xw and (not headerOnly or pm.headerButtonEnabled(xid)) then
+                                out[#out + 1] = { id = xid, pluginId = id, window = xw, order = tonumber(xw.order) or 100, idx = i + j / 1000 }
+                            end
+                        end
+                    end
+                end
             end
         end
         table.sort(out, function(a, b)
@@ -8312,6 +8379,7 @@ UI.HELP_COMMANDS = {
         { cmd = '/ac compact / /ac mini',             desc = 'Toggle auto-resizing Compact Mini-Window mode' },
         { cmd = '/ac scale [0.75-2.0|reset]',         desc = 'UI scale for every Triune window (per-window overrides on Settings -> Window Layout)' },
         { cmd = '/ac hud / /ac uf',                   desc = 'Toggle popout Target & Player HUD unit frames window' },
+        { cmd = '/ac target / /ac tw',                desc = 'Toggle the popout Target-only window (a big target frame)' },
         { cmd = '/ac cd / /ac cooldowns',             desc = 'Toggle popout Cooldown & Ability Monitor window' },
         { cmd = '/ac help / /ac h',                   desc = 'Print slash command usage and command options in chat' },
         { cmd = '/ac spellbook',                      desc = 'Toggle the Spellbook Browser & mem-to-gem queue window' },
@@ -8321,6 +8389,8 @@ UI.HELP_COMMANDS = {
         { cmd = '/ac buffbot [on|off]',               desc = 'Toggle the Buffbot window; on/off starts or stops the buffbot station (buffbot plugin)' },
         { cmd = '/ac map / /ac track / /ac zone',     desc = 'Toggle the Map, Zone Atlas & NPC Tracker window (map plugin)' },
         { cmd = '/ac inv / /ac bank',                 desc = 'Toggle the Inventory & Bank Manager window (inventory plugin)' },
+        { cmd = '/ac inv give <Name> <item|id> [qty]', desc = 'Hand one of your items to another box through the trade window (inventory plugin)' },
+        { cmd = '/ac inv find <text>',                desc = 'Search every box\'s inventory snapshot for an item (inventory plugin)' },
         { cmd = '/ac parcels [collect|stop|status]',  desc = 'Toggle the Parcel Helper window; collect retrieves every parcel at the open parcel merchant (parcels plugin)' },
         { cmd = '/ac dps / /dps',                     desc = 'Toggle the DPS Parser window (dps plugin)' },
         { cmd = '/ac net [all|zone|group|Name] [command]', desc = 'Toggle the Box Network window, or run an /ac command on your other boxes (boxnet plugin)' },
@@ -12660,7 +12730,7 @@ function runtime.getManagedWindows()
         local id, w = e.id, e.window
         local def = runtime.pluginWindowDefs[id]
         if not def or def.window ~= w then
-            local p = pm.plugins[id]
+            local p = pm.plugins[e.pluginId or id]
             local lockFlag = type(w.lockFlag) == 'string' and w.lockFlag or nil
             local canLock = (lockFlag ~= nil) or (type(w.getLock) == 'function' and type(w.setLock) == 'function')
             def = {
@@ -12788,9 +12858,11 @@ runtime.ghostStack = {}    -- keys with frame colours pushed, popped in popTheme
 runtime.windowBegun = {}   -- [key] = true once postBeginWindow ran this frame
 runtime.GHOST = {
     IN_MS = 150, OUT_MS = 400, LINGER_MS = 350,
-    -- the frame: pushed at the fade fraction before Begin
+    -- the frame: pushed at the fade fraction before Begin. ChildBg is here so
+    -- a child region (the unit frames' fixed target box) fades with the window
+    -- instead of leaving an opaque panel behind.
     FRAME = {
-        'WindowBg', 'Border', 'BorderShadow', 'TitleBg', 'TitleBgActive', 'TitleBgCollapsed', 'MenuBarBg',
+        'WindowBg', 'ChildBg', 'Border', 'BorderShadow', 'TitleBg', 'TitleBgActive', 'TitleBgCollapsed', 'MenuBarBg',
         'ScrollbarBg', 'ScrollbarGrab', 'ScrollbarGrabHovered', 'ScrollbarGrabActive',
         'ResizeGrip', 'ResizeGripHovered', 'ResizeGripActive',
         'Text', 'Button', 'ButtonHovered', 'ButtonActive',
@@ -14073,7 +14145,8 @@ end
 -- on Settings -> Plugins and the same MQ2Nav / MoveUtils warnings as the
 -- full window. Right-click the window (or the Menu button) for its options:
 -- every row can be hidden, and like the other HUDs it can be locked, made
--- frameless and faded (ctrl.mini_*).
+-- frameless and ghosted (ctrl.mini_*; mini_ghost is mirrored into the
+-- shared window option so the core's fade drives it).
 -- ============================================================================
 UI.MINI_SECTIONS = {
     { key = 'mini_show_activity', label = 'Activity line',   tip = 'What the engine is doing right now (pulling, fighting, resting, ...).' },
@@ -14520,6 +14593,22 @@ function UI.drawMiniWarnings()
     end
 end
 
+-- Ghost mode for the compact window: ctrl.mini_ghost is the saved switch;
+-- the core's fade reads the shared window option, so the two are kept in
+-- step (setWindowOpt saves the loadout itself, only when it changes).
+function UI.setMiniGhost(on)
+    on = (on == true)
+    ctrl.mini_ghost = on
+    UI.setWindowOpt('mini', 'ghost', on)
+    runtime.saveLoadout(true)
+end
+
+function UI.syncMiniGhost()
+    local o = UI.windowOpts('mini')
+    local want = ctrl.mini_ghost == true
+    if ((o and o.ghost == true) or false) ~= want then UI.setWindowOpt('mini', 'ghost', want) end
+end
+
 -- Right-click / Menu popup: window behaviour and which rows are shown.
 function UI.drawMiniMenu()
     if not ImGui.BeginPopupContextWindow('##miniMenu') then return end
@@ -14552,7 +14641,12 @@ function UI.drawMiniMenu()
         runtime.saveLoadout(true)
     end
     if ImGui.IsItemHovered() then UI.setTooltip('Hide the title bar for a cleaner overlay. Right-click the window to get back here.') end
-    UI.drawWindowMenuItems('mini', { header = false, titleBar = false, lock = false, scale = false, layout = false, close = false })
+    local ghostVal = ImGui.Checkbox('Ghost mode##miniGhost', ctrl.mini_ghost == true)
+    if ghostVal ~= (ctrl.mini_ghost == true) then
+        UI.setMiniGhost(ghostVal)
+    end
+    if ImGui.IsItemHovered() then UI.setTooltip('The background, border, title bar and buttons fade out when the mouse leaves the window and fade back in under it; the text and bars stay.\nPairs well with the title bar off. /ac ghost toggles it.') end
+    UI.drawWindowMenuItems('mini', { header = false, titleBar = false, ghost = false, lock = false, scale = false, layout = false, close = false })
     UI.drawWindowScaleControl('mini', 'Scale', 130)
     ImGui.SetNextItemWidth(UI.px(140))
     local alpha = ImGui.SliderFloat('Opacity##miniAlpha', ctrl.mini_alpha or 0.92, 0.20, 1.0, '%.2f')
@@ -14566,6 +14660,7 @@ end
 function UI.drawMiniGui()
     if not open or not ctrl.compact then return end
     UI.pushTheme()
+    UI.syncMiniGhost()
     UI.preBeginWindow('mini')
     pcall(ImGui.SetNextWindowBgAlpha, UI.windowBgAlpha('mini', ctrl.mini_alpha or 0.92))
     local flags = ImGuiWindowFlags.AlwaysAutoResize
@@ -22494,8 +22589,10 @@ local function triuneCommand(...)
         print('  \ag/ac dump\ax - Write a one-shot diagnostic snapshot file (settings, state, recent log)')
         print('  \ag/ac status\ax - Print running state and mode')
         print('  \ag/ac compact | mini\ax - Toggle compact mini-window mode')
+        print('  \ag/ac ghost [on|off]\ax - Ghost mode for the compact window: the frame fades when the mouse is away')
         print('  \ag/ac scale [0.75-2.0|reset]\ax - Scale every Triune window (per-window overrides on Settings -> Window Layout)')
         print('  \ag/ac hud | uf | targetwin\ax - Toggle popout Target & Player HUD window')
+        print('  \ag/ac target | tw | targetwindow\ax - Toggle the popout Target-only window')
         print('  \ag/ac help | h | ?\ax - Print slash command summary')
         print('  \ag/ac clearcursor | autoinv\ax - Clear items from cursor')
         print('  \ag/ac style [melee|ranged|spell]\ax - Configure combat style (Melee / Ranged bow / Spell)')
@@ -22610,6 +22707,10 @@ local function triuneCommand(...)
         ctrl.show_unit_frames = not ctrl.show_unit_frames
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Popout Target & Player HUD window %s.', ctrl.show_unit_frames and 'OPENED' or 'CLOSED'))
+    elseif cmd == 'target' or cmd == 'tw' or cmd == 'targetwindow' or cmd == 'targetframe' then
+        ctrl.show_target_window = not ctrl.show_target_window
+        runtime.saveLoadout(true)
+        print(string.format('\ag[Triune]\ax Popout Target window %s.', ctrl.show_target_window and 'OPENED' or 'CLOSED'))
     elseif cmd == 'group' or cmd == 'gw' or cmd == 'groupwin' or cmd == 'groupwindow' then
         ctrl.show_group_window = not ctrl.show_group_window
         runtime.saveLoadout(true)
@@ -22825,6 +22926,15 @@ local function triuneCommand(...)
         ctrl.compact = not ctrl.compact
         runtime.saveLoadout(true)
         print(string.format('\ag[Triune]\ax Compact Mini mode %s.', ctrl.compact and 'ENABLED' or 'DISABLED'))
+    elseif cmd == 'ghost' or cmd == 'minighost' then
+        local arg2 = args[2] and string.lower(args[2]) or ''
+        local on
+        if arg2 == 'on' or arg2 == '1' or arg2 == 'true' then on = true
+        elseif arg2 == 'off' or arg2 == '0' or arg2 == 'false' then on = false
+        else on = not (ctrl.mini_ghost == true) end
+        UI.setMiniGhost(on)
+        print(string.format('\ag[Triune]\ax Compact window ghost mode %s%s.', on and 'ENABLED' or 'DISABLED',
+            ctrl.compact and '' or ' (shows once the compact window is open: /ac compact)'))
     elseif cmd == 'pullcon' or cmd == 'con' or cmd == 'confilter' then
         ctrl.pull_con_filter = ctrl.pull_con_filter or {}
         local arg2 = args[2] and string.lower(args[2]) or ''
@@ -23042,7 +23152,7 @@ local function triuneCommand(...)
         return
     else
         print(
-            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|scale|status|spellbook|cursorui|dps|map|inv|buffbot|net|btn|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
+            '\ay[Triune]\ax usage: /ac [run|pause|burn|memall|importbar|compact|ghost|scale|status|spellbook|cursorui|dps|map|inv|buffbot|net|btn|update|clearcursor|style|range|zplane|huntz|pullhp|preset|help|pullcon|wp|manual|puller [hunt|camp]|assist [chase|camp|backline]]')
     end
 end
 

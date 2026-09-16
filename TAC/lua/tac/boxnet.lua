@@ -1178,6 +1178,15 @@ function api.peerCounters(name, maxAgeSec)
     if not p or type(p.hb.counters) ~= 'table' then return nil end
     return p.hb.counters
 end
+-- Whether a message from `sender` (the actors sender table; `payload` is
+-- the envelope when the transport gave no sender) may drive this box: the
+-- user's "accept remote commands" switch plus the allowlist. Plugins that
+-- act on other boxes' requests (the Inventory give flow) gate on this so one
+-- trust setting covers every remote action.
+function api.trusted(sender, payload)
+    if not cfg.acceptCommands then return false end
+    return isTrusted(sender, payload)
+end
 function api.command(scope, lines) return sendCommand(scope, lines) end
 function api.requestBuffs(scope) return sendBuffRequest(scope) end
 function api.campHere(scope) return sendCampHere(scope) end
