@@ -23726,7 +23726,7 @@ local function triuneCommand(...)
         local on
         if arg2 == 'on' or arg2 == '1' or arg2 == 'true' then on = true
         elseif arg2 == 'off' or arg2 == '0' or arg2 == 'false' then on = false
-        else on = not (ctrl.mini_ghost == true) end
+        else on = ctrl.mini_ghost ~= true end
         UI.setMiniGhost(on)
         print(string.format('\ag[Triune]\ax Compact window ghost mode %s%s.', on and 'ENABLED' or 'DISABLED',
             ctrl.compact and '' or ' (shows once the compact window is open: /ac compact)'))

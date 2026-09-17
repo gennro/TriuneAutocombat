@@ -1,0 +1,3 @@
+# Scratch output from running the CI checks / unit tests locally
+err.log
+/triune_map_config.lua

@@ -1443,7 +1443,7 @@ local function drawCompactWindow()
         if ImGui.IsItemHovered() then core.setTooltip('#nms loot coin' .. (target and (' on ' .. target) or '')) end
         ImGui.SameLine()
         local echoLabel = state.echo == nil and 'Echo ?' or (state.echo and 'Echo on' or 'Echo off')
-        if ImGui.SmallButton(echoLabel .. '##nmsCEcho') then sendNms({ sub = 'echo', on = not (state.echo == true) }, nil) end
+        if ImGui.SmallButton(echoLabel .. '##nmsCEcho') then sendNms({ sub = 'echo', on = state.echo ~= true }, nil) end
         if ImGui.IsItemHovered() then core.setTooltip('Toggle loot echo (#nms echo on|off).') end
         ImGui.SameLine()
         if ImGui.SmallButton('Full##nmsCFull') then cfg.compact = false; core.saveLoadout(true) end

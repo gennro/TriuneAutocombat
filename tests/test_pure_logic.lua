@@ -15307,7 +15307,7 @@ end)()
 
     -- 6. Wiring: settings slider, layout column, command, exports, plugins
     assert_true(src:find("ImGui.SliderFloat('##uiScale', curScale, UI.SCALE_MIN, UI.SCALE_MAX, '%.2fx')", 1, true) ~= nil, 'Suite 101: UI Scale slider on the Window Layout page')
-    assert_true(src:find("ImGui.BeginTable('ManagedWinTable', 7, tblFlags)", 1, true) ~= nil and src:find("UI.drawWindowScaleControl(def.key, '', 110)", 1, true) ~= nil, 'Suite 101: Scale column in the managed windows table')
+    assert_true(src:find("ImGui.BeginTable('ManagedWinTable', #cols, tblFlags", 1, true) ~= nil and src:find("UI.drawWindowScaleControl(def.key, '', 110)", 1, true) ~= nil, 'Suite 101: Scale column in the managed windows table')
     assert_true(src:find("cmd == 'scale' or cmd == 'uiscale'", 1, true) ~= nil, 'Suite 101: /ac scale command')
     assert_true(src:find("UI.drawWindowScaleControl('mini', 'Scale', 130)", 1, true) ~= nil, 'Suite 101: Mini HUD menu has the picker')
     for _, k in ipairs({ 'px', 'windowScale', 'pushWindowScale', 'applyWindowScale', 'drawWindowScaleControl', 'currentWindowScale' }) do

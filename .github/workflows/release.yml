@@ -21,6 +21,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          # On manual runs package the requested tag, not whatever branch was selected.
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Generate Release Notes & Instructions
         run: |
@@ -44,12 +47,12 @@ jobs:
 
           ### 🆕 New Installation
           1. Go here and grab the latest macroquest release https://github.com/macroquest/macroquest/releases and extract under your user folder.
-          2. Download TriuneAutocombat-full.zip below and extract directly into the root of your MacroQuest folder.
+          2. Download **`TriuneAutocombat-full.zip`** below and extract directly into the root of your MacroQuest folder. It contains everything: the Lua scripts, config, the offline game database (`resources/gamedb/`) and the MQ2Nav navmeshes (`resources/MQ2Nav/`).
           3. If running windows add an exception to your MQ folder before running.
           4. Start **`MacroQuest.exe`** before launching EverQuest.
 
           ### 🔄 Updating an Existing Installation
-          1. Download **`TriuneAutocombat-Update.zip`** from the Assets below.
+          1. Download **`TriuneAutocombat-Update.zip`** from the Assets below. It contains the Lua scripts, config and the offline game database (`resources/gamedb/`), but not the MQ2Nav navmeshes - grab the full zip if you also need those.
           2. Extract directly into the root of your MacroQuest folder (overwrite files if prompted).
           *Note: Your personal settings and saved loadouts in `triune_loadout.lua` are preserved and will never be overwritten.*
           '''
@@ -73,8 +76,27 @@ jobs:
 
       - name: Package Release Archives
         run: |
-          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-Update.zip HEAD:TAC lua config
-          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md -o TriuneAutocombat-full.zip HEAD:TAC lua config resources
+          # Both archives are built from the TAC/ tree so new modules, config
+          # and resource files are picked up automatically. The update zip
+          # ships everything except the MQ2Nav navmeshes (~1 GB, rarely
+          # change); the full zip ships the whole tree.
+          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md \
+            -o TriuneAutocombat-Update.zip HEAD:TAC . ':!resources/MQ2Nav'
+          git archive --format=zip --add-file=README.md --add-file=CHANGELOG.md \
+            -o TriuneAutocombat-full.zip HEAD:TAC .
+
+      - name: Verify Archive Contents
+        run: |
+          set -e
+          for z in TriuneAutocombat-Update.zip TriuneAutocombat-full.zip; do
+            echo "== $z ($(du -h "$z" | cut -f1))"
+            unzip -l "$z" | grep -v '/MQ2Nav/'
+            unzip -l "$z" | grep -q 'lua/triune.lua'   || { echo "missing lua/triune.lua in $z"; exit 1; }
+            unzip -l "$z" | grep -q 'gamedb/manifest.txt' || { echo "missing resources/gamedb in $z"; exit 1; }
+          done
+          unzip -l TriuneAutocombat-Update.zip | grep -q '\.navmesh' && { echo "update zip must not contain navmeshes"; exit 1; }
+          unzip -l TriuneAutocombat-full.zip   | grep -q '\.navmesh' || { echo "full zip is missing navmeshes"; exit 1; }
+          echo "Archives verified"
       - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:

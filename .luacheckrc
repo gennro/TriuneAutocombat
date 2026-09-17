@@ -24,6 +24,9 @@ globals = {
     "ImGuiTabItemFlags",
     "ImGuiMouseCursor",
     "ImGuiInputTextFlags",
+    "ImGuiHoveredFlags",
+    "ImGuiComboFlags",
+    "ImGuiPopupFlags",
     "ImGuiMod",
     "ImGuiKey",
     "ImVec2",
@@ -86,4 +89,5 @@ ignore = {
     "212/_%w*",      -- unused loop variable starting with _
     "431",           -- shadowing upvalue (very common with pcall patterns)
     "432",           -- shadowing upvalue argument
+    "542",           -- empty if branch (used deliberately with a comment to short-circuit an elseif chain)
 }

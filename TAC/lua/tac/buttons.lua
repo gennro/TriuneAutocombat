@@ -2681,7 +2681,7 @@ drawHotbarMenu = function(hb, hbId)
             saveDb({ silent = true })
         end
         if ImGui.MenuItem((hb.showScopeBar ~= false and 'Hide' or 'Show') .. ' Box Scope Switch (Group / Zone / All row)') then
-            hb.showScopeBar = not (hb.showScopeBar ~= false)
+            hb.showScopeBar = (hb.showScopeBar == false)
             saveDb({ silent = true })
         end
         if ImGui.IsItemHovered() then core.setTooltip('The row only appears while this bar holds Box Control buttons made with the "Hotbar switch" scope.') end

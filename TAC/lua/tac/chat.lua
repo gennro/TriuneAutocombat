@@ -1613,7 +1613,6 @@ end
 local function insertLink(text, name)
     if type(text) ~= 'string' or text == '' then return false end
     if type(name) ~= 'string' or name == '' then
-        name = nil
         local body = text:match(LINK .. '(.-)' .. LINK)
         if body then
             name = (#body > ITEM_LINK_PAYLOAD and body:sub(1, 1) == '0') and body:sub(ITEM_LINK_PAYLOAD + 1) or body
@@ -4192,7 +4191,7 @@ end
 -- drawn never takes the input line's frame (and its Enter) with it; the
 -- first error is kept for /tacchat stats.
 function AC.textWidth(text)
-    local ok, a, b = pcall(ImGui.CalcTextSize, text)
+    local ok, a = pcall(ImGui.CalcTextSize, text)
     if not ok then return #text * 7 end
     if type(a) == 'number' then return a end
     if type(a) == 'userdata' or type(a) == 'table' then return tonumber(a.x) or #text * 7 end

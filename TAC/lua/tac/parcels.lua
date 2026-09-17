@@ -672,7 +672,7 @@ local function drawNearest(colors)
 end
 
 local function drawMerchantSection(colors)
-    local GOOD, WARN, ERR, MUTED, ARC, GOLD = colors.GOOD, colors.WARN, colors.ERR, colors.MUTED, colors.ARC, colors.GOLD
+    local GOOD, WARN, MUTED, ARC, GOLD = colors.GOOD, colors.WARN, colors.MUTED, colors.ARC, colors.GOLD
 
     if not state.merchantOpen then
         ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Open a parcel merchant to collect. Parcel merchants carry the surname "Parcels".')
