@@ -149,7 +149,8 @@ A plugin is one Lua file in `lua/tac/` that returns a table with an `id`, a `nam
 - [Triune AutoCombat releases](https://github.com/gennro/TriuneAutocombat/releases/latest)
 - [MacroQuest releases (RoF2)](https://github.com/macroquest/macroquest/releases)
 - [Project Triune](https://nms.bestemu.com/)
-- [Change log](CHANGELOG.md)
+- [Release notes](RELEASES.md) - short summary per release
+- [Change log](CHANGELOG.md) - every change in detail
 
 ---
 
