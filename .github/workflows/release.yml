@@ -63,12 +63,21 @@ jobs:
 
           **Full change log:** [CHANGELOG.md](https://github.com/{repo}/blob/{tag}/CHANGELOG.md)
 
-          ## Install / update
+          ## 📦 Installation & Updating
 
-          - **New install:** download `TriuneAutocombat-full.zip` (everything, including the MQ2Nav navmeshes).
-          - **Updating:** download `TriuneAutocombat-Update.zip` (everything except the navmeshes - they rarely change).
+          ### 🆕 New installation
+          1. Download the latest **RoF2** MacroQuest from https://github.com/macroquest/macroquest/releases and extract it somewhere like `C:\\MacroQuest`.
+          2. Download **`TriuneAutocombat-full.zip`** from the Assets below. It has everything: the Lua scripts, config, the offline game database (`resources/gamedb/`) and the MQ2Nav zone navmeshes (`resources/MQ2Nav/`).
+          3. Extract the zip **into the root of your MacroQuest folder**. It merges `lua/`, `config/` and `resources/` into place.
+          4. Windows users: add your MacroQuest folder as an antivirus exception before running it.
+          5. Start `MacroQuest.exe`, then log into Project Triune. Triune opens by itself when you log in - if you close it, type `/ac` or `/lua run triune`.
 
-          Extract the zip **into the root of your MacroQuest folder** and overwrite if asked. Your own settings and loadouts are never touched. See the [README](https://github.com/{repo}/blob/{tag}/README.md#install) for the full steps.
+          ### 🔄 Updating an existing installation
+          1. Download **`TriuneAutocombat-Update.zip`** from the Assets below. It has everything except the MQ2Nav navmeshes (they rarely change) - grab the full zip if you also need those.
+          2. Extract it **into the root of your MacroQuest folder** and overwrite files if asked.
+          3. If Triune was running, type `/ac restart` (or relog) to load the new version.
+
+          *Your own settings and saved loadouts (`config/triune_loadout_<server>_<char>.lua`, `config/triune_chat_<Name>.lua`) are never overwritten.*
           """.format(repo=os.environ.get('GITHUB_REPOSITORY', 'gennro/TriuneAutocombat'), tag=tag or 'main')
           footer = '\n'.join(line[10:] if line.startswith(' ' * 10) else line for line in footer.split('\n'))
 

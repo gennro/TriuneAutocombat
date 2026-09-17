@@ -133,7 +133,7 @@ All paths are inside your MacroQuest folder.
 | `Logs/triune_*.log` | Diagnostic logs (when Log To File is on). |
 | `lua/triune.lua` | The bot itself. |
 | `lua/tac/*.lua` | The plugins listed above. Drop your own `.lua` plugin here and it loads. |
-| `resources/gamedb/` | The offline game database (full release only). |
+| `resources/gamedb/` | The offline game database (in both release zips). |
 | `resources/MQ2Nav/` | Zone navmeshes (full release only). |
 
 ---
