@@ -495,10 +495,10 @@ TriuneAutocombat/
 │   │   └── build_triune_quest.py # Quest database compilation script
 │   ├── lua/
 │   │   ├── triune.lua           # Main autocombat engine & Mini HUD
-│   │   ├── triune_log.lua       # File-backed diagnostic logger (/ac log, /ac dump)
 │   │   ├── triune_quest.lua     # Standalone Quest Guide, radar & dialogue assistant
 │   │   ├── triune_test.lua      # Standalone In-Game LLM Test Harness & QA Agent
 │   │   └── tac/                 # Modular plugin directory (lua/tac/*.lua)
+│   │       ├── triune_log.lua   # File-backed diagnostic logger (/ac log, /ac dump); core library, not a plugin
 │   │       ├── hud_unitframes.lua # Popout Unit Frames HUD plugin
 │   │       ├── hud_group.lua    # Popout Group window plugin
 │   │       ├── hud_effects.lua  # Popout Effects & Songs window plugin

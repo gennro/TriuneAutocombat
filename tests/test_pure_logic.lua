@@ -86,7 +86,7 @@ end
 -- upvalue (`tlog`), so every sandbox gets it. Its file output stays off
 -- (no getFileEnabled getter), so tests only touch the in-memory ring.
 package.path = 'TAC/lua/?.lua;' .. package.path
-local tlog = require('triune_log')
+local tlog = require('tac.triune_log')
 
 local function readFile(path)
     local f = assert(io.open(path, 'r'), 'Cannot open: ' .. path)
@@ -5748,8 +5748,12 @@ do
         'TAC/lua/tac/gamedb.lua',
     }
 
+    -- Register counts differ between Lua versions; prefer the 5.1 compiler
+    -- (what LuaJIT / MQ enforce, and what CI installs) over whatever `luac`
+    -- happens to be on PATH so the numbers match GitHub.
+    local luac = (os.execute('command -v luac5.1 >/dev/null 2>&1') == 0) and 'luac5.1' or 'luac'
     for _, filePath in ipairs(files) do
-        local handle = io.popen(string.format('luac -l -p %s 2>&1', filePath))
+        local handle = io.popen(string.format('%s -l -p %s 2>&1', luac, filePath))
         if handle then
             local out = handle:read('*a')
             local ok = handle:close()
@@ -11856,6 +11860,7 @@ do
         petState.lastReconcileAt = 0; petState.petsCache = nil; petState.PET_CLASSES = PET_CLASSES
         petState.PET_SCOPE_LIST = { 'all', 'swarm', 'mag', 'bst', 'nec', 'enc', 'shm', 'dru', 'brd', 'shd' }
         ctrl.pet_names = names or {}; ctrl.debug_mode = false
+        runtime.detectPetClassFromSpawn = env.detectPetClassFromSpawn -- reconcilePets calls it as a runtime method
         for i, c in ipairs(classes) do myClasses[i] = c end
     end
     local function addPet(id, name, opts)
@@ -11877,6 +11882,7 @@ do
     env.getAllMyPets = loadFunc(src, 'getAllMyPets', env)
     env.classToPetCmdScope = loadFunc(src, 'classToPetCmdScope', env)
     env.detectPetClassFromSpawn = loadFunc(src, 'detectPetClassFromSpawn', env)
+    runtime.detectPetClassFromSpawn = env.detectPetClassFromSpawn
     env.reconcilePets = loadFunc(src, 'reconcilePets', env)
     env.getMultiPetList = loadFunc(src, 'getMultiPetList', env)
     env.PET_SUMMON_GRACE_SEC = 12
@@ -17751,10 +17757,10 @@ end)()
 
 
 -- ==========================================================================
--- Suite 104: Diagnostic logger (triune_log.lua) + core wiring
+-- Suite 104: Diagnostic logger (tac/triune_log.lua) + core wiring
 -- ==========================================================================
 ;(function()
-    print('--- Suite 104: Diagnostic logger (triune_log.lua) ---')
+    print('--- Suite 104: Diagnostic logger (tac/triune_log.lua) ---')
     -- configDir '.' -> resolveDir probes ./../Logs (absent here) and falls
     -- back to '.', so the files land in the repo root; removed at the end.
     local L = tlog
@@ -17815,7 +17821,7 @@ end)()
     L._reset()
 
     -- Core wiring
-    assert_true(src:find("local tlog              = require('triune_log')", 1, true) ~= nil, 'Suite 104: triune.lua loads the logger')
+    assert_true(src:find("local tlog              = require('tac.triune_log')", 1, true) ~= nil, 'Suite 104: triune.lua loads the logger')
     assert_true(src:find('tlog.hookPrint()', 1, true) ~= nil, 'Suite 104: print() is hooked so existing output is captured')
     assert_true(src:find('log_to_file              = false,', 1, true) ~= nil, 'Suite 104: log_to_file has a ctrl default')
     assert_true(src:find('log                   = tlog,', 1, true) ~= nil, 'Suite 104: plugins get core.log')

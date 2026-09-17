@@ -40,7 +40,7 @@ local open              = true
 -- File-backed diagnostic logger. Hooked into print() right away so every
 -- chat line from here on (core and plugins) is captured in its ring buffer;
 -- identity / flag getters are wired up once ctrl and myName exist below.
-local tlog              = require('triune_log')
+local tlog              = require('tac.triune_log')
 tlog.hookPrint()
 
 -- ============================================================================
@@ -825,7 +825,7 @@ local function normalizeSpellName(name)
 end
 
 ---@return table
-local function getScribedSpellSet()
+function runtime.getScribedSpellSet()
     local now = os.clock()
     if runtime.spellbookSetCache and (now - (runtime.lastSpellbookCacheTime or 0)) < 3.0 then
         return runtime.spellbookSetCache
@@ -879,7 +879,7 @@ local function isScribed(nm)
     if strNm == "" or strNm == "NULL" or strNm == "nil" then return false end
 
     -- 1. Check cached spellbook map (fastest & handles unindexed TLO names)
-    local sbSet = getScribedSpellSet()
+    local sbSet = runtime.getScribedSpellSet()
     if not sbSet then return false end
     if sbSet[strNm] or sbSet[strNm:lower()] then return true end
 
@@ -972,7 +972,7 @@ local function isGemMatching(slotOrName, targetSpellName)
     return false
 end
 
-local function hasAA(nm)
+function runtime.hasAA(nm)
     if not nm or nm == "" or tonumber(nm) ~= nil then return false end
     if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
     if not nm or nm == "" or tonumber(nm) ~= nil then return false end
@@ -1023,7 +1023,7 @@ local function isDiscKnown(discName)
     return known
 end
 
-local function hasDisc(discName)
+function runtime.hasDisc(discName)
     return isDiscKnown(discName)
 end
 
@@ -1517,7 +1517,7 @@ end
 
 -- Best guess at which trio class a pet spawn belongs to: a name one of our
 -- classes learned from its own summon wins, then the pet's race / name archetype.
-local function detectPetClassFromSpawn(s)
+function runtime.detectPetClassFromSpawn(s)
     if not s or not s() then return nil end
     local cname = ''
     local race = ''
@@ -1564,7 +1564,7 @@ local function reconcilePets(quiet)
     for _, pid in ipairs(untracked) do
         local s = mq.TLO.Spawn(pid)
         if s and s() and not petTrackedCls(pid) then
-            local detCls = detectPetClassFromSpawn(s)
+            local detCls = runtime.detectPetClassFromSpawn(s)
             if detCls and petState.PET_CLASSES[detCls] then
                 for _, c in ipairs(petClassList) do
                     if c == detCls and not petState.myPets[c] then
@@ -4085,7 +4085,7 @@ local function filteredSpells(abbr)
     return names, lookup
 end
 
-local function classHasSpells(abbr)
+function runtime.classHasSpells(abbr)
     if not abbr or runtime.PURE_MELEE[abbr] or runtime.PURE_MELEE[abbr:upper()] then
         return false
     end
@@ -4144,7 +4144,7 @@ function runtime.isSpecialSkill(name)
     return false
 end
 
-local function isNonCombatSkill(name)
+function runtime.isNonCombatSkill(name)
     if not name or type(name) ~= 'string' or name == '' then return false end
     return name == 'Begging' or name == 'Pick Pockets' or name == 'Hide' or name == 'Sneak' or name == 'Bind Wound' or name == 'Forage' or name == 'Sense Heading'
 end
@@ -6652,7 +6652,7 @@ function runtime.initPluginManager()
             runtime               = runtime,
             -- core.log.debug('myplugin', 'fmt %d', n) etc. Debug lines only
             -- go out while Debug Mode is on; all levels land in the log file
-            -- when Log To File is on. See triune_log.lua.
+            -- when Log To File is on. See tac/triune_log.lua.
             log                   = tlog,
             DATA                  = DATA,
             saveLoadout           = runtime.saveLoadout,
@@ -6806,6 +6806,13 @@ function runtime.initPluginManager()
     local PLUGIN_HOOKS = {
         'onInit', 'onDestroy', 'onTick', 'onDrawUI', 'onDrawSettings', 'onCombatTick', 'onZoned',
         'onLoadoutSaved', 'onSaveSettings', 'onLoadSettings', 'wantsCombatHold', 'onBetweenPulls', 'onCommand',
+    }
+
+    -- Lower-case filenames in lua/tac/ that are core library modules, not
+    -- plugins (loaded via require() at the top of this file). pm.discover()
+    -- skips them so the scanner never runs their chunk a second time.
+    local PLUGIN_DIR_LIBRARIES = {
+        ['triune_log.lua'] = true,
     }
 
     -- Executing a dropped-in file runs its main chunk on the core's main
@@ -7258,6 +7265,10 @@ function runtime.initPluginManager()
         -- Known standalone scripts are not re-executed on a rescan (their
         -- chunk may have side effects); "Re-check" on the Plugins page does that.
         for fname in pairs(pm.scripts or {}) do loadedFiles[tostring(fname):lower()] = true end
+        -- Shared library modules that live in the plugin folder but are
+        -- require()d by the core itself. Running their chunk again here
+        -- would create a second instance and list them as a stray script.
+        for fname in pairs(PLUGIN_DIR_LIBRARIES) do loadedFiles[fname] = true end
 
         local function addFile(fname)
             if fname and fname:match('%.lua$') then
@@ -8458,8 +8469,11 @@ function UI.drawClassPicker()
 end
 
 -- Help tab tables are static; hoisted so the tab doesn't allocate ~75
--- entries per frame while open.
-UI.HELP_COMMANDS = {
+-- entries per frame while open. Built inside a closure: a table
+-- constructor this wide holds every entry as a temporary register in the
+-- enclosing function, which would push the main chunk toward Lua 5.1's
+-- 200-register limit.
+UI.HELP_COMMANDS = (function() return {
         { cmd = '/ac run / /ac start',                desc = 'Start / unpause auto-combat execution' },
         { cmd = '/ac pause / /ac stop',               desc = 'Pause auto-combat execution, halt movement & disengage pet' },
         { cmd = '/ac restart',                        desc = 'Stop and re-run the whole script (same as /lua stop triune, /lua run triune)' },
@@ -8505,7 +8519,7 @@ UI.HELP_COMMANDS = {
         { cmd = '/ac wp [add|clear|del|on|off|list]', desc = 'Configure & toggle Puller Waypoint Patrol loop' },
         { cmd = '/ac pullhp [0-95]',                  desc = 'Configure minimum HP percentage threshold before pausing pulling to rest (default 0 / disabled)' },
         { cmd = '/triunerun',                         desc = 'Quick keybind command to toggle run / pause' },
-}
+} end)()
 UI.HELP_TARGETS = {
         { opt = 'E: All Enemies',     color = ERR,  desc = 'Multi-Target mode: Evaluates ALL hostile enemies on your Extended Target (XTarget) window. For duration spells (DoTs, debuffs, snares, mes), sequentially casts on each enemy missing the effect and yields once all have it. For nukes/direct damage, round-robins casts evenly across all XTarget enemies. Honors per-mob max_casts and skips locked-out/immune mobs.' },
         { opt = 'E: Current Target',  color = ERR,  desc = 'Casts directly on your currently active game target (Target TLO). Does not switch targets automatically.' },
@@ -8819,7 +8833,7 @@ function UI.drawGemList(gemsTable, idPrefix, isActiveSet, allowBurn)
                 end
 
                 if cls then
-                    if not classHasSpells(cls) then
+                    if not runtime.classHasSpells(cls) then
                         ImGui.SameLine(); accent(MUTED, '  ' .. cls .. ' has no spells (melee) -> Abilities')
                         if ImGui.IsItemHovered() then
                             ImGui.SetTooltip(cls .. ' is a melee class without castable spell gems. Set up disciplines and abilities on the Abilities tab.')
@@ -9593,7 +9607,7 @@ function UI.drawAATab()
                         for _, item in ipairs(items) do
                             local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
                             if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
-                            if not tonumber(nm) and (not ctrl.aa_purchased_only or hasAA(nm)) then
+                            if not tonumber(nm) and (not ctrl.aa_purchased_only or runtime.hasAA(nm)) then
                                 any = true
                                 ImGui.PushID('aa_' .. tier .. '_' .. cls .. '_' .. nm)
                                 local isFD = isFeignDeathAbility(nm)
@@ -9905,7 +9919,7 @@ function UI.drawDiscTab()
         for _, cls in ipairs(myClasses) do
             for _, row in ipairs(DATA.discs[cls] or {}) do
                 local nm, lv = row[1], row[2]
-                if not ctrl.disc_trained_only or hasDisc(nm) then
+                if not ctrl.disc_trained_only or runtime.hasDisc(nm) then
                     anyDisc = true
                     ImGui.PushID('disc' .. cls .. nm)
                     local entry = loadout.discs[nm] or
@@ -15295,7 +15309,7 @@ end
 -- comparing .Name() directly, matching the scanKnownDiscs() fix. This is what
 -- was letting Paladin buffs "keep trying to buff even though I have it": a
 -- false negative from Buff(name) reads as "missing" and re-fires forever.
-local function getBuffRemainingSeconds(spawnObj, name, isMe)
+function runtime.getBuffRemainingSeconds(spawnObj, name, isMe)
     name = tostring(name or '')
     if name == '' or not spawnObj() then return -1 end
     local rem = -1
@@ -15322,7 +15336,7 @@ local function hasNamedBuff(spawnObj, name, isMe, minSec)
     minSec = tonumber(minSec) or 0
 
     if minSec > 0 then
-        local rem = getBuffRemainingSeconds(spawnObj, name, isMe)
+        local rem = runtime.getBuffRemainingSeconds(spawnObj, name, isMe)
         if rem >= 0 then
             return rem > minSec
         end
@@ -16842,7 +16856,7 @@ local function isCorrupted(targetId)
     return false
 end
 
-local function resolvePetTargetId(when, spellName, cls, pct)
+function runtime.resolvePetTargetId(when, spellName, cls, pct)
     local allPets = getAllMyPets()
     if #allPets == 0 then return nil end
     if #allPets == 1 then return allPets[1] end
@@ -17057,7 +17071,7 @@ function runtime.resolveTargetId(token, cls, when, spellName, pct, extra)
     elseif b == 'Lowest-HP Ally' then
         id = runtime.lowestHpAlly(nil, true)
     elseif b == 'Pet' then
-        id = resolvePetTargetId(when, spellName, cls, pct)
+        id = runtime.resolvePetTargetId(when, spellName, cls, pct)
     elseif b == 'Current Target' then
         id = mq.TLO.Target.ID()
     elseif b == 'Assist Target' then
@@ -17144,7 +17158,7 @@ local function bardSongDropped(key, targetId, spellName)
     return true
 end
 
-local function reconcileSungBuffs()
+function runtime.reconcileSungBuffs()
     local found = 0
     local function scanGemTable(gemsTable)
         -- gems is a priority list that can hold more than getNumGems() entries
@@ -17923,7 +17937,7 @@ runtime.fireSkill = function(name, a, id)
     clearCursor()
 
     -- Abilities like Begging, Pick Pockets, and Feign Death require auto-attack to be OFF to execute in EverQuest
-    local pauseAttack = (isNonCombatSkill(name) or isFD) and wasAttacking
+    local pauseAttack = (runtime.isNonCombatSkill(name) or isFD) and wasAttacking
     if pauseAttack then
         mq.cmd('/attack off')
         mq.delay(50, function() return not mq.TLO.Me.Combat() end)
@@ -24200,7 +24214,7 @@ local function runMainLoop()
             end
             UI.resetTracker()
             -- camp restored from a save; no map circle is drawn
-            reconcileSungBuffs()                                      -- don't re-sing bard buffs that are already up
+            runtime.reconcileSungBuffs()                                      -- don't re-sing bard buffs that are already up
             reconcilePets()                                           -- don't re-summon pets that are already out
             runtime.lastSig = loadoutSig(); runtime.autoDirty = false -- baseline; don't save what we just loaded
             if ctrl.fov_enabled and runtime.applyFov then

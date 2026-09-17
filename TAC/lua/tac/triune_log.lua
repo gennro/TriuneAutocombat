@@ -1,5 +1,5 @@
 --[[
-triune_log.lua -- file-backed diagnostic logger for Triune AutoCombat
+tac/triune_log.lua -- file-backed diagnostic logger for Triune AutoCombat
 
 Three jobs:
   1. A leveled logger (debug / info / warn / error) that core and plugins call
