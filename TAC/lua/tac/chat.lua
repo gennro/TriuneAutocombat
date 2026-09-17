@@ -7,7 +7,11 @@
 -- hands over no color / filter index, so the text itself decides), kept in a
 -- ring buffer, and shown in any number of ImGui chat windows. Each window has
 -- tabs; each tab is a filter set (channels + keyword include / exclude) with
--- its own send channel, unread badge and ImGui.ConsoleWidget.
+-- its own send channel, unread badge and ImGui.ConsoleWidget. Every tab owns
+-- its own buffer of the lines it accepted (cfg.maxLines of them): the main
+-- ring is where a rebuild (a filter change, a new tab) reads from, not what
+-- bounds a tab, so a fight's combat spam never pushes the guild or ooc lines
+-- out of the tab that holds them (see rebuildTab).
 --
 -- Facts this design rests on (Phase 0 spike, Sep 2026):
 --   * mq.event('#*#', fn, { keepLinks = true }) delivers every line in order,
@@ -211,6 +215,8 @@ local RECENT_TELLS = 5
 -- Tell / notification history helpers (filled in with the logging below;
 -- one table so the main chunk stays under Lua's 200-local limit).
 local H = { MIN = 100, MAX = 5000 }
+-- Tab buffer helpers (cap, clear, drop, log close), one table for the same reason.
+local TB = {}
 -- @Name completion in the input line (functions filled in with the input
 -- section below; declared here because ingest and the history restore feed it).
 local AC = { MAX_NAMES = 400, KEEP = 300, SHOW = 8 }
@@ -1262,14 +1268,18 @@ local function retryTextLinks()
     if not (db and db.DB and db.DB.isLoaded and db.DB.isLoaded('spells') and db.DB.isLoaded('npcs')) then return end
     if rt.textIndexReady then return end
     rt.textIndexReady = true
-    local ring = rt.ring
-    for i = ring.first, ring.last do
-        local e = ring.items[i]
-        if e and e.linkRetry then
-            e.linkRetry = nil
-            e.tokens, e.links, e.layouts, e.layoutKeys = nil, nil, nil, nil
+    local function retry(items, first, last)
+        for i = first, last do
+            local e = items[i]
+            if e and e.linkRetry then
+                e.linkRetry = nil
+                e.tokens, e.links, e.layouts, e.layoutKeys = nil, nil, nil, nil
+            end
         end
     end
+    retry(rt.ring.items, rt.ring.first, rt.ring.last)
+    -- A tab's buffer outlives the ring's copy of a line.
+    for _, st in pairs(rt.tabs) do retry(st.entries, st.first, st.last) end
 end
 
 -- ----------------------------------------------------------------------------
@@ -1301,11 +1311,11 @@ local function tabAccepts(tab, entry)
     return true
 end
 
--- The ring a tab is built from and bounded by. Tells and notifications live
--- in rt.keep as well as the main ring, and a conversation tab, a
--- Notifications tab or a tells-only tab reads from that: the general chat
--- volume (a fight is thousands of lines) must not empty a conversation that
--- is still open. Everything else mirrors the main ring.
+-- The ring a tab is rebuilt from. Tells and notifications live in rt.keep
+-- as well as the main ring, and a conversation tab, a Notifications tab or a
+-- tells-only tab reads from that, so a fresh one (a tell opening its own
+-- tab) comes up with the conversation even when the main ring has long
+-- evicted it. Everything else reads from the main ring.
 local function tabSource(tab)
     if tab.tellWith or tab.notifyOnly then return rt.keep end
     if tab.channels then
@@ -1321,11 +1331,10 @@ local function tabSource(tab)
     return rt.ring
 end
 
--- Whether a source ring has evicted an entry: by ring position (the main
--- ring's ids are positions; the kept ring records keepPos).
-local function evictedFrom(src, entry)
-    local pos = (src == rt.keep) and entry.keepPos or entry.id
-    return pos ~= nil and pos < src.first
+-- How many lines a tab's own buffer holds: Buffer lines, or the tell /
+-- notification line count for the tabs built from the kept ring.
+function TB.cap(tab)
+    return (tabSource(tab) == rt.keep) and rt.keep.cap or cfg.maxLines
 end
 
 local function tabKey(win, tab)
@@ -1339,7 +1348,8 @@ local function tabState(win, tab)
         -- entries / pending are queues trimmed from the front, so they carry
         -- explicit first / last indices: `#t` is undefined once t[1] is nil.
         st = { console = nil, consoleTried = false, pending = {}, pendingFirst = 1, pendingLast = 0, unread = 0, rebuild = true, lastId = 0,
-               entries = {}, first = 1, last = 0, atBottom = true, forceBottom = false, flashAt = 0, logFile = nil, logDay = nil, newBelow = 0 }
+               entries = {}, first = 1, last = 0, atBottom = true, forceBottom = false, flashAt = 0, logFile = nil, logDay = nil, newBelow = 0,
+               clearedTo = nil }   -- Clear this tab: entries with an id at or below this stay out of a rebuild
         rt.tabs[key] = st
     end
     return st
@@ -1375,9 +1385,43 @@ local function consoleAppend(w, line)
     if not ok then rt.stats.appendErr = tostring(err) end
 end
 
--- Rebuilds a tab's widget from the ring (filter / timestamp / clear changes).
+-- Rebuilds a tab (filter / timestamp / mute changes, a new tab). The tab's
+-- own buffer is the history: it is run through the filter again (a mute or
+-- keyword change drops lines it held) and merged, by entry id, with what
+-- the source ring has that the buffer does not - a new tab's backlog, lines
+-- a widened filter now accepts, lines that arrived while the rebuild was
+-- pending. Lines the ring has evicted but the tab still holds stay. Ids
+-- rise in arrival order in both (restored history lines carry negative
+-- ones, below every live line), so one ordered pass merges them.
 local function rebuildTab(win, tab)
     local st = tabState(win, tab)
+    local ring = tabSource(tab)
+    local floor = st.clearedTo or -math.huge
+    local old, out, n = st.entries, {}, 0
+    local i, j = st.first, ring.first
+    while i <= st.last or j <= ring.last do
+        local a = (i <= st.last) and old[i] or nil
+        local b = (j <= ring.last) and ring.items[j] or nil
+        if a == nil and i <= st.last then
+            i = i + 1
+        elseif b == nil and j <= ring.last then
+            j = j + 1
+        else
+            local e
+            if a and (not b or a.id <= b.id) then
+                e = a
+                i = i + 1
+                if b and b.id == a.id then j = j + 1 end
+            else
+                e = b
+                j = j + 1
+            end
+            if e.id > floor and tabAccepts(tab, e) then
+                n = n + 1
+                out[n] = e
+            end
+        end
+    end
     st.pending = {}
     st.pendingFirst = 1
     st.pendingLast = 0
@@ -1386,19 +1430,64 @@ local function rebuildTab(win, tab)
     st.last = 0
     st.rebuild = false
     st.forceBottom = true
-    local ring = tabSource(tab)
-    local start = math.max(ring.first, ring.last - ((ring == rt.keep) and ring.cap or cfg.maxLines) + 1)
     local w = (cfg.renderer == 'console') and ensureConsole(win, tab) or nil
     if w then pcall(function() w:Clear() end) end
-    for i = start, ring.last do
-        local e = ring.items[i]
-        if e and tabAccepts(tab, e) then
-            st.last = st.last + 1
-            st.entries[st.last] = e
-            if w then consoleAppend(w, renderLine(e, cfg.timestamps)) end
-        end
+    for k = math.max(1, n - TB.cap(tab) + 1), n do
+        local e = out[k]
+        st.last = st.last + 1
+        st.entries[st.last] = e
+        if w then consoleAppend(w, renderLine(e, cfg.timestamps)) end
     end
     st.lastId = ring.last
+end
+
+-- Empties a tab's buffer (Clear this tab). The lines stay in the rings for
+-- the other tabs; a later rebuild of this one leaves them out.
+function TB.clear(win, tab)
+    local st = tabState(win, tab)
+    st.entries, st.first, st.last = {}, 1, 0
+    st.pending, st.pendingFirst, st.pendingLast = {}, 1, 0
+    st.clearedTo = rt.ring.last
+    if st.console then pcall(function() st.console:Clear() end) end
+end
+
+-- Drops the entries `pred` picks out of a tab's buffer in place.
+function TB.drop(st, pred)
+    local packed, n = {}, 0
+    for k = st.first, st.last do
+        local e = st.entries[k]
+        if e and not pred(e) then
+            n = n + 1
+            packed[n] = e
+        end
+    end
+    st.entries, st.first, st.last = packed, 1, n
+    if st.pendingLast >= st.pendingFirst then
+        local pp, m = {}, 0
+        for k = st.pendingFirst, st.pendingLast do
+            local e = st.pending[k]
+            if e and not pred(e) then
+                m = m + 1
+                pp[m] = e
+            end
+        end
+        st.pending, st.pendingFirst, st.pendingLast = pp, 1, m
+    end
+end
+
+-- Fresh rings and empty tabs (Clear all tabs, /tacchat clear). Entry ids
+-- restart with the ring, so every tab buffer goes with it (a rebuild would
+-- otherwise merge old ids in among the new ones).
+function TB.clearAll()
+    rt.ring = newRing(cfg.maxLines)
+    rt.keep = newRing(cfg.history.lines)
+    for _, st in pairs(rt.tabs) do
+        st.entries, st.first, st.last = {}, 1, 0
+        st.pending, st.pendingFirst, st.pendingLast = {}, 1, 0
+        st.clearedTo = nil
+        st.rebuild = true
+        if st.console then pcall(function() st.console:Clear() end) end
+    end
 end
 
 -- A tab is "active" when it is the selected tab of its pane.
@@ -1660,25 +1749,25 @@ local function distribute(entry)
         for ti, tab in ipairs(win.tabs) do
             if tabAccepts(tab, entry) then
                 local st = tabState(win, tab)
-                -- A tab waiting for a rebuild re-reads the ring when drawn.
-                if not st.rebuild then
-                    st.last = st.last + 1
-                    st.entries[st.last] = entry
-                    -- Bounded here, not only when drawn: inactive tabs, closed
-                    -- windows and hidden chat must not grow for the session.
-                    local src = tabSource(tab)
-                    local cap = (src == rt.keep) and src.cap or cfg.maxLines
-                    while st.last - st.first + 1 > cap do
-                        st.entries[st.first] = nil
-                        st.first = st.first + 1
-                    end
-                    if cfg.renderer == 'console' then
-                        st.pendingLast = st.pendingLast + 1
-                        st.pending[st.pendingLast] = entry
-                        while st.pendingLast - st.pendingFirst + 1 > cap do
-                            st.pending[st.pendingFirst] = nil
-                            st.pendingFirst = st.pendingFirst + 1
-                        end
+                -- Into the tab's own buffer even while a rebuild is pending
+                -- (the rebuild merges by id, so nothing doubles): a closed
+                -- window's tab must not lose the lines the ring evicts before
+                -- it is drawn again.
+                st.last = st.last + 1
+                st.entries[st.last] = entry
+                -- Bounded here, not only when drawn: inactive tabs, closed
+                -- windows and hidden chat must not grow for the session.
+                local cap = TB.cap(tab)
+                while st.last - st.first + 1 > cap do
+                    st.entries[st.first] = nil
+                    st.first = st.first + 1
+                end
+                if cfg.renderer == 'console' and not st.rebuild then
+                    st.pendingLast = st.pendingLast + 1
+                    st.pending[st.pendingLast] = entry
+                    while st.pendingLast - st.pendingFirst + 1 > cap do
+                        st.pending[st.pendingFirst] = nil
+                        st.pendingFirst = st.pendingFirst + 1
                     end
                 end
                 if not (win.open and ctrl.show_chat and isTabActive(win, ti)) then
@@ -1882,7 +1971,13 @@ function H.clearNotifications()
         h.lines, h.first, h.last = lines, 1, #lines
         H.compact()
     end
-    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    -- The tabs built from the kept ring hold their own copies: out of those
+    -- too (a general tab keeps the line - it is ordinary chat there).
+    for key, st in pairs(rt.tabs) do
+        local _, tab = tabByKey(key)
+        if tab and tabSource(tab) == rt.keep then TB.drop(st, H.isNotification) end
+        st.rebuild = true
+    end
     return gone
 end
 
@@ -1962,9 +2057,9 @@ function H.load()
         if e then
             -- Into the kept ring only: restored tells belong to the Tells tabs
             -- and restored notifications to the Notifications tab, not to
-            -- All / Social. Ids stay unique below the main ring's.
-            rt.restoreId = (rt.restoreId or 0) - 1
-            e.id = rt.restoreId
+            -- All / Social. Ids stay unique below the main ring's, and rise
+            -- oldest to newest like the live ones (rebuildTab merges by id).
+            e.id = i - h.last - 1
             keepPush(e)
             n = n + 1
         end
@@ -2985,18 +3080,9 @@ end
 
 local function drawInlineLogBody(win, tab, st, logH)
     pcall(ImGui.SetWindowFontScale, rt.safeMode and 1.0 or (win.fontScale or 1.0))
-    -- Drop entries the tab's source ring has already evicted.
-    local src = tabSource(tab)
-    while st.first <= st.last do
-        local head = st.entries[st.first]
-        if head == nil then
-            healQueue(st, 'evict')
-            break
-        end
-        if not evictedFrom(src, head) then break end
-        st.entries[st.first] = nil
-        st.first = st.first + 1
-    end
+    -- The tab's buffer is its own: the ring evicting a line does not take it
+    -- out of here (distribute bounds the buffer to tabCap as lines arrive).
+    if st.first <= st.last and st.entries[st.first] == nil then healQueue(st, 'head') end
     if st.first > 512 then
         local packed, n = {}, 0
         for i = st.first, st.last do
@@ -3175,9 +3261,18 @@ local function addTab(win, name, preset, pane)
     return tab
 end
 
-local function dropTabState(win, tab)
+-- Closes a tab's log file (the next logged line reopens it under the
+-- current name); the tab's buffer stays.
+function TB.closeLog(win, tab)
     local st = rt.tabs[tabKey(win, tab)]
-    if st and st.logFile then pcall(function() st.logFile:close() end) end
+    if not st then return end
+    if st.logFile then pcall(function() st.logFile:close() end) end
+    st.logFile, st.logDay = nil, nil
+end
+
+-- Forgets a tab's runtime state, buffer included (the tab is going away).
+local function dropTabState(win, tab)
+    TB.closeLog(win, tab)
     rt.tabs[tabKey(win, tab)] = nil
 end
 
@@ -3213,11 +3308,15 @@ end
 local function moveTabToWindow(win, ti, dest)
     if #win.tabs <= 1 or dest == win then return false end
     local tab = table.remove(win.tabs, ti)
-    dropTabState(win, tab)
+    -- The buffer moves with the tab (its state is keyed by window and tab id).
+    TB.closeLog(win, tab)
+    local st = rt.tabs[tabKey(win, tab)]
+    rt.tabs[tabKey(win, tab)] = nil
     local taken = tabIds(dest)
     if taken[tab.id] then tab.id = uniqueId('t', taken) end
     tab.pane = 1
     dest.tabs[#dest.tabs + 1] = tab
+    if st then rt.tabs[tabKey(dest, tab)] = st end
     setActiveTab(dest, #dest.tabs)
     dest.open = true
     win.activeTab = math.max(1, math.min(#win.tabs, win.activeTab))
@@ -3421,7 +3520,7 @@ local function drawTabPage(win, tab)
     local name = ImGui.InputText('##tabName', tab.name)
     if type(name) == 'string' and name ~= tab.name and trim(name) ~= '' then
         tab.name = name
-        dropTabState(win, tab) -- log file name follows the tab name
+        TB.closeLog(win, tab) -- log file name follows the tab name
         markDirty()
     end
     ImGui.SameLine()
@@ -3439,7 +3538,7 @@ local function drawTabPage(win, tab)
     local log = ImGui.Checkbox('Log to file##tabLog', tab.logToFile)
     if log ~= tab.logToFile then
         tab.logToFile = log
-        if not log then dropTabState(win, tab) end
+        if not log then TB.closeLog(win, tab) end
         markDirty()
     end
     if ImGui.IsItemHovered and ImGui.IsItemHovered() then core.setTooltip('Appends this tab\'s lines to logs/tac_chat_<Name>_<tab>_<date>.txt') end
@@ -3595,6 +3694,9 @@ local function drawGeneralPage()
         markDirty()
     end
     if not dragging then rt.maxLinesDraft = nil end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('How many lines each tab keeps. Every tab has its own buffer of the lines it accepted,\nso a fight\'s combat spam in one tab never pushes the guild or ooc lines out of another.')
+    end
     ImGui.SetNextItemWidth(core.px(160))
     local op = ImGui.SliderFloat('Default opacity##genOpacity', cfg.opacity, 0.1, 1.0, '%.2f')
     if type(op) == 'number' and math.abs(op - cfg.opacity) > 0.001 then cfg.opacity = op; markDirty() end
@@ -3794,15 +3896,10 @@ local function drawTabMenuBody(win, tab, ti)
     end
     if ImGui.MenuItem('Log this tab to file', nil, tab.logToFile) then
         tab.logToFile = not tab.logToFile
-        if not tab.logToFile then dropTabState(win, tab) end
+        if not tab.logToFile then TB.closeLog(win, tab) end
         markDirty()
     end
-    if ImGui.MenuItem('Clear this tab') then
-        local st = tabState(win, tab)
-        st.entries, st.first, st.last = {}, 1, 0
-        st.pending, st.pendingFirst, st.pendingLast = {}, 1, 0
-        if st.console then pcall(function() st.console:Clear() end) end
-    end
+    if ImGui.MenuItem('Clear this tab') then TB.clear(win, tab) end
     if tab.notifyOnly then
         if ImGui.MenuItem('Clear notifications') then
             local n = H.clearNotifications()
@@ -3876,11 +3973,7 @@ local function drawTabMenuBody(win, tab, ti)
     if ImGui.MenuItem('Colours...') then openEditor('colors', win, tab) end
     if ImGui.MenuItem('Highlights...') then openEditor('highlights', win, tab) end
     if ImGui.MenuItem('Muted senders...') then openEditor('muted', win, tab) end
-    if ImGui.MenuItem('Clear all tabs') then
-        rt.ring = newRing(cfg.maxLines)
-        rt.keep = newRing(cfg.history.lines)
-        invalidateTabs()
-    end
+    if ImGui.MenuItem('Clear all tabs') then TB.clearAll() end
 end
 
 local function drawTabMenu(win, tab, ti)
@@ -4908,9 +5001,7 @@ function chatCommand(sub, arg1, arg2)
         end
         openTellTab(name, true)
     elseif sub == 'clear' then
-        rt.ring = newRing(cfg.maxLines)
-        rt.keep = newRing(cfg.history.lines)
-        for _, s in pairs(rt.tabs) do s.rebuild = true end
+        TB.clearAll()
         return
     elseif sub == 'capture' then
         local on = tostring(arg1 or ''):lower()
@@ -5299,6 +5390,8 @@ plugin.ringPush = ringPush
 plugin.ringCount = ringCount
 plugin.tabAccepts = tabAccepts
 plugin.tabSource = tabSource
+plugin.TB = TB
+plugin.rebuildTab = rebuildTab
 plugin.renderLine = renderLine
 plugin.channelColor = channelColor
 plugin.ingest = ingest

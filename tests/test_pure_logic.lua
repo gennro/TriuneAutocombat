@@ -9372,8 +9372,8 @@ do
     -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.15', 'Suite 77: triune.lua VERSION is 2.15')
-    assert_eq(vReadme, '2.15', 'Suite 77: README.md version is 2.15')
+    assert_eq(vTriune, '3.0', 'Suite 77: triune.lua VERSION is 3.0')
+    assert_eq(vReadme, '3.0', 'Suite 77: README.md version is 3.0')
     assert_eq(vTriune, vReadme, 'Suite 77: Version numbers match across triune.lua and README.md')
 end
 
@@ -9488,8 +9488,8 @@ do
     -- 6. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.15', 'Suite 78: triune.lua VERSION is 2.15')
-    assert_eq(vReadme, '2.15', 'Suite 78: README.md version is 2.15')
+    assert_eq(vTriune, '3.0', 'Suite 78: triune.lua VERSION is 3.0')
+    assert_eq(vReadme, '3.0', 'Suite 78: README.md version is 3.0')
     assert_eq(vTriune, vReadme, 'Suite 78: Version numbers match across triune.lua and README.md')
 end
 
@@ -9647,8 +9647,8 @@ do
     -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.15', 'Suite 79: triune.lua VERSION is 2.15')
-    assert_eq(vReadme, '2.15', 'Suite 79: README.md version is 2.15')
+    assert_eq(vTriune, '3.0', 'Suite 79: triune.lua VERSION is 3.0')
+    assert_eq(vReadme, '3.0', 'Suite 79: README.md version is 3.0')
     assert_eq(vTriune, vReadme, 'Suite 79: Version numbers match across triune.lua and README.md')
 end
 
@@ -9834,8 +9834,8 @@ do
     -- 7. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '2.15', 'Suite 81: triune.lua VERSION is 2.15')
-    assert_eq(vReadme, '2.15', 'Suite 81: README.md version is 2.15')
+    assert_eq(vTriune, '3.0', 'Suite 81: triune.lua VERSION is 3.0')
+    assert_eq(vReadme, '3.0', 'Suite 81: README.md version is 3.0')
     assert_eq(vTriune, vReadme, 'Suite 81: Version numbers match across triune.lua and README.md')
 end
 
@@ -10501,7 +10501,7 @@ do
     -- Test lifecycle with mock core API
     local mockCore = {
         ctrl = { show_unit_frames = true, uf_lock = false, uf_alpha = 0.85 },
-        VERSION = '2.15',
+        VERSION = '3.0',
         mq = {
             TLO = {
                 Me = {
@@ -10724,7 +10724,7 @@ do
         mq = mockMq,
         ImGui = mockImGui,
         UI = mockUI,
-        VERSION = '2.15',
+        VERSION = '3.0',
         DATA = {},
         loadout = {},
         scriptDir = './',
@@ -10993,7 +10993,7 @@ do
             },
         }
         local core = {
-            VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            VERSION = '3.0', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
@@ -11342,7 +11342,7 @@ do
             UI = { accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop,
                    drawStatusProgressBar = noop, drawSpellIcon = function() return false end,
                    getConColorRgb = function() return { 1, 1, 1, 1 } end, resolveTargetOfTarget = function() return nil end },
-            VERSION = '2.15', DATA = {}, loadout = {}, scriptDir = './',
+            VERSION = '3.0', DATA = {}, loadout = {}, scriptDir = './',
             GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
             saveLoadout = noop, print = quietPrint,
             idxOf = function() return 0 end, fmtSec = tostring, parseDurationSec = function() return 0 end,
@@ -11595,7 +11595,7 @@ do
         ctrl = { auto_summon_fireworks = true, auto_spend_aa_id = 17788, plugins = {} }, mq = mq,
         ImGui = setmetatable({}, { __index = function() return noop end }),
         runtime = { isCasting = function() return false end, cachedAAData = {} },
-        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '2.15',
+        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '3.0',
     }
     local origPrint = print
     print = quietPrint
@@ -11730,7 +11730,7 @@ do
                 ['Alternately Advanced Fireworks'] = { cost = 25, rank = 0, maxRank = 1, category = 'Special' },
             },
         },
-        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '2.15',
+        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '3.0',
     }
     local origPrint = print
     print = quietPrint
@@ -12238,7 +12238,7 @@ do
         UI = { accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop,
                drawStatusProgressBar = noop, drawSpellIcon = function() return false end,
                getConColorRgb = function() return { 1, 1, 1, 1 } end, resolveTargetOfTarget = function() return nil end },
-        VERSION = '2.15', DATA = {}, loadout = {}, scriptDir = './',
+        VERSION = '3.0', DATA = {}, loadout = {}, scriptDir = './',
         GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
         saveLoadout = noop, print = quietPrint,
         idxOf = function() return 0 end, fmtSec = tostring, parseDurationSec = function() return 0 end,
@@ -12647,7 +12647,7 @@ end
             },
         }
         local core = setmetatable({
-            mq = mq, ImGui = mockImGui, runtime = { pullState = 'IDLE' }, VERSION = '2.15',
+            mq = mq, ImGui = mockImGui, runtime = { pullState = 'IDLE' }, VERSION = '3.0',
             colors = {}, saveLoadout = function() box.saves = box.saves + 1 end,
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
@@ -13253,7 +13253,7 @@ end)()
         },
     }
     local core = setmetatable({
-        mq = mq, ImGui = mockImGui, runtime = {}, VERSION = '2.15', colors = {},
+        mq = mq, ImGui = mockImGui, runtime = {}, VERSION = '3.0', colors = {},
         saveLoadout = function() saves = saves + 1 end,
         px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
         preBeginWindow = noop, postBeginWindow = noop,
@@ -14561,7 +14561,7 @@ end)()
         SameLine = function(x) if x then S.imgui.lastSameLineX = x end end,
     }, { __index = function() return function() end end })
     local core = setmetatable({
-        VERSION = '2.15', ctrl = { plugins = {}, show_dps = true }, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+        VERSION = '3.0', ctrl = { plugins = {}, show_dps = true }, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
         px = function(n) return n end, colors = {}, pushTheme = function() end, popTheme = function() end, accent = function() end, setTooltip = function() end,
         preBeginWindow = function() end, postBeginWindow = function() end, saveLoadout = function() end,
         drawStatusProgressBar = function(frac, w, h, label, r, g, b) S.imgui.bars = (S.imgui.bars or 0) + 1 S.lastBar = { frac = frac, label = label, r = r, g = g, b = b } texts[#texts + 1] = tostring(label) end,
@@ -14804,7 +14804,7 @@ end)()
     }
     local UI = {}
     local env = setmetatable({
-        ctrl = ctrl, runtime = runtime, mq = mq, ImGui = mockImGui, UI = UI, VERSION = '2.15', open = true,
+        ctrl = ctrl, runtime = runtime, mq = mq, ImGui = mockImGui, UI = UI, VERSION = '3.0', open = true,
         GOLD = { 1, 0.7, 0.54, 1 }, ARC = { 0.3, 0.7, 1, 1 }, MUTED = { 0.49, 0.56, 0.65, 1 }, GOOD = { 0.37, 0.88, 0.64, 1 }, WARN = { 1, 0.72, 0.3, 1 },
         accent = function(c, txt) mockImGui.TextColored(c[1], c[2], c[3], c[4], txt) end,
         idxOf = loadFunc(src, 'idxOf', {}),
@@ -15711,7 +15711,7 @@ end)()
     local win = cfg.windows[1]
     local tells = rt.tabs[win.id .. '/' .. win.tabs[5].id]
     assert_eq(tells and tells.unread, 3, 'Suite 102: hidden Tells tab counts unread player tells only (pet chat is not a tell; the offline notice is one)')
-    assert_true(tells.rebuild == true and tells.pendingLast == 0 and tells.last == 0, 'Suite 102: undrawn tab defers to a ring rebuild')
+    assert_true(tells.rebuild == true and tells.pendingLast == 0 and tells.last == 3, 'Suite 102: an undrawn tab still fills its own buffer (the first draw merges it with the ring)')
     local sample = rt.ring.items[rt.ring.first]
     assert_true(plugin.renderLine(sample, true):find('^%[%d%d:%d%d:%d%d%] \a#%x%x%x%x%x%x') ~= nil, 'Suite 102: rendered line = timestamp + channel color')
 
@@ -16053,11 +16053,9 @@ end)()
         and plugin.tabSource({ tellWith = 'Bob', channels = nil }) == rt.keep and plugin.tabSource({ channels = { tell_in = true, say = true } }) == rt.ring,
         'Suite 102: conversation, Tells and Notifications tabs read from the kept ring; mixed tabs from the main ring')
     cfg.maxLines = 200
-    rt.ring.cap = 200
     cfg.tellPopouts = true
-    rt.ring = plugin.newRing(200)
-    rt.keep = plugin.newRing(cfg.history.lines)
-    for _, st in pairs(rt.tabs) do st.rebuild = true end
+    plugin.TB.clearAll()   -- Clear all tabs: fresh rings and empty tab buffers
+    assert_true(rt.ring.cap == 200 and rt.ring.last == 0 and rt.tabs[win.id .. '/' .. tellsTab.id].last == 0, 'Suite 102: Clear all tabs empties every buffer with the rings')
     S.events.TACChatAll.fn(P('Alice') .. " tells you, 'remember me'")
     S.events.TACChatAll.fn(P('Alice') .. " says, 'Genro are you there'")   -- a mention: a notification
     plugin.onTick()
@@ -16082,11 +16080,62 @@ end)()
         'Suite 102: the conversation tab still holds the tell after 300 lines of chat')
     assert_true(tellsSt2.last - tellsSt2.first + 1 == 1 and notifySt.last - notifySt.first + 1 == 1,
         'Suite 102: the Tells and Notifications tabs keep theirs too')
-    assert_true(socialSt.entries[socialSt.first].text:find('spam line', 1, true) ~= nil, 'Suite 102: a general tab mirrors the main ring as before')
+    assert_true(socialSt.last - socialSt.first + 1 == 200 and socialSt.entries[socialSt.first].text:find('spam line', 1, true) ~= nil, 'Suite 102: a general tab that takes every line is bounded by Buffer lines')
     for _, st in pairs(rt.tabs) do st.rebuild = true end
     okDraw = pcall(plugin.onDrawUI)
     assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and tellsSt2.last - tellsSt2.first + 1 == 1,
         'Suite 102: a rebuild (filter / timestamp change) refills a conversation tab from the kept ring')
+    -- Every tab owns its buffer: a guild line in a tab that does not take the
+    -- combat spam survives the main ring evicting it (the user's guild / ooc
+    -- history used to vanish after a fight), through rebuilds too.
+    local guildTab = { id = 'gt', name = 'Guild', channels = { guild = true }, include = {}, exclude = {}, send = 'guild' }
+    win.tabs[#win.tabs + 1] = guildTab
+    S.events.TACChatAll.fn(P('Guildie') .. " tells the guild, 'raid at eight'")
+    plugin.onTick()
+    okDraw = pcall(plugin.onDrawUI)
+    local guildSt = rt.tabs[win.id .. '/' .. guildTab.id]
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 1 and guildSt.entries[guildSt.first].text:find('raid at eight', 1, true) ~= nil, 'Suite 102: the guild line lands in the guild tab')
+    local guildId = guildSt.entries[guildSt.first].id
+    for i = 1, 250 do
+        S.events.TACChatAll.fn('You slash a rat for ' .. i .. ' points of damage.')
+        if i % 100 == 0 then plugin.onTick() end
+    end
+    plugin.onTick()
+    assert_true(rt.ring.first > guildId and rt.ring.items[guildId] == nil, 'Suite 102: the main ring evicted the guild line')
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 1 and guildSt.entries[guildSt.first].id == guildId, 'Suite 102: the guild tab still shows it after the ring moved on')
+    guildSt.rebuild = true
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 1 and guildSt.entries[guildSt.first].id == guildId, 'Suite 102: a rebuild keeps the lines only the tab still holds')
+    S.events.TACChatAll.fn(P('Guildie') .. " tells the guild, 'bring food'")
+    plugin.onTick()
+    guildSt.rebuild = true
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 2 and guildSt.entries[guildSt.first].id == guildId and guildSt.entries[guildSt.last].text:find('bring food', 1, true) ~= nil,
+        'Suite 102: a rebuild merges the tab buffer with the ring, oldest first, nothing doubled')
+    guildTab.exclude = { 'food' }
+    guildSt.rebuild = true
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 1 and guildSt.entries[guildSt.first].id == guildId, 'Suite 102: a filter change re-filters the lines the tab holds')
+    guildTab.exclude = {}
+    plugin.TB.clear(win, guildTab)
+    guildSt.rebuild = true
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 0, 'Suite 102: Clear this tab: a rebuild does not bring the cleared lines back from the ring')
+    S.events.TACChatAll.fn(P('Guildie') .. " tells the guild, 'after the clear'")
+    plugin.onTick()
+    okDraw = pcall(plugin.onDrawUI)
+    assert_true(okDraw and guildSt.last - guildSt.first + 1 == 1 and guildSt.entries[guildSt.first].text:find('after the clear', 1, true) ~= nil, 'Suite 102: lines after the clear show')
+    assert_eq(plugin.TB.cap(guildTab), 200, 'Suite 102: a general tab holds Buffer lines')
+    assert_eq(plugin.TB.cap(tellsTab), cfg.history.lines, 'Suite 102: a tells tab holds the tell / notification line count')
+    -- moving a tab to another window carries its buffer
+    local w2 = plugin.newWindow('Second')
+    plugin.moveTabToWindow(win, #win.tabs, w2)
+    assert_true(rt.tabs[w2.id .. '/' .. guildTab.id] == guildSt and rt.tabs[win.id .. '/' .. guildTab.id] == nil, 'Suite 102: a moved tab keeps its buffer under the new window')
+    plugin.moveTabToWindow(w2, #w2.tabs, win)
+    plugin.removeTab(win, #win.tabs)
+    for i = #cfg.windows, 1, -1 do if cfg.windows[i] == w2 then table.remove(cfg.windows, i) end end
+    assert_true(rt.tabs[win.id .. '/' .. guildTab.id] == nil, 'Suite 102: removing the tab drops its state')
     -- a tell to Alice while she is offline: the notice lands in her tab and
     -- the Tells tab as an undelivered outgoing tell, in the warning colour,
     -- with a status line above the input
@@ -16218,8 +16267,7 @@ end)()
     okDraw, errDraw = pcall(plugin.onDrawUI)
     assert_true(okDraw, 'Suite 102: draw after eviction: ' .. tostring(errDraw))
     assert_true(allSt.first <= allSt.last and allSt.entries[allSt.last] ~= nil and allSt.entries[allSt.last].text == 'You receive 900 gold.', 'Suite 102: newest line still at the end of the tab queue after eviction')
-    assert_true(allSt.entries[allSt.first].id >= rt.ring.first, 'Suite 102: evicted lines trimmed from the front')
-    assert_true(allSt.last - allSt.first + 1 <= 300, 'Suite 102: tab queue bounded by the ring')
+    assert_true(allSt.last - allSt.first + 1 == 300 and allSt.entries[allSt.first].text == 'You receive 601 gold.', 'Suite 102: tab buffer bounded by Buffer lines, newest kept')
     for i = 1, 600 do S.events.TACChatAll.fn('You receive ' .. (900 + i) .. ' gold.') end
     ticks = 0
     while #rt.queue > 0 and ticks < 10 do plugin.onTick(); ticks = ticks + 1 end
@@ -18263,7 +18311,7 @@ do
         }
         local ctrl = { plugins = {}, show_inv = true }
         local core = {
-            VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            VERSION = '3.0', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
@@ -18725,7 +18773,7 @@ do
         }
         local ctrl = { plugins = {} }
         local core = {
-            VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            VERSION = '3.0', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
