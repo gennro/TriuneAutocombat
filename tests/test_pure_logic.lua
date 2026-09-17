@@ -2396,6 +2396,8 @@ do
         return false
     end
 
+    local function anySlotCounts() return true end
+
     local findFirstNPCXtarget = loadFunc(src, 'findFirstNPCXtarget', {
         ctrl = { xtar_nav_dist = 150 },
         mq = dummyMqXtar,
@@ -2403,7 +2405,8 @@ do
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
         isHostileTarget = dummyIsHostile,
-        buffActive = function() return false end
+        buffActive = function() return false end,
+        xtSlotCounts = anySlotCounts,
     })
 
     local isXTargetId = loadFunc(src, 'isXTargetId', {
@@ -2411,7 +2414,8 @@ do
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
         isHostileTarget = dummyIsHostile,
-        isIgnored = function() return false end
+        isIgnored = function() return false end,
+        xtSlotCounts = anySlotCounts,
     })
 
     -- 1. Default maxDist (150) picks lowest HP within 150 (mob 202 at dist 50, hp 40; ignores 201 at dist 180)
@@ -2437,7 +2441,8 @@ do
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
         isHostileTarget = dummyIsHostile,
-        isIgnored = function() return false end
+        isIgnored = function() return false end,
+        xtSlotCounts = anySlotCounts,
     })
 
     assert_eq(hasActualNPCXtarget(), true, 'hasActualNPCXtarget: true with active hostile NPCs on XTarget')
@@ -2451,7 +2456,8 @@ do
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
         isHostileTarget = dummyIsHostile,
-        isIgnored = function() return false end
+        isIgnored = function() return false end,
+        xtSlotCounts = anySlotCounts,
     })
     assert_eq(hasActualNPCXtargetDead(), false, 'hasActualNPCXtarget: false when all spawns are dead or corpses')
     dummyXtarSlots[1].dead = false
@@ -2464,7 +2470,8 @@ do
         isGroupOrRaidMember = function() return true end,
         isSpawnPetOrPlayer = function() return true end,
         isHostileTarget = function() return false end,
-        isIgnored = function() return false end
+        isIgnored = function() return false end,
+        xtSlotCounts = anySlotCounts,
     })
     assert_eq(hasActualNPCXtargetFriendly(), false, 'hasActualNPCXtarget: false when spawns are group members or players')
 
@@ -2475,7 +2482,8 @@ do
         isGroupOrRaidMember = function() return false end,
         isSpawnPetOrPlayer = function() return false end,
         isHostileTarget = dummyIsHostile,
-        isIgnored = function() return true end
+        isIgnored = function() return true end,
+        xtSlotCounts = anySlotCounts,
     })
     assert_eq(hasActualNPCXtargetIgnored(), false, 'hasActualNPCXtarget: false when all spawns are on ignore list')
 
@@ -2487,6 +2495,7 @@ do
                 mq = dummyMqXtar,
                 isHostileTarget = dummyIsHostile,
                 xtForceId = forceId,
+                xtSlotCounts = anySlotCounts,
             })
         end
         -- Forced mob 201 sits at dist 180 (beyond the 150 default) with more HP
@@ -2561,6 +2570,183 @@ do
             mq = { TLO = { Spawn = function() return hostileSpawn end } },
         })
         assert_eq(isHostileNoSet(5), true, 'isHostileTarget: no ignore set -> unchanged')
+    end
+
+    -- 6. XTarget slot kinds: a mob in a "... Target" role slot is only an enemy
+    --    in play once it is engaged (Manual mode); Auto Hater always counts.
+    do
+        local xtSlotIsSelectionOnly = loadFunc(src, 'xtSlotIsSelectionOnly', {})
+        assert_eq(xtSlotIsSelectionOnly('Auto Hater'), false, 'xt slot kind: Auto Hater is not selection-only')
+        assert_eq(xtSlotIsSelectionOnly(''), false, 'xt slot kind: unknown / empty type is not selection-only')
+        assert_eq(xtSlotIsSelectionOnly(nil), false, 'xt slot kind: nil type is not selection-only')
+        assert_eq(xtSlotIsSelectionOnly('Group Tank Target'), true, 'xt slot kind: Group Tank Target is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('Group Assist Target'), true, 'xt slot kind: Group Assist Target is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('Group Puller Target'), true, 'xt slot kind: Group Puller Target is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('My Pet Target'), true, 'xt slot kind: My Pet Target is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('Raid Assist 1 Target'), true, 'xt slot kind: Raid Assist 1 Target is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('Target of Target'), true, 'xt slot kind: Target of Target is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('Specific NPC'), true, 'xt slot kind: Specific NPC is selection-only')
+        assert_eq(xtSlotIsSelectionOnly('group tank target'), true, 'xt slot kind: match is case-insensitive')
+        assert_eq(xtSlotIsSelectionOnly('Group Tank'), false, 'xt slot kind: Group Tank (a PC slot) is not selection-only')
+
+        local function fakeSlot(o)
+            return setmetatable({
+                TargetType = function() return o.tt end,
+                PctAggro = function() return o.aggro or 0 end,
+                Distance3D = function() return o.dist or 10 end,
+                TargetOfTarget = { ID = function() return o.tot or 0 end },
+                AggroHolder = { ID = function() return o.holder or 0 end },
+            }, { __call = function() return true end })
+        end
+        local groupIds = { [11] = true, [12] = true }
+        local peerIds = { [21] = true }
+        local myPetIds = { [5] = true }
+        local xtSlotFightInfo = loadFunc(src, 'xtSlotFightInfo', {})
+        local xtSlotFightingMe = loadFunc(src, 'xtSlotFightingMe', {
+            mq = { TLO = { Me = { ID = function() return 1 end } } },
+            isSpawnMyPet = function(id) return myPetIds[id] == true end,
+            xtSlotFightInfo = xtSlotFightInfo,
+        })
+        assert_eq(xtSlotFightingMe(fakeSlot({ tt = 'Auto Hater' })), false, 'xt fighting me: group hater I have not touched is not mine')
+        assert_eq(xtSlotFightingMe(fakeSlot({ tt = 'Auto Hater', aggro = 1 })), true, 'xt fighting me: on its hate list')
+        assert_eq(xtSlotFightingMe(fakeSlot({ tt = 'Auto Hater', tot = 1 })), true, 'xt fighting me: it targets me')
+        assert_eq(xtSlotFightingMe(fakeSlot({ tt = 'Auto Hater', holder = 5 })), true, 'xt fighting me: my pet holds it')
+        assert_eq(xtSlotFightingMe(fakeSlot({ tt = 'Auto Hater', tot = 11, holder = 11 })), false, 'xt fighting me: fighting a group member only -> not me')
+        local xtSlotEngaged = loadFunc(src, 'xtSlotEngaged', {
+            mq = { TLO = { Me = { ID = function() return 1 end } } },
+            isGroupOrRaidMember = function(id) return groupIds[id] == true end,
+            runtime = { isBoxPeerId = function(id) return peerIds[id] == true end },
+            xtSlotIsSelectionOnly = xtSlotIsSelectionOnly,
+            xtSlotFightInfo = xtSlotFightInfo,
+        })
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Auto Hater' })), true, 'xt engaged: Auto Hater slot is always engaged')
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Group Tank Target' })), false,
+            'xt engaged: tank merely selected the mob -> not engaged')
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Group Tank Target', aggro = 35 })), true,
+            'xt engaged: aggro on us counts')
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Group Tank Target', tot = 1 })), true,
+            'xt engaged: mob targeting me counts')
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Group Assist Target', tot = 12 })), true,
+            'xt engaged: mob targeting a group member counts')
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Group Assist Target', holder = 21 })), true,
+            'xt engaged: a box peer holding aggro counts')
+        assert_eq(xtSlotEngaged(fakeSlot({ tt = 'Group Puller Target', tot = 99, holder = 98 })), false,
+            'xt engaged: mob fighting someone else\'s group -> not engaged')
+        -- A slot object without the aggro / ToT members (older client) reads as not engaged rather than erroring
+        local bare = setmetatable({ TargetType = function() return 'Group Tank Target' end }, { __call = function() return true end })
+        assert_eq(xtSlotEngaged(bare), false, 'xt engaged: missing TLO members -> not engaged, no error')
+
+        -- xtSlotCounts: Manual mode applies the rule; the self-directed modes keep every hostile
+        local ctrlBox = { mode = 'Manual', manual_auto_xtarget = true, xtar_nav_dist = 150 }
+        local xtSlotCounts = loadFunc(src, 'xtSlotCounts', {
+            ctrl = ctrlBox,
+            xtSlotEngaged = function(xt) return xt.TargetType() == 'Auto Hater' end,
+            xtSlotFightingMe = function(xt) return xt.PctAggro() > 0 end,
+        })
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Group Tank Target' }), 301), false, 'xtSlotCounts: Manual skips a selected-only mob')
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Auto Hater', dist = 40 }), 301), true, 'xtSlotCounts: Manual keeps a group hater inside chase range')
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Auto Hater', dist = 400 }), 301), false,
+            'xtSlotCounts: Manual ignores a group hater beyond chase range (other box pulling elsewhere)')
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Auto Hater', dist = 400, aggro = 20 }), 301), true,
+            'xtSlotCounts: a mob fighting me counts at any range')
+        ctrlBox.manual_auto_xtarget = false
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Auto Hater', dist = 40 }), 301), false,
+            'xtSlotCounts: Auto-Target off -> a group hater is not our fight')
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Auto Hater', dist = 40, aggro = 20 }), 301), true,
+            'xtSlotCounts: Auto-Target off -> a mob fighting me still counts')
+        ctrlBox.manual_auto_xtarget = true
+        ctrlBox.xtar_nav_dist = 500
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Auto Hater', dist = 400 }), 301), true, 'xtSlotCounts: chase range slider widens it')
+        ctrlBox.xtar_nav_dist = 150
+        ctrlBox.mode = 'Puller'
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Group Tank Target', dist = 400 }), 301), true, 'xtSlotCounts: Puller keeps every hostile slot')
+        ctrlBox.mode = 'Assist'
+        assert_eq(xtSlotCounts(fakeSlot({ tt = 'Group Tank Target', dist = 400 }), 301), true, 'xtSlotCounts: Assist keeps every hostile slot')
+
+        -- isCombat(): the group-wide hater counters are not this character's
+        -- combat in Manual mode; the per-slot rule decides.
+        do
+            local st = { combat = false, cs = 'ACTIVE', haters = 0, slotCounts = false }
+            local slotObj = setmetatable({ ID = function() return 301 end }, { __call = function() return true end })
+            local isCombat = loadFunc(src, 'isCombat', {
+                ctrl = ctrlBox,
+                mq = { TLO = {
+                    Me = {
+                        Combat = function() return st.combat end,
+                        AutoFire = function() return false end,
+                        CombatState = function() return st.cs end,
+                        XTHaterCount = function() return st.haters end,
+                        XTAggroCount = function() return 0 end,
+                        XTargetSlots = function() return 1 end,
+                        XTarget = function() return slotObj end,
+                    },
+                    Target = setmetatable({}, { __call = function() return false end }),
+                    Spawn = function() return setmetatable({ Type = function() return 'NPC' end, Dead = function() return false end, CleanName = function() return 'a_rat' end }, { __call = function() return true end }) end,
+                } },
+                isSpawnAlive = function() return true end,
+                isGroupOrRaidMember = function() return false end,
+                isSpawnPetOrPlayer = function() return false end,
+                isIgnored = function() return false end,
+                isHostileTarget = function() return true end,
+                xtSlotCounts = function() return st.slotCounts end,
+            })
+            ctrlBox.mode = 'Manual'
+            st.haters = 2
+            assert_eq(isCombat(), false, 'isCombat (Manual): group haters elsewhere are not my combat')
+            st.slotCounts = true
+            assert_eq(isCombat(), true, 'isCombat (Manual): a slot that counts for me is combat')
+            st.slotCounts = false
+            st.cs = 'COMBAT'
+            assert_eq(isCombat(), true, 'isCombat (Manual): my own combat state still counts')
+            st.cs = 'ACTIVE'; st.combat = true
+            assert_eq(isCombat(), true, 'isCombat (Manual): auto-attack on still counts')
+            st.combat = false
+            ctrlBox.mode = 'Puller'
+            assert_eq(isCombat(), true, 'isCombat (Puller): group hater count still means combat')
+            ctrlBox.mode = 'Manual'
+        end
+
+        -- End to end through the scanners: slot 1 (mob 201) becomes the tank's
+        -- selection, slot 2 (mob 202) is a hater. Manual must neither report
+        -- 201 as an XTarget nor acquire it, and must still pick 202.
+        dummyXtarSlots[1].tt = 'Group Tank Target'
+        dummyXtarSlots[2].tt = 'Auto Hater'
+        local slotTypeCounts = function(xt, id)
+            for _, slot in pairs(dummyXtarSlots) do
+                if slot.id == id then return slot.tt ~= 'Group Tank Target' end
+            end
+            return true
+        end
+        local isXTargetIdManual = loadFunc(src, 'isXTargetId', {
+            mq = dummyMqXtar,
+            isHostileTarget = dummyIsHostile,
+            isIgnored = function() return false end,
+            xtSlotCounts = slotTypeCounts,
+        })
+        assert_eq(isXTargetIdManual(201), false, 'isXTargetId: tank-selected mob is not an XTarget in play')
+        assert_eq(isXTargetIdManual(202), true, 'isXTargetId: hater still is')
+        local findFirstManual = loadFunc(src, 'findFirstNPCXtarget', {
+            ctrl = { xtar_nav_dist = 500 },
+            mq = dummyMqXtar,
+            isHostileTarget = dummyIsHostile,
+            xtSlotCounts = slotTypeCounts,
+        })
+        dummyXtarSlots[2].dead = true
+        assert_eq(findFirstManual(false, nil, nil, nil, nil), nil,
+            'findFirstNPCXtarget: with only the tank-selected mob left, nothing is acquired')
+        dummyXtarSlots[2].dead = false
+        assert_eq(findFirstManual(false, nil, nil, nil, nil), 202, 'findFirstNPCXtarget: the hater is still acquired')
+        local hasActualManual = loadFunc(src, 'hasActualNPCXtarget', {
+            mq = dummyMqXtar,
+            isHostileTarget = dummyIsHostile,
+            isIgnored = function() return false end,
+            xtSlotCounts = slotTypeCounts,
+        })
+        dummyXtarSlots[2].dead = true
+        assert_eq(hasActualManual(), false, 'hasActualNPCXtarget: a tank-selected mob alone is not a live XTarget')
+        dummyXtarSlots[2].dead = false
+        dummyXtarSlots[1].tt = nil
+        dummyXtarSlots[2].tt = nil
     end
 end
 
@@ -10455,6 +10641,7 @@ do
         { file = 'boxnet',          id = 'boxnet' },
         { file = 'buttons',         id = 'buttons' },
         { file = 'parcels',         id = 'parcels' },
+        { file = 'nmsloot',         id = 'nmsloot' },
     }
     for _, sp in ipairs(shipped) do
         local fn = assert(loadfile('TAC/lua/tac/' .. sp.file .. '.lua'))
@@ -10553,7 +10740,7 @@ do
     initPM()
     local pm = rt.pluginManager
     assert_true(pm ~= nil, 'Suite 88: runtime.initPluginManager creates runtime.pluginManager')
-    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'parcels', 'spellbook', 'update_check' }
+    local expected = { 'auto_aa', 'auto_accept', 'boxnet', 'buffbot', 'buttons', 'chat', 'cursor', 'dps', 'floating_damage', 'gamedb', 'hud_cooldowns', 'hud_effects', 'hud_group', 'hud_spellgems', 'hud_unitframes', 'hud_xtarget', 'inventory', 'map', 'nmsloot', 'parcels', 'spellbook', 'update_check' }
     for _, id in ipairs(expected) do
         local p = pm.plugins[id]
         assert_true(p ~= nil, 'Suite 88: discover() loaded ' .. id)
@@ -11209,22 +11396,22 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 20, 'Suite 89: nineteen shipped plugins own a window, plus the unit frames Target popout')
+        assert_eq(#W.all, 21, 'Suite 89: twenty shipped plugins own a window, plus the unit frames Target popout')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
         W.hdr = pm.windowPlugins(true)
-        assert_eq(#W.hdr, 17, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net + Buttons + Chat + Database (buffbot off)')
+        assert_eq(#W.hdr, 18, 'Suite 89: header buttons default to the old header set + Auto AA + Auto-Accept + Box Net + Buttons + Chat + Database + NMS Loot (buffbot off)')
         assert_eq(pm.headerButtonEnabled('buffbot'), false, 'Suite 89: buffbot header button off by default')
         assert_eq(pm.headerButtonEnabled('hud_group'), true, 'Suite 89: hud_group header button on by default')
         assert_eq(pm.headerButtonEnabled('floating_damage'), false, 'Suite 89: no header button for plugins without a window')
         pm.setHeaderButton('buffbot', true)
         assert_eq(W.ctrl.plugins.buffbot.headerButton, true, 'Suite 89: header button preference persisted to ctrl.plugins')
-        assert_eq(#pm.windowPlugins(true), 18, 'Suite 89: enabling the preference adds the button')
+        assert_eq(#pm.windowPlugins(true), 19, 'Suite 89: enabling the preference adds the button')
         assert_true(W.saves >= 1, 'Suite 89: header button preference triggers a loadout save')
         pm.setHeaderButton('hud_group', false)
         assert_eq(pm.headerButtonEnabled('hud_group'), false, 'Suite 89: saved preference overrides the plugin default')
-        assert_eq(#pm.windowPlugins(true), 17, 'Suite 89: disabling the preference removes the button')
+        assert_eq(#pm.windowPlugins(true), 18, 'Suite 89: disabling the preference removes the button')
 
         -- extra windows (plugin.windows) are addressed as '<plugin>:<key>'
         local tw = pm.getWindow('hud_unitframes:target_window')
@@ -11239,9 +11426,9 @@ do
         assert_eq(W.ctrl.plugins.hud_unitframes.windowHeader.target_window, true, 'Suite 89: extra window header choice is kept under ctrl.plugins[plugin].windowHeader[key]')
         assert_eq(W.ctrl.plugins['hud_unitframes:target_window'], nil, 'Suite 89: no composite ctrl.plugins entry is created for an extra window')
         assert_eq(pm.headerButtonEnabled('hud_unitframes:target_window'), true, 'Suite 89: the saved choice turns the extra window header button on')
-        assert_eq(#pm.windowPlugins(true), 18, 'Suite 89: the extra window header button counts like any other')
+        assert_eq(#pm.windowPlugins(true), 19, 'Suite 89: the extra window header button counts like any other')
         pm.setHeaderButton('hud_unitframes:target_window', false)
-        assert_eq(#pm.windowPlugins(true), 17, 'Suite 89: and can be turned off again')
+        assert_eq(#pm.windowPlugins(true), 18, 'Suite 89: and can be turned off again')
         assert_eq(pm.isWindowOpen('hud_unitframes:target_window'), false, 'Suite 89: Target popout closed initially')
         pm.toggleWindow('hud_unitframes:target_window')
         assert_eq(W.ctrl.show_target_window, true, 'Suite 89: toggleWindow opens an extra window via its ctrl flag')
@@ -11267,7 +11454,7 @@ do
 
         -- header renderer: one button per enabled header plugin, clicks toggle
         mockImGui.Button = function(label) return W.clickLabel ~= nil and label:find(W.clickLabel, 1, true) ~= nil end
-        assert_eq(pm.drawHeaderButtons(), 17, 'Suite 89: drawHeaderButtons draws one button per header plugin')
+        assert_eq(pm.drawHeaderButtons(), 18, 'Suite 89: drawHeaderButtons draws one button per header plugin')
         W.clickLabel = 'Map##hdrPlg_map'
         pm.drawHeaderButtons()
         assert_eq(W.ctrl.show_map, true, 'Suite 89: clicking the header button opens the plugin window')
@@ -11301,10 +11488,10 @@ do
         pm.HEADER_BUTTONS_PER_ROW = 8
         mockImGui.SameLine = nil
         pm.disablePlugin('map')
-        assert_eq(pm.drawHeaderButtons(), 16, 'Suite 89: disabled plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 17, 'Suite 89: disabled plugins get no header button')
         pm.enablePlugin('map')
         pm.plugins.map.status = 'Error'
-        assert_eq(pm.drawHeaderButtons(), 16, 'Suite 89: errored plugins get no header button')
+        assert_eq(pm.drawHeaderButtons(), 17, 'Suite 89: errored plugins get no header button')
         pm.plugins.map.status = 'Active'
 
         -- collectSettings persists the effective header preference for window plugins
@@ -12054,7 +12241,7 @@ do
     initPM()
     local pm = rt.pluginManager
     S.shipped = #pm.pluginOrder
-    assert_eq(S.shipped, 21, 'Suite 92: all shipped plugins still load under the load-time guards')
+    assert_eq(S.shipped, 22, 'Suite 92: all shipped plugins still load under the load-time guards')
 
     -- Soft plugin dependencies (`uses`): normalised at registration, reverse-listed, state-tracked
     assert_eq(#pm.normalizeUses(nil), 0, 'Suite 92: no uses -> empty list')
@@ -12069,7 +12256,7 @@ do
     assert_eq(S.ids(pm.plugins.hud_spellgems.uses), 'gamedb,spellbook', 'Suite 92: hud_spellgems declares it uses gamedb and spellbook')
     assert_eq(#pm.plugins.boxnet.uses, 0, 'Suite 92: boxnet uses nothing')
     assert_eq(S.ids(pm.plugins.inventory.uses), 'boxnet,gamedb', 'Suite 92: inventory declares it uses boxnet and gamedb')
-    assert_eq(S.ids(pm.usedBy('boxnet')), 'buttons,dps,hud_group,inventory', 'Suite 92: usedBy(boxnet) lists the four consumers in load order')
+    assert_eq(S.ids(pm.usedBy('boxnet')), 'buttons,dps,hud_group,inventory,nmsloot', 'Suite 92: usedBy(boxnet) lists the five consumers in load order')
     assert_eq(S.ids(pm.usedBy('spellbook')), 'hud_spellgems', 'Suite 92: usedBy(spellbook) lists the gem bar')
     assert_eq(#pm.usedBy('cursor'), 0, 'Suite 92: cursor is used by nobody')
     assert_eq(pm.useState('boxnet'), 'active', 'Suite 92: an enabled plugin is an active dependency')
@@ -15244,7 +15431,7 @@ end)()
         { "Spinevenom tells you, 'Waiting for your order to attack, Master.", 'petchat', 'Spinevenom' },
         { "Otherpet tells you, 'Attacking a sorcerer of hate Master.'", 'petchat', 'Otherpet' },
         { P('Playerone') .. " tells you, 'can i get a buff'", 'tell_in', 'Playerone' },
-        { 'babykaikes is not online at this time.', 'system' },
+        { 'babykaikes is not online at this time.', 'tell_out', 'Babykaikes' },
         { 'Your fever has broken.', 'buff_worn' },
         { "You told Playerone, 'sure'", 'tell_out', 'Playerone' },
         { P('Playertwo') .. " says out of character, 'people only use them for their AAs'", 'ooc', 'Playertwo' },
@@ -15338,6 +15525,15 @@ end)()
     local linked = plugin.classify(P('Playerone') .. " tells you, 'hi'", ctx)
     assert_true(linked.isPlayer == true, 'Suite 102: link-wrapped sender flagged as a player')
     assert_true(plugin.classify("Spinevenom tells you, 'Attacking X Master.'", ctx).isPlayer == false, 'Suite 102: bare pet sender is not a player')
+    -- a tell to someone offline: the game's notice is filed as that tell
+    local offline = plugin.classify('bobby is not online at this time.', ctx)
+    assert_true(offline.channel == 'tell_out' and offline.sender == 'Bobby' and offline.outgoing and offline.tellFail == true,
+        'Suite 102: "X is not online" is an outgoing tell to X (name capitalised) flagged as undelivered')
+    assert_true(plugin.classify('Bobby is not currently online.', ctx).tellFail == true, 'Suite 102: the other wording too')
+    local ctx2 = { me = 'Genro', pets = {}, lastTellTo = 'Carol' }
+    local nameless = plugin.classify('That player is not online.', ctx2)
+    assert_true(nameless.channel == 'tell_out' and nameless.sender == 'Carol' and nameless.tellFail, 'Suite 102: the name-less notice is about the last tell sent from here')
+    assert_eq(plugin.classify('That player is not online.', ctx).channel, 'system', 'Suite 102: with no tell sent from here it stays a system line')
     for _, c in ipairs(plugin.CHANNELS) do
         assert_true(type(c.id) == 'string' and c.color:match('^%x%x%x%x%x%x$') ~= nil, 'Suite 102: channel ' .. tostring(c.id) .. ' has a hex color')
     end
@@ -15495,7 +15691,7 @@ end)()
     assert_eq(rt.unknownRecent[1], 'Some completely new server message nobody has seen.', 'Suite 102: unclassified lines kept for review')
     local win = cfg.windows[1]
     local tells = rt.tabs[win.id .. '/' .. win.tabs[5].id]
-    assert_eq(tells and tells.unread, 2, 'Suite 102: hidden Tells tab counts unread player tells only (pet chat is not a tell)')
+    assert_eq(tells and tells.unread, 3, 'Suite 102: hidden Tells tab counts unread player tells only (pet chat is not a tell; the offline notice is one)')
     assert_true(tells.rebuild == true and tells.pendingLast == 0 and tells.last == 0, 'Suite 102: undrawn tab defers to a ring rebuild')
     local sample = rt.ring.items[rt.ring.first]
     assert_true(plugin.renderLine(sample, true):find('^%[%d%d:%d%d:%d%d%] \a#%x%x%x%x%x%x') ~= nil, 'Suite 102: rendered line = timestamp + channel color')
@@ -15574,7 +15770,7 @@ end)()
     win.tabs[5].tellTarget = 'Bob'
     plugin.sendText(win.tabs[5], 'hi bob')
     assert_eq(S.cmds[#S.cmds], '/tell Bob hi bob', 'Suite 102: tell routed to the tab target')
-    assert_eq(#rt.history, 4, 'Suite 102: input history recorded')
+    assert_eq(#cfg.inputHistory, 0, 'Suite 102: sendText itself records no history (the input line does, with its links)')
 
     print = quiet
     S.binds['/tacchat']('toggle')
@@ -15872,10 +16068,22 @@ end)()
     okDraw = pcall(plugin.onDrawUI)
     assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and tellsSt2.last - tellsSt2.first + 1 == 1,
         'Suite 102: a rebuild (filter / timestamp change) refills a conversation tab from the kept ring')
+    -- a tell to Alice while she is offline: the notice lands in her tab and
+    -- the Tells tab as an undelivered outgoing tell, in the warning colour,
+    -- with a status line above the input
+    S.events.TACChatAll.fn('alice is not online at this time.')
+    plugin.onTick()
+    okDraw = pcall(plugin.onDrawUI)
+    local lastAlice = aliceSt.entries[aliceSt.last]
+    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 2 and lastAlice.tellFail == true and lastAlice.channel == 'tell_out' and lastAlice.sender == 'Alice',
+        'Suite 102: the offline notice joins the conversation as an undelivered tell')
+    assert_eq(lastAlice.hl, 'FFB84D', 'Suite 102: in the warning colour')
+    assert_true(tellsSt2.last - tellsSt2.first + 1 == 2, 'Suite 102: and the Tells tab shows it')
+    assert_true(rt.echo ~= nil and rt.echo:find('Alice is not online', 1, true) ~= nil, 'Suite 102: the status line says so')
     S.events.TACChatAll.fn(P('Bob') .. " tells you, 'new person'")
     plugin.onTick()
     okDraw = pcall(plugin.onDrawUI)
-    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 1 and plugin.findTellTab(tw, 'Bob') ~= nil, 'Suite 102: a tell from someone else leaves the other conversation intact')
+    assert_true(okDraw and aliceSt.last - aliceSt.first + 1 == 2 and plugin.findTellTab(tw, 'Bob') ~= nil, 'Suite 102: a tell from someone else leaves the other conversation intact')
     assert_eq(rt.keep.cap, cfg.history.lines, 'Suite 102: the kept ring is bounded by the history line count')
     cfg.tellPopouts = false
     cfg.maxLines = 2000
@@ -16300,6 +16508,164 @@ end)()
 
     cfg.timestamps = false
     win.activeTab = 5
+    -- input history: Up / Down walk the sent lines like a shell, the draft
+    -- being typed is set aside and comes back, links ride along, repeats
+    -- move to the end, and the list persists with the config
+    do
+        local IH = plugin.IH
+        local ist = { input = '', links = nil }
+        assert_true(#cfg.inputHistory >= 1 and cfg.inputHistory[#cfg.inputHistory].text == 'hello group', 'Suite 102: a line sent from the drawn input is recorded')
+        for i = #cfg.inputHistory, 1, -1 do cfg.inputHistory[i] = nil end
+        IH.push('first line')
+        IH.push('/g second', nil)
+        IH.push('[Bracer] for sale', { Bracer = L .. 'x' .. L })
+        IH.push('first line')
+        assert_eq(#cfg.inputHistory, 3, 'Suite 102: a repeated line is not added twice')
+        assert_eq(cfg.inputHistory[3].text, 'first line', 'Suite 102: it moves to the end')
+        assert_eq(cfg.inputHistory[2].links.Bracer, L .. 'x' .. L, 'Suite 102: an entry keeps its links')
+        assert_true(rt.dirty, 'Suite 102: sending marks the config for saving')
+        local buf = 'typing this'
+        -- the callback data the way MQ's usertype exposes it: Buffer, no BufTextLen
+        local data = { Buffer = buf }
+        function data:DeleteChars(from, n) buf = buf:sub(1, from) .. buf:sub(from + n + 1); self.Buffer = buf end
+        function data:InsertChars(at, t) buf = buf:sub(1, at) .. t .. buf:sub(at + 1); self.Buffer = buf end
+        local hadKey = _G.ImGuiKey
+        _G.ImGuiKey = _G.ImGuiKey or { UpArrow = 515, DownArrow = 516, Tab = 512, None = 0 }
+        local KEY = _G.ImGuiKey
+        rt.cbState = ist
+        data.EventKey = KEY.UpArrow
+        plugin.inputCallback(128, data)
+        assert_eq(buf, 'first line', 'Suite 102: Up shows the newest line (MQ passes the event flag first, then the data)')
+        assert_eq(rt.historyDraft and rt.historyDraft.text, 'typing this', 'Suite 102: the draft is set aside')
+        plugin.inputCallback(128, data)
+        assert_eq(buf, '[Bracer] for sale', 'Suite 102: Up again, the one before')
+        assert_eq(ist.links and ist.links.Bracer, L .. 'x' .. L, 'Suite 102: its link is back in the tab')
+        plugin.inputCallback(128, data)
+        assert_eq(buf, '/g second', 'Suite 102: Up to the oldest')
+        plugin.inputCallback(128, data)
+        assert_eq(buf, '/g second', 'Suite 102: Up at the oldest stays')
+        data.EventKey = KEY.DownArrow
+        plugin.inputCallback(128, data)
+        assert_eq(buf, '[Bracer] for sale', 'Suite 102: Down goes newer')
+        plugin.inputCallback(128, data)
+        plugin.inputCallback(128, data)
+        assert_eq(buf, 'typing this', 'Suite 102: Down past the newest restores the draft')
+        assert_eq(rt.historyIdx, 0, 'Suite 102: and browsing ends')
+        assert_nil(ist.links, 'Suite 102: the draft had no links')
+        plugin.inputCallback(128, data)
+        assert_eq(buf, 'typing this', 'Suite 102: Down on the draft does nothing')
+        data.EventKey = KEY.UpArrow
+        plugin.inputCallback(data)
+        assert_eq(buf, 'first line', 'Suite 102: a binding that passes the data alone works too')
+        data.EventKey = KEY.DownArrow
+        plugin.inputCallback(128, data)
+        assert_eq(buf, 'typing this', 'Suite 102: and Down returns to the draft again')
+        for i = 1, 105 do IH.push('bulk ' .. i) end
+        assert_eq(#cfg.inputHistory, 100, 'Suite 102: the list is capped')
+        assert_eq(cfg.inputHistory[100].text, 'bulk 105', 'Suite 102: keeping the newest')
+        -- @Name completion: names from chat senders, tells and the group
+        -- (not you, pets or NPCs), the @word under the cursor, newest
+        -- first, Tab completes in the callback, Up / Down pick while the
+        -- list is open, Enter completes from the draw
+        local AC = plugin.AC
+        local hadFlags = _G.ImGuiInputTextFlags
+        _G.ImGuiInputTextFlags = _G.ImGuiInputTextFlags or { EnterReturnsTrue = 32, CallbackCompletion = 64, CallbackHistory = 128, CallbackAlways = 256, CallbackEdit = 524288 }
+        local F = _G.ImGuiInputTextFlags
+        rt.names, rt.namesN = {}, 0
+        rt.me = 'Genro'
+        rt.pets = { Spinevenom = true }
+        AC.note('Genro'); AC.note('Spinevenom'); AC.note('a rat'); AC.note('')
+        assert_eq(rt.namesN, 0, 'Suite 102: your name, pets, NPC names and blanks are not completion candidates')
+        AC.note('Bobby', 100); AC.note('Bob', 200); AC.note('Alice', 300); AC.note('Bob', 150)
+        assert_eq(rt.names.Bob, 200, 'Suite 102: an older sighting never moves a name back')
+        assert_eq(table.concat(AC.matches('bo'), ','), 'Bob,Bobby', 'Suite 102: prefix match, case-insensitive, newest first')
+        assert_eq(table.concat(AC.matches(''), ','), 'Alice,Bob,Bobby', 'Suite 102: a bare @ lists everyone recent')
+        assert_eq(#AC.matches('zz'), 0, 'Suite 102: no match, no list')
+        local st0, cur0, pre0 = AC.token('wts @bo', 7)
+        assert_true(st0 == 4 and cur0 == 7 and pre0 == 'bo', 'Suite 102: the @word under the cursor: start, cursor, letters')
+        assert_nil(AC.token('wts bo', 6), 'Suite 102: a word without @ is no token')
+        assert_nil(AC.token('@bo and', 7), 'Suite 102: the cursor must be in the @word')
+        local s1, _, p1 = AC.token('@', 1)
+        assert_true(s1 == 0 and p1 == '', 'Suite 102: a lone @ is a token with no letters')
+        cfg.mentionComplete = true
+        rt.cbKey = 'w1/t1'
+        AC.track('wts @bo', 7)
+        assert_true(rt.ac ~= nil and rt.ac.sel == 1 and #rt.ac.matches == 2, 'Suite 102: tracking opens the list')
+        assert_eq(rt.ac.key, 'w1/t1', 'Suite 102: the list belongs to the input that opened it (another window\'s inactive input must not close it)')
+        assert_eq(AC.complete('wts @bo', rt.ac), 'wts Bob ', 'Suite 102: completion replaces the @word with the name and a space')
+        assert_eq(AC.complete('/t @bo hi', { start = 3, stop = 6, matches = { 'Bob' }, sel = 1 }), '/t Bob  hi', 'Suite 102: text after the cursor stays')
+        -- Up / Down while the list is open pick, not history
+        buf = 'wts @bo'; data.Buffer = buf; data.CursorPos = 7
+        data.EventKey = KEY.DownArrow
+        plugin.inputCallback(F.CallbackHistory, data)
+        assert_true(buf == 'wts @bo' and rt.ac.sel == 2, 'Suite 102: Down moves the selection and leaves the line')
+        plugin.inputCallback(F.CallbackHistory, data)
+        assert_eq(rt.ac.sel, 1, 'Suite 102: and wraps')
+        data.EventKey = KEY.UpArrow
+        plugin.inputCallback(F.CallbackHistory, data)
+        assert_eq(rt.ac.sel, 2, 'Suite 102: Up goes the other way')
+        -- a line from Bobby arrives: the list reorders, the highlight stays on Bobby
+        AC.note('Bobby', 400)
+        data.EventKey = 0
+        plugin.inputCallback(F.CallbackAlways or F.CallbackEdit or 0, data)
+        assert_true(rt.ac.matches[1] == 'Bobby' and rt.ac.sel == 1 and rt.ac.selName == 'Bobby', 'Suite 102: the selection follows the name when the list reorders')
+        AC.note('Bob', 500)
+        plugin.inputCallback(F.CallbackAlways or F.CallbackEdit or 0, data)
+        assert_true(rt.ac.matches[1] == 'Bob' and rt.ac.sel == 2 and rt.ac.matches[2] == 'Bobby', 'Suite 102: and again')
+        -- the event is told from EventKey even when the flag is unhelpful
+        data.EventKey = KEY.UpArrow
+        plugin.inputCallback(0, data)
+        assert_eq(rt.ac.sel, 1, 'Suite 102: Up is history by its key, whatever the flag says')
+        data.EventKey = KEY.DownArrow
+        plugin.inputCallback(0, data)
+        assert_eq(rt.ac.sel, 2, 'Suite 102: Down too')
+        -- Tab completes in place: the name that was highlighted, wherever it moved to
+        data.EventKey = KEY.Tab
+        plugin.inputCallback(F.CallbackCompletion, data)
+        assert_eq(buf, 'wts Bobby ', 'Suite 102: Tab completes the selected name in the buffer')
+        assert_eq(data.CursorPos, 10, 'Suite 102: cursor after the space')
+        assert_nil(rt.ac, 'Suite 102: the list closes')
+        -- the always callback tracks the cursor; the list closes when the word is gone
+        buf = 'hello @al'; data.Buffer = buf; data.CursorPos = 9; data.EventKey = 0
+        plugin.inputCallback(F.CallbackAlways or F.CallbackEdit or 0, data)
+        assert_true(rt.ac ~= nil and rt.ac.matches[1] == 'Alice', 'Suite 102: the always callback opens the list for the word at the cursor')
+        buf = 'hello Alice'; data.Buffer = buf; data.CursorPos = 11
+        plugin.inputCallback(F.CallbackAlways or F.CallbackEdit or 0, data)
+        assert_nil(rt.ac, 'Suite 102: and closes it once no @word is there')
+        -- Enter completes from the draft and refocuses with the cursor at the end
+        local est = { input = 'hey @al', links = nil }
+        AC.track('hey @al', 7)
+        assert_true(AC.applyToDraft(est, 'w1/t1'), 'Suite 102: Enter completion applies to the draft')
+        assert_eq(est.input, 'hey Alice ', 'Suite 102: the draft is completed')
+        assert_true(rt.acCursorEnd and rt.inputRefocus == 2 and rt.lastInputKey == 'w1/t1', 'Suite 102: the input is refocused with the cursor moved to the end')
+        buf = est.input; data.Buffer = buf; data.CursorPos = 0; data.SelectionStart = 0; data.SelectionEnd = #buf; data.EventKey = 0
+        function data:ClearSelection() self.SelectionStart = self.CursorPos; self.SelectionEnd = self.CursorPos end
+        plugin.inputCallback(F.CallbackAlways or F.CallbackEdit or 0, data)
+        assert_true(data.CursorPos == #buf and data.SelectionStart == #buf and not rt.acCursorEnd, 'Suite 102: the next callback puts the cursor at the end')
+        -- a click on a drawn row completes that name; the log ignores it
+        local cst = { input = 'yo @b', links = nil }
+        AC.track('yo @b', 5)
+        rt.acRect = { x0 = 100, y0 = 200, w = 160, lineH = 20, n = #rt.ac.matches, x1 = 260, y1 = 200 + 20 * (#rt.ac.matches + 1) }
+        local savedClick, savedPos = mockImGui.IsMouseClicked, mockImGui.GetMousePos
+        mockImGui.IsMouseClicked = function(b) return b == 0 end
+        mockImGui.GetMousePos = function() return 120, 231 end   -- second row
+        assert_true(AC.mouseInList(), 'Suite 102: the mouse over the list is known')
+        assert_true(AC.clickPick(cst, 'w1/t1'), 'Suite 102: a click on a row picks it')
+        assert_eq(cst.input, 'yo Bobby ', 'Suite 102: the second row was Bobby')
+        mockImGui.GetMousePos = function() return 120, 600 end
+        AC.track('yo @b', 5)
+        assert_true(not AC.clickPick(cst, 'w1/t1'), 'Suite 102: a click elsewhere is not a pick')
+        mockImGui.IsMouseClicked, mockImGui.GetMousePos = savedClick, savedPos
+        rt.ac = nil; rt.acRect = nil
+        cfg.mentionComplete = false
+        AC.track('hey @al', 7)
+        assert_nil(rt.ac, 'Suite 102: off, no list')
+        cfg.mentionComplete = true
+        rt.inputRefocus = 0
+        _G.ImGuiInputTextFlags = hadFlags
+        _G.ImGuiKey = hadKey
+        rt.cbState = nil
+    end
     rt.dirty = true
     plugin.onDestroy()
     assert_true(tellsSt.logFile == nil, 'Suite 102: tab logs closed on destroy')
@@ -16403,6 +16769,8 @@ end)()
     assert_eq(plugin2.cfg.windows[1].activeTab, 5, 'Suite 102: active tab persisted')
     assert_eq(plugin2.cfg.windows[1].tabs[5].tellTarget, 'Bob', 'Suite 102: tell target persisted')
     assert_eq(plugin2.cfg.colors.tell_in, '123456', 'Suite 102: color override persisted')
+    assert_eq(#plugin2.cfg.inputHistory, 100, 'Suite 102: input history persisted')
+    assert_eq(plugin2.cfg.inputHistory[100].text, 'bulk 105', 'Suite 102: newest line last')
     local okSettings, errSettings = pcall(plugin2.onDrawSettings)
     assert_true(okSettings, 'Suite 102: settings page renders under the mock: ' .. tostring(errSettings))
     plugin2.onDestroy()
@@ -17180,6 +17548,120 @@ end)()
     assert_eq(chat.expandLinks(fst, '[not a link]'), '[not a link]', 'Suite 103: brackets with no link are plain text')
     assert_true(not chat.insertLink('', 'x'), 'Suite 103: empty text is refused')
     fst.input = ''
+    -- the game's own chat line: an item window icon click writes the item's
+    -- name there (the client keeps the link as a tag MQ cannot read), so the
+    -- name is matched to the displayed item, its link built from the id and
+    -- placed here, and the name taken back out of the game line
+    local gameLine = 'wts '
+    local setCalls = 0
+    local edit = setmetatable({ Text = function() return gameLine end, SetText = function(t) setCalls = setCalls + 1; gameLine = t; return true end },
+        { __call = function() return 'TRUE' end })
+    chatCore.mq.TLO.Window = function(name) return { Child = function(c) if name == 'ChatWindow' and c == 'CW_ChatInput' then return edit end end } end
+    local shown = { [1] = { name = bracer, id = 1032100 }, [2] = { name = 'Sword of Fire', id = 5001 } }
+    chatCore.mq.TLO.DisplayItem = function(i)
+        local it = shown[i]
+        if not it then return nil end
+        return { Name = function() return it.name end, ID = function() return it.id end }
+    end
+    chatCore.mq.TLO.FindItem = function(n) if n == '=Carried Thing' then return { ID = function() return 777 end } end return { ID = function() return nil end } end
+    local cmds = {}
+    chatCore.mq.cmd = function(c) cmds[#cmds + 1] = c end
+    chat.cfg.gameLinks = true
+    chat.cfg.gameLineClose = false
+    chat.GL.last = nil
+    assert_eq(chat.GL.harvest(), 0, 'Suite 103: the first look at the game line only remembers it')
+    gameLine = 'wts ' .. bracer
+    assert_eq(chat.GL.harvest(), 1, 'Suite 103: a displayed item\'s name added to the game line becomes a link')
+    assert_eq(gameLine, 'wts', 'Suite 103: the name is taken back out of the game line, the typed text stays')
+    assert_eq(setCalls, 1, 'Suite 103: the game line is written back once')
+    assert_eq(fst.input, '[' .. bracer .. ']', 'Suite 103: the link shows in this input as [Name]')
+    assert_eq(fst.links[bracer], link1, 'Suite 103: the link is the 77-byte body for the item id')
+    assert_eq(chat.GL.harvest(), 0, 'Suite 103: nothing new, nothing done')
+    gameLine = 'wts hello'
+    assert_eq(chat.GL.harvest(), 0, 'Suite 103: typed text that is no item name is not a link')
+    assert_eq(setCalls, 1, 'Suite 103: and, with closing off, never written back')
+    assert_eq(chat.GL.gameFocus, true, 'Suite 103: but shows the game line has the keyboard')
+    gameLine = 'wts helloSword of Fire'
+    assert_eq(chat.GL.harvest(), 1, 'Suite 103: a second displayed item links too')
+    assert_eq(gameLine, 'wts hello', 'Suite 103: its name leaves the game line')
+    assert_eq(fst.input, '[' .. bracer .. '] [Sword of Fire]', 'Suite 103: it follows the first link')
+    assert_eq(fst.links['Sword of Fire'], L .. '000001389' .. string.rep('0', 68) .. 'Sword of Fire' .. L, 'Suite 103: built from that item\'s id')
+    gameLine = 'wts helloCarried Thing'
+    assert_eq(chat.GL.harvest(), 1, 'Suite 103: a name no item window shows is looked up in your own bags')
+    assert_eq(fst.links['Carried Thing'], L .. '000000309' .. string.rep('0', 68) .. 'Carried Thing' .. L, 'Suite 103: and linked by that id')
+    gameLine = 'wts helloUnknown Junk'
+    assert_eq(chat.GL.harvest(), 0, 'Suite 103: an unknown name is not a link')
+    assert_eq(gameLine, 'wts helloUnknown Junk', 'Suite 103: and stays in the game line')
+    gameLine = ''
+    chat.GL.harvest()
+    chat.cfg.gameLinks = false
+    gameLine = bracer
+    chat.GL.poll()
+    assert_eq(gameLine, bracer, 'Suite 103: links off, the game line keeps the name')
+    chat.cfg.gameLinks = true
+    -- closing the game line: Enter seen by the game opens it (the model),
+    -- and while Enter is this input's key the line is emptied and closed
+    -- with a keypress; text typed into the line proves it open and does the
+    -- same; Enter on an open line sends and closes; Esc closes
+    chat.cfg.gameLineClose = true
+    chat.cfg.enterFocus = true
+    chatCore.ctrl.show_chat = true
+    chat.GL.gameFocus = false
+    gameLine = ''
+    chat.GL.harvest()
+    local keys = {}
+    local savedIsKeyPressed, savedGetIO = mockImGui.IsKeyPressed, mockImGui.GetIO
+    mockImGui.IsKeyPressed = function(k) return keys[k] == true end
+    mockImGui.GetIO = function() return { WantCaptureKeyboard = false, WantTextInput = false } end
+    local hadKey103 = _G.ImGuiKey
+    _G.ImGuiKey = _G.ImGuiKey or { Enter = 525, KeypadEnter = 615, Escape = 526 }
+    local KEY = _G.ImGuiKey
+    keys[KEY.Enter] = true
+    chat.GL.poll()
+    assert_eq(cmds[#cmds], '/keypress ENTER', 'Suite 103: Enter reaching the game opens its line; a keypress closes it again')
+    assert_eq(chat.GL.gameFocus, false, 'Suite 103: the model says the line is closed')
+    keys[KEY.Enter] = nil
+    local before = #cmds
+    gameLine = 'wwww'
+    chat.GL.poll()
+    assert_eq(gameLine, '', 'Suite 103: keys typed into the game line: it is emptied')
+    assert_eq(cmds[#cmds], '/keypress ENTER', 'Suite 103: and closed')
+    assert_eq(#cmds, before + 1, 'Suite 103: with one keypress')
+    before = #cmds
+    chat.GL.gameFocus = true
+    keys[KEY.Enter] = true
+    chat.GL.poll()
+    assert_eq(#cmds, before, 'Suite 103: Enter on a line the model says is open sends it: no keypress')
+    assert_eq(chat.GL.gameFocus, false, 'Suite 103: and the line is closed')
+    keys[KEY.Enter] = nil
+    chat.GL.gameFocus = true
+    keys[KEY.Escape] = true
+    chat.GL.poll()
+    assert_eq(chat.GL.gameFocus, false, 'Suite 103: Esc closes the line')
+    assert_eq(#cmds, before, 'Suite 103: without a keypress')
+    keys[KEY.Escape] = nil
+    mockImGui.GetIO = function() return { WantCaptureKeyboard = true, WantTextInput = true } end
+    keys[KEY.Enter] = true
+    chat.GL.poll()
+    assert_eq(#cmds, before, 'Suite 103: Enter typed into ImGui never reached the game: nothing happens')
+    assert_eq(chat.GL.gameFocus, false, 'Suite 103: and the model does not move')
+    keys[KEY.Enter] = nil
+    mockImGui.GetIO = function() return { WantCaptureKeyboard = false, WantTextInput = false } end
+    chat.cfg.enterFocus = false
+    keys[KEY.Enter] = true
+    chat.GL.poll()
+    assert_eq(#cmds, before, 'Suite 103: with Enter not this input\'s key the game line is left open')
+    assert_eq(chat.GL.gameFocus, true, 'Suite 103: and the model says so')
+    keys[KEY.Enter] = nil
+    chat.cfg.enterFocus = true
+    chat.GL.gameFocus = false
+    mockImGui.IsKeyPressed, mockImGui.GetIO = savedIsKeyPressed, savedGetIO
+    _G.ImGuiKey = hadKey103
+    chatCore.mq.cmd = noop
+    chatCore.mq.TLO.DisplayItem = nil
+    chatCore.mq.TLO.FindItem = nil
+    chatCore.mq.TLO.Window = nil
+    fst.input = ''; fst.links = nil
     -- "[Spell Name]" / "[NPC (Zone)]" in a received line is a text link when
     -- the database knows the name; other brackets stay text; lines seen
     -- before the indexes were in are tokenized again once they are
@@ -18187,6 +18669,398 @@ do
         assert_true(isrc:find('mq.delay(', 1, true) == nil, 'Suite 108: the give workflow never blocks the core with mq.delay')
         assert_true(select(2, isrc:gsub('UI%.drawBagGrid%(', '')) >= 5, 'Suite 108: one bag grid renderer serves bags, bank, shared bank and peers')
         assert_true(isrc:find("BeginTabItem(\"Box Inventories##tabBoxes\")", 1, true) ~= nil, 'Suite 108: the Box Inventories tab is registered')
+    end
+
+    print = origPrint
+end
+
+
+-- ============================================================================
+-- Suite 109: NMS Loot plugin (tac/nmsloot.lua) -- reply parsing, #nms line
+-- building, /ac nms argument parsing, reply capture window, Box Network
+-- state sharing / remote requests / trust, settings round-trip.
+-- ============================================================================
+print('--- Suite 109: NMS Loot plugin ---')
+do
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+    local noop = function() end
+    local passthrough = function(_, v) return v end
+    local mockImGui = setmetatable({
+        Checkbox = passthrough, Button = function() return false end, SmallButton = function() return false end,
+        IsItemHovered = function() return false end, BeginTable = function() return false end,
+        Begin = function() return false, false end, BeginPopupContextWindow = function() return false end,
+        SliderInt = function(_, v) return v, false end, InputTextWithHint = function(_, _, v) return v, false end,
+        BeginCombo = function() return false end, CollapsingHeader = function() return false end,
+    }, { __index = function() return function() end end })
+
+    local function makeWorld(me)
+        local w = { cmds = {}, events = {}, saves = 0, nowMs = 100000, wall = 1000 }
+        local mq = {
+            event = function(name, pattern, fn) w.events[name] = fn end,
+            unevent = function(name) w.events[name] = nil end,
+            cmd = function(c) w.cmds[#w.cmds + 1] = c end,
+            cmdf = function(f, ...) w.cmds[#w.cmds + 1] = string.format(f, ...) end,
+            gettime = function() return w.nowMs end,
+            TLO = { Me = { CleanName = function() return me end } },
+        }
+        local ctrl = { plugins = {} }
+        local core = {
+            VERSION = '2.15', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
+            px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
+            preBeginWindow = noop, postBeginWindow = noop,
+            saveLoadout = function() w.saves = w.saves + 1 end,
+        }
+        return core, w, ctrl
+    end
+
+    local function makeBoxnet(me, peers)
+        local bn = { sent = {}, broadcasts = {}, subs = {}, gen = 1, trust = true, peersList = peers or {} }
+        function bn.available() return true end
+        function bn.myName() return me end
+        function bn.peers() return bn.peersList end
+        function bn.peer(name) for _, p in ipairs(bn.peersList) do if p.name:lower() == tostring(name):lower() then return p end end return nil end
+        function bn.generation() return bn.gen end
+        function bn.trusted() return bn.trust end
+        function bn.send(name, kind, data) bn.sent[#bn.sent + 1] = { to = name, kind = kind, data = data } return true end
+        function bn.broadcast(kind, data) bn.broadcasts[#bn.broadcasts + 1] = { kind = kind, data = data } return true end
+        function bn.subscribe(kind, fn) bn.subs[kind] = fn return function() bn.subs[kind] = nil end end
+        return bn
+    end
+
+    local function loadNms()
+        local fn = assert(loadfile('TAC/lua/tac/nmsloot.lua'))
+        local origPrint = print
+        print = quietPrint
+        local ok, inst = pcall(fn)
+        print = origPrint
+        assert_true(ok and type(inst) == 'table', 'Suite 109: nmsloot.lua loads')
+        return inst
+    end
+
+    local LINK = string.char(18)
+    local function itemLink(name) return LINK .. string.rep('0', 77) .. name .. LINK end
+
+    local origPrint = print
+    print = quietPrint
+
+    -- 1. Pure parsing: looter lines
+    do
+        local nms = loadNms()
+        local L = nms.logic
+        assert_eq(L.parseLooter('The active looter is Bob.'), 'Bob', 'Suite 109: "looter is Name"')
+        assert_eq(L.parseLooter('Active looter: Bob'), 'Bob', 'Suite 109: "looter: Name"')
+        assert_eq(L.parseLooter('Bob is now the active looter.'), 'Bob', 'Suite 109: "Name is now the active looter"')
+        assert_eq(L.parseLooter('Bob has claimed the active looter slot.'), 'Bob', 'Suite 109: "Name has claimed"')
+        assert_eq(L.parseLooter('Bob already has the active looter slot.'), 'Bob', 'Suite 109: claim refused names the holder')
+        assert_eq(L.parseLooter('The active looter slot is now held by Bob.'), 'Bob', 'Suite 109: "held by Name"')
+        assert_eq(L.parseLooter('You are now the active looter.'), 'You', 'Suite 109: "You are now" is this character')
+        assert_eq(L.parseLooter('You claimed the active looter slot.'), 'You', 'Suite 109: "You claimed" is this character')
+        assert_eq(L.parseLooter('The active looter slot is now yours.'), 'You', 'Suite 109: "yours" is this character')
+        assert_eq(L.parseLooter('No one is the active looter.'), '', 'Suite 109: "No one" is nobody')
+        assert_eq(L.parseLooter('There is no active looter.'), '', 'Suite 109: "no active looter" is nobody')
+        assert_eq(L.parseLooter('Bob is no longer the active looter.'), '', 'Suite 109: "no longer" empties the slot')
+        assert_nil(L.parseLooter('Bob is not the active looter.'), 'Suite 109: a negated name-first line says nothing')
+        assert_nil(L.parseLooter('You are not the active looter.'), 'Suite 109: a negated You line says nothing')
+        assert_eq(L.parseLooter('You are not the active looter, the active looter is Bob.'), 'Bob', 'Suite 109: a negated line still trusts "looter is Name"')
+        assert_nil(L.parseLooter('Only the active looter can loot that.'), 'Suite 109: a hint line says nothing')
+        assert_nil(L.parseLooter('Bob tells you, hello'), 'Suite 109: no "looter" no event')
+        -- echo
+        assert_eq(L.parseEcho('Loot echo is now on.'), true, 'Suite 109: echo on')
+        assert_eq(L.parseEcho('Loot echo is now off.'), false, 'Suite 109: echo off')
+        assert_eq(L.parseEcho('Loot offers will be echoed to chat: enabled'), true, 'Suite 109: echo enabled')
+        assert_nil(L.parseEcho('The echo of your footsteps'), 'Suite 109: echo without loot is ignored')
+        -- offers
+        local n, q = L.parseOffer('Offered: [Rusty Sword] x3')
+        assert_eq(n, 'Rusty Sword', 'Suite 109: bracketed item name')
+        assert_eq(q, 3, 'Suite 109: quantity from xN')
+        n, q = L.parseOffer('1. Peridot (x5)')
+        assert_eq(n, 'Peridot', 'Suite 109: numbered list name without the quantity')
+        assert_eq(q, 5, 'Suite 109: quantity from (xN)')
+        n = L.parseOffer('Fine Steel Dagger', { 'Fine Steel Dagger' })
+        assert_eq(n, 'Fine Steel Dagger', 'Suite 109: link name wins')
+        assert_nil(L.parseOffer('Nothing here'), 'Suite 109: no name no offer')
+        -- parseLine
+        local ev = L.parseLine('Loot offered to you: ' .. itemLink('Rusty Sword') .. ' x2')
+        assert_true(ev and ev.kind == 'offer' and ev.name == 'Rusty Sword' and ev.qty == 2, 'Suite 109: linked offer line')
+        ev = L.parseLine('Bob tells the group, \'loot [Guild] rules?\'')
+        assert_nil(ev, 'Suite 109: player chat with brackets is not an offer')
+        ev = L.parseLine('2. Peridot x1', 'list')
+        assert_true(ev and ev.kind == 'offer' and ev.name == 'Peridot', 'Suite 109: numbered lines are offers while a list reply is open')
+        ev = L.parseLine('2. Peridot x1', nil)
+        assert_nil(ev, 'Suite 109: numbered lines outside a list reply are ignored')
+        ev = L.parseLine('You keep ' .. itemLink('Rusty Sword') .. '.')
+        assert_true(ev and ev.kind == 'resolved' and ev.name == 'Rusty Sword', 'Suite 109: linked resolution line')
+        ev = L.parseLine('You sold Rusty Sword.')
+        assert_true(ev and ev.kind == 'resolved' and ev.name == 'Rusty Sword', 'Suite 109: plain resolution line takes the rest of the sentence')
+        ev = L.parseLine('Nothing is offered to you.')
+        assert_true(ev and ev.kind == 'empty', 'Suite 109: empty list line')
+        ev = L.parseLine('The active looter is Bob.')
+        assert_true(ev and ev.kind == 'looter' and ev.name == 'Bob', 'Suite 109: looter line event')
+        ev = L.parseLine('Loot echo is now on.')
+        assert_true(ev and ev.kind == 'echo' and ev.on == true, 'Suite 109: echo line event')
+    end
+
+    -- 2. #nms line building and /ac nms argument parsing
+    do
+        local nms = loadNms()
+        local L = nms.logic
+        assert_eq(L.nmsLine({ sub = 'claim' }), 'claim', 'Suite 109: claim line')
+        assert_eq(L.nmsLine({ sub = 'STATUS' }), 'status', 'Suite 109: sub-commands are case-insensitive')
+        assert_eq(L.nmsLine({ sub = 'echo', on = true }), 'echo on', 'Suite 109: echo on line')
+        assert_eq(L.nmsLine({ sub = 'echo', on = false }), 'echo off', 'Suite 109: echo off line')
+        assert_nil(L.nmsLine({ sub = 'echo' }), 'Suite 109: echo without on/off is refused')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'keep', item = 'Rusty Sword' }), 'loot keep "Rusty Sword"', 'Suite 109: loot line quotes the item')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'sell', item = '"Peri"dot"' }), 'loot sell "Peridot"', 'Suite 109: quotes inside the item name are stripped')
+        assert_nil(L.nmsLine({ sub = 'loot', action = 'steal', item = 'X' }), 'Suite 109: unknown loot action refused')
+        assert_nil(L.nmsLine({ sub = 'loot', action = 'keep', item = '' }), 'Suite 109: empty item refused')
+        assert_nil(L.nmsLine({ sub = 'zone', item = 'x' }), 'Suite 109: unknown sub-command refused')
+        assert_nil(L.nmsLine({ sub = 'claim; #zone x' }), 'Suite 109: no smuggling through the sub-command')
+
+        local function isPeer(n) return n == 'Bob' end
+        local spec = L.parseArgs({ 'nms' }, isPeer)
+        assert_eq(spec.sub, 'window', 'Suite 109: bare /ac nms is the window toggle')
+        spec = L.parseArgs({ 'nms', 'claim' }, isPeer)
+        assert_true(spec.sub == 'claim' and spec.target == nil, 'Suite 109: /ac nms claim is local')
+        spec = L.parseArgs({ 'nms', 'claim', 'Bob' }, isPeer)
+        assert_true(spec.sub == 'claim' and spec.target == nil, 'Suite 109: a trailing word after claim is ignored (target goes first)')
+        spec = L.parseArgs({ 'nms', 'Bob', 'claim' }, isPeer)
+        assert_true(spec.sub == 'claim' and spec.target == 'Bob', 'Suite 109: /ac nms Bob claim targets the box')
+        spec = L.parseArgs({ 'nms', 'Bob' }, isPeer)
+        assert_true(spec.sub == 'status' and spec.target == 'Bob', 'Suite 109: /ac nms Bob asks that box for status')
+        spec = L.parseArgs({ 'nms', 'loot', 'keep', 'Rusty', 'Sword' }, isPeer)
+        assert_true(spec.sub == 'loot' and spec.action == 'keep' and spec.item == 'Rusty Sword', 'Suite 109: item name rejoined from words')
+        spec = L.parseArgs({ 'nms', 'loot', 'keep', '"Rusty Sword"' }, isPeer)
+        assert_eq(spec.item, 'Rusty Sword', 'Suite 109: quotes stripped from the item')
+        spec = L.parseArgs({ 'nms', 'keep', 'Peridot' }, isPeer)
+        assert_true(spec.sub == 'loot' and spec.action == 'keep' and spec.item == 'Peridot', 'Suite 109: /ac nms keep X shorthand')
+        spec = L.parseArgs({ 'nms', 'Bob', 'loot', 'sell', 'Peridot' }, isPeer)
+        assert_true(spec.target == 'Bob' and spec.action == 'sell', 'Suite 109: remote loot action')
+        spec = L.parseArgs({ 'nms', 'echo', 'on' }, isPeer)
+        assert_true(spec.sub == 'echo' and spec.on == true, 'Suite 109: echo on parsed')
+        spec = L.parseArgs({ 'nms', 'echo', 'off' }, isPeer)
+        assert_true(spec.sub == 'echo' and spec.on == false, 'Suite 109: echo off parsed')
+        local bad, why = L.parseArgs({ 'nms', 'echo' }, isPeer)
+        assert_true(bad == nil and why:find('usage', 1, true) ~= nil, 'Suite 109: echo without on/off gives usage')
+        bad, why = L.parseArgs({ 'nms', 'Sam', 'claim' }, isPeer)
+        assert_true(bad == nil and why:find('not a box', 1, true) ~= nil, 'Suite 109: unknown box is explained')
+        bad = L.parseArgs({ 'nms', 'loot', 'keep' }, isPeer)
+        assert_nil(bad, 'Suite 109: loot without an item is refused')
+        spec = L.parseArgs({ 'nms', 'me', 'claim' }, isPeer)
+        assert_true(spec.sub == 'claim' and spec.target == nil, 'Suite 109: "me" is this box')
+    end
+
+    -- 3. Live flow: send, capture window, belief, boxnet sharing
+    do
+        local core, w, ctrl = makeWorld('Tank')
+        local bn = makeBoxnet('Tank', { { name = 'Bob' }, { name = 'Sam' } })
+        core.boxnet = bn
+        local nms = loadNms()
+        nms.clock = function() return w.nowMs / 1000 end
+        nms.wallClock = function() return w.wall end
+        nms.onInit(core)
+        assert_eq(ctrl.show_nmsloot, false, 'Suite 109: window flag seeded')
+        assert_true(w.events.TacNmsLootAll ~= nil, 'Suite 109: catch-all chat event registered')
+        assert_true(bn.subs['nmsloot:state'] and bn.subs['nmsloot:who'] and bn.subs['nmsloot:run'], 'Suite 109: boxnet subscriptions in place')
+
+        -- first tick: status query (statusOnInit) and a who broadcast
+        nms.tick()
+        assert_eq(w.cmds[1], '/say #nms status', 'Suite 109: one #nms status on the first tick')
+        assert_true(bn.broadcasts[1] and bn.broadcasts[1].kind == 'nmsloot:who', 'Suite 109: asks the boxes what they know')
+        assert_true(nms.state.pending ~= nil and nms.state.pending.spec.sub == 'status', 'Suite 109: a reply window is open')
+
+        -- server replies: we are the looter
+        w.events.TacNmsLootAll('You are the active looter.')
+        assert_eq(nms.state.looter, 'Tank', 'Suite 109: "You" resolves to this character')
+        assert_eq(nms.state.looterFrom, 'server', 'Suite 109: source is the server')
+        assert_true(nms.state.net.dirty, 'Suite 109: a change marks the state dirty')
+        -- our own announce line must not be re-parsed
+        w.events.TacNmsLootAll('[NMS Loot] Active looter is now Bob.')
+        assert_eq(nms.state.looter, 'Tank', 'Suite 109: own tagged prints are skipped')
+        w.events.TacNmsLootAll("You say, '#nms status'")
+        assert_eq(nms.state.looter, 'Tank', 'Suite 109: the echoed say line is skipped')
+
+        -- reply window closes after CAPTURE_SEC and the state is broadcast
+        w.nowMs = w.nowMs + 2500
+        bn.broadcasts = {}
+        nms.tick()
+        assert_nil(nms.state.pending, 'Suite 109: reply window closed')
+        assert_true(bn.broadcasts[1] and bn.broadcasts[1].kind == 'nmsloot:state', 'Suite 109: state broadcast after the reply window')
+        assert_eq(bn.broadcasts[1].data.looter, 'Tank', 'Suite 109: broadcast names the holder')
+        assert_eq(bn.broadcasts[1].data.known, true, 'Suite 109: broadcast says the holder is known')
+        assert_eq(bn.broadcasts[1].data.asOf, 1000, 'Suite 109: broadcast carries the server-confirmed time')
+
+        -- a peer reports a newer claim: adopt it
+        w.wall = 1010
+        bn.subs['nmsloot:state']({ looter = 'Bob', known = true, asOf = 1010, echo = true, offers = { { n = 'Peridot', q = 2 } }, at = 1010 }, { character = 'Bob' })
+        assert_eq(nms.state.looter, 'Bob', 'Suite 109: a newer peer report is adopted')
+        assert_eq(nms.state.looterFrom, 'Bob', 'Suite 109: source is the peer')
+        assert_eq(nms.state.peers.bob.offers[1].name, 'Peridot', 'Suite 109: the peer\'s offers are kept')
+        assert_eq(nms.state.peers.bob.echo, true, 'Suite 109: the peer\'s echo state is kept')
+        -- an older peer report does not override
+        bn.subs['nmsloot:state']({ looter = 'Sam', known = true, asOf = 900, offers = {}, at = 900 }, { character = 'Sam' })
+        assert_eq(nms.state.looter, 'Bob', 'Suite 109: an older report is ignored')
+        assert_eq(nms.state.peers.sam.looter, 'Sam', 'Suite 109: ...but the peer row remembers what Sam thinks')
+        -- a server line always wins
+        w.wall = 1020
+        w.events.TacNmsLootAll('The active looter is Sam.')
+        assert_eq(nms.state.looter, 'Sam', 'Suite 109: server line adopted')
+        assert_eq(nms.state.looterAsOf, 1020, 'Suite 109: server line stamps the time')
+        w.events.TacNmsLootAll('No one holds the active looter slot.')
+        assert_eq(nms.state.looter, '', 'Suite 109: nobody')
+
+        -- who request from a peer answers with our state (rate limited)
+        bn.broadcasts = {}
+        bn.subs['nmsloot:who']({}, { character = 'Bob' })
+        assert_true(bn.broadcasts[1] and bn.broadcasts[1].kind == 'nmsloot:state', 'Suite 109: who is answered with a state broadcast')
+        bn.subs['nmsloot:who']({}, { character = 'Sam' })
+        assert_eq(#bn.broadcasts, 1, 'Suite 109: a second who inside the window is not answered again')
+
+        -- list: numbered lines inside the window become the offers
+        w.cmds = {}
+        assert_true(nms.runOn(nil, { sub = 'list' }), 'Suite 109: local list sent')
+        assert_eq(w.cmds[1], '/say #nms list', 'Suite 109: list line')
+        w.events.TacNmsLootAll('Items offered to you:')
+        w.events.TacNmsLootAll('1. ' .. itemLink('Rusty Sword') .. ' x1')
+        w.events.TacNmsLootAll('2. Peridot x3')
+        assert_eq(#nms.state.offers, 0, 'Suite 109: offers replace the list only when the reply window closes')
+        w.nowMs = w.nowMs + 2500
+        nms.tick()
+        assert_eq(#nms.state.offers, 2, 'Suite 109: two offers listed')
+        assert_eq(nms.state.offers[1].name, 'Rusty Sword', 'Suite 109: linked item name')
+        assert_eq(nms.state.offers[2].qty, 3, 'Suite 109: numbered item quantity')
+        -- echo offer outside a window adds; resolution removes
+        w.events.TacNmsLootAll('Loot offered: ' .. itemLink('Fine Steel Dagger'))
+        assert_eq(#nms.state.offers, 3, 'Suite 109: an echoed offer is added')
+        w.events.TacNmsLootAll('You keep ' .. itemLink('Rusty Sword') .. '.')
+        assert_eq(#nms.state.offers, 2, 'Suite 109: a handled item leaves the list')
+        w.events.TacNmsLootAll('Loot offered: ' .. itemLink('Fine Steel Dagger'))
+        assert_eq(#nms.state.offers, 2, 'Suite 109: the same offer twice is one row')
+        w.events.TacNmsLootAll('Loot echo is now on.')
+        assert_eq(nms.state.echo, true, 'Suite 109: echo state from the server')
+
+        -- loot action locally and remotely
+        w.cmds = {}
+        nms.runOn(nil, { sub = 'loot', action = 'keep', item = 'Peridot' })
+        assert_eq(w.cmds[1], '/say #nms loot keep "Peridot"', 'Suite 109: local loot action')
+        bn.sent = {}
+        local ok = nms.runOn('bob', { sub = 'claim' })
+        assert_true(ok, 'Suite 109: remote claim sent')
+        assert_true(bn.sent[1].to == 'Bob' and bn.sent[1].kind == 'nmsloot:run' and bn.sent[1].data.sub == 'claim', 'Suite 109: remote claim addressed by the roster name')
+        local okX, whyX = nms.runOn('Nobody', { sub = 'claim' })
+        assert_true(okX == false and whyX:find('not on the Box Network', 1, true) ~= nil, 'Suite 109: unknown box refused')
+        okX, whyX = nms.runOn('Bob', { sub = 'loot', action = 'eat', item = 'x' })
+        assert_true(okX == false, 'Suite 109: a bad spec is refused before sending')
+
+        -- incoming run request: trusted -> typed; untrusted / off -> refused with a reason
+        w.cmds = {}
+        nms.state.pending = nil
+        bn.subs['nmsloot:run']({ sub = 'claim' }, { character = 'Bob' })
+        assert_eq(w.cmds[1], '/say #nms claim', 'Suite 109: a trusted peer\'s claim request is typed')
+        assert_eq(nms.state.pending.from, 'Bob', 'Suite 109: the reply window remembers who asked')
+        w.cmds = {}
+        bn.subs['nmsloot:run']({ sub = 'loot', action = 'keep', item = 'Peridot' }, { character = 'Bob' })
+        assert_eq(w.cmds[1], '/say #nms loot keep "Peridot"', 'Suite 109: a remote loot request is typed')
+        w.cmds = {}
+        bn.subs['nmsloot:run']({ sub = 'zone', item = 'x' }, { character = 'Bob' })
+        assert_eq(#w.cmds, 0, 'Suite 109: an unknown sub-command from a peer types nothing')
+        bn.sent = {}
+        bn.trust = false
+        bn.subs['nmsloot:run']({ sub = 'claim' }, { character = 'Bob' })
+        assert_eq(#w.cmds, 0, 'Suite 109: an untrusted peer types nothing')
+        assert_true(bn.sent[1] and bn.sent[1].kind == 'nmsloot:state' and bn.sent[1].data.refused == 'not trusted', 'Suite 109: the refusal reason goes back')
+        bn.trust = true
+        nms.cfg.acceptRemote = false
+        bn.subs['nmsloot:run']({ sub = 'claim' }, { character = 'Bob' })
+        assert_eq(#w.cmds, 0, 'Suite 109: remote requests off types nothing')
+        nms.cfg.acceptRemote = true
+        -- a refusal from a peer is logged here
+        bn.subs['nmsloot:state']({ looter = '', known = false, offers = {}, refused = 'not trusted', at = 1 }, { character = 'Sam' })
+        assert_true(nms.state.log[1].text:find('Sam refused', 1, true) ~= nil, 'Suite 109: a peer refusal is logged')
+
+        -- holder re-broadcast
+        w.wall = 2000
+        w.events.TacNmsLootAll('You are the active looter.')
+        w.nowMs = w.nowMs + 3000
+        nms.state.pending = nil
+        nms.tick()
+        bn.broadcasts = {}
+        w.nowMs = w.nowMs + 21000
+        nms.tick()
+        assert_true(bn.broadcasts[1] and bn.broadcasts[1].data.looter == 'Tank', 'Suite 109: the holder re-announces itself')
+
+        -- boxnet reload re-subscribes
+        bn.gen = 2
+        bn.subs = {}
+        nms.tick()
+        assert_true(bn.subs['nmsloot:state'] ~= nil, 'Suite 109: re-subscribed after a boxnet reload')
+
+        -- settings
+        local saved = nms.onSaveSettings()
+        assert_true(saved.announce == true and saved.statusOnInit == true and saved.acceptRemote == true and saved.pollSec == 0, 'Suite 109: settings saved')
+        nms.onLoadSettings({ announce = false, pollSec = 30, statusOnInit = false })
+        assert_true(nms.cfg.announce == false and nms.cfg.pollSec == 30 and nms.cfg.statusOnInit == false, 'Suite 109: settings loaded')
+        nms.onLoadSettings({ pollSec = 9999 })
+        assert_eq(nms.cfg.pollSec, 300, 'Suite 109: poll interval clamped')
+        -- poll sends status on schedule
+        w.cmds = {}
+        nms.state.pending = nil
+        nms.cfg.pollSec = 10
+        w.nowMs = w.nowMs + 11000
+        nms.tick()
+        assert_eq(w.cmds[1], '/say #nms status', 'Suite 109: periodic status poll')
+
+        -- commands
+        w.cmds = {}
+        bn.sent = {}
+        assert_true(nms.onCommand('nms', { 'nms', 'claim' }), 'Suite 109: /ac nms claim handled')
+        assert_eq(w.cmds[#w.cmds], '/say #nms claim', 'Suite 109: /ac nms claim types the claim')
+        assert_true(nms.onCommand('nms', { 'nms', 'Bob', 'claim' }), 'Suite 109: /ac nms Bob claim handled')
+        assert_true(bn.sent[#bn.sent].to == 'Bob' and bn.sent[#bn.sent].data.sub == 'claim', 'Suite 109: remote claim over boxnet')
+        nms.onCommand('nms', { 'nms', 'loot', 'sell', 'Rusty', 'Sword' })
+        assert_eq(w.cmds[#w.cmds], '/say #nms loot sell "Rusty Sword"', 'Suite 109: /ac nms loot sell types the line')
+        nms.onCommand('nms', { 'nms', 'echo', 'off' })
+        assert_eq(w.cmds[#w.cmds], '/say #nms echo off', 'Suite 109: /ac nms echo off')
+        local shown = ctrl.show_nmsloot
+        nms.onCommand('nms', { 'nms' })
+        assert_eq(ctrl.show_nmsloot, not shown, 'Suite 109: bare /ac nms toggles the window')
+        printed = {}
+        nms.onCommand('nms', { 'nms', 'who' })
+        assert_true(printed[1] and printed[1]:find('Active looter', 1, true) ~= nil, 'Suite 109: /ac nms who prints the roster')
+        assert_true(nms.onCommand('parcels', { 'parcels' }) == false, 'Suite 109: other commands ignored')
+
+        nms.onDestroy()
+        assert_nil(w.events.TacNmsLootAll, 'Suite 109: chat event released on destroy')
+        assert_nil(bn.subs['nmsloot:state'], 'Suite 109: boxnet subscriptions released on destroy')
+    end
+
+    -- 4. Works without boxnet (feature off, nothing crashes)
+    do
+        local core, w = makeWorld('Solo')
+        local nms = loadNms()
+        nms.clock = function() return w.nowMs / 1000 end
+        nms.onInit(core)
+        nms.tick()
+        assert_eq(w.cmds[1], '/say #nms status', 'Suite 109: status query without boxnet')
+        local ok, why = nms.runOn('Bob', { sub = 'claim' })
+        assert_true(ok == false and why:find('Box Network', 1, true) ~= nil, 'Suite 109: remote request without boxnet is explained')
+        w.events.TacNmsLootAll('The active looter is Solo.')
+        assert_eq(nms.state.looter, 'Solo', 'Suite 109: local parsing still works')
+        w.nowMs = w.nowMs + 3000
+        nms.tick()
+        nms.onDestroy()
+    end
+
+    -- 5. Core wiring
+    do
+        local t = readFile('TAC/lua/triune.lua')
+        assert_true(t:find("'nmsloot.lua',", 1, true) ~= nil, 'Suite 109: discover() known-plugin probe lists nmsloot.lua')
+        assert_true(t:find('if c.show_nmsloot == nil then c.show_nmsloot = false end', 1, true) ~= nil, 'Suite 109: sanitize seeds show_nmsloot')
+        local psrc = readFile('TAC/lua/tac/nmsloot.lua')
+        assert_true(psrc:find('mq.delay(', 1, true) == nil, 'Suite 109: the plugin never blocks the core')
+        assert_true(psrc:find("mq.cmdf('/say #nms %s', line)", 1, true) ~= nil, 'Suite 109: #nms goes out through /say like every other server command')
+        assert_true(select(2, psrc:gsub("mq%.cmdf?%(", '')) == 1, 'Suite 109: nmsLine() is the only way a #nms line is typed')
     end
 
     print = origPrint

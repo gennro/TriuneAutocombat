@@ -246,6 +246,7 @@ local function sanitizeModeConfig(c)
     if c.show_chat == nil then c.show_chat = false end
     if c.show_gamedb == nil then c.show_gamedb = false end
     if c.show_parcels == nil then c.show_parcels = false end
+    if c.show_nmsloot == nil then c.show_nmsloot = false end
     if c.cooldown_alpha == nil then c.cooldown_alpha = 0.90 end
     if c.cooldown_locked == nil then c.cooldown_locked = false end
     if c.cooldown_view_mode == nil then c.cooldown_view_mode = 'table' end
@@ -436,6 +437,7 @@ local function defaultCtrl()
         show_chat                = false,
         show_gamedb              = false,
         show_parcels             = false,
+        show_nmsloot             = false,
         cooldown_alpha           = 0.90,
         cooldown_locked          = false,
         cooldown_view_mode       = 'table',
@@ -2594,6 +2596,77 @@ isHostileTarget = function(id)
     return true
 end
 
+-- XTarget slot types that only mirror what a friendly has selected: "Group
+-- Tank Target", "Group Assist Target", "Group Puller Target", "Group Mark
+-- Target", "Raid Assist N Target", "My Pet Target", "Target of Target",
+-- "Specific NPC"... A live mob in one of those is not necessarily fighting
+-- anyone -- a group member may just have clicked it to con it. "Auto Hater"
+-- slots only ever hold mobs that have us (or the group) on their hate list.
+local function xtSlotIsSelectionOnly(targetType)
+    local tt = tostring(targetType or ''):lower()
+    if tt == '' or tt == 'auto hater' then return false end
+    return tt == 'specific npc' or tt:find(' target', 1, true) ~= nil
+end
+
+-- Who the mob in XTarget slot `xt` is fighting: its target and its aggro
+-- holder (0 when unknown), plus our aggro % on it.
+local function xtSlotFightInfo(xt)
+    local aggro, totId, holderId = 0, 0, 0
+    pcall(function() aggro = xt.PctAggro() or 0 end)
+    pcall(function() totId = xt.TargetOfTarget.ID() or 0 end)
+    pcall(function() holderId = xt.AggroHolder.ID() or 0 end)
+    return aggro, totId, holderId
+end
+
+-- True when the mob in slot `xt` is fighting THIS character: we are on its
+-- hate list (XTarget.PctAggro), or it is targeting / being held by us or one
+-- of our pets.
+local function xtSlotFightingMe(xt)
+    local aggro, totId, holderId = xtSlotFightInfo(xt)
+    if aggro > 0 then return true end
+    local myId = mq.TLO.Me.ID() or 0
+    local function mine(pid) return pid > 0 and (pid == myId or isSpawnMyPet(pid)) end
+    return mine(totId) or mine(holderId)
+end
+
+-- True when the mob in XTarget slot `xt` is actually fighting our side. An
+-- Auto Hater slot always is (and so is any slot type we don't recognise, to
+-- keep the old behaviour); a selection-only slot counts once the mob has
+-- aggro on us or its target / aggro holder is one of ours.
+local function xtSlotEngaged(xt)
+    local tt = ''
+    pcall(function() tt = xt.TargetType() or '' end)
+    if not xtSlotIsSelectionOnly(tt) then return true end
+    local aggro, totId, holderId = xtSlotFightInfo(xt)
+    if aggro > 0 then return true end
+    local myId = mq.TLO.Me.ID() or 0
+    local function ours(pid)
+        return pid > 0 and (pid == myId or isGroupOrRaidMember(pid)
+            or (runtime.isBoxPeerId and runtime.isBoxPeerId(pid)) or false)
+    end
+    return ours(totId) or ours(holderId)
+end
+
+-- Whether an XTarget occupant counts as an enemy in play for the scanners
+-- below. The self-directed modes treat every hostile on XTarget as live.
+-- Manual mode only fights what THIS character is in: a mob fighting us (or
+-- our pet) always counts; anything else counts only while we are joining
+-- XTarget fights (Auto-Target Hostiles on XTarget), the mob is engaged with
+-- our side (xtSlotEngaged -- not merely selected by the tank) and it is
+-- inside the chase range. Auto Hater slots are shared by the whole group on
+-- this server, so a second character pulling on its own across the zone used
+-- to make isCombat() true here, count toward every Min XT gate and fire each
+-- 'in combat' AA / disc / ability while this character stood idle.
+local function xtSlotCounts(xt, id)
+    if not ctrl or ctrl.mode ~= 'Manual' then return true end
+    if xtSlotFightingMe(xt) then return true end
+    if ctrl.manual_auto_xtarget == false then return false end
+    if not xtSlotEngaged(xt) then return false end
+    local d = 999
+    pcall(function() d = xt.Distance3D() or xt.Distance() or 999 end)
+    return d <= (ctrl.xtar_nav_dist or 150)
+end
+
 -- True if `id` occupies an XTarget slot and is a live, non-ignored hostile.
 -- isHostileTarget() already covers the friendly / dead / type checks.
 local function isXTargetId(id)
@@ -2601,7 +2674,7 @@ local function isXTargetId(id)
     for i = 1, 13 do
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) == id then
-            return isHostileTarget(id) and not isIgnored(xt.CleanName())
+            return isHostileTarget(id) and not isIgnored(xt.CleanName()) and xtSlotCounts(xt, id)
         end
     end
     return false
@@ -2615,7 +2688,7 @@ local function hasActualNPCXtarget()
             local xt = mq.TLO.Me.XTarget(i)
             if xt and xt() then
                 local id = xt.ID() or 0
-                if id > 0 and isHostileTarget(id) and not isIgnored(xt.CleanName()) then
+                if id > 0 and isHostileTarget(id) and not isIgnored(xt.CleanName()) and xtSlotCounts(xt, id) then
                     found = true
                     return
                 end
@@ -2644,7 +2717,9 @@ function runtime.xtSnapshot()
                 local id = xt.ID() or 0
                 if id > 0 then
                     local name = xt.CleanName() or ''
-                    local hostile = isHostileTarget(id)
+                    -- A hostile parked in a selection-only slot (see
+                    -- xtSlotCounts) is recorded but not treated as hostile.
+                    local hostile = isHostileTarget(id) and xtSlotCounts(xt, id)
                     local ignored = isIgnored(name)
                     local row = { slot = i, id = id, name = name, hostile = hostile, ignored = ignored,
                         unreachable = (hostile and not ignored) and isUnreachable(id) or false }
@@ -2752,7 +2827,7 @@ function runtime.findFirstNPCXtarget(unmezzedOnly, isIgnoredFn, isUnreachableFn,
             local xt = mq.TLO.Me.XTarget(i)
             if xt() then
                 local id = xt.ID() or 0
-                if id > 0 and isHostileTarget(id) then
+                if id > 0 and isHostileTarget(id) and xtSlotCounts(xt, id) then
                     local s = mq.TLO.Spawn(id)
                     if s() then
                         local cname = s.CleanName() or ''
@@ -5974,6 +6049,7 @@ local function loadoutSig()
                 '~' ..
                 tostring(a.enabled) .. '~' .. tostring(a.target) .. '~' .. tostring(a.when) .. '~' .. tostring(a.pct)
                 .. '~' .. tostring(a.boss_only) .. '~' .. tostring(a.burn_only) .. '~' .. tostring(a.priority)
+                .. '~' .. tostring(a.min_xtar) .. '~' .. tostring(a.excl)
         end
     end
     local dkeys = {}
@@ -7236,6 +7312,7 @@ function runtime.initPluginManager()
             'buttons.lua',
             'gamedb.lua',
             'parcels.lua',
+            'nmsloot.lua',
         }
         for _, f in ipairs(known) do
             if not fileSet[f:lower()] then
@@ -8542,6 +8619,13 @@ function UI.drawHelpTab()
             end
             ImGui.EndTable()
         end
+
+        ImGui.Spacing()
+        accent(GOLD, 'AA Exclusion Groups (AAs tab, Grp column):')
+        ImGui.TextWrapped(
+            'Put AAs that grant the same effect (e.g. Bloodlust and Rage of Rallos Zek, which both let every proc fire on every swing) ' ..
+            'in the same letter group. Only one AA per group runs at a time: the one listed highest in the AAs tab fires first, and the ' ..
+            'next one fires as soon as that effect drops, so they chain back-to-back instead of overlapping and wasting one.')
     end
 
     ImGui.EndTabItem()
@@ -9455,9 +9539,13 @@ end
 -- UI: activated AAs tab
 function UI.drawAATab()
     if not ImGui.BeginTabItem('AAs') then return end
-    ImGui.TextWrapped('Activated Alternate Advancements (each has its own timer -- all fire when ready). Grouped by cooldown.')
+    ImGui.TextWrapped('Activated Alternate Advancements (each has its own timer -- all fire when ready). Grouped by cooldown. Use Grp to chain AAs that do the same thing.')
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.')
+        ImGui.SetTooltip(
+            'Activated Alternate Advancement abilities operate on independent cooldown timers and fire automatically when their conditions are met.\n\n' ..
+            'Grp: put AAs that grant the same effect (e.g. Bloodlust and Rage of Rallos Zek) in the same letter group.\n' ..
+            'Only one AA per group runs at a time -- the one listed highest in this tab fires first, and the next\n' ..
+            'one fires once that effect drops, so they chain back-to-back instead of overlapping.')
     end
     ctrl.aa_purchased_only = ImGui.Checkbox('Purchased Only', ctrl.aa_purchased_only)
     if ImGui.IsItemHovered() then
@@ -9559,6 +9647,31 @@ function UI.drawAATab()
                                     entry.burn_only = aaboVal
                                     if ImGui.IsItemHovered() then
                                         ImGui.SetTooltip('Only fire this AA when Burn Mode is ON.')
+                                    end
+                                    ImGui.SameLine(); ImGui.SetNextItemWidth(UI.px(38))
+                                    local exOpts = runtime.AA_EXCL_GROUPS
+                                    local exi = ImGui.Combo('##aaex', idxOf(exOpts, entry.excl or '-'), exOpts)
+                                    entry.excl = (exi > 1) and exOpts[exi] or nil
+                                    if ImGui.IsItemHovered() then
+                                        ImGui.SetTooltip(
+                                            'Exclusion group. AAs sharing a letter never run at the same time:\n' ..
+                                            'the one listed highest in this tab fires first, the next fires when\n' ..
+                                            'that effect drops. Use for AAs that grant the same thing.')
+                                    end
+                                    if entry.excl then
+                                        ImGui.SameLine()
+                                        if runtime.aaGroupBusy(nm, entry) then
+                                            ImGui.TextDisabled('waiting')
+                                            if ImGui.IsItemHovered() then
+                                                ImGui.SetTooltip('Another AA in group ' .. entry.excl .. ' is still running; this one fires when it drops.')
+                                            end
+                                        elseif runtime.isAAEffectActive(nm) then
+                                            local r2, g2, b2 = 0.4, 0.9, 0.4
+                                            ImGui.TextColored(r2, g2, b2, 1, 'running')
+                                            if ImGui.IsItemHovered() then
+                                                ImGui.SetTooltip('This AA\'s effect is up; the rest of group ' .. entry.excl .. ' waits for it.')
+                                            end
+                                        end
                                     end
                                 end
                                 loadout.aas[nm] = entry
@@ -11322,7 +11435,11 @@ function UI.drawControlTab()
             ctrl.manual_auto_xtarget ~= false)
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Checked: Automatically acquires and fights hostile NPCs that enter your Extended Target (XTarget) list.\nUnchecked: Only fights targets you manually select.')
+                'Checked: Automatically acquires and fights hostile NPCs that enter your Extended Target (XTarget) list.\n' ..
+                'Only mobs inside the Max XTarget Chase Range that are actually fighting your group count (Auto Hater slots, or a mob\n' ..
+                'with aggro on you / targeting one of yours) -- a mob that just sits in a Group Tank/Assist/Puller Target slot because someone\n' ..
+                'selected it, or that another character is fighting on the far side of the zone, is not this character\'s combat.\n' ..
+                'Unchecked: Only fights targets you manually select (and anything that is hitting you).')
         end
         if ctrl.manual_auto_xtarget ~= false then
             ImGui.SetNextItemWidth(UI.px(180))
@@ -15633,7 +15750,7 @@ function runtime.countNPCXtarget(includeUnreachable)
                 local xt = mq.TLO.Me.XTarget(i)
                 if xt() then
                     local id = xt.ID() or 0
-                    if id > 0 and isHostileTarget(id)
+                    if id > 0 and isHostileTarget(id) and xtSlotCounts(xt, id)
                         and not isIgnored(xt.CleanName())
                         and (includeUnreachable or not isUnreachable(id)) then
                         cnt = cnt + 1
@@ -16168,10 +16285,15 @@ local function isCombat()
         if mq.TLO.Me.Combat() then return true end
         if mq.TLO.Me.AutoFire() then return true end
         if mq.TLO.Me.CombatState() == 'COMBAT' then return true end
-        local hCount = mq.TLO.Me.XTHaterCount() or 0
-        if hCount > 0 then return true end
-        local aCount = mq.TLO.Me.XTAggroCount() or 0
-        if aCount > 0 then return true end
+        -- The hater / aggro counters cover the whole group's haters. Manual
+        -- mode judges each slot below (xtSlotCounts) so a second character's
+        -- pulls elsewhere in the zone do not read as this character's combat.
+        if not (ctrl and ctrl.mode == 'Manual') then
+            local hCount = mq.TLO.Me.XTHaterCount() or 0
+            if hCount > 0 then return true end
+            local aCount = mq.TLO.Me.XTAggroCount() or 0
+            if aCount > 0 then return true end
+        end
         local t = mq.TLO.Target
         if t() and (t.ID() or 0) > 0 and not isGroupOrRaidMember(t.ID()) and not isSpawnPetOrPlayer(t.ID()) then
             local stype = t.Type() or ''
@@ -16188,7 +16310,8 @@ local function isCombat()
                     local s = mq.TLO.Spawn(id)
                     if s() then
                         local stype = s.Type() or ''
-                        if (stype == 'NPC' or stype == 'Pet') and not s.Dead() and stype ~= 'Corpse' and not isIgnored(s.CleanName()) and isHostileTarget(id) then
+                        if (stype == 'NPC' or stype == 'Pet') and not s.Dead() and stype ~= 'Corpse' and not isIgnored(s.CleanName())
+                            and isHostileTarget(id) and xtSlotCounts(xt, id) then
                             return true
                         end
                     end
@@ -17420,6 +17543,7 @@ function runtime.fireAA(name, a, id)
     if not runtime.aaCooldownTotal then runtime.aaCooldownTotal = {} end
     runtime.aaCooldownTotal[name] = aaReuse
     runtime.lastCast[key] = now + aaReuse
+    runtime.noteAAEffectStarted(name, now)
 
     print('\ag[Triune]\ax AA fired: ' .. name)
     if orig ~= id and orig > 0 and not keepHostile then
@@ -17434,6 +17558,127 @@ function runtime.fireAA(name, a, id)
         mq.cmd('/attack on')
     end
     return true
+end
+
+-- ---------------------------------------------------------------------------
+-- AA exclusion groups
+-- Two AAs that grant the same thing (Bloodlust and Rage of Rallos Zek both
+-- let every proc fire on every swing) should run one after the other, not
+-- on top of each other. Each AA row can be put in a lettered group; only one
+-- AA per group may have its effect running at a time. When several are ready
+-- the one listed first in the AAs tab fires, and the next one fires once that
+-- effect drops. "Running" is the AA's buff on us (by the buff's own name --
+-- it is not always the AA's name) OR a software timer from the fire time plus
+-- the spell's duration, which covers the tick or two before the buff shows up
+-- in the window and buffs whose names the window reports differently.
+-- ---------------------------------------------------------------------------
+runtime.AA_EXCL_GROUPS = { '-', 'A', 'B', 'C', 'D', 'E' }
+runtime.aaEffectUntil = {}   -- AA name -> os.clock() when its effect should be gone
+runtime.aaBuffNameCache = {} -- AA name -> { name = buff name, time = os.clock() }
+
+-- The buff an AA lands on us, resolved through its attached spell. Cached
+-- because Me.AltAbility(name).Spell is a few TLO hops and this runs per
+-- grouped AA per tick.
+function runtime.aaBuffName(name)
+    local now = os.clock()
+    local c = runtime.aaBuffNameCache[name]
+    if c and (now - (c.time or 0)) < 30.0 then return c.name end
+    local buff = name
+    pcall(function()
+        local aa = mq.TLO.Me.AltAbility(name)
+        if aa and aa() and aa.Spell and aa.Spell() then
+            local sn = aa.Spell.Name()
+            if sn and sn ~= '' and sn ~= 'NULL' then buff = sn end
+        end
+    end)
+    runtime.aaBuffNameCache[name] = { name = buff, time = now }
+    return buff
+end
+
+-- Called from fireAA: arm the duration timer for this AA's effect.
+function runtime.noteAAEffectStarted(name, now)
+    now = now or os.clock()
+    local durSec = 0
+    pcall(function()
+        local aa = mq.TLO.Me.AltAbility(name)
+        if aa and aa() and aa.Spell and aa.Spell() then
+            local sp = aa.Spell
+            if sp.Duration then durSec = parseDurationSec(sp.Duration) end
+            if durSec <= 0 and sp.MyDuration then durSec = parseDurationSec(sp.MyDuration) end
+        end
+    end)
+    -- Instant/no-duration AAs still get a short grace so a sibling in the same
+    -- group does not fire in the very same tick before the buff window updates.
+    if durSec <= 0 then durSec = 2 end
+    runtime.aaEffectUntil[name] = now + durSec
+end
+
+-- Is this AA's effect still running (buff present, or duration timer live)?
+function runtime.isAAEffectActive(name)
+    local now = os.clock()
+    local untilT = runtime.aaEffectUntil[name]
+    if untilT and now < untilT then return true end
+    return buffActive(mq.TLO.Me.ID(), runtime.aaBuffName(name), 0)
+end
+
+-- True when another enabled AA in the same exclusion group is still running,
+-- so this one has to wait its turn.
+function runtime.aaGroupBusy(name, a)
+    local grp = a and a.excl
+    if not grp or grp == '' or grp == '-' then return false end
+    for rawName, other in pairs(loadout.aas or {}) do
+        local oname = type(rawName) == 'string' and rawName:match('^%s*(.-)%s*$') or rawName
+        if oname ~= name and type(other) == 'table' and other.enabled and other.excl == grp then
+            if runtime.isAAEffectActive(oname) then return true end
+        end
+    end
+    return false
+end
+
+-- The order the AAs tab lists abilities in (cooldown tier -> class -> data
+-- order). Used to give grouped AAs a deterministic "first listed fires first"
+-- turn order instead of pairs() order. Cached per class set.
+function runtime.aaTabOrder()
+    local sig = table.concat(myClasses or {}, ',')
+    local c = runtime.aaTabOrderCache
+    if c and c.sig == sig then return c.order end
+    local order, n = {}, 0
+    for _, tier in ipairs({ 'short', 'mid', 'burn' }) do
+        for _, cls in ipairs(myClasses or {}) do
+            for sec, list in pairs(DATA.aas[cls] or {}) do
+                local isTuple = type(list) == 'table' and type(list[1]) == 'string' and tonumber(list[2]) ~= nil
+                local secNum = isTuple and tonumber(list[2]) or tonumber(sec) or 60
+                if aaTier(secNum) == tier and type(list) == 'table' then
+                    for _, item in ipairs(isTuple and { list } or list) do
+                        local nm = type(item) == 'table' and (item[1] or item.name) or tostring(item)
+                        if type(nm) == 'string' then nm = nm:match('^%s*(.-)%s*$') end
+                        if nm and not tonumber(nm) and not order[nm] then
+                            n = n + 1
+                            order[nm] = n
+                        end
+                    end
+                end
+            end
+        end
+    end
+    runtime.aaTabOrderCache = { sig = sig, order = order }
+    return order
+end
+
+-- loadout.aas as a list sorted the way the AAs tab shows them (names not in
+-- the data file sort last, alphabetically).
+function runtime.sortedAAEntries()
+    local order = runtime.aaTabOrder()
+    local list = {}
+    for rawName, a in pairs(loadout.aas or {}) do
+        local name = type(rawName) == 'string' and rawName:match('^%s*(.-)%s*$') or rawName
+        list[#list + 1] = { name = name, entry = a, ord = order[name] or math.huge }
+    end
+    table.sort(list, function(x, y)
+        if x.ord ~= y.ord then return x.ord < y.ord end
+        return tostring(x.name) < tostring(y.name)
+    end)
+    return list
 end
 
 -- Auto AA engine (scan / prioritise / AA-window purchase / Fireworks) lives in
@@ -17899,7 +18144,7 @@ function runtime.processHealPriority()
             local name = type(rawName) == 'string' and rawName:match('^%s*(.-)%s*$') or rawName
             if a.enabled and runtime.isHealAction(name, a.target, a) then
                 local aPct = tonumber(a.pct) or 50
-                if aPct > 0 and (not a.burn_only or ctrl.burn) then
+                if aPct > 0 and (not a.burn_only or ctrl.burn) and not runtime.aaGroupBusy(name, a) then
                     local id = runtime.resolveTargetId(a.target, a.cls, a.when, name, aPct, a)
                     if id and isSpawnAlive(id) then
                         local rangeOk = (id == mq.TLO.Me.ID()) or runtime.isTargetInRange(name, id)
@@ -20570,7 +20815,7 @@ function runtime.checkAggroSwitch()
         local xt = mq.TLO.Me.XTarget(i)
         if xt() and (xt.ID() or 0) > 0 and xt.ID() ~= curId and (xt.Type() == 'NPC' or xt.Type() == 'Pet') and not isUnreachable(xt.ID())
             and not isGroupOrRaidMember(xt.ID()) and not isSpawnPetOrPlayer(xt.ID()) and isHostileTarget(xt.ID())
-            and not isIgnored(xt.CleanName()) then
+            and not isIgnored(xt.CleanName()) and xtSlotCounts(xt, xt.ID()) then
             local d = xt.Distance3D() or 999
             local isHittingMe = false
             pcall(function()
@@ -20672,6 +20917,7 @@ runtime.onZoned = function()
     end
     runtime.npcSpellApplied = {}
     runtime.npcSpellLastCast = {}
+    runtime.aaEffectUntil = {}
     pursuit.unreachableIds = {}
     pursuit.id = 0
     pursuit.wanderLoc = nil
@@ -21097,6 +21343,7 @@ local function combatTick()
             runtime.npcSpellLastCast = {}
             runtime.discExpires = {}
             runtime.discCooldown = {}
+            runtime.aaEffectUntil = {}
             petState.myPets = {}; petState.lastObservedId = 0; petState.summonPending = nil; petState.petsCache = nil
             print('\ar[Triune]\ax character is dead -- paused. Will resume automatically once alive again.')
         end
@@ -22130,16 +22377,19 @@ local function combatTick()
     end
 
     -- activated AAs are instant and off the spell timer: fire every eligible one,
-    -- and don't let them block (or be blocked by) the spell cast below
+    -- and don't let them block (or be blocked by) the spell cast below.
+    -- Walked in AAs-tab order so exclusion groups (runtime.aaGroupBusy) give
+    -- the first-listed AA its turn first; once it fires, its siblings see the
+    -- effect timer and wait.
     if combatReady then
-        for rawName, a in pairs(loadout.aas) do
-            local name = type(rawName) == 'string' and rawName:match('^%s*(.-)%s*$') or rawName
+        for _, e in ipairs(runtime.sortedAAEntries()) do
+            local name, a = e.name, e.entry
             local aPct = tonumber(a.pct)
             if aPct == nil then aPct = 30 end
             local isDet = isDetrimentalAction(name, a.target, a)
             local minXt = tonumber(a.min_xtar) or 1
             local xtOk = (numXtar >= minXt) or (not isDet and minXt <= 1)
-            if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and xtOk then
+            if a.enabled and (aPct > 0) and (not a.burn_only or ctrl.burn) and xtOk and not runtime.aaGroupBusy(name, a) then
                 local id = resolveTargetId(a.target, a.cls, a.when, name, aPct, a)
                 if id and conditionMet(a.when, aPct, name, id, a.cls, a.target) then
                     if not isDet or (isHostileTarget(id) and isTargetInRange(name, id)) then
@@ -23357,7 +23607,7 @@ end
 -- setting is global to MQ2Lua and persisted by /lua conf (config/MQ2Lua.yaml),
 -- so Triune raises it once at startup when it finds a lower value; a value the
 -- user set higher is left alone.
-local LUA_TURBO_TARGET = 25000
+local LUA_TURBO_TARGET = 10000
 function runtime.luaTurbo()
     local v = nil
     pcall(function()

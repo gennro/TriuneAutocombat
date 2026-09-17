@@ -44,8 +44,10 @@ local sortModes = {
 -- render pass only reads `snap`. Per-effect static facts (spell ID, icon, max
 -- duration, level, description, beneficial flag, caster) are cached per slot
 -- while the same spell name stays in that slot; only Duration / TotalCounters
--- are re-read each refresh. Each entry stores an `expiresAt` timestamp so the
--- remaining-time text and bar keep counting down smoothly between refreshes.
+-- are re-read each refresh. Each entry carries an `expiresAt` timestamp,
+-- anchored once per slot (see stableExpiry) so the remaining-time text and
+-- bar count down smoothly instead of snapping to the game's whole-second
+-- reading on every refresh.
 -- ---------------------------------------------------------------------------
 local REFRESH_INTERVAL = 0.25
 local lastRefreshAt = 0
@@ -235,17 +237,43 @@ local function readStaticFacts(mq, obj, name)
     return st
 end
 
--- Per-refresh dynamic facts: remaining duration and counters.
+-- Per-refresh dynamic facts: remaining duration, the granularity (seconds)
+-- the game reported it at, and counters. Me.Buff().Duration is whole seconds;
+-- the DurationTicks fallback is 6-second ticks.
 local function readDynamicFacts(obj)
-    local dur, counters = 0, 0
+    local dur, step, counters = 0, 1, 0
     pcall(function() dur = core.parseDurationSec(obj.Duration) end)
     if dur <= 0 then
         pcall(function()
-            if obj.DurationTicks then dur = (tonumber(obj.DurationTicks()) or 0) * 6 end
+            if obj.DurationTicks then
+                dur = (tonumber(obj.DurationTicks()) or 0) * 6
+                step = 6
+            end
         end)
     end
     pcall(function() counters = obj.TotalCounters() or 0 end)
-    return dur, counters
+    return dur, step, counters
+end
+
+-- Returns a stable expiry timestamp for a slot. The game only reports the
+-- remaining time in whole seconds (or ticks), so re-anchoring `now + dur` on
+-- every refresh makes the countdown snap back up to the integer boundary
+-- four times a second, which reads as flicker in the text and bar. Keep the
+-- anchor cached on the slot's static entry and only move it when the fresh
+-- reading disagrees by more than the reporting granularity (buff recast,
+-- extension, or a partial dispel) - or when the buff is about to fall off.
+local function stableExpiry(st, dur, step, now)
+    if dur <= 0 then
+        st.expiresAt = nil
+        return nil
+    end
+    local fresh = now + dur
+    local held = st.expiresAt
+    if held and (held - now) > 0 and math.abs(fresh - held) <= (step + 0.5) then
+        return held
+    end
+    st.expiresAt = fresh
+    return fresh
 end
 
 -- Walks one slot range (buffs or songs) into `list`, using / refreshing the
@@ -266,7 +294,10 @@ local function scanSlots(mq, ctrl, kind, getter, maxSlots, isSong, now, list)
                         st = readStaticFacts(mq, obj, name)
                         statics[i] = st
                     end
-                    local dur, counters = readDynamicFacts(obj)
+                    local dur, step, counters = readDynamicFacts(obj)
+                    local expiresAt = stableExpiry(st, dur, step, now)
+                    -- Sort / snapshot on the same smoothed value the rows draw
+                    if expiresAt then dur = math.max(0, expiresAt - now) end
                     local maxDur = st.maxDur
                     if maxDur < dur then maxDur = dur end
                     if showDet or st.isBen then
@@ -276,7 +307,7 @@ local function scanSlots(mq, ctrl, kind, getter, maxSlots, isSong, now, list)
                             spellId = st.spellId,
                             iconId = st.iconId,
                             duration = dur,
-                            expiresAt = (dur > 0) and (now + dur) or nil,
+                            expiresAt = expiresAt,
                             maxDuration = maxDur,
                             isSong = isSong,
                             isBeneficial = st.isBen,

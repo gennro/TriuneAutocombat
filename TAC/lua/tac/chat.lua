@@ -22,7 +22,9 @@
 -- button, /ac linkitem) puts a link in the input line the way the game's
 -- input takes a dragged item - shown as [Name], the raw \x12 body swapped
 -- back in when the line is sent (expandLinks). Link ... to chat in a line's
--- menu does the same with an item link someone else posted.
+-- menu does the same with an item link someone else posted. Clicking the
+-- icon in the game's item window writes the item's name into the game's own
+-- chat line; the GL watcher turns that into a link here (/tacchat gamelinks).
 -- Text links: the client has no spell or NPC links, so "[Spell Name]" and
 -- "[NPC Name (Zone)]" in a line (what the database's Link to chat sends for
 -- those) are drawn as links when the database knows the name, and open the
@@ -37,7 +39,7 @@
 local plugin = {
     id                 = 'chat',
     name               = 'Chat Windows',
-    version            = '1.8.0',
+    version            = '1.9.0',
     author             = 'Triune',
     description        = 'Chat window replacement: channel-filtered tabs, multiple windows, colors, timestamps, an input line and keyword filters.',
     defaultEnabled     = true,
@@ -61,6 +63,7 @@ end
 local GOLD  = { 1.00, 0.70, 0.54, 1 }
 local MUTED = { 0.49, 0.56, 0.65, 1 }
 local WARN  = { 1.00, 0.72, 0.30, 1 }
+local WARN_HEX = 'FFB84D'                 -- WARN as a line colour (entry.hl)
 local ERR   = { 0.95, 0.35, 0.35, 1 }
 
 local CONFIG_VERSION = 3
@@ -195,13 +198,21 @@ local cfg = {
     windows = {},             -- { id, title, open, opacity, ghost, tabs = { { id, name, channels, include, exclude, send, tellTarget, logToFile } } }
     tellPopouts = false,      -- incoming tells open the Tells window (one window, a tab per person)
     enterFocus = true,        -- Enter (when not typing anywhere) focuses the chat input; Enter sends and hands the keys back
+    gameLinks = true,         -- an item window icon click (the game writes the name in its own chat input) links the item here (see GL)
+    gameLinksWindow = nil,    -- game window MQ resolves the chat input from; nil = 'ChatWindow'
+    gameLineClose = true,     -- close the game's chat line when Enter opened it along with this input (see GL)
     recentTells = {},         -- last few people you exchanged tells with, most recent first
     history = { on = true, lines = 1000 },  -- tells and notifications kept on disk and restored on the next start
+    inputHistory = {},        -- lines sent from the input, oldest first: { text, links = { [name] = raw } | nil } (see IH)
+    mentionComplete = true,   -- @Name in the input line completes player names seen in chat (see AC)
 }
 local RECENT_TELLS = 5
 -- Tell / notification history helpers (filled in with the logging below;
 -- one table so the main chunk stays under Lua's 200-local limit).
 local H = { MIN = 100, MAX = 5000 }
+-- @Name completion in the input line (functions filled in with the input
+-- section below; declared here because ingest and the history restore feed it).
+local AC = { MAX_NAMES = 400, KEEP = 300, SHOW = 8 }
 
 local chatCommand -- defined with the commands below; the settings pages call it
 local saveConfig  -- defined with the config persistence below (only the tick / destroy paths call it)
@@ -246,8 +257,17 @@ local rt = {
     reportPath = nil,
     input = '',               -- legacy; the input draft lives per tab in rt.tabs[key].input
     inputRefocus = 0,
-    history = {},
-    historyIdx = 0,
+    historyIdx = 0,           -- input history browsing: 0 = the live draft, else the cfg.inputHistory index shown
+    historyDraft = nil,       -- the draft (text, links) set aside when browsing began
+    cbState = nil,            -- tab state of the input being drawn (for the history callback)
+    names = {},               -- [player name] = when last seen, for @Name completion (see AC)
+    namesN = 0,
+    namesGen = 0,             -- bumped when rt.names changes (match cache key)
+    ac = nil,                 -- open completion: { start, stop, prefix, matches, sel, selName, key } (bytes, 0-based; key = owning tab, see AC)
+    cbKey = nil,              -- tab key of the input being drawn (the callback keys the list by it)
+    acRect = nil,             -- where the completion list was drawn last frame (rows for a click)
+    winKeys = {},             -- [window id] = layout key the window was last drawn under
+    acCursorEnd = false,      -- put the cursor at the end on the next callback (after an Enter / click completion)
     focusRequested = false,
     drawEvents = true,        -- ask MQ for our event every frame (see pumpEvents); off if the binding refuses
     drawPumped = 0,           -- lines that arrived through the per-frame pump
@@ -592,6 +612,21 @@ local function classify(raw, ctx)
     end
     s = text:match("^You told (.-), '")
     if s then return result('tell_out', s, text, true) end
+    -- A tell that could not be delivered: the game says so instead of
+    -- echoing "You told ...", and otherwise nothing would show. Filed as
+    -- the tell it answers - outgoing, to that person - so it lands in the
+    -- conversation and the tab the tell was sent from (tellFail: warning
+    -- colour, a status line). The name comes back as typed, so it is
+    -- capitalised the way names are; the name-less form is about the last
+    -- tell sent from here.
+    s = text:match('^(%S+) is not online at this time%.?$') or text:match('^(%S+) is not currently online%.?$')
+    if not s and text:find('^That player is not online') then s = ctx.lastTellTo end
+    if s and not s:find("'", 1, true) then
+        s = s:sub(1, 1):upper() .. s:sub(2)
+        local r = result('tell_out', s, text, true)
+        r.tellFail = true
+        return r
+    end
     if text:find("^You tell your party, '") then return result('group', ctx.me, text, true) end
     s = text:match("^(.-) tells the group, '")
     if s then return result('group', s, text, false, player(s)) end
@@ -894,11 +929,29 @@ local function sanitizeConfig(c)
     c.muted = muted
     c.tellPopouts = (c.tellPopouts == true)
     c.enterFocus = (c.enterFocus ~= false)
+    c.gameLinks = (c.gameLinks ~= false)
+    if type(c.gameLinksWindow) ~= 'string' or c.gameLinksWindow == '' then c.gameLinksWindow = nil end
+    c.gameLineClose = (c.gameLineClose ~= false)
+    c.mentionComplete = (c.mentionComplete ~= false)
     local h = type(c.history) == 'table' and c.history or {}
     c.history = {
         on = (h.on ~= false),
         lines = math.max(H.MIN, math.min(H.MAX, math.floor(tonumber(h.lines) or 1000))),
     }
+    local sent = {}
+    for _, e in ipairs(type(c.inputHistory) == 'table' and c.inputHistory or {}) do
+        if type(e) == 'table' and type(e.text) == 'string' and e.text ~= '' then
+            local links = nil
+            if type(e.links) == 'table' then
+                for n, raw in pairs(e.links) do
+                    if type(n) == 'string' and type(raw) == 'string' then links = links or {}; links[n] = raw end
+                end
+            end
+            sent[#sent + 1] = { text = e.text, links = links }
+        end
+    end
+    while #sent > 100 do table.remove(sent, 1) end
+    c.inputHistory = sent
     local recent = {}
     for _, n in ipairs(type(c.recentTells) == 'table' and c.recentTells or {}) do
         if type(n) == 'string' and n ~= '' and #recent < RECENT_TELLS then recent[#recent + 1] = n end
@@ -1450,6 +1503,7 @@ end
 -- Remembers the last few people you exchanged tells with (most recent first)
 -- for the reply dropdown next to the tell target.
 function noteTeller(name)
+    AC.note(name)
     local list = cfg.recentTells
     for i = #list, 1, -1 do
         if list[i]:lower() == name:lower() then table.remove(list, i) end
@@ -1781,6 +1835,7 @@ function H.decode(line)
     if flags:find('m', 1, true) then e.mention = true end
     e.hl = flags:match('h(%x%x%x%x%x%x)')
     e.player = clickablePlayer(channel, sender, outgoing)
+    if e.player then AC.note(e.player, t) end
     if sender and cfg.muted[sender:lower()] and not outgoing then e.muted = true end
     return e
 end
@@ -1953,6 +2008,269 @@ local function nowMs()
     return os.clock() * 1000
 end
 
+-- ----------------------------------------------------------------------------
+-- Links from the game's item window
+-- ----------------------------------------------------------------------------
+-- Clicking the icon in the client's item window is how the game links an
+-- item, and the only place the client puts that link is its own chat input
+-- (the active chat window's CW_ChatInput edit box). The edit box keeps the
+-- link as a tag of its own (CEditWnd::AddItemTag) and only the item's name
+-- in its text, so MQ's Window.Text shows "Darkblade of the Warlord" with no
+-- \x12 body to lift: the link cannot be read out, only rebuilt. So the
+-- watcher reads that edit box every frame and, when its text grows by the
+-- name of an item the client is displaying (DisplayItem[1-6]; your own copy
+-- through FindItem when the display list does not have it), builds the link
+-- from that item's id - the 77-byte body the database plugin writes, no
+-- augment data - drops it in this plugin's input line through insertLink
+-- (the same [Name] placeholder the database's Link to chat uses) and takes
+-- the name back out of the game line with Window.SetText, leaving whatever
+-- else was typed there. The line the plugin starts with is taken as is.
+--
+-- The game line and the keyboard. The Enter that opens this plugin's input
+-- (enterFocus) reaches the game too, which opens its own chat line; the
+-- Enter that sends from here is ImGui's alone, so the game line stays open
+-- and swallows the movement keys until the game sees Enter or Esc again.
+-- MQ exposes no focus state, so it is modelled from what the game can see:
+-- Enter outside ImGui toggles the line (closed -> open; open -> it sends
+-- what it holds and closes), Esc closes it, and text growing in the line
+-- that is no item name proves it is open. When the model says the line
+-- just opened - and this input is what Enter is for (enterFocus, chat
+-- shown) - the line is emptied with SetText and a /keypress ENTER closes
+-- it: the keyboard goes back to the game as soon as this input lets go.
+-- Text that ends up in the game line this way was never meant for it.
+local GL = { MAX_ERRORS = 3, errors = 0, disabled = nil, noted = {}, last = nil, MAX_DISPLAY = 6, gameFocus = false }
+
+-- The game's chat input edit box (a CXWnd), or nil. Not checked for
+-- visibility: the window's own ToString is its Open state, and the line
+-- gets the link whether the game window is shown or hidden away.
+function GL.inputWnd()
+    if not (mq.TLO and mq.TLO.Window) then return nil end
+    local w = mq.TLO.Window(cfg.gameLinksWindow or 'ChatWindow')
+    if not (w and w.Child) then return nil end
+    local edit = w.Child('CW_ChatInput')
+    if not (edit and edit.Text) then return nil end
+    return edit
+end
+
+function GL.note(key, msg)
+    if GL.noted[key] then return end
+    GL.noted[key] = true
+    print('\ay[Triune Chat]\ax ' .. msg)
+end
+
+-- Writes `text` back into the game's edit box; true when it took.
+function GL.setText(edit, text)
+    if not edit.SetText then return false end
+    local ok = pcall(function()
+        local r = edit.SetText(text)
+        if type(r) == 'userdata' or type(r) == 'table' then pcall(function() return r() end) end
+    end)
+    if not ok then return false end
+    local okRead, after = pcall(function() return edit.Text() end)
+    return okRead and (after or '') == text
+end
+
+-- Item link body -> the 77-byte link text this client reads.
+function GL.buildLink(id, name)
+    id = tonumber(id)
+    if not id or id <= 0 or type(name) ~= 'string' or name == '' then return nil end
+    local body = string.format('0%08X', id)
+    return LINK .. body .. string.rep('0', ITEM_LINK_PAYLOAD - #body) .. name .. LINK
+end
+
+-- Items the client is displaying: { { name, id }, ... }, longest names
+-- first so "Sword of Fire (Legendary)" wins over "Sword of Fire".
+function GL.displayed()
+    local out = {}
+    pcall(function()
+        for i = 1, GL.MAX_DISPLAY do
+            local it = mq.TLO.DisplayItem(i)
+            local name = it and it.Name and it.Name()
+            if type(name) == 'string' and name ~= '' then
+                local id = tonumber(it.ID and it.ID())
+                if id and id > 0 then out[#out + 1] = { name = name, id = id } end
+            end
+        end
+    end)
+    table.sort(out, function(a, b) return #a.name > #b.name end)
+    return out
+end
+
+-- Your own copy of `name` (inventory, then bank): its id, or nil.
+function GL.ownItemId(name)
+    local id
+    pcall(function()
+        local it = mq.TLO.FindItem and mq.TLO.FindItem('=' .. name)
+        if not (it and it.ID and tonumber(it.ID())) and mq.TLO.FindItemBank then it = mq.TLO.FindItemBank('=' .. name) end
+        id = it and it.ID and tonumber(it.ID())
+    end)
+    return id and id > 0 and id or nil
+end
+
+-- The item whose name `added` (text the game line just gained) holds:
+-- { name, id, s, e } with the name's position in `text`, or nil.
+function GL.match(text, added, from)
+    if added == '' then return nil end
+    for _, it in ipairs(GL.displayed()) do
+        if added:find(it.name, 1, true) then
+            local s, e = text:find(it.name, from, true)
+            if not s then s, e = text:find(it.name, 1, true) end
+            if s then return { name = it.name, id = it.id, s = s, e = e } end
+        end
+    end
+    -- No display window with that name (DisplayItem missing, or the window
+    -- already closed): the whole addition as one name, if you carry it.
+    local name = added:gsub('^%s+', ''):gsub('%s+$', '')
+    if name ~= '' then
+        local id = GL.ownItemId(name)
+        if id then
+            local s, e = text:find(name, from, true)
+            if not s then s, e = text:find(name, 1, true) end
+            if s then return { name = name, id = id, s = s, e = e } end
+        end
+    end
+    return nil
+end
+
+-- Item names the game line gained since the last frame become links in this
+-- input; the rest of the line stays. Returns the number of links placed.
+function GL.harvest()
+    local edit = GL.inputWnd()
+    if not edit then return 0 end
+    local text = edit.Text()
+    if type(text) ~= 'string' then return 0 end
+    local last = GL.last
+    GL.last = text
+    if last == nil or text == last or #text <= #last then return 0 end
+    -- Where the addition starts: the common prefix (the client inserts at
+    -- the cursor, normally the end).
+    local c = 0
+    local n = math.min(#last, #text)
+    while c < n and last:byte(c + 1) == text:byte(c + 1) do c = c + 1 end
+    local added = text:sub(c + 1, c + (#text - #last))
+    local placed = 0
+    local rest = text
+    if cfg.gameLinks then
+        for _ = 1, GL.MAX_DISPLAY do
+            local m = GL.match(rest, added, math.max(1, c - #added + 1))
+            if not m then break end
+            local link = GL.buildLink(m.id, m.name)
+            if not (link and insertLink(link, m.name)) then break end
+            placed = placed + 1
+            rt.stats.gameLinks = (rt.stats.gameLinks or 0) + 1
+            rest = rest:sub(1, m.s - 1) .. rest:sub(m.e + 1)
+            added = added:gsub(m.name:gsub('%W', '%%%0'), '', 1)
+        end
+    end
+    if placed == 0 then
+        -- Typed text: the game line has the keyboard.
+        GL.lineOpened()
+        return 0
+    end
+    rest = rest:gsub('  +', ' '):gsub('^ ', ''):gsub(' $', '')
+    if GL.setText(edit, rest) then
+        GL.last = rest
+    else
+        GL.note('settext', 'the game\'s chat line could not be cleared (Window.SetText); its copy of the name stays there.')
+    end
+    return placed
+end
+
+-- Whether closing the game line is wanted: only while Enter is this
+-- input's key and the chat is on screen.
+function GL.closeWanted()
+    return cfg.gameLineClose and cfg.enterFocus and ctrl.show_chat and true or false
+end
+
+-- Empties the game line and sends it the Enter that closes it.
+function GL.closeLine()
+    local edit = GL.inputWnd()
+    if edit then
+        local text = edit.Text()
+        if type(text) == 'string' and text ~= '' then GL.setText(edit, '') end
+    end
+    pcall(mq.cmd, '/keypress ENTER')
+    rt.stats.keypresses = (rt.stats.keypresses or 0) + 1
+    GL.gameFocus = false
+    GL.last = ''
+end
+
+-- The model learned the game line is open (Enter reached the game, or text
+-- appeared in it): close it when that is wanted.
+function GL.lineOpened()
+    GL.gameFocus = true
+    if GL.closeWanted() then GL.closeLine() end
+end
+
+-- Enter and Esc the game saw (ImGui did not take the keyboard) move the
+-- model along.
+function GL.trackKeys()
+    local K = ImGuiKey or _G.ImGuiKey
+    if not K then return end
+    local okIo, io = pcall(ImGui.GetIO)
+    if okIo and io and io.WantCaptureKeyboard then return end
+    local function pressed(k)
+        if k == nil then return false end
+        local ok, p = pcall(ImGui.IsKeyPressed, k, false)
+        return ok and p == true
+    end
+    if pressed(K.Escape) then
+        GL.gameFocus = false
+    elseif pressed(K.Enter) or pressed(K.KeypadEnter) then
+        if GL.gameFocus then
+            GL.gameFocus = false   -- sent what it held and closed
+            GL.last = ''
+        else
+            GL.lineOpened()
+        end
+    end
+end
+
+-- Once per frame from onDrawUI.
+function GL.poll()
+    if GL.disabled or not mq then return end
+    if not (cfg.gameLinks or cfg.gameLineClose) then return end
+    local ok, err = pcall(function()
+        GL.harvest()
+        GL.trackKeys()
+    end)
+    if not ok then
+        GL.errors = GL.errors + 1
+        if GL.errors >= GL.MAX_ERRORS then
+            GL.disabled = tostring(err)
+            print('\ay[Triune Chat]\ax item-window link capture stopped after repeated errors: ' .. tostring(err))
+        end
+    end
+end
+
+-- /tacchat gamelinks status
+function GL.status()
+    local lines = {}
+    lines[#lines + 1] = 'item-window links: ' .. (cfg.gameLinks and 'on' or 'off') .. (GL.disabled and (' (stopped: ' .. GL.disabled .. ')') or '')
+    lines[#lines + 1] = 'close the game line: ' .. (cfg.gameLineClose and 'on' or 'off') .. (GL.closeWanted() and '' or ' (not now: needs Enter-opens-input and the chat shown)')
+        .. '; the model says the game line is ' .. (GL.gameFocus and 'open' or 'closed')
+    local ok, err = pcall(function()
+        local edit = GL.inputWnd()
+        if not edit then
+            lines[#lines + 1] = 'game chat input: Window[' .. (cfg.gameLinksWindow or 'ChatWindow') .. '].Child[CW_ChatInput] not found'
+            return
+        end
+        local text = edit.Text() or ''
+        local w = mq.TLO.Window(cfg.gameLinksWindow or 'ChatWindow')
+        local title = '?'
+        pcall(function() title = tostring(w.Text() or '') end)
+        lines[#lines + 1] = string.format('game chat input: found in "%s", %d chars; SetText %s', title, #text, edit.SetText and 'available' or 'missing')
+        local preview = text:gsub('[%c]', '?')
+        if #preview > 160 then preview = preview:sub(1, 160) .. '...' end
+        lines[#lines + 1] = 'input text: "' .. preview .. '"'
+        local shown = {}
+        for _, it in ipairs(GL.displayed()) do shown[#shown + 1] = it.name .. ' (' .. it.id .. ')' end
+        lines[#lines + 1] = 'displayed items: ' .. (#shown > 0 and table.concat(shown, ', ') or '(none)')
+    end)
+    if not ok then lines[#lines + 1] = 'error: ' .. tostring(err) end
+    for _, l in ipairs(lines) do print('\ag[Triune Chat]\ax ' .. l) end
+end
+
 -- Refreshes the names the classifier compares against (me, my pets).
 local function refreshNames(force)
     local t = os.time()
@@ -1977,10 +2295,20 @@ local function refreshNames(force)
     -- session, so their crits / casts / flurries file under Pet too.
     for n in pairs(rt.learnedPets or {}) do pets[n] = true end
     rt.pets = pets
+    -- Group members complete too, seen or not - noted once, so a refresh
+    -- does not keep pushing them to the top of the list.
+    pcall(function()
+        local n = tonumber(mq.TLO.Group.Members()) or 0
+        for i = 1, n do
+            local m = mq.TLO.Group.Member(i)
+            local name = m and m.CleanName and m.CleanName()
+            if type(name) == 'string' and not rt.names[name] then AC.note(name) end
+        end
+    end)
 end
 
 local function ctxForClassify()
-    return { me = rt.me, pets = rt.pets }
+    return { me = rt.me, pets = rt.pets, lastTellTo = rt.lastTellTo }
 end
 
 -- Tells sent through the plugin (or typed as /tell in its input) are
@@ -2046,6 +2374,11 @@ local function ingest(raw)
         raw = raw,
     }
     if r.sender and cfg.muted[r.sender:lower()] and not r.outgoing then entry.muted = true end
+    if r.tellFail then
+        entry.tellFail = true
+        entry.hl = WARN_HEX
+        echo(r.sender .. ' is not online: the tell was not delivered.')
+    end
     local function beep()
         if os.time() - rt.lastBeepAt >= 1 then
             rt.lastBeepAt = os.time()
@@ -2103,6 +2436,8 @@ local function ingest(raw)
         if cfg.tellPopouts then openTellTab(r.sender, false) end
     end
     entry.player = clickablePlayer(r.channel, r.sender, r.outgoing)
+    -- A failed tell's name may be a typo: not a completion candidate.
+    if entry.player and not r.tellFail then AC.note(entry.player) end
     distribute(entry)
     H.write(entry)
 end
@@ -2159,9 +2494,6 @@ end
 local function sendText(tab, text)
     text = trim(text)
     if text == '' then return end
-    rt.history[#rt.history + 1] = text
-    if #rt.history > 50 then table.remove(rt.history, 1) end
-    rt.historyIdx = 0
     if text:sub(1, 1) == '/' then
         local to, msg = text:match('^/t (%S+) (.*)$')
         if not to then to, msg = text:match('^/tell (%S+) (.*)$') end
@@ -2394,7 +2726,7 @@ local function drawRun(text, link, isTs, entry, r, g, b, isName)
             local MC = ImGuiMouseCursor or _G.ImGuiMouseCursor
             if MC and MC.Hand and ImGui.SetMouseCursor then pcall(ImGui.SetMouseCursor, MC.Hand) end
             if core.setTooltip then core.setTooltip('Tell ' .. entry.player .. ' (opens their tab in the Tells window)') end
-            if ImGui.IsMouseClicked and ImGui.IsMouseClicked(0) then requestTell(entry.player) end
+            if ImGui.IsMouseClicked and ImGui.IsMouseClicked(0) and not AC.mouseInList() then requestTell(entry.player) end
         end
     elseif link then
         local l = entry.links[link]
@@ -2965,7 +3297,8 @@ local function findWindow(name)
 end
 
 local function openEditor(kind, win, tab)
-    rt.editor = { kind = kind or 'tab', winId = win and win.id, tabId = tab and tab.id, page = kind == 'tab' and 'tab' or kind }
+    local page = ({ tab = 'Tab filters', colors = 'Colours', colours = 'Colours', highlights = 'Highlights', muted = 'Muted', general = 'General' })[kind or 'tab'] or 'Tab filters'
+    rt.editor = { kind = kind or 'tab', winId = win and win.id, tabId = tab and tab.id, page = page }
 end
 
 -- ----------------------------------------------------------------------------
@@ -3286,6 +3619,21 @@ local function drawGeneralPage()
     if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
         core.setTooltip('Off: the input keeps the keyboard after you send, so you can keep typing.\nThe game still opens its own chat input on Enter; shrink or hide its windows once this one does the job.')
     end
+    local gl = ImGui.Checkbox('Item window icon links go to this input##genGameLinks', cfg.gameLinks)
+    if gl ~= cfg.gameLinks then cfg.gameLinks = gl; markDirty() end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('Clicking the icon in the game\'s item window puts the item\'s name in the game\'s own chat line.\nOn: that name is taken back out and the item\'s link is placed here as [Name], ready to send.\n/tacchat gamelinks status shows what the watcher sees when a link does not arrive.')
+    end
+    local mc = ImGui.Checkbox('@Name completes player names (Tab / Enter)##genMention', cfg.mentionComplete)
+    if mc ~= cfg.mentionComplete then cfg.mentionComplete = mc; if not mc then rt.ac = nil end; markDirty() end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('Type @ and the first letters of a name in the input line: the players seen in chat (and your group) that match are listed above it, newest first.\nTab or Enter completes the selected one (Up / Down choose, or click); the @ is dropped, so "/t @bo" becomes "/t Bob ".')
+    end
+    local glc = ImGui.Checkbox('Close the game\'s chat line when Enter opens this input##genGameLine', cfg.gameLineClose)
+    if glc ~= cfg.gameLineClose then cfg.gameLineClose = glc; markDirty() end
+    if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
+        core.setTooltip('The Enter that opens this input also opens the game\'s own chat line, and the game never sees the Enter that sends from here,\nso its line keeps the keyboard and eats your movement keys until you press Enter or Esc with the game.\nOn: whenever the game line opens that way (or text shows up in it), it is emptied and closed with a keypress.\nOnly while "Enter opens the chat input" is on and the chat is shown. Off if you type in the game\'s line yourself.')
+    end
     local cap = ImGui.Checkbox('Capture lines to file (pattern building)##genCap', cfg.capture)
     if cap ~= cfg.capture then setCapture(cap) end
     if ImGui.SmallButton('Reset layout to defaults##genReset') then chatCommand('reset') end
@@ -3354,13 +3702,36 @@ function drawEditorBody(ed)
                 { 'Muted', drawMutedPage },
                 { 'General', drawGeneralPage },
             }
+            -- The page is the editor's own state (ed.page): the tab for it is
+            -- drawn with SetSelected, and a click on any header sets it. So
+            -- the selection never depends on ImGui keeping it between
+            -- frames, and a header click counts even when ImGui's own
+            -- selection would not have stuck.
+            local TIF = ImGuiTabItemFlags or _G.ImGuiTabItemFlags
+            local want = ed.page or 'Tab filters'
+            local clicked = nil
             for _, page in ipairs(pages) do
-                if ImGui.BeginTabItem(page[1]) then
-                    guarded('settings ' .. page[1], page[2])
+                local label = page[1]
+                local flags = (label == want and TIF and TIF.SetSelected) or 0
+                local shown
+                if flags ~= 0 then
+                    local ok, a, b = pcall(ImGui.BeginTabItem, label, nil, flags)
+                    if ok then shown = (b == nil) and (a == true) or (b == true) else shown = ImGui.BeginTabItem(label) == true end
+                else
+                    shown = ImGui.BeginTabItem(label) == true
+                end
+                if ImGui.IsItemClicked and ImGui.IsItemClicked(0) then clicked = label end
+                if shown then
+                    guarded('settings ' .. label, page[2])
                     ImGui.EndTabItem()
                 end
             end
             ImGui.EndTabBar()
+            if clicked then
+                ed.page = clicked
+                rt.stats.edClicks = (rt.stats.edClicks or 0) + 1
+                rt.stats.edLastClick = clicked
+            end
         end
     end
 end
@@ -3519,24 +3890,432 @@ end
 -- ----------------------------------------------------------------------------
 -- Window drawing
 -- ----------------------------------------------------------------------------
-local function inputCallback(data)
-    rt.stats.cbCalls = rt.stats.cbCalls + 1
-    local K = ImGuiKey or _G.ImGuiKey
-    pcall(function()
-        if K and data.EventKey == K.UpArrow and #rt.history > 0 then
-            rt.historyIdx = (rt.historyIdx == 0) and #rt.history or math.max(1, rt.historyIdx - 1)
-            data:DeleteChars(0, data.BufTextLen)
-            data:InsertChars(0, rt.history[rt.historyIdx])
-        elseif K and data.EventKey == K.DownArrow and rt.historyIdx > 0 then
-            rt.historyIdx = rt.historyIdx + 1
-            data:DeleteChars(0, data.BufTextLen)
-            if rt.historyIdx > #rt.history then
-                rt.historyIdx = 0
-            else
-                data:InsertChars(0, rt.history[rt.historyIdx])
-            end
+-- ----------------------------------------------------------------------------
+-- Input history: Up / Down in the input line walk the lines sent from it,
+-- shell style. The list lives in the config (cfg.inputHistory, oldest
+-- first, 100 lines, per character, so it survives a reload), a line sent
+-- again moves to the end instead of repeating, and each entry keeps the
+-- draft as typed - [Name] placeholders with their raw links - so a recalled
+-- line goes out with its links intact. Pressing Up sets the draft being
+-- typed aside; Down past the newest line brings it back. The keys arrive
+-- through the InputText CallbackHistory callback (rt.cbState names the tab
+-- the input belongs to); /tacchat stats counts those callbacks and shows
+-- what the last one saw.
+-- ----------------------------------------------------------------------------
+local IH = { MAX = 100 }
+
+function IH.copyLinks(links)
+    if type(links) ~= 'table' then return nil end
+    local out, any = {}, false
+    for n, raw in pairs(links) do out[n] = raw; any = true end
+    return any and out or nil
+end
+
+-- Records a sent draft (text as typed, its link table).
+function IH.push(text, links)
+    text = trim(text or '')
+    if text == '' then return end
+    local list = cfg.inputHistory
+    for i = #list, 1, -1 do
+        if list[i].text == text then table.remove(list, i) end
+    end
+    list[#list + 1] = { text = text, links = IH.copyLinks(links) }
+    while #list > IH.MAX do table.remove(list, 1) end
+    rt.historyIdx = 0
+    rt.historyDraft = nil
+    markDirty()
+end
+
+-- Moves the browse position by `dir` (-1 older, +1 newer) for the tab
+-- state `st` whose draft is `current`; returns the entry to show
+-- ({ text, links }) or nil when there is nowhere to go.
+function IH.step(st, dir, current)
+    local list = cfg.inputHistory
+    local idx = rt.historyIdx
+    if dir < 0 then
+        if #list == 0 or idx == 1 then return nil end
+        if idx == 0 then
+            rt.historyDraft = { text = current or '', links = IH.copyLinks(st and st.links) }
+            idx = #list
+        else
+            idx = idx - 1
         end
+    else
+        if idx == 0 then return nil end
+        idx = idx + 1
+        if idx > #list then
+            rt.historyIdx = 0
+            local d = rt.historyDraft or { text = '' }
+            rt.historyDraft = nil
+            return d
+        end
+    end
+    rt.historyIdx = idx
+    return list[idx]
+end
+
+-- The callback data's buffer text. MQ's usertype names it Buffer and has
+-- no BufTextLen (lua_ImGuiUserTypes.cpp); stock names are tried after.
+function IH.bufferText(data)
+    local ok, buf = pcall(function() return data.Buffer end)
+    if not (ok and type(buf) == 'string') then ok, buf = pcall(function() return data.Buf end) end
+    return (ok and type(buf) == 'string') and buf or nil
+end
+
+-- Puts `entry` in the input buffer and its links in the tab.
+function IH.show(data, st, entry)
+    local buf = IH.bufferText(data)
+    local len = buf and #buf or tonumber(data.BufTextLen) or 0
+    if len > 0 then data:DeleteChars(0, len) end
+    if entry.text ~= '' then data:InsertChars(0, entry.text) end
+    if st then st.links = IH.copyLinks(entry.links) end
+end
+
+-- Which way the history key went: -1 for Up, 1 for Down, nil for neither.
+-- EventKey is compared as a number and as is (the binding may hand the
+-- enum over either way); failing that the key state decides - the
+-- CallbackHistory callback only fires on Up and Down.
+function IH.direction(data, K)
+    local ek = data.EventKey
+    local n = tonumber(ek)
+    if n == nil and ek ~= nil then n = tonumber(tostring(ek)) end
+    if n ~= nil then
+        if n == tonumber(K.UpArrow) then return -1 end
+        if n == tonumber(K.DownArrow) then return 1 end
+    end
+    if ek ~= nil then
+        if ek == K.UpArrow then return -1 end
+        if ek == K.DownArrow then return 1 end
+    end
+    for _, probe in ipairs({ ImGui.IsKeyPressed, ImGui.IsKeyDown }) do
+        if probe then
+            local okU, up = pcall(probe, K.UpArrow, true)
+            if okU and up == true then return -1 end
+            local okD, down = pcall(probe, K.DownArrow, true)
+            if okD and down == true then return 1 end
+        end
+    end
+    return nil
+end
+
+-- ----------------------------------------------------------------------------
+-- @Name completion. Names come from chat: every line whose sender is a
+-- player (the clickable-name rule, so NPCs, pets and you are out), tells
+-- sent and received, restored history and the group. Typing "@" and some
+-- letters at the cursor opens a list of the names that start with them,
+-- most recently seen first, above the input; Tab or Enter completes the
+-- one selected (Up / Down pick, a click works too), replacing "@bo" with
+-- "Bob " - the "@" goes, so "/t @bo" becomes a working "/t Bob ". The
+-- token is read in the InputText CallbackAlways callback (buffer and
+-- cursor), Tab arrives as CallbackCompletion, and Up / Down as the history
+-- callback, which the open list takes over. Enter completes from the draw
+-- (ImGui returns the line as entered): the input is refocused and the next
+-- callback puts the cursor at the end, since a refocus selects all.
+-- ----------------------------------------------------------------------------
+function AC.note(name, t)
+    if type(name) ~= 'string' or name == '' or name:find('[%s%p]') then return end
+    if name == rt.me or (rt.pets and rt.pets[name]) then return end
+    t = t or os.time()
+    local seen = rt.names[name]
+    if seen == nil then
+        rt.namesN = rt.namesN + 1
+        if rt.namesN > AC.MAX_NAMES then AC.prune() end
+    elseif seen >= t then
+        return
+    end
+    rt.names[name] = t
+    rt.namesGen = rt.namesGen + 1
+end
+
+-- Drops the oldest names down to AC.KEEP.
+function AC.prune()
+    local list = {}
+    for n, at in pairs(rt.names) do list[#list + 1] = { n = n, at = at } end
+    table.sort(list, function(a, b) return a.at > b.at end)
+    local names = {}
+    for i = 1, math.min(AC.KEEP, #list) do names[list[i].n] = list[i].at end
+    rt.names = names
+    rt.namesN = math.min(AC.KEEP, #list)
+    rt.namesGen = rt.namesGen + 1
+end
+
+-- Names starting with `prefix` (case-insensitive), newest first, at most
+-- AC.SHOW; cached until the names or the prefix change.
+function AC.matches(prefix)
+    local c = AC.cache
+    if c and c.prefix == prefix and c.gen == rt.namesGen then return c.list end
+    local p = prefix:lower()
+    local list = {}
+    for n, at in pairs(rt.names) do
+        if p == '' or n:lower():sub(1, #p) == p then list[#list + 1] = { n = n, at = at } end
+    end
+    table.sort(list, function(a, b)
+        if a.at ~= b.at then return a.at > b.at end
+        return a.n < b.n
     end)
+    local out = {}
+    for i = 1, math.min(AC.SHOW, #list) do out[i] = list[i].n end
+    AC.cache = { prefix = prefix, gen = rt.namesGen, list = out }
+    return out
+end
+
+-- The "@word" the cursor is in: start (0-based byte offset of the "@"),
+-- stop (the cursor) and the letters after the "@"; nil when the cursor is
+-- not in one. `cursor` is ImGui's 0-based byte position.
+function AC.token(buf, cursor)
+    if type(buf) ~= 'string' or type(cursor) ~= 'number' then return nil end
+    cursor = math.max(0, math.min(#buf, math.floor(cursor)))
+    local i = cursor
+    while i > 0 and not buf:sub(i, i):find('%s') do i = i - 1 end
+    local word = buf:sub(i + 1, cursor)
+    if word:sub(1, 1) ~= '@' then return nil end
+    return i, cursor, word:sub(2)
+end
+
+-- Keeps rt.ac in step with the buffer and cursor (every callback).
+function AC.track(buf, cursor)
+    if not cfg.mentionComplete then rt.ac = nil return end
+    local start, stop, prefix = AC.token(buf, cursor)
+    if not start then rt.ac = nil return end
+    local matches = AC.matches(prefix)
+    if #matches == 0 then rt.ac = nil return end
+    -- The selection follows the name, not the row: the list is rebuilt
+    -- every frame, newest first, and a line arriving from someone in it
+    -- would otherwise move the highlight to another person.
+    local ac = rt.ac
+    local sel = 1
+    if ac and ac.prefix == prefix and ac.start == start and ac.selName then
+        for i, n in ipairs(matches) do
+            if n == ac.selName then sel = i break end
+        end
+    end
+    -- Keyed by the input line it belongs to: every open chat window draws
+    -- an input, and only the owner may draw, use or close the list (the
+    -- others' inputs are inactive and would close it every frame).
+    rt.ac = { start = start, stop = stop, prefix = prefix, matches = matches, sel = sel, selName = matches[sel], key = rt.cbKey }
+end
+
+-- The completed line for `text` (a Lua string) and its cursor position.
+function AC.complete(text, ac, name)
+    name = name or ac.matches[ac.sel]
+    local out = text:sub(1, ac.start) .. name .. ' ' .. text:sub(ac.stop + 1)
+    return out, ac.start + #name + 1
+end
+
+-- Completion inside the callback (Tab): edits the buffer in place.
+function AC.applyInCallback(data, name)
+    local ac = rt.ac
+    if not ac then return false end
+    name = name or ac.matches[ac.sel]
+    if not name then return false end
+    data:DeleteChars(ac.start, ac.stop - ac.start)
+    data:InsertChars(ac.start, name .. ' ')
+    local pos = ac.start + #name + 1
+    pcall(function() data.CursorPos = pos; data.SelectionStart = pos; data.SelectionEnd = pos end)
+    rt.ac = nil
+    return true
+end
+
+-- Completion from the draw (Enter, or a click on the list): the input is
+-- inactive at that point, so the draft is edited and the input refocused.
+function AC.applyToDraft(st, key, name)
+    local ac = rt.ac
+    if not (ac and st) then return false end
+    name = name or ac.matches[ac.sel]
+    if not name then return false end
+    st.input = (AC.complete(st.input or '', ac, name))
+    rt.ac = nil
+    rt.acCursorEnd = true
+    rt.inputRefocus = 2
+    rt.lastInputKey = key
+    return true
+end
+
+-- Mouse position, whichever shape the binding returns.
+function AC.mousePos()
+    local x, y
+    local function take(a, b)
+        if type(a) == 'number' then x, y = a, b
+        elseif type(a) == 'userdata' or type(a) == 'table' then x, y = a.x, a.y end
+    end
+    if ImGui.GetMousePosVec then pcall(function() take(ImGui.GetMousePosVec()) end) end
+    if (x == nil or y == nil) and ImGui.GetMousePos then pcall(function() take(ImGui.GetMousePos()) end) end
+    return tonumber(x), tonumber(y)
+end
+
+-- True while the mouse is over the drawn list (the chat log under it
+-- leaves such a click alone).
+function AC.mouseInList()
+    local r = rt.ac and rt.acRect
+    if not r then return false end
+    local x, y = AC.mousePos()
+    return x ~= nil and y ~= nil and x >= r.x0 and x <= r.x1 and y >= r.y0 - 4 and y <= r.y1
+end
+
+-- A left click on a row of the list completes that name (checked before
+-- the input notices it lost the mouse); true when it did.
+function AC.clickPick(st, key)
+    local r = rt.ac and rt.acRect
+    if not r or not (ImGui.IsMouseClicked and ImGui.IsMouseClicked(0)) then return false end
+    local x, y = AC.mousePos()
+    if not (x and y) or x < r.x0 or x > r.x1 or y < r.y0 then return false end
+    local row = math.floor((y - r.y0) / r.lineH) + 1
+    if row < 1 or row > r.n then return false end
+    local name = rt.ac.matches[row]
+    if not name then return false end
+    return AC.applyToDraft(st, key, name)
+end
+
+-- Up / Down while the list is open move the selection; true when taken.
+function AC.move(dir)
+    local ac = rt.ac
+    if not (ac and #ac.matches > 0) then return false end
+    ac.sel = ac.sel + dir
+    if ac.sel < 1 then ac.sel = #ac.matches elseif ac.sel > #ac.matches then ac.sel = 1 end
+    ac.selName = ac.matches[ac.sel]
+    return true
+end
+
+-- The list, painted on ImGui's foreground draw list right above the input
+-- (whose rect was just laid out). A window of its own would sit behind the
+-- chat window as soon as that is clicked - the foreground layer is above
+-- every window. A click on a row completes it (AC.clickPick, from the
+-- rect kept here; the chat log ignores a name click under the list).
+-- Every binding call is guarded so a list that cannot be
+-- drawn never takes the input line's frame (and its Enter) with it; the
+-- first error is kept for /tacchat stats.
+function AC.textWidth(text)
+    local ok, a, b = pcall(ImGui.CalcTextSize, text)
+    if not ok then return #text * 7 end
+    if type(a) == 'number' then return a end
+    if type(a) == 'userdata' or type(a) == 'table' then return tonumber(a.x) or #text * 7 end
+    return #text * 7
+end
+
+function AC.draw(win, st, key)
+    local ac = rt.ac
+    if not (ac and #ac.matches > 0) then return end
+    if not (ImGui.GetForegroundDrawList and ImGui.GetItemRectMin and core.toVec and core.col32) then
+        rt.stats.acErr = rt.stats.acErr or 'no foreground draw list / item rect / vector helpers in this binding'
+        return
+    end
+    local mnX, mnY
+    local okRect, errRect = pcall(function()
+        local a, b = ImGui.GetItemRectMin()
+        if type(a) == 'number' then mnX, mnY = a, b else mnX, mnY = a.x, a.y end
+    end)
+    if not okRect or type(mnX) ~= 'number' or type(mnY) ~= 'number' then
+        rt.stats.acErr = rt.stats.acErr or ('item rect: ' .. tostring(errRect))
+        return
+    end
+    local lineH = 18
+    pcall(function() lineH = ImGui.GetTextLineHeightWithSpacing() end)
+    local padX, padY = core.px(8), core.px(4)
+    local hint = 'Tab / Enter complete, Up / Down choose'
+    local w = AC.textWidth(hint)
+    for _, name in ipairs(ac.matches) do w = math.max(w, AC.textWidth(name)) end
+    w = w + padX * 2
+    local h = (#ac.matches + 1) * lineH + padY * 2
+    local x0, y0 = mnX, mnY - h - core.px(2)
+    if y0 < 0 then y0 = mnY + lineH + core.px(6) end   -- no room above: below the input
+    -- Where the rows are, for a click next frame (see AC.clickPick).
+    rt.acRect = { x0 = x0, y0 = y0 + padY, w = w, lineH = lineH, n = #ac.matches, x1 = x0 + w, y1 = y0 + h }
+    local dl = ImGui.GetForegroundDrawList()
+    if not dl then
+        rt.stats.acErr = rt.stats.acErr or 'GetForegroundDrawList returned nothing'
+        return
+    end
+    local ok, err = pcall(function()
+        local V, C = core.toVec, core.col32
+        dl:AddRectFilled(V(x0, y0), V(x0 + w, y0 + h), C(0.08, 0.10, 0.14, 0.96), 4)
+        dl:AddRect(V(x0, y0), V(x0 + w, y0 + h), C(0.40, 0.50, 0.65, 1), 4)
+        local y = y0 + padY
+        for i, name in ipairs(ac.matches) do
+            if i == ac.sel then
+                dl:AddRectFilled(V(x0 + 2, y), V(x0 + w - 2, y + lineH), C(0.22, 0.42, 0.72, 0.9), 3)
+            end
+            dl:AddText(V(x0 + padX, y + (lineH - (lineH - 4)) / 2), C(0.95, 0.95, 0.95, 1), name)
+            y = y + lineH
+        end
+        dl:AddText(V(x0 + padX, y + 2), C(MUTED[1], MUTED[2], MUTED[3], 1), hint)
+    end)
+    if not ok then rt.stats.acErr = rt.stats.acErr or ('list: ' .. tostring(err)) end
+    rt.stats.acDrawn = (rt.stats.acDrawn or 0) + 1
+end
+
+-- MQ's binding calls the Lua callback as callback(eventFlag, data) - the
+-- ImGuiInputTextFlags event first, the ImGuiInputTextCallbackData second
+-- (LuaInputTextCallback in lua_ImGuiWidgets.cpp). A binding that passes the
+-- data alone is taken too.
+local function inputCallback(flag, data)
+    rt.stats.cbCalls = rt.stats.cbCalls + 1
+    if data == nil and type(flag) ~= 'number' then data = flag end
+    if data == nil then
+        rt.stats.lastCb = 'no callback data (flag ' .. tostring(flag) .. ')'
+        return 0
+    end
+    local K = ImGuiKey or _G.ImGuiKey
+    local dir, err, branch
+    local before = rt.ac and (rt.ac.sel .. '/' .. #rt.ac.matches .. ' ' .. tostring(rt.ac.selName)) or 'closed'
+    local ok, e = pcall(function()
+        local F = ImGuiInputTextFlags or _G.ImGuiInputTextFlags
+        local ef = tonumber(flag) or 0
+        local st = rt.cbState
+        local buf = IH.bufferText(data)
+        -- After an Enter / click completion the refocused input selects
+        -- all: put the cursor at the end instead.
+        if rt.acCursorEnd then
+            rt.acCursorEnd = false
+            local len = buf and #buf or 0
+            pcall(function() data:ClearSelection() end)
+            pcall(function() data.CursorPos = len; data.SelectionStart = len; data.SelectionEnd = len end)
+        end
+        -- Which event this is. EventKey says it best: Tab for completion,
+        -- Up / Down for history, none for the always / edit events; the
+        -- flag is the fallback.
+        local ekn
+        pcall(function()
+            local ek = data.EventKey
+            ekn = tonumber(ek)
+            if ekn == nil and ek ~= nil then ekn = tonumber(tostring(ek)) end
+        end)
+        local function keyIs(k) return k ~= nil and ekn ~= nil and ekn == tonumber(k) end
+        local isTab = (K and keyIs(K.Tab)) or (F and F.CallbackCompletion and ef == F.CallbackCompletion) or false
+        if K and keyIs(K.UpArrow) then dir = -1 elseif K and keyIs(K.DownArrow) then dir = 1 end
+        local isHistory = dir ~= nil or (F and F.CallbackHistory and ef == F.CallbackHistory) or false
+        if isTab then
+            branch = 'completion'
+            AC.applyInCallback(data)
+            return
+        end
+        if not isHistory then
+            branch = 'track'
+            local cur = 0
+            pcall(function() cur = tonumber(data.CursorPos) or 0 end)
+            AC.track(buf, cur)
+            return
+        end
+        branch = 'history'
+        if not K then err = 'no ImGuiKey table' return end
+        dir = dir or IH.direction(data, K)
+        if not dir then return end
+        if AC.move(dir) then branch = 'list' return end
+        local current = buf or (st and st.input) or ''
+        local entry = IH.step(st, dir, current)
+        if entry then IH.show(data, st, entry) end
+    end)
+    if not ok then err = tostring(e) end
+    -- What the last callback saw (/tacchat stats).
+    local okKey, ek = pcall(function() return data.EventKey end)
+    local okFlag, ef = pcall(function() return data.EventFlag end)
+    local line = string.format('%s: key %s (%s), flag %s / %s, up %s / down %s, dir %s, idx %d of %d, list %s -> %s%s',
+        tostring(branch), okKey and tostring(ek) or '?', okKey and type(ek) or '?', tostring(flag), okFlag and tostring(ef) or '?',
+        tostring(K and K.UpArrow), tostring(K and K.DownArrow), tostring(dir), rt.historyIdx, #cfg.inputHistory,
+        before, rt.ac and (rt.ac.sel .. '/' .. #rt.ac.matches .. ' ' .. tostring(rt.ac.selName)) or 'closed',
+        err and (', error: ' .. err) or '')
+    rt.stats.lastCb = line
+    -- The always / edit events come every frame; keep the last key event too.
+    if branch ~= 'track' then rt.stats.lastKeyCb = line end
     return 0
 end
 
@@ -3588,10 +4367,13 @@ local function drawInput(win, tab)
     local F = ImGuiInputTextFlags or _G.ImGuiInputTextFlags
     local flags = (F and F.EnterReturnsTrue) or 0
     if F and F.CallbackHistory then flags = flags + F.CallbackHistory end
+    if F and F.CallbackCompletion then flags = flags + F.CallbackCompletion end
+    if F and F.CallbackAlways then flags = flags + F.CallbackAlways elseif F and F.CallbackEdit then flags = flags + F.CallbackEdit end
 
     local key = tabKey(win, tab)
     local mine = (rt.focusKey == nil) or (rt.focusKey == key)
     if (rt.focusRequested and mine) or (rt.inputRefocus > 0 and rt.lastInputKey == key) then
+        rt.stats.focusCalls = (rt.stats.focusCalls or 0) + 1
         pcall(ImGui.SetKeyboardFocusHere)
         rt.focusRequested = false
         rt.focusKey = nil
@@ -3601,18 +4383,39 @@ local function drawInput(win, tab)
     -- show up in every other input line.
     local st = tabState(win, tab)
     local draft = st.input or ''
+    rt.cbState = st
+    rt.cbKey = key
     ImGui.PushItemWidth(-1)
     local ok, text, entered = pcall(ImGui.InputText, '##tacchatInput', draft, flags, inputCallback)
     if not ok then
         text, entered = ImGui.InputText('##tacchatInput', draft, (F and F.EnterReturnsTrue) or 0)
     end
     ImGui.PopItemWidth()
-    if ImGui.IsItemActive and ImGui.IsItemActive() then
+    local active = ImGui.IsItemActive and ImGui.IsItemActive()
+    if active then
         rt.lastInputKey = key
         rt.activeInputWin = win.id
     end
     if type(text) == 'string' then st.input = text end
+    -- The completion list, when this input owns it.
+    local mineAc = rt.ac ~= nil and rt.ac.key == key
+    if mineAc and not active and AC.clickPick(st, key) then
+        -- The click that picked a name is what took the mouse from the input.
+    elseif mineAc and (active or rt.inputRefocus > 0 or entered == true) then
+        local okAc, errAc = pcall(AC.draw, win, st, key)
+        if not okAc then rt.stats.acErr = rt.stats.acErr or tostring(errAc) end
+    elseif mineAc and not active then
+        rt.ac = nil
+        rt.acRect = nil
+    end
+    if not rt.ac then rt.acRect = nil end
+    if entered == true and rt.ac and rt.ac.key == key and #rt.ac.matches > 0 then
+        -- Enter takes the completion, not the line.
+        AC.applyToDraft(st, key)
+        entered = false
+    end
     if entered == true then
+        IH.push(st.input, st.links)
         sendText(tab, expandLinks(st, st.input or ''))
         st.input = ''
         rt.lastInputKey = key
@@ -3837,6 +4640,7 @@ end
 local function drawWindow(win, wi)
     if not win.open then return end
     local key = (wi == 1) and 'chat' or ('chat_' .. win.id)
+    rt.winKeys[win.id] = key
     core.pushTheme()
     core.preBeginWindow(key)
     -- Tight chrome: chat is text, not buttons. Pushed after the scale hook so
@@ -4106,6 +4910,36 @@ function chatCommand(sub, arg1, arg2)
         local on = tostring(arg1 or ''):lower()
         if on == 'on' then setCapture(true) elseif on == 'off' then setCapture(false) else setCapture(not cfg.capture) end
         return
+    elseif sub == 'gamelinks' then
+        local what = tostring(arg1 or ''):lower()
+        if what == 'status' then GL.status() return end
+        if what == 'window' then
+            local name = trim(tostring(arg2 or ''))
+            cfg.gameLinksWindow = (name ~= '' and name ~= 'default') and name or nil
+            markDirty()
+            print('\ag[Triune Chat]\ax game chat input read from Window[' .. (cfg.gameLinksWindow or 'ChatWindow') .. '].')
+            return
+        end
+        local on
+        if what == 'on' then on = true elseif what == 'off' then on = false else on = not cfg.gameLinks end
+        if on ~= cfg.gameLinks then cfg.gameLinks = on; markDirty() end
+        if on then GL.disabled = nil; GL.errors = 0; GL.last = nil end
+        print('\ag[Triune Chat]\ax item window icon links ' .. (on and 'go to the chat input.' or 'stay in the game\'s chat line.'))
+        return
+    elseif sub == 'complete' then
+        local what = tostring(arg1 or ''):lower()
+        local on
+        if what == 'on' then on = true elseif what == 'off' then on = false else on = not cfg.mentionComplete end
+        if on ~= cfg.mentionComplete then cfg.mentionComplete = on; if not on then rt.ac = nil end; markDirty() end
+        print(string.format('\ag[Triune Chat]\ax @Name completion %s (%d names known).', on and 'on' or 'off', rt.namesN))
+        return
+    elseif sub == 'gameline' then
+        local what = tostring(arg1 or ''):lower()
+        local on
+        if what == 'on' then on = true elseif what == 'off' then on = false else on = not cfg.gameLineClose end
+        if on ~= cfg.gameLineClose then cfg.gameLineClose = on; markDirty() end
+        print('\ag[Triune Chat]\ax the game\'s chat line is ' .. (on and 'closed when Enter opens this input.' or 'left alone.'))
+        return
     elseif sub == 'history' then
         local what = tostring(arg1 or ''):lower()
         if what == 'clear' then
@@ -4229,6 +5063,18 @@ function chatCommand(sub, arg1, arg2)
         print(string.format('\ag[Triune Chat]\ax last event %s | last tick %s | last draw %s | queued %d | ring %d | engine %s',
             agoText(s.lastEventAt), agoText(s.lastTickAt), agoText(s.lastDrawAt), #rt.queue, ringCount(rt.ring), ctrl.running and 'running' or 'paused'))
         print(string.format('\ag[Triune Chat]\ax per-frame delivery: %s (%d lines pumped in the draw)', rt.drawEvents and 'on' or 'off', rt.drawPumped))
+        if s.lastCb then print('\ag[Triune Chat]\ax last input callback: ' .. s.lastCb) end
+        if s.lastKeyCb then print('\ag[Triune Chat]\ax last key callback (Tab / Up / Down): ' .. s.lastKeyCb) end
+        print(string.format('\ag[Triune Chat]\ax input focus: SetKeyboardFocusHere %d times, focusRequested %s (key %s), refocus %d, last input %s | game line: model %s, closed by keypress %d times, links placed %d',
+            s.focusCalls or 0, tostring(rt.focusRequested), tostring(rt.focusKey), rt.inputRefocus, tostring(rt.lastInputKey),
+            GL.gameFocus and 'open' or 'closed', s.keypresses or 0, s.gameLinks or 0))
+        if s.drawErr then print('\ay[Triune Chat]\ax last draw error: ' .. tostring(s.drawErr)) end
+        print(string.format('\ag[Triune Chat]\ax settings editor: %s, page %s, header clicks %d (last %s)',
+            rt.editor and 'open' or 'closed', tostring(rt.editor and rt.editor.page), s.edClicks or 0, tostring(s.edLastClick)))
+        print(string.format('\ag[Triune Chat]\ax @Name completion: %s, %d names known, list drawn %d times, open now: %s%s',
+            cfg.mentionComplete and 'on' or 'off', rt.namesN, s.acDrawn or 0,
+            rt.ac and (#rt.ac.matches .. ' match(es) for "@' .. rt.ac.prefix .. '"') or 'no',
+            s.acErr and (', list error: ' .. s.acErr) or ''))
         if s.holes or s.drawErr then
             print(string.format('\ay[Triune Chat]\ax queue repairs %d (%s) | last renderer error: %s', s.holes or 0, tostring(s.holeInfo), tostring(s.drawErr)))
         end
@@ -4353,6 +5199,7 @@ function plugin.onDrawUI()
     if not core then return end
     refresh()
     rt.stats.lastDrawAt = os.time()
+    GL.poll()
     if ctrl.show_chat then
         pumpEvents()
         if #rt.queue > 0 then drainQueue() end
@@ -4386,7 +5233,7 @@ function plugin.onCommand(cmd, args)
 end
 
 plugin.help = {
-    '  \ag/ac chat [show|hide|toggle|focus|settings|clear|capture on|off|history on|off|clear|ghost [window]|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|reset]\ax - Chat Windows (also /tacchat)',
+    '  \ag/ac chat [show|hide|toggle|focus|settings|clear|capture on|off|history on|off|clear|gamelinks on|off|status|gameline on|off|complete on|off|ghost [window]|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|reset]\ax - Chat Windows (also /tacchat)',
 }
 
 -- Exposed for tests
@@ -4453,6 +5300,10 @@ plugin.drainQueue = drainQueue
 plugin.onAnyLine = onAnyLine
 plugin.sendText = sendText
 plugin.insertLink = insertLink
+plugin.GL = GL
+plugin.IH = IH
+plugin.AC = AC
+plugin.inputCallback = inputCallback
 plugin.openTextLink = openTextLink
 plugin.retryTextLinks = retryTextLinks
 plugin.expandLinks = expandLinks
