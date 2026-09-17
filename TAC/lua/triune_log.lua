@@ -345,8 +345,8 @@ end
 
 function M.hookPrint()
     if st.printHooked then return end
-    st.rawPrint = _G.print
-    local rawPrint = st.rawPrint
+    local rawPrint = _G.print
+    st.rawPrint = rawPrint
     _G.print = function(...)
         pcall(M.capturePrint, ...)
         return rawPrint(...)

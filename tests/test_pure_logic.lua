@@ -15396,7 +15396,12 @@ end)()
         { '[Triune] AA fired: Distant Strike', 'triune' },
         { '[Nav] Navigating to spawn: a_warlord_of_hate005 (271)', 'mq' },
         { 'Cannot bind /chat, already bound in MQ.', 'mq' },
-        { '[NMS] Words of Obliteration sold for 3 platinum, 3 gold.', 'loot' },
+        { '[NMS] Words of Obliteration sold for 3 platinum, 3 gold.', 'nms' },
+        { '[NMS] Active looter: you.', 'nms' },
+        { '[NMS] Offers waiting: 0 (0 items).', 'nms' },
+        { '[NMS Loot] offer 1748 slot 65535 id 12428 qty 1 "Iksar Bandit Mask"', 'nms' },
+        { '[Triune NMS] Active looter is now Bob.', 'triune' },
+        { 'You receive no coin.', 'loot' },
         { 'miss', 'melee_num' }, { '249', 'melee_num' }, { '1056', 'melee_num' },
         { 'Spinevenom was burned.', 'ds', 'Spinevenom' }, { 'YOU are burned!', 'ds' }, { 'Gennro was burned.', 'ds', 'Gennro' },
         { 'Spinevenom begins to cast a spell.', 'pet', 'Spinevenom' },
@@ -15580,6 +15585,11 @@ end)()
     assert_true(old.windows[1].tabs[1].channels.petchat == nil and old.windows[1].tabs[1].channels.tell_in, 'Suite 102: v1 Tells preset migrates pet chat out')
     assert_true(old.windows[1].tabs[2].channels.petchat == true, 'Suite 102: migration leaves custom tabs alone')
     assert_true(plugin.sanitizeConfig({ version = 2, windows = { { id = 'w', tabs = { { id = 'tells', channels = { tell_in = true, tell_out = true, petchat = true } } } } } }).windows[1].tabs[1].channels.petchat == true, 'Suite 102: v2 configs are not migrated')
+    local mig4 = plugin.sanitizeConfig({ version = 3, windows = { { id = 'w', tabs = { { id = 'loot', channels = { loot = true, exp = true } }, { id = 'soc', channels = { say = true } } } } } })
+    assert_true(mig4.windows[1].tabs[1].channels.nms == true, 'Suite 102: v3 tabs that showed loot gain the NMS channel')
+    assert_true(mig4.windows[1].tabs[2].channels.nms == nil, 'Suite 102: ...and tabs without loot do not')
+    assert_true(plugin.sanitizeConfig({ version = 4, windows = { { id = 'w', tabs = { { id = 'loot', channels = { loot = true } } } } } }).windows[1].tabs[1].channels.nms == nil, 'Suite 102: a v4 tab that dropped the NMS channel is left alone')
+    assert_true(c.windows[1].tabs[4].channels.nms == true and c.windows[1].tabs[4].channels.loot == true, 'Suite 102: the default Loot & XP tab shows NMS lines')
     c = plugin.sanitizeConfig({ maxLines = 'x', opacity = 7, appendMode = 'weird', colors = { say = 'ZZZ', group = 'FF00FF', bogus = 'FFFFFF' },
         windows = { { id = 'a', tabs = { { channels = { bogus = true, say = true }, send = 'nope', exclude = { 'WTS', 7, '' } } } }, { id = 'a', tabs = {} } } })
     assert_eq(c.maxLines, 2000, 'Suite 102: bad maxLines falls back')

@@ -66,7 +66,7 @@ local WARN  = { 1.00, 0.72, 0.30, 1 }
 local WARN_HEX = 'FFB84D'                 -- WARN as a line colour (entry.hl)
 local ERR   = { 0.95, 0.35, 0.35, 1 }
 
-local CONFIG_VERSION = 3
+local CONFIG_VERSION = 4
 local LINK = string.char(18)              -- \x12 wraps EQ links
 local ITEM_LINK_PAYLOAD = 77              -- fixed-width item link body before the item name
 local COLOR_ESC = string.char(127)        -- \x7F RRGGBB inline color (MQ output)
@@ -127,6 +127,7 @@ local CHANNELS = {
     -- Info
     { id = 'exp',        label = 'Experience',             group = 'Info', color = 'FFFF66' },
     { id = 'loot',       label = 'Loot & money',           group = 'Info', color = 'C2FF66' },
+    { id = 'nms',        label = 'NMS loot (#nms, auto-sell)', group = 'Info', color = '8FE388' },
     { id = 'item',       label = 'Item effects & upgrades', group = 'Info', color = 'E6C34A' },
     { id = 'buff',       label = 'Buffs landed',           group = 'Info', color = '66FFCC' },
     { id = 'buff_worn',  label = 'Buffs worn off',         group = 'Info', color = '99CCCC' },
@@ -153,7 +154,7 @@ local PRESETS = {
     all    = nil,
     social = { 'say', 'npc_say', 'tell_in', 'tell_out', 'group', 'guild', 'raid', 'ooc', 'auction', 'shout', 'emote', 'channel', 'petchat' },
     combat = { 'melee_you', 'melee_others', 'melee_taken', 'crit', 'flurry', 'pet', 'spell_you', 'spell_others', 'spell_taken', 'spell_land', 'dot', 'ds', 'heal', 'cast', 'death', 'resist', 'combat_msg' },
-    loot   = { 'exp', 'loot', 'item', 'skill', 'faction' },
+    loot   = { 'exp', 'loot', 'nms', 'item', 'skill', 'faction' },
     tells  = { 'tell_in', 'tell_out' },          -- pets are not players: pet chat has its own channel
     triune = { 'triune', 'mq' },
 }
@@ -580,7 +581,10 @@ local function classify(raw, ctx)
     -- MQ / Triune output (arrives through the same event as game text)
     if text:sub(1, 1) == '[' then
         if text:find('^%[Triune') or text:find('^%[TAC') then return result('triune', nil, text) end
-        if text:find('^%[NMS%]') then return result('loot', nil, text) end
+        -- The personal loot system: "[NMS] X sold for ...", "[NMS] Active
+        -- looter: you.", "[NMS Loot] offer 1748 slot ... "Item"" - its own
+        -- channel so a tab can show or hide the auto-sell stream on its own.
+        if text:find('^%[NMS%]') or text:find('^%[NMS Loot%]') then return result('nms', nil, text) end
         for _, p in ipairs(MQ_PREFIXES) do
             if text:sub(1, #p) == p then return result('mq', nil, text) end
         end
@@ -1003,6 +1007,9 @@ local function sanitizeConfig(c)
                         for _ in pairs(t.channels) do n = n + 1 end
                         if n == 3 then t.channels.petchat = nil end
                     end
+                    -- v4 split the [NMS] lines out of Loot & money into their
+                    -- own channel; a tab that showed loot keeps showing them.
+                    if fromVersion < 4 and t.channels.loot then t.channels.nms = true end
                 end
             end
             for _, key in ipairs({ 'include', 'exclude' }) do
