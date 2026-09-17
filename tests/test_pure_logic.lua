@@ -107,6 +107,7 @@ local function extractFunction(src, funcName)
                 or line:match('^runtime%.' .. funcName .. '%s*=%s*function%s*%(')
                 or line:match('^function invLogic%.' .. funcName .. '%s*%(')
                 or line:match('^invLogic%.' .. funcName .. '%s*=%s*function%s*%(')
+                or line:match('^function isoH%.' .. funcName .. '%s*%(')
                 or line:match('^' .. funcName .. '%s*=%s*function%s*%(') then
                 capturing = true
                 lines[#lines + 1] = line
@@ -135,6 +136,8 @@ local function loadFunc(src, funcName, env)
         code = code .. '\nreturn runtime.' .. funcName
     elseif code:match('^function invLogic%.') or code:match('^invLogic%.') then
         code = code .. '\nreturn invLogic.' .. funcName
+    elseif code:match('^function isoH%.') then
+        code = code .. '\nreturn isoH.' .. funcName
     else
         code = code .. '\nreturn ' .. funcName
     end
@@ -11396,7 +11399,7 @@ do
         assert_eq(pm.getWindow('floating_damage'), nil, 'Suite 89: floating_damage (overlay) declares no window')
         assert_eq(pm.getWindow('auto_accept') and pm.getWindow('auto_accept').flag, 'show_auto_accept', 'Suite 89: auto_accept declares its popout window')
         W.all = pm.windowPlugins(false)
-        assert_eq(#W.all, 21, 'Suite 89: twenty shipped plugins own a window, plus the unit frames Target popout')
+        assert_eq(#W.all, 22, 'Suite 89: twenty shipped plugins own a window, plus the unit frames Target popout and the NMS Loot compact window')
         assert_eq(W.all[1].id, 'spellbook', 'Suite 89: header order starts with the Spellbook (as before)')
         assert_eq(W.all[2].id, 'map', 'Suite 89: Map follows Spellbook in header order')
         assert_eq(W.all[#W.all].id, 'buffbot', 'Suite 89: Buffbot sorts last')
@@ -18766,11 +18769,17 @@ do
         assert_eq(L.parseLooter('You are not the active looter, the active looter is Bob.'), 'Bob', 'Suite 109: a negated line still trusts "looter is Name"')
         assert_nil(L.parseLooter('Only the active looter can loot that.'), 'Suite 109: a hint line says nothing')
         assert_nil(L.parseLooter('Bob tells you, hello'), 'Suite 109: no "looter" no event')
+        assert_eq(L.parseLooter('Active looter: you.'), 'You', 'Suite 109: the real status reply (lowercase you)')
+        assert_eq(L.parseLooter('Active looter: none.'), '', 'Suite 109: "looter: none"')
+        assert_eq(L.parseLooter('Active looter: Bob.'), 'Bob', 'Suite 109: "looter: Name."')
         -- echo
         assert_eq(L.parseEcho('Loot echo is now on.'), true, 'Suite 109: echo on')
         assert_eq(L.parseEcho('Loot echo is now off.'), false, 'Suite 109: echo off')
         assert_eq(L.parseEcho('Loot offers will be echoed to chat: enabled'), true, 'Suite 109: echo enabled')
         assert_nil(L.parseEcho('The echo of your footsteps'), 'Suite 109: echo without loot is ignored')
+        assert_eq(L.parseEcho('Loot echo on. Each offer prints one line per item.'), true, 'Suite 109: the real echo-on reply')
+        assert_eq(L.parseEcho('Loot echo off.'), false, 'Suite 109: the real echo-off reply')
+        assert_nil(L.parseEcho('#nms echo on|off - print each loot offer to chat'), 'Suite 109: the usage line is not a state')
         -- offers
         local n, q = L.parseOffer('Offered: [Rusty Sword] x3')
         assert_eq(n, 'Rusty Sword', 'Suite 109: bracketed item name')
@@ -18783,13 +18792,31 @@ do
         assert_nil(L.parseOffer('Nothing here'), 'Suite 109: no name no offer')
         -- parseLine
         local ev = L.parseLine('Loot offered to you: ' .. itemLink('Rusty Sword') .. ' x2')
-        assert_true(ev and ev.kind == 'offer' and ev.name == 'Rusty Sword' and ev.qty == 2, 'Suite 109: linked offer line')
+        assert_nil(ev, 'Suite 109: a loose line with a link is no longer an offer (the server has an exact format)')
         ev = L.parseLine('Bob tells the group, \'loot [Guild] rules?\'')
         assert_nil(ev, 'Suite 109: player chat with brackets is not an offer')
         ev = L.parseLine('2. Peridot x1', 'list')
         assert_true(ev and ev.kind == 'offer' and ev.name == 'Peridot', 'Suite 109: numbered lines are offers while a list reply is open')
         ev = L.parseLine('2. Peridot x1', nil)
         assert_nil(ev, 'Suite 109: numbered lines outside a list reply are ignored')
+        assert_nil(L.parseLine('[MQ2Nav] Navigating to loot at 12, 34'), 'Suite 109: another script\'s [Tag] line is not an offer')
+        assert_nil(L.parseLine('Offered: [Guild] loot rules'), 'Suite 109: a bracketed word is not an offer')
+        assert_nil(L.parseLine('[NMS] Offered: [Rusty Sword] x2'), 'Suite 109: a server line that is not the offer format is not an offer')
+        -- the auto-loot rules acting on an item
+        ev = L.parseLine('[NMS Loot] sold "Rusty Sword" x1 for 12 gold')
+        assert_true(ev and ev.kind == 'resolved' and ev.name == 'Rusty Sword', 'Suite 109: an auto-sold line resolves the item, never offers it')
+        ev = L.parseLine('[NMS Loot] offer 1748 kept ' .. itemLink('Peridot'))
+        assert_true(ev and ev.kind == 'resolved' and ev.handle == '1748' and ev.name == 'Peridot', 'Suite 109: a handled line with a handle')
+        ev = L.parseLine('[NMS Loot] banked ' .. itemLink('Peridot'))
+        assert_true(ev and ev.kind == 'resolved' and ev.name == 'Peridot', 'Suite 109: a banked line resolves the item')
+        ev = L.parseLine('[NMS] Ruby Crown sold for 200 platinum.')
+        assert_true(ev and ev.kind == 'resolved' and ev.name == 'Ruby Crown', 'Suite 109: the real auto-sell line')
+        ev = L.parseLine("[NMS] Part of Yaeth's Compendium Pg. 63 sold for 3 platinum, 7 gold.")
+        assert_true(ev and ev.kind == 'resolved' and ev.name == "Part of Yaeth's Compendium Pg. 63", 'Suite 109: a punctuated name before "sold for"')
+        ev = L.parseLine('[NMS] Ethereal Mist Vambraces (Enchanted) sold for 1 platinum, 7 gold.')
+        assert_true(ev and ev.kind == 'resolved' and ev.name == 'Ethereal Mist Vambraces (Enchanted)', 'Suite 109: a tiered name before "sold for"')
+        assert_nil(L.parseLine('Luck is with you! ' .. itemLink('Ethereal Mist Vambraces') .. ' has become ' .. itemLink('Ethereal Mist Vambraces (Enchanted)') .. '.'), 'Suite 109: the enchant line is neither an offer nor a resolution')
+        assert_nil(L.parseLine('You receive 2 gold, 1 silver, 1 copper.'), 'Suite 109: coin lines are ignored')
         ev = L.parseLine('You keep ' .. itemLink('Rusty Sword') .. '.')
         assert_true(ev and ev.kind == 'resolved' and ev.name == 'Rusty Sword', 'Suite 109: linked resolution line')
         ev = L.parseLine('You sold Rusty Sword.')
@@ -18800,6 +18827,25 @@ do
         assert_true(ev and ev.kind == 'looter' and ev.name == 'Bob', 'Suite 109: looter line event')
         ev = L.parseLine('Loot echo is now on.')
         assert_true(ev and ev.kind == 'echo' and ev.on == true, 'Suite 109: echo line event')
+        -- the [NMS] prefix and the usage text
+        ev = L.parseLine('[NMS] Active looter: you.')
+        assert_true(ev and ev.kind == 'looter' and ev.name == 'You' and ev.server == true, 'Suite 109: prefixed status reply is a server looter event')
+        ev = L.parseLine('[NMS] Offers waiting: 2 (5 items).')
+        assert_true(ev and ev.kind == 'count' and ev.offers == 2 and ev.items == 5, 'Suite 109: offers-waiting count')
+        ev = L.parseLine('[NMS] Offers waiting: 0 (0 items).')
+        assert_true(ev and ev.kind == 'count' and ev.offers == 0, 'Suite 109: zero offers waiting')
+        ev = L.parseLine('[NMS] Loot echo on. Each offer prints one line per item.')
+        assert_true(ev and ev.kind == 'echo' and ev.on == true, 'Suite 109: prefixed echo on')
+        ev = L.parseLine('[NMS Loot] offer 1748 slot 65535 id 12428 qty 1 "Iksar Bandit Mask"')
+        assert_true(ev and ev.kind == 'offer' and ev.name == 'Iksar Bandit Mask' and ev.handle == '1748' and ev.itemId == 12428 and ev.qty == 1 and ev.slot == 65535 and ev.server == true,
+            'Suite 109: the real list line: handle, item id, qty, quoted name')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'keep', item = ev.name, handle = ev.handle }), 'loot keep "Iksar Bandit Mask" 1748', 'Suite 109: the row\'s handle goes on the loot line')
+        for _, u in ipairs({ 'Usage:', '#nms claim - claim the active looter slot', '#nms status - who holds it, and what you may loot',
+            '#nms echo on|off - print each loot offer to chat', '#nms list [handle] - list what is offered to you',
+            '#nms loot <action> "item name" [handle]', '#nms loot coin [handle] - take the coin',
+            'actions: keep, sell, tribute, bank, vault, destroy, pass <player>' }) do
+            assert_nil(L.parseLine(u), 'Suite 109: usage text yields no event: ' .. u)
+        end
     end
 
     -- 2. #nms line building and /ac nms argument parsing
@@ -18817,6 +18863,13 @@ do
         assert_nil(L.nmsLine({ sub = 'loot', action = 'keep', item = '' }), 'Suite 109: empty item refused')
         assert_nil(L.nmsLine({ sub = 'zone', item = 'x' }), 'Suite 109: unknown sub-command refused')
         assert_nil(L.nmsLine({ sub = 'claim; #zone x' }), 'Suite 109: no smuggling through the sub-command')
+        assert_eq(L.nmsLine({ sub = 'list', handle = 'c12' }), 'list c12', 'Suite 109: list with a handle')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'keep', item = 'Peridot', handle = 'c12' }), 'loot keep "Peridot" c12', 'Suite 109: loot with a handle')
+        assert_nil(L.nmsLine({ sub = 'loot', action = 'keep', item = 'Peridot', handle = 'x; #zone' }), 'Suite 109: a handle is one word')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'coin' }), 'loot coin', 'Suite 109: take the coin')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'coin', handle = 'c12' }), 'loot coin c12', 'Suite 109: take the coin of one offer')
+        assert_eq(L.nmsLine({ sub = 'loot', action = 'pass', item = 'Peridot', player = 'Bob' }), 'loot pass Bob "Peridot"', 'Suite 109: pass names the player')
+        assert_nil(L.nmsLine({ sub = 'loot', action = 'pass', item = 'Peridot' }), 'Suite 109: pass without a player is refused')
 
         local function isPeer(n) return n == 'Bob' end
         local spec = L.parseArgs({ 'nms' }, isPeer)
@@ -18849,6 +18902,22 @@ do
         assert_nil(bad, 'Suite 109: loot without an item is refused')
         spec = L.parseArgs({ 'nms', 'me', 'claim' }, isPeer)
         assert_true(spec.sub == 'claim' and spec.target == nil, 'Suite 109: "me" is this box')
+        spec = L.parseArgs({ 'nms', 'list', 'Bob' }, isPeer)
+        assert_true(spec.sub == 'list' and spec.target == 'Bob', 'Suite 109: /ac nms list Bob targets the box')
+        spec = L.parseArgs({ 'nms', 'list', 'c12' }, isPeer)
+        assert_true(spec.sub == 'list' and spec.handle == 'c12', 'Suite 109: /ac nms list <handle>')
+        spec = L.parseArgs({ 'nms', 'loot', 'keep', '"Rusty Sword"', 'c12' }, isPeer)
+        assert_true(spec.item == 'Rusty Sword' and spec.handle == 'c12', 'Suite 109: a handle after the quoted item')
+        spec = L.parseArgs({ 'nms', 'loot', 'pass', 'Bob', 'Rusty', 'Sword' }, isPeer)
+        assert_true(spec.action == 'pass' and spec.player == 'Bob' and spec.item == 'Rusty Sword', 'Suite 109: pass takes the player first')
+        assert_nil(L.parseArgs({ 'nms', 'loot', 'pass', '"Rusty Sword"' }, isPeer), 'Suite 109: pass without a player is refused')
+        spec = L.parseArgs({ 'nms', 'loot', 'coin' }, isPeer)
+        assert_true(spec.action == 'coin' and spec.handle == nil, 'Suite 109: loot coin')
+        spec = L.parseArgs({ 'nms', 'coin', 'c12' }, isPeer)
+        assert_true(spec.action == 'coin' and spec.handle == 'c12', 'Suite 109: coin shorthand with a handle')
+        assert_eq(L.parseArgs({ 'nms', 'compact' }, isPeer).sub, 'compact', 'Suite 109: /ac nms compact')
+        assert_eq(L.parseArgs({ 'nms', 'mini' }, isPeer).sub, 'compact', 'Suite 109: mini is compact')
+        assert_eq(L.parseArgs({ 'nms', 'full' }, isPeer).sub, 'full', 'Suite 109: /ac nms full')
     end
 
     -- 3. Live flow: send, capture window, belief, boxnet sharing
@@ -18870,16 +18939,23 @@ do
         assert_true(bn.broadcasts[1] and bn.broadcasts[1].kind == 'nmsloot:who', 'Suite 109: asks the boxes what they know')
         assert_true(nms.state.pending ~= nil and nms.state.pending.spec.sub == 'status', 'Suite 109: a reply window is open')
 
-        -- server replies: we are the looter
-        w.events.TacNmsLootAll('You are the active looter.')
+        -- server replies: we are the looter (the real reply wording)
+        w.events.TacNmsLootAll('[NMS] Active looter: you.')
         assert_eq(nms.state.looter, 'Tank', 'Suite 109: "You" resolves to this character')
+        w.events.TacNmsLootAll('[NMS] Offers waiting: 0 (0 items).')
+        assert_eq(nms.state.offerCount, 0, 'Suite 109: offer count from the status reply')
+        assert_eq(nms.state.wantList, false, 'Suite 109: nothing waiting, no list')
         assert_eq(nms.state.looterFrom, 'server', 'Suite 109: source is the server')
         assert_true(nms.state.net.dirty, 'Suite 109: a change marks the state dirty')
         -- our own announce line must not be re-parsed
-        w.events.TacNmsLootAll('[NMS Loot] Active looter is now Bob.')
+        w.events.TacNmsLootAll('[Triune NMS] Active looter is now Bob.')
         assert_eq(nms.state.looter, 'Tank', 'Suite 109: own tagged prints are skipped')
         w.events.TacNmsLootAll("You say, '#nms status'")
         assert_eq(nms.state.looter, 'Tank', 'Suite 109: the echoed say line is skipped')
+        w.events.TacNmsLootAll('[MQ2Nav] Navigating to loot ' .. itemLink('Rusty Sword'))
+        assert_eq(#nms.state.offers, 0, 'Suite 109: MQ2Nav output is skipped even with a link in it')
+        w.events.TacNmsLootAll('[MQ2Nav] The active looter is Bob')
+        assert_eq(nms.state.looter, 'Tank', 'Suite 109: MQ2Nav output never sets the looter')
 
         -- reply window closes after CAPTURE_SEC and the state is broadcast
         w.nowMs = w.nowMs + 2500
@@ -18917,26 +18993,56 @@ do
         bn.subs['nmsloot:who']({}, { character = 'Sam' })
         assert_eq(#bn.broadcasts, 1, 'Suite 109: a second who inside the window is not answered again')
 
+        -- a status that reports offers waiting fetches the list by itself
+        w.cmds = {}
+        nms.runOn(nil, { sub = 'status' })
+        w.events.TacNmsLootAll('[NMS] Active looter: you.')
+        w.events.TacNmsLootAll('[NMS] Offers waiting: 1 (2 items).')
+        assert_eq(nms.state.offerCount, 1, 'Suite 109: offers waiting counted')
+        assert_eq(nms.state.itemCount, 2, 'Suite 109: items counted')
+        assert_true(nms.state.wantList, 'Suite 109: a list is wanted')
+        w.nowMs = w.nowMs + 2500
+        nms.tick()
+        assert_eq(w.cmds[2], '/say #nms list', 'Suite 109: the list is sent once the status reply window closes')
+        assert_eq(nms.state.wantList, false, 'Suite 109: list wanted only once')
+        w.nowMs = w.nowMs + 2500
+        nms.tick()
         -- list: numbered lines inside the window become the offers
         w.cmds = {}
         assert_true(nms.runOn(nil, { sub = 'list' }), 'Suite 109: local list sent')
         assert_eq(w.cmds[1], '/say #nms list', 'Suite 109: list line')
-        w.events.TacNmsLootAll('Items offered to you:')
-        w.events.TacNmsLootAll('1. ' .. itemLink('Rusty Sword') .. ' x1')
-        w.events.TacNmsLootAll('2. Peridot x3')
+        w.events.TacNmsLootAll('[NMS] Offers waiting: 1 (3 items).')
+        w.events.TacNmsLootAll('[NMS Loot] offer 1748 slot 65535 id 12428 qty 1 "Rusty Sword"')
+        w.events.TacNmsLootAll('[NMS Loot] offer 1748 slot 65534 id 1001 qty 3 "Peridot"')
+        w.events.TacNmsLootAll('2. Fine Steel Dagger x1')
         assert_eq(#nms.state.offers, 0, 'Suite 109: offers replace the list only when the reply window closes')
         w.nowMs = w.nowMs + 2500
         nms.tick()
-        assert_eq(#nms.state.offers, 2, 'Suite 109: two offers listed')
-        assert_eq(nms.state.offers[1].name, 'Rusty Sword', 'Suite 109: linked item name')
-        assert_eq(nms.state.offers[2].qty, 3, 'Suite 109: numbered item quantity')
+        assert_eq(#nms.state.offers, 3, 'Suite 109: three offers listed')
+        assert_eq(nms.state.offers[1].name, 'Rusty Sword', 'Suite 109: quoted item name')
+        assert_eq(nms.state.offers[1].handle, '1748', 'Suite 109: offer handle kept')
+        assert_eq(nms.state.offers[1].itemId, 12428, 'Suite 109: item id kept')
+        assert_eq(nms.state.offers[2].qty, 3, 'Suite 109: quantity kept')
+        assert_eq(nms.state.offers[3].name, 'Fine Steel Dagger', 'Suite 109: a numbered line inside the list reply still counts')
+        assert_eq(nms.state.wantList, false, 'Suite 109: the count inside a list reply does not queue another list')
+        nms.state.offers[3] = nil
         -- echo offer outside a window adds; resolution removes
-        w.events.TacNmsLootAll('Loot offered: ' .. itemLink('Fine Steel Dagger'))
+        w.events.TacNmsLootAll('[NMS Loot] offer 1750 slot 65535 id 5 qty 1 "Fine Steel Dagger"')
         assert_eq(#nms.state.offers, 3, 'Suite 109: an echoed offer is added')
-        w.events.TacNmsLootAll('You keep ' .. itemLink('Rusty Sword') .. '.')
-        assert_eq(#nms.state.offers, 2, 'Suite 109: a handled item leaves the list')
-        w.events.TacNmsLootAll('Loot offered: ' .. itemLink('Fine Steel Dagger'))
+        assert_eq(nms.state.offers[3].handle, '1750', 'Suite 109: echoed offer keeps its handle')
+        w.events.TacNmsLootAll('[NMS Loot] sold "Rusty Sword" x1 for 3 platinum')
+        assert_eq(#nms.state.offers, 2, 'Suite 109: an auto-sold item leaves the list')
+        w.events.TacNmsLootAll('[NMS Loot] sold "Something Else" x1 for 3 platinum')
+        assert_eq(#nms.state.offers, 2, 'Suite 109: ...and adds nothing')
+        w.events.TacNmsLootAll('[NMS Loot] offer 1749 slot 65535 id 7 qty 1 "Rusty Sword"')
+        assert_eq(#nms.state.offers, 3, 'Suite 109: a fresh offer of the same item is its own row')
+        w.events.TacNmsLootAll('[NMS Loot] offer 1749 kept')
+        assert_eq(#nms.state.offers, 2, 'Suite 109: a handled line with only the handle removes that row')
+        w.events.TacNmsLootAll('[NMS Loot] offer 1750 slot 65535 id 5 qty 1 "Fine Steel Dagger"')
         assert_eq(#nms.state.offers, 2, 'Suite 109: the same offer twice is one row')
+        assert_true(bn.broadcasts ~= nil, 'Suite 109: (state sharing continues)')
+        local payload = nms.statePayload()
+        assert_eq(payload.offers[2].h, '1750', 'Suite 109: handles travel to the other boxes')
         w.events.TacNmsLootAll('Loot echo is now on.')
         assert_eq(nms.state.echo, true, 'Suite 109: echo state from the server')
 
@@ -19025,6 +19131,17 @@ do
         local shown = ctrl.show_nmsloot
         nms.onCommand('nms', { 'nms' })
         assert_eq(ctrl.show_nmsloot, not shown, 'Suite 109: bare /ac nms toggles the window')
+        nms.onCommand('nms', { 'nms', 'compact' })
+        assert_true(nms.cfg.compact == true and ctrl.show_nmsloot == true, 'Suite 109: /ac nms compact shows the compact window')
+        assert_true(nms.isCompactOpen(), 'Suite 109: the compact layout row reads open')
+        nms.setCompactOpen(false)
+        assert_eq(ctrl.show_nmsloot, false, 'Suite 109: closing the compact row hides the window')
+        nms.onCommand('nms', { 'nms', 'full' })
+        assert_true(nms.cfg.compact == false and ctrl.show_nmsloot == true, 'Suite 109: /ac nms full shows the full window')
+        assert_eq(nms.onSaveSettings().compact, false, 'Suite 109: compact preference is saved')
+        nms.onLoadSettings({ compact = true, compactRows = 99 })
+        assert_true(nms.cfg.compact == true and nms.cfg.compactRows == 10, 'Suite 109: compact preference loaded, rows clamped')
+        nms.cfg.compact = false
         printed = {}
         nms.onCommand('nms', { 'nms', 'who' })
         assert_true(printed[1] and printed[1]:find('Active looter', 1, true) ~= nil, 'Suite 109: /ac nms who prints the roster')
@@ -19064,6 +19181,349 @@ do
     end
 
     print = origPrint
+end
+
+
+-- ============================================================================
+-- Suite 110: Mesh isolation recovery -- last-good trail sampling, the
+-- no-path / unreachable-burst signals, the island vs unmeshed decision, the
+-- recovery ladder (references -> NPC -> maneuvers -> give up), success and
+-- interruption bookkeeping, hazard promotion, and the core wiring.
+-- ============================================================================
+print('--- Suite 110: Mesh isolation recovery ---')
+do
+    local MESH_ISO = loadstring('return ' .. src:match('pursuit%.MESH_ISO = (%b{})'))()
+    local isoInitSrc = src:match('\n    meshIso = (%b{})')
+    assert_true(isoInitSrc ~= nil and MESH_ISO.CONFIRM_SECS ~= nil, 'Suite 110: constants and initial state found in source')
+
+    local function makeWorld()
+        local w = { cmds = {}, printed = {}, now = 1000, x = 0, y = 0, z = 0, paths = {}, spawns = {},
+            combat = false, xtar = false, navActive = false, moveToMoving = false, stickActive = false,
+            zone = 'poknowledge', stops = 0, saves = 0, hazards = {} }
+        local me = setmetatable({
+            X = function() return w.x end, Y = function() return w.y end, Z = function() return w.z end,
+            Combat = function() return w.combat end, Sitting = function() return false end,
+            Moving = function() return false end,
+        }, { __call = function() return true end })
+        w.mq = {
+            TLO = {
+                Me = me,
+                Navigation = {
+                    PathExists = function(spec) return function() return w.paths[spec] == true end end,
+                    Active = function() return w.navActive end,
+                    MeshLoaded = function() return true end,
+                },
+                MoveTo = { Moving = function() return w.moveToMoving end },
+                Stick = { Active = function() return w.stickActive end, Status = function() return w.stickActive and 'ON' or 'OFF' end },
+                Spawn = function(id) return { Distance = function() local sp = w.spawns[id]; return sp and sp.dist or 9999 end } end,
+            },
+            cmd = function(c) w.cmds[#w.cmds + 1] = c end,
+            cmdf = function(f, ...) w.cmds[#w.cmds + 1] = string.format(f, ...) end,
+        }
+        w.ctrl = { running = true, mode = 'Puller', submode = 'Hunt', nav_mesh_isolation = true,
+            nav_hazard_avoidance = true, nav_hazard_min_hits = 2, nav_hazard_max_hits = 6, nav_hazard_radius = 15 }
+        w.pursuit = { meshIso = loadstring('return ' .. isoInitSrc)(), MESH_ISO = MESH_ISO, unreachableIds = {} }
+        w.pursuit.meshIso.trailZone = w.zone -- a zone change clears the trail; the tests seed one
+        w.rt = {
+            getCurrentZoneShortName = function() return w.zone end,
+            anyXtarAlive = function() return w.xtar end,
+            medBreakActive = false,
+            pathExistsCache = { stale = true },
+            roamScanEmpty = { at = 1 },
+            getZoneHazards = function() return w.hazards end,
+            recordStuckHazard = function(x, y, z)
+                w.hazards[#w.hazards + 1] = { x = x, y = y, z = z, hits = 1 }
+            end,
+            saveLoadout = function() w.saves = w.saves + 1 end,
+        }
+        w.isoH = {}
+        w.env = {
+            mq = w.mq, ctrl = w.ctrl, pursuit = w.pursuit, runtime = w.rt, isoH = w.isoH,
+            navLoaded = function() return true end, navMeshLoaded = function() return true end,
+            stickLoaded = function() return true end,
+            stopMoving = function() w.stops = w.stops + 1; w.moveToMoving = false; w.stickActive = false end,
+            isMoveActive = function() return w.moveToMoving or w.stickActive end,
+            isCasting = function() return false end,
+            isSpawnAlive = function(id) return w.spawns[id] ~= nil end,
+            distToLoc = function(x, y, z) return math.sqrt((w.x - x) ^ 2 + (w.y - y) ^ 2 + (z and (w.z - z) or 0) ^ 2) end,
+            distToId = function(id) local sp = w.spawns[id]; return sp and sp.dist or 9999 end,
+            os = { clock = function() return w.now end, time = function() return w.now end },
+            print = function(...) w.printed[#w.printed + 1] = table.concat({ ... }, ' ') end,
+            pcall = pcall,
+        }
+        w.isoH.MANEUVERS = loadstring('local mq = ...; return ' .. src:match('isoH%.MANEUVERS = (%b{})'))(w.mq)
+        for _, n in ipairs({ 'pathExists', 'locSpec', 'dist2D', 'referencePoints', 'refsReachable', 'hasPath',
+            'driveToLoc', 'driveToId', 'legStart', 'finish', 'advance', 'run' }) do
+            w.isoH[n] = loadFunc(src, n, w.env)
+        end
+        for _, n in ipairs({ 'sampleGoodMeshPos', 'noteMeshNoPath', 'noteMeshPathOk', 'noteUnreachableBurst',
+            'recordMeshHoleHazard', 'checkMeshIsolation' }) do
+            w.rt[n] = loadFunc(src, n, w.env)
+        end
+        w.tick = function(n)
+            local r
+            for _ = 1, (n or 1) do w.now = w.now + 1; r = w.rt.checkMeshIsolation() end
+            return r
+        end
+        w.sawCmd = function(frag)
+            for _, c in ipairs(w.cmds) do if c:find(frag, 1, true) then return true end end
+            return false
+        end
+        w.sawPrint = function(frag)
+            for _, p in ipairs(w.printed) do if p:find(frag, 1, true) then return true end end
+            return false
+        end
+        return w
+    end
+
+    -- 1. Last-good trail: sampled only while /nav is displacing us, spaced, capped, per zone
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, 0, 'Suite 110: nav idle samples nothing')
+        w.navActive = true
+        w.now = w.now + 3; w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, 0, 'Suite 110: first active sample only seeds the displacement check')
+        w.x = 10; w.now = w.now + 3; w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, 1, 'Suite 110: displacing under active nav records a good point')
+        w.x = 15; w.now = w.now + 3; w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, 1, 'Suite 110: a point inside TRAIL_SPACING of the head is not added')
+        w.x = 40; w.now = w.now + 3; w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, 2, 'Suite 110: a point past TRAIL_SPACING is added')
+        assert_eq(iso.trail[1].x, 40, 'Suite 110: newest point is first')
+        for i = 1, 8 do w.x = 40 + i * 25; w.now = w.now + 3; w.rt.sampleGoodMeshPos() end
+        assert_eq(#iso.trail, MESH_ISO.TRAIL_MAX, 'Suite 110: trail is capped at TRAIL_MAX')
+        w.now = w.now + 3; w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, MESH_ISO.TRAIL_MAX, 'Suite 110: no displacement, no new point')
+        w.zone = 'pofire'; w.now = w.now + 3; w.rt.sampleGoodMeshPos()
+        assert_eq(#iso.trail, 0, 'Suite 110: zone change clears the trail')
+    end
+
+    -- 2. The no-path scan signal and the reference check
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        assert_eq(w.rt.noteMeshNoPath({ count = 2, id = 99, dist = 40, los = true }), false, 'Suite 110: no references -> not on connected mesh')
+        assert_eq(iso.noPathSince, w.now, 'Suite 110: first no-path scan starts the clock')
+        assert_eq(iso.noPathId, 99, 'Suite 110: nearest no-path NPC remembered')
+        local t0 = iso.noPathSince
+        w.now = w.now + 1; w.rt.noteMeshNoPath({ count = 2, id = 99, dist = 40, los = true })
+        assert_eq(iso.noPathSince, t0, 'Suite 110: a fresh follow-up keeps the clock running')
+        w.now = w.now + MESH_ISO.SCAN_STALE + 1; w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = true })
+        assert_eq(iso.noPathSince, w.now, 'Suite 110: a stale gap restarts the clock')
+        w.rt.noteMeshPathOk()
+        assert_eq(iso.noPathSince, 0, 'Suite 110: a pathable scan clears the signal')
+
+        iso.trail = { { x = 50, y = 0, z = 0, at = 1 } }
+        w.paths['loc 0.00 50.00 0.00'] = true
+        w.now = w.now + 3
+        assert_eq(w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = true }), true, 'Suite 110: reachable trail point -> we are on the connected mesh')
+        assert_eq(iso.refOk, true, 'Suite 110: refOk recorded')
+        w.paths['loc 0.00 50.00 0.00'] = nil
+        w.now = w.now + 1; w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = true })
+        assert_eq(iso.refOk, true, 'Suite 110: reference check is cached for 2 s')
+        w.now = w.now + 2; w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = true })
+        assert_eq(iso.refOk, false, 'Suite 110: unreachable trail point -> island suspicion')
+        iso.trail = {}
+        w.x = 100; w.y = 100
+        w.ctrl.submode = 'Camp'; w.ctrl.camp_loc = { x = 60, y = 100, z = 0 }
+        w.paths['loc 100.00 60.00 0.00'] = true
+        w.now = w.now + 3; w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = true })
+        assert_eq(iso.refOk, true, 'Suite 110: the camp anchor is a reference too')
+
+        w.ctrl.nav_mesh_isolation = false
+        assert_eq(w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = true }), false, 'Suite 110: disabled: never claims connected mesh')
+    end
+
+    -- 3. Unreachable bursts
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        w.spawns[5] = { dist = 30 }
+        w.rt.noteUnreachableBurst(5); w.rt.noteUnreachableBurst(5); w.rt.noteUnreachableBurst(5)
+        assert_eq(iso.burstPending, false, 'Suite 110: the same spawn repeated is not a burst')
+        w.rt.noteUnreachableBurst(6)
+        assert_eq(iso.burstPending, false, 'Suite 110: two distinct spawns is not a burst')
+        w.rt.noteUnreachableBurst(7)
+        assert_eq(iso.burstPending, true, 'Suite 110: three distinct spawns inside the window is a burst')
+        assert_eq(iso.noPathId, 5, 'Suite 110: burst supplies a live NPC to test against')
+        iso.burstPending = false; iso.recentUnreachable = {}
+        w.rt.noteUnreachableBurst(8)
+        w.now = w.now + MESH_ISO.BURST_WINDOW + 1
+        w.rt.noteUnreachableBurst(9); w.rt.noteUnreachableBurst(10)
+        assert_eq(iso.burstPending, false, 'Suite 110: entries older than the window do not count')
+    end
+
+    -- 4. Island: detected, walks back to the last good ground, recovers
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        iso.trail = { { x = 50, y = 0, z = 0, at = 1 } }
+        w.spawns[99] = { dist = 40 }
+        w.pursuit.unreachableIds = { [77] = 5 }
+        w.rt.noteMeshNoPath({ count = 2, id = 99, dist = 40, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        assert_eq(w.tick(), true, 'Suite 110: island confirmed -> recovery running')
+        assert_eq(iso.kind, 'island', 'Suite 110: kind is island')
+        assert_eq(iso.stage, 1, 'Suite 110: stage 1 walks the references')
+        assert_true(w.sawCmd('/moveto loc 0.00 50.00 0.00 mdist 5'), 'Suite 110: /moveto straight at the last good point (Y X Z)')
+        assert_true(w.sawPrint('Mesh isolation detected'), 'Suite 110: detection is announced')
+        local before = #w.cmds
+        w.moveToMoving = true
+        w.tick()
+        assert_eq(#w.cmds, before, 'Suite 110: /moveto not re-issued while still moving')
+        w.x = 20; w.paths['loc 0.00 50.00 0.00'] = true
+        assert_eq(w.tick(), false, 'Suite 110: path to known ground again -> recovery done')
+        assert_eq(iso.active, false, 'Suite 110: recovery inactive after success')
+        assert_eq(next(w.pursuit.unreachableIds), nil, 'Suite 110: unreachable list wiped on success')
+        assert_nil(w.rt.pathExistsCache.stale, 'Suite 110: PathExists cache wiped on success')
+        assert_nil(w.rt.roamScanEmpty, 'Suite 110: empty-scan cache wiped on success')
+        assert_eq(#w.hazards, 1, 'Suite 110: the hole is logged as a hazard')
+        assert_eq(w.hazards[1].x, 0, 'Suite 110: hazard sits where the island was entered, not where we ended up')
+        assert_eq(w.hazards[1].hits, 2, 'Suite 110: hazard promoted straight to active')
+        assert_eq(iso.trail[1].x, 20, 'Suite 110: the recovered spot joins the trail')
+        assert_true(iso.lastResult:find('recovered', 1, true) ~= nil, 'Suite 110: result recorded')
+        assert_eq(iso.cooldownUntil, w.now + MESH_ISO.OK_COOLDOWN, 'Suite 110: short cooldown after success')
+        assert_true(w.stops >= 1, 'Suite 110: movement stopped on finish')
+    end
+
+    -- 5. Island suspicion refuted by a reachable reference at confirm time
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        iso.trail = { { x = 50, y = 0, z = 0, at = 1 } }
+        w.spawns[99] = { dist = 40 }
+        w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        w.paths['loc 0.00 50.00 0.00'] = true
+        iso.refCheckAt = nil; iso.refOk = false -- pretend the cached check was stale
+        assert_eq(w.tick(), false, 'Suite 110: reachable reference -> not isolated')
+        assert_eq(iso.active, false, 'Suite 110: no recovery started')
+        assert_eq(iso.noPathSince, 0, 'Suite 110: signal reset')
+        -- burst with reachable references: it really is the mobs
+        iso.burstPending = true; w.now = w.now + 10
+        assert_eq(w.tick(), false, 'Suite 110: burst with reachable ground does not start a recovery')
+        assert_eq(iso.burstPending, false, 'Suite 110: burst consumed')
+    end
+
+    -- 6. The full ladder: stalled leg -> NPC leg -> maneuvers -> give up
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        iso.trail = { { x = 50, y = 0, z = 0, at = 1 } }
+        w.spawns[99] = { dist = 40 }
+        w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        w.tick()
+        assert_eq(iso.stage, 1, 'Suite 110: ladder starts at the references')
+        w.tick(MESH_ISO.STALL_SECS + 1) -- never displaced
+        assert_eq(iso.stage, 2, 'Suite 110: a leg that does not move us is abandoned early')
+        assert_true(w.sawCmd('/stick id 99 8'), 'Suite 110: stage 2 sticks at the nearest no-path NPC')
+        w.spawns[99] = nil
+        w.tick()
+        assert_eq(iso.stage, 3, 'Suite 110: NPC gone -> maneuvers')
+        assert_eq(iso.maneuverIdx, 1, 'Suite 110: first maneuver')
+        assert_true(w.sawCmd('/keypress back hold'), 'Suite 110: first maneuver backs up')
+        assert_true(w.sawCmd('/face fast loc 0.00,50.00'), 'Suite 110: faces the best reference before the maneuvers')
+        local manCount = #w.isoH.MANEUVERS
+        local ticks = 0
+        while iso.active and ticks < 3 * manCount + 3 do w.tick(); ticks = ticks + 1 end
+        assert_eq(iso.active, false, 'Suite 110: all maneuvers exhausted -> gave up')
+        assert_eq(iso.maneuverIdx, manCount + 1, 'Suite 110: every maneuver was tried')
+        assert_true(iso.lastResult:find('FAILED', 1, true) ~= nil, 'Suite 110: failure recorded')
+        assert_eq(iso.cooldownUntil, w.now + MESH_ISO.FAIL_COOLDOWN, 'Suite 110: long cooldown after failure')
+        assert_eq(#w.hazards, 1, 'Suite 110: failed island still logs the hole')
+        assert_true(w.sawPrint('recovery FAILED'), 'Suite 110: failure is announced')
+        w.rt.noteMeshNoPath({ count = 1, id = 98, dist = 40, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        assert_eq(w.tick(), false, 'Suite 110: nothing restarts during the cooldown')
+    end
+
+    -- 7. Combat interrupts; disabled / Manual never runs
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        iso.trail = { { x = 50, y = 0, z = 0, at = 1 } }
+        w.spawns[99] = { dist = 40 }
+        w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        w.tick()
+        assert_eq(iso.active, true, 'Suite 110: recovery running')
+        w.xtar = true
+        assert_eq(w.tick(), false, 'Suite 110: an XTarget hostile interrupts the recovery')
+        assert_eq(iso.lastResult, 'interrupted by combat', 'Suite 110: interruption recorded')
+        assert_eq(#w.hazards, 0, 'Suite 110: an interrupted recovery logs no hazard')
+        w.xtar = false; w.now = w.now + 10
+        w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 40, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        w.combat = true
+        assert_eq(w.tick(), false, 'Suite 110: recovery does not start while in combat')
+        w.combat = false
+        w.ctrl.mode = 'Manual'
+        assert_eq(w.tick(), false, 'Suite 110: Manual mode never recovers')
+        w.ctrl.mode = 'Puller'; w.ctrl.nav_mesh_isolation = false
+        assert_eq(w.tick(), false, 'Suite 110: disabled never recovers')
+        assert_eq(iso.noPathSince, 0, 'Suite 110: disabled clears the signal')
+    end
+
+    -- 8. Unmeshed mobs: references reachable for a long while, no maneuvers, no hazard
+    do
+        local w = makeWorld()
+        local iso = w.pursuit.meshIso
+        iso.trail = { { x = 50, y = 0, z = 0, at = 1 } }
+        w.paths['loc 0.00 50.00 0.00'] = true
+        w.spawns[99] = { dist = 70 }
+        w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 70, los = false })
+        assert_eq(iso.refOk, true, 'Suite 110: unmeshed: references reachable')
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS - 1
+        assert_eq(w.tick(), false, 'Suite 110: the short confirm window is only for islands')
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS_SOFT - 1
+        assert_eq(w.tick(), true, 'Suite 110: the long window starts an unmeshed recovery')
+        assert_eq(iso.kind, 'unmeshed', 'Suite 110: kind is unmeshed')
+        assert_eq(iso.stage, 2, 'Suite 110: unmeshed skips the reference legs')
+        assert_true(w.sawCmd('/stick id 99 8'), 'Suite 110: unmeshed walks at the NPC')
+        w.paths['id 99'] = true
+        assert_eq(w.tick(), false, 'Suite 110: NPC pathable again -> done')
+        assert_eq(#w.hazards, 0, 'Suite 110: unmeshed success logs no hazard (our ground was fine)')
+        -- and its failure
+        w.paths['id 99'] = nil; w.now = w.now + MESH_ISO.OK_COOLDOWN + 1
+        w.rt.noteMeshNoPath({ count = 1, id = 99, dist = 70, los = false })
+        iso.noPathSince = w.now - MESH_ISO.CONFIRM_SECS_SOFT - 1
+        w.tick()
+        assert_eq(iso.stage, 2, 'Suite 110: unmeshed again')
+        w.spawns[99] = nil
+        assert_eq(w.tick(), false, 'Suite 110: NPC gone -> unmeshed gives up without maneuvers')
+        assert_eq(#w.hazards, 0, 'Suite 110: unmeshed failure logs no hazard')
+        assert_true(not w.sawCmd('/keypress back hold'), 'Suite 110: no key maneuvers for unmeshed')
+    end
+
+    -- 9. Hazard promotion
+    do
+        local w = makeWorld()
+        w.rt.recordMeshHoleHazard(10, 20, 5)
+        assert_eq(w.hazards[1].hits, 2, 'Suite 110: fresh hotspot promoted to min hits')
+        assert_eq(w.saves, 1, 'Suite 110: promotion saved')
+        w.hazards[1].hits = 5
+        w.rt.recordMeshHoleHazard(12, 21, 6)
+        assert_eq(w.hazards[1].hits, 5, 'Suite 110: an already-active hotspot is left alone')
+        w.ctrl.nav_hazard_avoidance = false
+        w.rt.recordMeshHoleHazard(90, 90, 0)
+        assert_eq(#w.hazards, 2, 'Suite 110: hazard avoidance off -> nothing logged')
+    end
+
+    -- 10. Core wiring
+    do
+        assert_true(src:find('if runtime.checkMeshIsolation() then return end', 1, true) ~= nil, 'Suite 110: main loop yields to a running recovery')
+        assert_true(src:find('if pursuit.meshIso.active then return end', 1, true) ~= nil, 'Suite 110: checkStuck defers to the recovery')
+        assert_true(src:find('runtime.noteUnreachableBurst(id)', 1, true) ~= nil, 'Suite 110: markUnreachable feeds the burst signal')
+        assert_true(src:find('runtime.noteMeshNoPath(noPath)', 1, true) ~= nil, 'Suite 110: findRoamTarget reports all-no-path scans')
+        assert_true(src:find('if c.nav_mesh_isolation == nil then c.nav_mesh_isolation = true end', 1, true) ~= nil, 'Suite 110: sanitize seeds the setting on')
+        assert_true(src:find("ImGui.Checkbox('Mesh Isolation Recovery'", 1, true) ~= nil, 'Suite 110: Settings checkbox')
+        local roam = src:match('function runtime%.findRoamTarget.-\nend\n')
+        assert_true(roam:find('noPath.los and noPath.dist <= pursuit.MESH_ISO.DIRECT_LOS_DIST', 1, true) ~= nil, 'Suite 110: direct approach needs LoS and range')
+        assert_true(roam:find('runtime.noteMeshPathOk(); return targetId', 1, true) ~= nil, 'Suite 110: a found target clears the signal')
+    end
 end
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

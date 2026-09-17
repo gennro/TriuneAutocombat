@@ -228,6 +228,7 @@ local function sanitizeModeConfig(c)
     if c.nav_hazard_decay_minutes == nil then c.nav_hazard_decay_minutes = 10 end
     if c.nav_reverse_breadcrumbs == nil then c.nav_reverse_breadcrumbs = true end
     if c.nav_max_path_ratio == nil then c.nav_max_path_ratio = 2.5 end
+    if c.nav_mesh_isolation == nil then c.nav_mesh_isolation = true end
     if c.nav_proactive_doors == nil then c.nav_proactive_doors = true end
     if c.nav_levitation_clear == nil then c.nav_levitation_clear = true end
     if type(c.zone_hazards) ~= 'table' then c.zone_hazards = {} end
@@ -397,6 +398,7 @@ local function defaultCtrl()
         nav_hazard_decay_minutes = 10,
         nav_reverse_breadcrumbs = true,
         nav_max_path_ratio       = 2.5,
+        nav_mesh_isolation       = true,
         nav_proactive_doors      = true,
         nav_levitation_clear     = true,
         zone_hazards             = {},
@@ -698,6 +700,17 @@ local pursuit = {
     lastFrontStickDist = 0,
     meshRecoverId = 0,
     meshRecoverAt = 0,
+    -- Mesh isolation recovery (see checkMeshIsolation()).
+    meshIso = {
+        noPathSince = 0, lastNoPathAt = 0, noPathId = 0, noPathCount = 0, noPathLos = false, noPathDist = 9999,
+        refOk = nil, refCheckAt = nil, refCheckOk = nil,
+        recentUnreachable = {}, burstPending = false,
+        active = false, kind = nil, refs = {}, refIdx = 0, stage = 0, stageAt = 0, startedAt = 0,
+        startX = 0, startY = 0, startZ = 0, moveX = 0, moveY = 0, moveAt = 0,
+        maneuverIdx = 0, maneuverUntil = 0, cooldownUntil = 0, tickAt = 0,
+        trail = {}, trailZone = nil, sampleAt = 0, sampleX = nil, sampleY = nil,
+        lastResult = ''
+    },
     -- Detour state machine fields
     detourActive = false,
     detourX = 0,
@@ -2388,6 +2401,7 @@ end
 -- rather than continuing to sit on something they can never reach.
 function runtime.markUnreachable(id)
     pursuit.unreachableIds[id] = os.clock()
+    if runtime.noteUnreachableBurst then runtime.noteUnreachableBurst(id) end
     if runtime.xtForceId == id then
         runtime.xtForceId = 0
         print(string.format('\ay[Triune]\ax Force target #%d released -- no path to it.', id))
@@ -10899,6 +10913,19 @@ function UI.drawStatusTab()
             local stuckCounter = stuckState.counter or 0
             ImGui.TextDisabled(string.format('• Stuck Attempts: %d | Frame Counter: %d', stuckAttempts, stuckCounter))
 
+            local iso = pursuit.meshIso
+            if iso.active then
+                accent(WARN, string.format('• Mesh Isolation: RECOVERING (%s, stage %d, %.0fs)',
+                    iso.kind or '?', iso.stage or 0, os.clock() - (iso.startedAt or os.clock())))
+            elseif (iso.noPathSince or 0) > 0 and (os.clock() - (iso.lastNoPathAt or 0)) <= pursuit.MESH_ISO.SCAN_STALE then
+                accent(WARN, string.format('• Mesh Isolation: %d NPC(s) in range, none pathable (%.0fs, known ground %s)',
+                    iso.noPathCount or 0, os.clock() - iso.noPathSince,
+                    iso.refOk == true and 'reachable' or (iso.refOk == false and 'UNREACHABLE' or 'unknown')))
+            else
+                ImGui.TextDisabled(string.format('• Mesh Isolation: clear | Trail: %d good point(s)%s',
+                    #(iso.trail or {}), (iso.lastResult ~= '' and (' | Last: ' .. iso.lastResult) or '')))
+            end
+
             local zoneHazards = (ctrl.zone_hazards and ctrl.zone_hazards[curZoneShort]) or {}
             local hazCount = type(zoneHazards) == 'table' and #zoneHazards or 0
             ImGui.TextDisabled(string.format('• Hazard Hotspots: %d recorded in %s', hazCount, curZoneShort))
@@ -13875,6 +13902,23 @@ function UI.drawSettingsTab()
                 .. 'even after that recovery gives up -- which walks straight\n'
                 .. 'at whatever wall is blocking the path.\n'
                 .. 'Off by default: unreachable targets are dropped instead.')
+        end
+
+        local isoVal = ImGui.Checkbox('Mesh Isolation Recovery', ctrl.nav_mesh_isolation ~= false)
+        if isoVal ~= (ctrl.nav_mesh_isolation ~= false) then
+            ctrl.nav_mesh_isolation = isoVal
+            runtime.saveLoadout(true)
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip(
+                'When every nearby NPC reports "no path" but ground we stood on\n'
+                .. 'moments ago (or the camp) is unreachable too, the character is\n'
+                .. 'on an unlinked navmesh island, not surrounded by unreachable\n'
+                .. 'mobs. Walks straight back to the last good ground, then at the\n'
+                .. 'nearest NPC, then tries the unstick maneuvers, re-checking the\n'
+                .. 'mesh after each; logs the hole as an active hazard hotspot.\n'
+                .. 'Also lets Hunter/Puller approach a close, visible NPC directly\n'
+                .. 'when only its own spot is unmeshed.')
         end
 
         ImGui.SetNextItemWidth(UI.px(180))
@@ -19929,6 +19973,8 @@ function runtime.checkStuck()
     stuckState.checkAt = now
     -- a scheduled unstuck maneuver is still moving the character
     if stuckState.maneuverUntil and now < stuckState.maneuverUntil then return end
+    -- mesh isolation recovery drives its own legs and maneuvers
+    if pursuit.meshIso.active then return end
 
     -- Stuck detection MUST only evaluate when movement is actively running
     -- (i.e. MQ2Nav or MQ2MoveUtils is active). If neither plugin is moving,
@@ -19987,6 +20033,473 @@ function runtime.checkStuck()
         stuckState.counter = 0
     end
     stuckState.lastX, stuckState.lastY = x, y
+end
+
+-- ============================================================================
+-- Mesh Isolation Recovery
+-- ============================================================================
+-- isPlayerOffMesh() only fires in a real void: MQ2Nav snaps the path start to
+-- the nearest polygon with generous extents, so standing on a mesh *island*
+-- (a rock top, an unlinked stair polygon, a spot whose nearest polygon is
+-- under the floor or across a wall) still reads as "on mesh" -- but every
+-- PathExists to an NPC fails. findRoamTarget then rejects every candidate,
+-- nothing is ever pursued, moveToward's own hole recovery never runs, and
+-- checkStuck only evaluates while nav/stick is active. Net effect: the
+-- character stands still forever printing "No NPCs found".
+--
+-- Two signals say the problem is us, not the mobs:
+--   * findRoamTarget saw >= 1 otherwise-valid NPC and rejected ALL of them
+--     purely for no-path, and kept doing so for CONFIRM_SECS (noteMeshNoPath).
+--   * several distinct spawns hit markUnreachable() inside BURST_WINDOW -- a
+--     target already in flight when we fell into the hole makes /nav finish
+--     instantly with no path, navStalls trip, and the mob gets the blame;
+--     then the next mob, and the next (noteUnreachableBurst).
+-- Both are confirmed against reference points that were reachable moments
+-- ago: the last-good trail (sampled while /nav was actively displacing us,
+-- sampleGoodMeshPos) and the camp / hunter anchor. No path to any of them
+-- means we are on an island ('island'). A path to them but none to any mob
+-- for a long while means the mobs stand on unmeshed ground ('unmeshed').
+--
+-- Recovery deliberately moves WITHOUT the mesh and re-probes PathExists to
+-- the references every tick:
+--   1. /moveto (MoveUtils straight line) back toward each last-good point --
+--      we walked in from there, so straight back is the best guess.
+--      Skipped for 'unmeshed' (those points are reachable already).
+--   2. /stick toward the nearest no-path NPC -- mobs stand on real ground.
+--   3. the back / strafe / jump key maneuvers, re-probing between each.
+--   4. give up: log the spot as an ACTIVE hazard hotspot so detours route
+--      around it, warn, and back off for FAIL_COOLDOWN.
+-- On success the unreachable list and PathExists cache are wiped (they were
+-- wrong about the mobs) and the hole is logged as a hotspot too.
+
+-- One table for the helpers: the main chunk is close to Lua's 200-local cap.
+local isoH = {}
+
+pursuit.MESH_ISO = {
+    CONFIRM_SECS      = 6,   -- scans must keep reporting only-no-path candidates this long ('island')
+    CONFIRM_SECS_SOFT = 30,  -- same, when the references ARE reachable ('unmeshed' mobs)
+    SCAN_STALE        = 3,   -- a no-path report older than this no longer counts
+    BURST_COUNT       = 3,   -- distinct spawns marked unreachable...
+    BURST_WINDOW      = 30,  -- ...within this many seconds
+    STAGE_SECS        = 10,  -- per movement leg
+    STALL_SECS        = 3,   -- a leg that has not displaced us for this long is abandoned early
+    TRAIL_SPACING     = 20,  -- units between last-good trail samples
+    TRAIL_MAX         = 5,
+    REF_MIN_DIST      = 8,   -- a trail point closer than this is probably the hole itself
+    REF_MAX_DIST      = 300,
+    REF_LEGS          = 3,   -- at most this many trail points are walked back to
+    NPC_MAX_DIST      = 120, -- stage 2 only walks at a no-path NPC inside this
+    DIRECT_LOS_DIST   = 50,  -- on connected mesh: a no-path NPC with LoS inside this is approached anyway
+    OK_COOLDOWN       = 10,
+    FAIL_COOLDOWN     = 90,
+}
+
+-- Unstick key maneuvers, same /timed release scheme as performUnstuck (N in
+-- tenths of a second) so nothing sleeps in the tick.
+isoH.MANEUVERS = {
+    { name = 'backing up + jump', secs = 1.6, run = function()
+        mq.cmd('/keypress back hold'); mq.cmd('/timed 12 /keypress back'); mq.cmd('/timed 12 /keypress jump') end },
+    { name = 'strafing left + jump', secs = 1.8, run = function()
+        mq.cmd('/keypress strafe_left hold'); mq.cmd('/timed 15 /keypress strafe_left'); mq.cmd('/timed 15 /keypress jump') end },
+    { name = 'strafing right + jump', secs = 2.6, run = function()
+        mq.cmd('/keypress strafe_right hold'); mq.cmd('/timed 24 /keypress strafe_right'); mq.cmd('/timed 24 /keypress jump') end },
+    { name = 'forward + jump', secs = 1.6, run = function()
+        mq.cmd('/keypress forward hold'); mq.cmd('/timed 12 /keypress forward'); mq.cmd('/timed 12 /keypress jump') end },
+}
+
+function isoH.pathExists(spec)
+    local v = false
+    local ok = pcall(function() v = mq.TLO.Navigation.PathExists(spec)() or false end)
+    return ok and v == true
+end
+
+function isoH.locSpec(p)
+    return string.format('loc %.2f %.2f %.2f', p.y, p.x, p.z or 0)
+end
+
+function isoH.dist2D(ax, ay, bx, by)
+    return math.sqrt((ax - bx) ^ 2 + (ay - by) ^ 2)
+end
+
+-- Known-good ground to test against: last-good trail points (newest first)
+-- that are neither on top of us nor absurdly far, then the camp / hunter
+-- anchor. Empty when we have never navigated here and have no anchor.
+function isoH.referencePoints()
+    local iso = pursuit.meshIso
+    local C = pursuit.MESH_ISO
+    local me = mq.TLO.Me
+    local mx, my = me.X() or 0, me.Y() or 0
+    local refs = {}
+    for _, p in ipairs(iso.trail) do
+        local d = isoH.dist2D(mx, my, p.x, p.y)
+        if d >= C.REF_MIN_DIST and d <= C.REF_MAX_DIST then
+            refs[#refs + 1] = { x = p.x, y = p.y, z = p.z, kind = 'trail' }
+            if #refs >= C.REF_LEGS then break end
+        end
+    end
+    local anchor = (ctrl.mode == 'Puller' and ctrl.submode == 'Camp') and ctrl.camp_loc or ctrl.hunter_combat_loc
+    if anchor and anchor.x and anchor.y then
+        local d = isoH.dist2D(mx, my, anchor.x, anchor.y)
+        if d >= C.REF_MIN_DIST and d <= C.REF_MAX_DIST then
+            refs[#refs + 1] = { x = anchor.x, y = anchor.y, z = anchor.z or (me.Z() or 0), kind = 'camp' }
+        end
+    end
+    return refs
+end
+
+-- Can we path to any known-good ground? nil when there is none to ask about.
+-- Cached for 2 s: findRoamTarget asks every 0.4 s while idle.
+function isoH.refsReachable(now)
+    local iso = pursuit.meshIso
+    if iso.refCheckAt and (now - iso.refCheckAt) < 2.0 then return iso.refCheckOk end
+    iso.refCheckAt = now
+    local refs = isoH.referencePoints()
+    if #refs == 0 then iso.refCheckOk = nil; return nil end
+    local ok = false
+    for _, r in ipairs(refs) do
+        if isoH.pathExists(isoH.locSpec(r)) then ok = true; break end
+    end
+    iso.refCheckOk = ok
+    return ok
+end
+
+-- Sample where /nav is actively and successfully moving us: those spots are
+-- on the connected mesh by construction, and the newest one is where to walk
+-- back to when the mesh under us stops being one. Every 2 s; a sample only
+-- counts once we have actually displaced since the last one (a nav spinning
+-- against a wall is not a spot worth returning to).
+function runtime.sampleGoodMeshPos()
+    local iso = pursuit.meshIso
+    local C = pursuit.MESH_ISO
+    local now = os.clock()
+    if (now - (iso.sampleAt or 0)) < 2.0 then return end
+    iso.sampleAt = now
+    local zs = runtime.getCurrentZoneShortName()
+    if iso.trailZone ~= zs then
+        iso.trail = {}; iso.trailZone = zs; iso.sampleX = nil; iso.refCheckAt = nil
+    end
+    if iso.active or not navLoaded() then return end
+    local navActive = false
+    pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+    if not navActive then iso.sampleX = nil; return end
+    local me = mq.TLO.Me
+    if not me() then return end
+    local x, y, z = me.X() or 0, me.Y() or 0, me.Z() or 0
+    if iso.sampleX and isoH.dist2D(x, y, iso.sampleX, iso.sampleY) >= 5 then
+        local head = iso.trail[1]
+        if not head or isoH.dist2D(x, y, head.x, head.y) >= C.TRAIL_SPACING then
+            table.insert(iso.trail, 1, { x = x, y = y, z = z, at = now })
+            while #iso.trail > C.TRAIL_MAX do table.remove(iso.trail) end
+        end
+    end
+    iso.sampleX, iso.sampleY = x, y
+end
+
+-- findRoamTarget: every otherwise-valid candidate was rejected for no-path.
+-- `info` = { count=, id= (nearest), dist=, los= }. Returns true when the
+-- references are reachable (we are on the connected mesh, the mobs are not)
+-- so the caller may still approach a close, visible one directly.
+function runtime.noteMeshNoPath(info)
+    local iso = pursuit.meshIso
+    if not ctrl or ctrl.nav_mesh_isolation == false then return false end
+    local now = os.clock()
+    if iso.noPathSince == 0 or (now - iso.lastNoPathAt) > pursuit.MESH_ISO.SCAN_STALE then
+        iso.noPathSince = now
+    end
+    iso.lastNoPathAt = now
+    iso.noPathId = info.id or 0
+    iso.noPathCount = info.count or 0
+    iso.noPathLos = info.los and true or false
+    iso.noPathDist = info.dist or 9999
+    local refOk = isoH.refsReachable(now)
+    iso.refOk = refOk
+    return refOk == true
+end
+
+-- findRoamTarget found something (or nothing at all): no isolation evidence.
+function runtime.noteMeshPathOk()
+    local iso = pursuit.meshIso
+    iso.noPathSince = 0
+    iso.noPathCount = 0
+end
+
+-- markUnreachable(): several distinct spawns in a short window is the other
+-- way an island shows up.
+function runtime.noteUnreachableBurst(id)
+    local iso = pursuit.meshIso
+    if not ctrl or ctrl.nav_mesh_isolation == false then return end
+    local C = pursuit.MESH_ISO
+    local now = os.clock()
+    local kept = {}
+    for _, e in ipairs(iso.recentUnreachable) do
+        if (now - e.at) <= C.BURST_WINDOW and e.id ~= id then kept[#kept + 1] = e end
+    end
+    kept[#kept + 1] = { id = id, at = now }
+    iso.recentUnreachable = kept
+    if #kept >= C.BURST_COUNT then
+        iso.burstPending = true
+        -- something live to test against: the newest of the burst still standing
+        if iso.noPathId == 0 or not isSpawnAlive(iso.noPathId) then
+            iso.noPathId = id
+            for i = #kept, 1, -1 do
+                if isSpawnAlive(kept[i].id) then iso.noPathId = kept[i].id; break end
+            end
+        end
+    end
+end
+
+-- Log the hole so the detour logic routes around it from now on. A fresh
+-- hotspot needs nav_hazard_min_hits before it is active; an island is not a
+-- maybe, so it is promoted straight away.
+function runtime.recordMeshHoleHazard(x, y, z)
+    if not ctrl or not ctrl.nav_hazard_avoidance then return end
+    runtime.recordStuckHazard(x, y, z)
+    local minHits = ctrl.nav_hazard_min_hits or 2
+    local promoted = false
+    for _, h in ipairs(runtime.getZoneHazards(runtime.getCurrentZoneShortName())) do
+        if isoH.dist2D(x, y, h.x, h.y) <= 14 and math.abs(z - h.z) <= 15 and (h.hits or 1) < minHits then
+            h.hits = minHits; promoted = true
+        end
+    end
+    if promoted then runtime.saveLoadout(true) end
+end
+
+-- Success test for the running recovery.
+function isoH.hasPath(iso)
+    if iso.kind ~= 'unmeshed' then
+        for _, r in ipairs(iso.refs) do
+            if isoH.pathExists(isoH.locSpec(r)) then return true, r.kind end
+        end
+    end
+    if iso.noPathId > 0 and isSpawnAlive(iso.noPathId) and isoH.pathExists('id ' .. iso.noPathId) then
+        return true, 'npc'
+    end
+    return false
+end
+
+function isoH.driveToLoc(r)
+    if stickLoaded() then
+        local moving = false
+        pcall(function() moving = (mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving()) or false end)
+        if not moving then mq.cmdf('/moveto loc %.2f %.2f %.2f mdist 5', r.y, r.x, r.z or 0) end
+        pursuit.lastNavLoc = 'meshiso_loc'
+        return
+    end
+    mq.cmdf('/face fast loc %.2f,%.2f', r.y, r.x)
+    local isMoving = false
+    pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+    if not isMoving then mq.cmd('/keypress forward hold') end
+    pursuit.lastNavLoc = 'native_meshiso'
+end
+
+function isoH.driveToId(id)
+    if stickLoaded() then
+        local active = false
+        pcall(function() active = (mq.TLO.Stick.Active() or mq.TLO.Stick.Status() == 'ON') or false end)
+        if not active then mq.cmdf('/stick id %d 8', id) end
+        pursuit.lastNavTargetId = id
+        return
+    end
+    mq.cmdf('/face fast id %d', id)
+    local isMoving = false
+    pcall(function() isMoving = mq.TLO.Me.Moving() or false end)
+    if not isMoving then mq.cmd('/keypress forward hold') end
+    pursuit.lastNavTargetId = 'native_meshiso'
+end
+
+function isoH.legStart(iso, now)
+    iso.stageAt = now
+    iso.moveAt = now
+    local me = mq.TLO.Me
+    iso.moveX, iso.moveY = me.X() or 0, me.Y() or 0
+end
+
+function isoH.finish(iso, success, now, why)
+    stopMoving()
+    iso.active = false
+    iso.noPathSince = 0
+    iso.burstPending = false
+    iso.recentUnreachable = {}
+    iso.refCheckAt = nil
+    local me = mq.TLO.Me
+    local x, y, z = me.X() or 0, me.Y() or 0, me.Z() or 0
+    local took = now - iso.startedAt
+    if success then
+        pursuit.unreachableIds = {}
+        runtime.pathExistsCache = {}
+        runtime.roamScanEmpty = nil
+        iso.cooldownUntil = now + pursuit.MESH_ISO.OK_COOLDOWN
+        iso.lastResult = string.format('recovered in %.0fs (stage %d, via %s)', took, iso.stage, why or '?')
+        if iso.kind == 'island' then runtime.recordMeshHoleHazard(iso.startX, iso.startY, iso.startZ) end
+        -- where we stand now is proven good ground
+        table.insert(iso.trail, 1, { x = x, y = y, z = z, at = now })
+        while #iso.trail > pursuit.MESH_ISO.TRAIL_MAX do table.remove(iso.trail) end
+        print(string.format(
+            '\ag[Triune]\ax Mesh isolation recovered -- path to %s found again after %.0fs (stage %d). Unreachable list cleared.',
+            why or 'known ground', took, iso.stage))
+    elseif why == 'combat' then
+        iso.cooldownUntil = now + 5
+        iso.lastResult = 'interrupted by combat'
+        print('\ay[Triune]\ax Mesh isolation recovery interrupted -- something aggroed us; fighting.')
+    elseif why == 'off' then
+        iso.cooldownUntil = now + 5
+        iso.lastResult = 'stopped'
+    else
+        iso.cooldownUntil = now + pursuit.MESH_ISO.FAIL_COOLDOWN
+        iso.lastResult = string.format('FAILED after %.0fs', took)
+        -- 'unmeshed' is the mobs' problem, not this spot's: only an island is a hazard
+        if iso.kind == 'island' then
+            runtime.recordMeshHoleHazard(iso.startX, iso.startY, iso.startZ)
+            if isoH.dist2D(x, y, iso.startX, iso.startY) > 14 then runtime.recordMeshHoleHazard(x, y, z) end
+        end
+        print(string.format(
+            '\ar[Triune]\ax Mesh isolation recovery FAILED at (Y:%.1f, X:%.1f, Z:%.1f) -- no path back to known-good ground after %.0fs. '
+            .. 'The navmesh has a hole or an unlinked island here; move the character by hand or regenerate the mesh. Retrying in %ds.',
+            y, x, z, took, pursuit.MESH_ISO.FAIL_COOLDOWN))
+    end
+end
+
+-- Move to the next leg of the ladder: stage 1 walks each reference point in
+-- turn, stage 2 the nearest no-path NPC, stage 3 each key maneuver, stage 4
+-- gives up.
+function isoH.advance(iso, now)
+    local C = pursuit.MESH_ISO
+    stopMoving()
+    if iso.stage < 1 then iso.stage = 1; iso.refIdx = 0 end
+    if iso.stage == 1 then
+        if iso.kind ~= 'unmeshed' then
+            iso.refIdx = iso.refIdx + 1
+            local r = iso.refs[iso.refIdx]
+            if r then
+                isoH.legStart(iso, now)
+                print(string.format('\ay[Triune]\ax Mesh isolation: walking straight back to last good ground (%s, %.0f units).',
+                    r.kind, distToLoc(r.x, r.y, r.z)))
+                isoH.driveToLoc(r)
+                return
+            end
+        end
+        iso.stage = 2
+    end
+    if iso.stage == 2 then
+        if iso.noPathId > 0 and isSpawnAlive(iso.noPathId) and distToId(iso.noPathId) <= C.NPC_MAX_DIST then
+            isoH.legStart(iso, now)
+            print(string.format('\ay[Triune]\ax Mesh isolation: walking straight at NPC #%d (%.0f units) to find meshed ground.',
+                iso.noPathId, distToId(iso.noPathId)))
+            isoH.driveToId(iso.noPathId)
+            return
+        end
+        iso.stage = 3; iso.maneuverIdx = 0
+    end
+    if iso.stage == 3 then
+        iso.maneuverIdx = iso.maneuverIdx + 1
+        -- 'unmeshed': the ground under us is fine, jumping about will not change what the mobs stand on
+        local m = iso.kind ~= 'unmeshed' and isoH.MANEUVERS[iso.maneuverIdx] or nil
+        if m then
+            isoH.legStart(iso, now)
+            local face = iso.refs[1]
+            if face then mq.cmdf('/face fast loc %.2f,%.2f', face.y, face.x)
+            elseif iso.noPathId > 0 then mq.cmdf('/face fast id %d', iso.noPathId) end
+            print(string.format('\ay[Triune]\ax Mesh isolation: %s (maneuver %d/%d).', m.name, iso.maneuverIdx, #isoH.MANEUVERS))
+            m.run()
+            iso.maneuverUntil = now + m.secs
+            return
+        end
+        iso.stage = 4
+    end
+    isoH.finish(iso, false, now)
+end
+
+function isoH.run(iso, now)
+    local C = pursuit.MESH_ISO
+    if mq.TLO.Me.Combat() or runtime.anyXtarAlive(true) then isoH.finish(iso, false, now, 'combat'); return end
+    if iso.stage == 3 and now < iso.maneuverUntil then return end
+    local ok, via = isoH.hasPath(iso)
+    if ok then isoH.finish(iso, true, now, via); return end
+    if iso.stage == 3 then isoH.advance(iso, now); return end -- maneuver done, still no path: next one
+
+    -- leg bookkeeping: displacement refreshes the stall clock
+    local me = mq.TLO.Me
+    local x, y = me.X() or 0, me.Y() or 0
+    if isoH.dist2D(x, y, iso.moveX, iso.moveY) >= 2 then iso.moveAt = now; iso.moveX, iso.moveY = x, y end
+    if (now - iso.stageAt) > C.STAGE_SECS or (now - iso.moveAt) > C.STALL_SECS then isoH.advance(iso, now); return end
+
+    if iso.stage == 1 then
+        local r = iso.refs[iso.refIdx]
+        if not r or distToLoc(r.x, r.y, r.z) <= 6 then isoH.advance(iso, now); return end -- arrived, still no path
+        isoH.driveToLoc(r)
+    elseif iso.stage == 2 then
+        if not isSpawnAlive(iso.noPathId) or distToId(iso.noPathId) <= 8 then isoH.advance(iso, now); return end
+        isoH.driveToId(iso.noPathId)
+    end
+end
+
+-- Main-loop hook. Returns true while a recovery is driving the character so
+-- the caller skips the mode logic (which would otherwise start its own
+-- movement, or stopMoving() ours, every tick).
+function runtime.checkMeshIsolation()
+    local iso = pursuit.meshIso
+    local C = pursuit.MESH_ISO
+    local now = os.clock()
+    if (now - (iso.tickAt or 0)) < 0.5 then return iso.active end
+    iso.tickAt = now
+    if not ctrl or not ctrl.running or ctrl.nav_mesh_isolation == false or ctrl.mode == 'Manual' then
+        if iso.active then isoH.finish(iso, false, now, 'off') end
+        iso.noPathSince = 0; iso.burstPending = false
+        return false
+    end
+    if not navMeshLoaded() then
+        if iso.active then isoH.finish(iso, false, now, 'off') end
+        return false
+    end
+    runtime.sampleGoodMeshPos()
+    if iso.active then isoH.run(iso, now); return iso.active end
+    if now < iso.cooldownUntil then return false end
+
+    local elapsed = iso.noPathSince > 0 and (now - iso.noPathSince) or 0
+    local fresh = (now - iso.lastNoPathAt) <= C.SCAN_STALE
+    local kind = nil
+    if iso.burstPending then
+        kind = 'island'
+    elseif fresh and elapsed >= C.CONFIRM_SECS and iso.refOk ~= true then
+        kind = 'island'
+    elseif fresh and elapsed >= C.CONFIRM_SECS_SOFT and iso.refOk == true then
+        kind = 'unmeshed'
+    end
+    if not kind then return false end
+    iso.burstPending = false
+
+    -- never start while something is on us or we are busy standing still on purpose
+    local me = mq.TLO.Me
+    if mq.TLO.Me.Combat() or runtime.anyXtarAlive(true) or isCasting() or me.Sitting() or runtime.medBreakActive then return false end
+    if isMoveActive() then return false end
+
+    -- confirm right now, uncached
+    iso.refCheckAt = nil
+    local refs = isoH.referencePoints()
+    local refOk = false
+    for _, r in ipairs(refs) do if isoH.pathExists(isoH.locSpec(r)) then refOk = true; break end end
+    local npcOk = iso.noPathId > 0 and isSpawnAlive(iso.noPathId) and isoH.pathExists('id ' .. iso.noPathId)
+    if kind == 'island' and refOk then
+        -- the burst / scan blamed us but known ground is reachable: it really is the mobs
+        iso.noPathSince = 0; iso.cooldownUntil = now + 5
+        return false
+    end
+    if npcOk then iso.noPathSince = 0; return false end
+    if #refs == 0 and iso.noPathId == 0 then iso.noPathSince = 0; return false end -- nothing to test against
+
+    iso.active = true
+    iso.kind = kind
+    iso.refs = refs
+    iso.startedAt = now
+    iso.stage = 0; iso.refIdx = 0; iso.maneuverIdx = 0; iso.maneuverUntil = 0
+    iso.startX, iso.startY, iso.startZ = me.X() or 0, me.Y() or 0, me.Z() or 0
+    print(string.format(
+        '\ay[Triune]\ax Mesh isolation detected (%s): %d NPC(s) nearby, none pathable%s. Leaving the mesh to recover.',
+        kind == 'island' and 'no path to known-good ground' or 'mobs on unmeshed ground',
+        iso.noPathCount or 0,
+        #refs > 0 and string.format(', %d reference point(s)', #refs) or ', no reference points'))
+    isoH.advance(iso, now)
+    return iso.active
 end
 
 function runtime.checkCombatStall()
@@ -20224,6 +20737,11 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     if lastEmpty and lastEmpty.key == emptyKey and (nowScan - lastEmpty.at) < 1.0 then return nil end
 
     local playerOffMesh = runtime.isPlayerOffMesh()
+    -- Candidates that passed every filter but PathExists. If that is ALL of
+    -- them, the mesh under us (not the mobs) is the likely problem -- see
+    -- checkMeshIsolation(). NearestSpawn iterates nearest-first, so the
+    -- first one seen is the closest.
+    local noPath = { count = 0, id = 0, dist = 9999, los = false }
     -- Mobs the other boxes hold (Box Network); one lookup per scan.
     local claimed = runtime.boxnetClaimedTargets()
     -- PathExists is a navmesh query per candidate; remember answers for 3 s.
@@ -20279,6 +20797,10 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                                                     local ok, hasPath = pathExists(sid)
                                                     if ok and not hasPath then
                                                         pathOk = false
+                                                        noPath.count = noPath.count + 1
+                                                        if noPath.id == 0 then
+                                                            noPath.id = sid; noPath.dist = dist; noPath.los = hasLoS(sid)
+                                                        end
                                                     elseif ok and hasPath then
                                                         local pathLen = 0
                                                         pcall(function() pathLen = mq.TLO.Navigation.PathLength('id ' .. sid)() or 0 end)
@@ -20308,13 +20830,32 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local floorZ = isCampMode and (ctrl.camp_z_plane or 15) or (ctrl.hunter_z_plane or 15)
     local tier1Z = math.min(floorZ, searchMaxZ or 75)
     local targetId = scanSpawns(tier1Z)
-    if targetId then return targetId end
+    if targetId then runtime.noteMeshPathOk(); return targetId end
 
     -- Tier 2: Expand to full maxZ range if no target on immediate floor
     local maxZ = searchMaxZ or (isCampMode and (ctrl.camp_z or 75) or (ctrl.hunter_z or 75))
     if maxZ > tier1Z then
         targetId = scanSpawns(maxZ)
-        if targetId then return targetId end
+        if targetId then runtime.noteMeshPathOk(); return targetId end
+    end
+
+    if noPath.count > 0 then
+        -- Every otherwise-valid NPC was rejected for no-path. When known-good
+        -- ground IS still reachable we are on the connected mesh and it is the
+        -- mob standing on unmeshed ground: a close one we can see is worth
+        -- walking at directly (moveToward's off-mesh stick recovery takes it
+        -- from here; its stall timeout marks it unreachable if that fails).
+        if runtime.noteMeshNoPath(noPath) and noPath.los and noPath.dist <= pursuit.MESH_ISO.DIRECT_LOS_DIST then
+            if runtime.lastDirectApproachId ~= noPath.id then
+                runtime.lastDirectApproachId = noPath.id
+                print(string.format(
+                    '\ay[Triune]\ax No navmesh path to #%d but it is %.0f units away in plain sight -- approaching directly.',
+                    noPath.id, noPath.dist))
+            end
+            return noPath.id
+        end
+    else
+        runtime.noteMeshPathOk()
     end
 
     runtime.roamScanEmpty = { key = emptyKey, at = nowScan }
@@ -21525,6 +22066,10 @@ local function combatTick()
     if runtime.processHealPriority and runtime.processHealPriority() then
         return
     end
+
+    -- Mesh isolation recovery owns movement while it runs; the mode logic
+    -- below would otherwise start its own movement (or stop ours) every tick.
+    if runtime.checkMeshIsolation() then return end
 
     -- Extended Target window overrides. A forced spawn is targeted here, ahead
     -- of every mode's own selection, and held until forcedTargetId() releases
