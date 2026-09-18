@@ -68,7 +68,7 @@ Everything below is built in. Open them from the buttons on the main window's he
 | Cooldowns | `/ac cd` | Every ability, AA and disc timer in one place. |
 | Spellbook | `/ac spellbook` | Browse and search the spells of all three classes; mem to a gem from here. |
 | Map | `/ac map` | 2D zone map, Norrath atlas and an NPC tracker (`/ac track`). Camp, waypoints and hazards are drawn on it. |
-| Chat Windows | `/tacchat` | Chat window replacement: tabs, filters, colours, highlights, a Tells window, item links, logging. |
+| Chat Windows | `/tacchat` | Chat window replacement: tabs, filters, colours, highlights, a Tells window, item links, NPC dialogue links (click to answer), logging. |
 | Game Database | `/ac db` | Offline copy of the server's item, NPC and spell database. `/ac item`, `/ac npc`, `/ac spell` search it. |
 | Inventory & Bank | `/ac inv` | Search, sort and move items; see every box's bags; hand items between boxes. |
 | Hot Buttons | `/ac btn` | Button Master-style hotbars with cooldown overlays and share strings. |
@@ -76,7 +76,7 @@ Everything below is built in. Open them from the buttons on the main window's he
 | NMS Loot | `/ac nms` | The server's `#nms` loot system as a window, shared across your boxes. |
 | DPS Parser | `/dps` | Per-fight damage for you and your pets, plus a group meter over the Box Network. |
 | Auto-Accept | `/ac autoaccept` | Auto-accepts group, trade and DZ invites by your rules. |
-| Auto AA | `/ac aawin` | Spends AA points on a priority list; auto-buys and summons fireworks at the cap. |
+| Auto AA | `/ac aawin` | Spends AA points on the checked priorities only; the fireworks cap spender runs once every priority is maxed (or none is checked). `/ac aastatus` shows why each priority is or is not next. |
 | Buffbot | `/ac buffbot on` | A buff station: players `/tell` you for buffs, it casts them. Off unless you turn it on. |
 | Cursor Manager | `/ac cursorui` | Clears whatever is stuck on your cursor. |
 | Parcels | `/ac parcels` | Tells you when parcels arrive and collects them all at a parcel merchant. |
@@ -104,7 +104,7 @@ Type `/ac help` in game for the full list.
 | `/ac style melee\|ranged\|spell` | Set combat style |
 | `/ac wp add` / `/ac wp clear` | Add a waypoint here / clear the route |
 | `/ac pet attack\|back\|hold on` | Pet commands (any `#petcmd` verb) |
-| `/ac net all <command>` | Run an `/ac` command on every box |
+| `/ac net <all\|zone\|group\|Name> <command>` | Run a command on the boxes: an `/ac` command (`/ac net all burn on`) or any slash command as typed (`/ac net group /ac manual`, `/ac net all /camp`) |
 | `/ac scale 1.25` | Make every Triune window bigger (or smaller) |
 | `/ac status` | Print what the bot is doing |
 | `/ac restart` | Reload the whole script |
@@ -156,6 +156,6 @@ A plugin is one Lua file in `lua/tac/` that returns a table with an `id`, a `nam
 
 ## Version
 
-Current version: **3.0**
+Current version: **3.1**
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.

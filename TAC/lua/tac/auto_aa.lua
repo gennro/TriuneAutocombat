@@ -24,7 +24,7 @@
 local plugin = {
     id                 = 'auto_aa',
     name               = 'Auto AA Spender',
-    version            = '1.1.0',
+    version            = '1.2.0',
     author             = 'Triune',
     description        = 'Automatically spends AA points by priority through the AA window, Fireworks cap spender, auto-summon, and the Auto AA window.',
     defaultEnabled     = true,
@@ -72,6 +72,11 @@ local function resetState()
     AA.scanCtx = nil                -- per-scan TLO lookup caches (see scanPlayerAAs)
     AA.trainBackoff = {}            -- AA name -> os.clock() until which it is not retried
     AA.trainFailLogged = {}         -- AA name -> true once the failure was reported
+    AA.rowCost = {}                 -- AA name -> { rank, cost } last read off its AA-window row
+    AA.prioStatus = {}              -- AA name -> latest priority verdict (/ac aastatus)
+    AA.capHoldLogged = nil
+    AA.skipLogged = nil
+    AA.lastPrioEvalAt = nil
 end
 resetState()
 
@@ -257,6 +262,67 @@ function AA.isSpecialTabAA(name)
         if itm.type == 4 then return true end
     end
     return false
+end
+
+-- Text of one AA-window list cell (List(row, col) hands back a string, a
+-- callable TLO object, or nothing depending on the client build).
+function AA.readListCell(child, row, col)
+    local text = nil
+    pcall(function()
+        local v = col and child.List(row, col) or child.List(row)
+        if type(v) == 'string' then
+            text = v
+        elseif type(v) == 'userdata' or type(v) == 'table' then
+            local ok, r = pcall(function() return v() end)
+            if ok and r ~= nil then text = tostring(r) else text = tostring(v) end
+        elseif type(v) == 'function' then
+            text = tostring(v())
+        end
+    end)
+    if text == nil or text == '' or text == 'NULL' then return nil end
+    return text
+end
+
+-- What the AA window itself says about a row: name, "cur/max" and cost
+-- (the same columns the scan reads). nil when the row has no readable name.
+function AA.readRowInfo(child, row)
+    if not child or not row or row <= 0 then return nil end
+    local name = AA.readListCell(child, row, 1) or AA.readListCell(child, row)
+    if not name then return nil end
+    local info = { name = name:match('^%s*(.-)%s*$'), rank = nil, maxRank = nil, cost = nil }
+    local curMax = AA.readListCell(child, row, 2)
+    if curMax then
+        local c, m = curMax:match('(%d+)%s*/%s*(%d+)')
+        if c and m then info.rank, info.maxRank = tonumber(c), tonumber(m) end
+    end
+    local costTxt = AA.readListCell(child, row, 3)
+    if costTxt then
+        local c = costTxt:match('%d+')
+        if c then info.cost = tonumber(c) end
+    end
+    return info
+end
+
+-- Folds a window row into the caches so the next decision uses the price
+-- the window shows (a Train click is only ever made against this data).
+function AA.applyRowInfo(name, row)
+    if not row then return end
+    local function apply(entry)
+        if not entry then return end
+        if row.rank ~= nil then entry.rank = row.rank end
+        if row.maxRank ~= nil and row.maxRank > 0 then entry.maxRank = row.maxRank end
+        if row.cost ~= nil and row.cost > 0 then
+            entry.cost = row.cost
+            entry.costRank = entry.rank
+        end
+    end
+    if rt.cachedAAData then apply(rt.cachedAAData[name]) end
+    if AA.scannedAAMap then apply(AA.scannedAAMap[name]) end
+    if row.cost ~= nil and row.cost > 0 and row.rank ~= nil then
+        AA.rowCost = AA.rowCost or {}
+        AA.rowCost[name] = { rank = row.rank, cost = row.cost }
+    end
+    AA.aaFilterDirty = true
 end
 
 function AA.findAAInWindowLists(targetName, preferredTab)
@@ -688,6 +754,7 @@ end
 -- are probed under pcall. Fallback: the old "rank + 1" guess, which holds
 -- for the General / Archetype lines whose ranks cost 1, 2, 3, ... but not
 -- for flat-cost class lines - hence the probe first.
+-- Returns the cost and whether the client supplied it (false = the guess).
 function AA.nextRankCost(name, rank)
     rank = tonumber(rank) or 0
     local cost = 0
@@ -706,8 +773,177 @@ function AA.nextRankCost(name, rank)
             end
         end
     end)
-    if cost > 0 then return cost end
-    return (rank > 0) and (rank + 1) or 1
+    if cost > 0 then return cost, true end
+    if rank <= 0 then
+        -- untrained: the global record is rank 1, so its Cost is the price
+        pcall(function()
+            local ga = mq.TLO.AltAbility(name)
+            if ga and ga() and ga.Cost then cost = tonumber(ga.Cost() or 0) or 0 end
+        end)
+        if cost > 0 then return cost, true end
+    end
+    return (rank > 0) and (rank + 1) or 1, false
+end
+
+-- A cached cost is only the price of the next rank while the character is
+-- still at the rank it was recorded for (costRank); right after a purchase
+-- it is the price of the rank just bought. Entries written before costRank
+-- existed are trusted when their recorded rank still matches.
+function AA.cachedCostFor(src, rank)
+    if not src then return 0 end
+    local cost = tonumber(src.cost) or 0
+    if cost <= 0 then return 0 end
+    if src.costRank ~= nil then
+        if src.costRank == rank then return cost end
+        return 0
+    end
+    if (tonumber(src.rank) or 0) == rank then return cost end
+    return 0
+end
+
+-- Live-first snapshot of one AA for a purchase decision. The client's own
+-- rank and max rank beat the cache (which still carries the pre-purchase
+-- values right after a Train), the next rank's cost is probed from the
+-- client before a cached cost is considered, and a cached cost only counts
+-- when it was recorded at the current rank (see AA.cachedCostFor).
+function AA.purchaseInfo(nm)
+    local info = { name = nm, rank = 0, maxRank = 0, cost = 0, minLevel = 0, canTrain = nil, live = false }
+    pcall(function()
+        local ma = mq.TLO.Me.AltAbility(nm)
+        if ma and ma() then
+            info.live = true
+            info.rank = tonumber(ma.Rank and ma.Rank() or 0) or 0
+            info.maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0
+            if ma.MinLevel then info.minLevel = tonumber(ma.MinLevel() or 0) or 0 end
+            if ma.CanTrain ~= nil then info.canTrain = (ma.CanTrain() ~= false) end
+        end
+    end)
+    if not info.live then
+        pcall(function()
+            local ga = mq.TLO.AltAbility(nm)
+            if ga and ga() then
+                info.maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0
+                if ga.MinLevel then info.minLevel = tonumber(ga.MinLevel() or 0) or 0 end
+                if ga.CanTrain ~= nil then info.canTrain = (ga.CanTrain() ~= false) end
+            end
+        end)
+    end
+    local cd = rt.cachedAAData and rt.cachedAAData[nm]
+    local sc = AA.scannedAAMap and AA.scannedAAMap[nm]
+    local function fill(src)
+        if not src then return end
+        if not info.live and info.rank == 0 and (tonumber(src.rank) or 0) > 0 then info.rank = src.rank end
+        if info.maxRank == 0 and (tonumber(src.maxRank) or 0) > 0 then info.maxRank = src.maxRank end
+        if info.minLevel == 0 and (tonumber(src.minLevel) or 0) > 0 then info.minLevel = src.minLevel end
+    end
+    fill(cd)
+    fill(sc)
+
+    info.isSpecial = AA.isSpecialTabAA(nm) or false
+    if info.isSpecial then
+        -- Special-tab repeatables (fireworks): no fixed max rank, the
+        -- configured per-rank cost, and the client's CanTrain is not consulted.
+        if info.maxRank <= 0 then info.maxRank = 1 end
+        info.cost = tonumber(ctrl.auto_spend_aa_cost) or 25
+        info.canTrain = nil
+        info.fullyTrained = false
+        info.invalid = false
+        return info
+    end
+
+    info.fullyTrained = (info.maxRank > 0 and info.rank >= info.maxRank)
+    info.invalid = (info.maxRank <= 0)
+    if info.fullyTrained then
+        info.cost = 0
+        return info
+    end
+    local cost, probed = AA.nextRankCost(nm, info.rank)
+    if not probed then
+        local cached = AA.cachedCostFor(cd, info.rank)
+        if cached <= 0 then cached = AA.cachedCostFor(sc, info.rank) end
+        if cached > 0 then cost = cached end
+    end
+    -- The price the AA window itself showed for this rank wins outright
+    local rc = AA.rowCost and AA.rowCost[nm]
+    if rc and rc.rank == info.rank and (tonumber(rc.cost) or 0) > 0 then cost = rc.cost end
+    info.cost = cost
+    return info
+end
+
+AA.PRIORITY_SPACING = 30.0    -- seconds between window attempts on one AA
+
+-- /ac aastatus: the spender's view of every priority, fresh (not the last
+-- tick's verdicts, which only exist while auto-spend is running).
+function AA.printPriorityStatus()
+    local unspent, myLevel = 0, 0
+    pcall(function() unspent = tonumber(mq.TLO.Me.AAPoints() or 0) or 0 end)
+    pcall(function() myLevel = tonumber(mq.TLO.Me.Level() or 0) or 0 end)
+    print(string.format('\ag[Triune]\ax Auto AA: %s | Unspent %d | Bank threshold %d | Cap spender "%s" (cost %d)',
+        ctrl.auto_spend_aa and '\agON\ax' or '\arOFF\ax', unspent, AA.threshold(),
+        ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks', tonumber(ctrl.auto_spend_aa_cost) or 25))
+    if AA.pendingAATrain then
+        print(string.format('\ag[Triune]\ax   Window purchase in progress: "%s" (step %s)', AA.pendingAATrain.name, tostring(AA.pendingAATrain.step)))
+    end
+    local names = {}
+    for nm, enabled in pairs(ctrl.auto_aa_priorities or {}) do
+        if enabled then names[#names + 1] = nm end
+    end
+    if #names == 0 then
+        print('\ay[Triune]\ax   No prioritized AAs; only the cap spender runs.')
+        return
+    end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+    local now = os.clock()
+    for _, nm in ipairs(names) do
+        local info = AA.purchaseInfo(nm)
+        local why = AA.priorityBlocker(info, unspent, myLevel, now)
+        local verdict
+        if why == nil then
+            verdict = (unspent >= AA.threshold()) and '\agbuy next\ax' or string.format('\agready\ax, waiting for the %d AA bank threshold', AA.threshold())
+        else
+            verdict = '\ay' .. (AA.BLOCKER_TEXT[why] or why) .. '\ax'
+        end
+        print(string.format('\ag[Triune]\ax   "%s"  Rank %d/%d  Cost %d  CanTrain %s  -> %s',
+            nm, info.rank, info.maxRank, info.cost,
+            info.canTrain == nil and 'n/a' or tostring(info.canTrain), verdict))
+    end
+end
+
+-- Why a prioritized AA is not bought this tick (nil = it can be). Every
+-- answer but 'trained' and 'stub' leaves the AA outstanding, which keeps
+-- the cap spender off.
+function AA.priorityBlocker(info, unspent, myLevel, now)
+    if info.fullyTrained then return 'trained' end
+    if info.invalid then return 'stub' end
+    if myLevel > 0 and info.minLevel > 0 and myLevel < info.minLevel then return 'level' end
+    if now < ((AA.trainBackoff and AA.trainBackoff[info.name]) or 0) then return 'backoff' end
+    if unspent < info.cost then return 'points' end
+    if info.canTrain == false then return 'cantrain' end
+    local last = AA.lastAATrainAttempt and AA.lastAATrainAttempt[info.name]
+    if last and (now - last) < AA.PRIORITY_SPACING then return 'spacing' end
+    return nil
+end
+
+AA.BLOCKER_TEXT = {
+    trained  = 'already at max rank',
+    stub     = 'no valid max rank reported by the client',
+    level    = 'character level below the AA minimum',
+    backoff  = 'last purchase did not go through; retry pending',
+    points   = 'waiting for points',
+    cantrain = 'client reports it cannot be trained (prerequisite / class / expansion)',
+    spacing  = 'attempted recently; retry pending',
+}
+
+-- Remembers the latest verdict per priority for /ac aastatus, and prints a
+-- blocker once when it first applies (waiting states stay quiet).
+function AA.notePriorityStatus(info, why, unspent)
+    AA.prioStatus = AA.prioStatus or {}
+    local prev = AA.prioStatus[info.name]
+    AA.prioStatus[info.name] = { why = why, cost = info.cost, rank = info.rank, maxRank = info.maxRank, canTrain = info.canTrain, at = os.clock() }
+    if why and why ~= 'points' and why ~= 'spacing' and why ~= 'backoff' and (not prev or prev.why ~= why) then
+        print(string.format('\ay[Triune]\ax Prioritized AA "%s" (Rank %d/%d, Cost %d, Unspent %d) skipped: %s.',
+            info.name, info.rank, info.maxRank, info.cost, unspent, AA.BLOCKER_TEXT[why] or why))
+    end
 end
 
 function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, knownCost, isKnownCharAA, category, isFromUI)
@@ -744,6 +980,7 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
         end
         if knownCost ~= nil and knownCost > 0 then
             existing.cost = knownCost
+            existing.costRank = existing.rank
         end
         local isSpecial = (AA.isSpecialTabAA and AA.isSpecialTabAA(name))
         if not isSpecial and existing.maxRank > 0 and existing.rank >= existing.maxRank then
@@ -763,6 +1000,7 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
             rank = existing.rank,
             maxRank = existing.maxRank,
             cost = existing.cost,
+            costRank = existing.costRank or existing.rank,
             category = existing.category,
             id = existing.id,
             minLevel = existing.minLevel or (old and old.minLevel),
@@ -775,11 +1013,12 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
     local isCharacterAA = not not isKnownCharAA
     local description = ''
 
-    if rt.cachedAAData and rt.cachedAAData[name] then
-        local cd = rt.cachedAAData[name]
-        if cd.rank ~= nil then rank = cd.rank end
+    -- The cache fills what the client does not report; rank and cost are
+    -- taken live below (a cached pair goes stale the moment a rank is
+    -- bought, and a stale cost made the spender click Train short of points).
+    local cd = rt.cachedAAData and rt.cachedAAData[name]
+    if cd then
         if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
-        if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
         if cd.category and not category then category = cd.category end
         if cd.id ~= nil and cd.id > 0 then id = cd.id end
         if cd.minLevel ~= nil and cd.minLevel > 0 then minLevel = cd.minLevel end
@@ -794,9 +1033,11 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
             if mid > 0 then
                 id = mid
                 isCharacterAA = true
-                if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
+                rank = tonumber(ma.Rank and ma.Rank() or 0) or 0
                 if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
-                if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
+                -- Me.AltAbility.Cost is the owned rank's price: only rank 1's
+                -- is the next one (untrained); AA.nextRankCost covers the rest
+                if cost == 0 and rank <= 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
                 if minLevel == 0 and ma.MinLevel then minLevel = tonumber(ma.MinLevel() or 0) or 0 end
                 canTrain = (ma.CanTrain and ma.CanTrain() == true)
                 pointsSpent = tonumber(ma.PointsSpent and ma.PointsSpent() or 0) or 0
@@ -816,7 +1057,7 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
             if ga and ga() then
                 if id == 0 then id = tonumber(ga.ID and ga.ID() or 0) or 0 end
                 if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
-                if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
+                if cost == 0 and rank <= 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
                 if minLevel == 0 and ga.MinLevel then minLevel = tonumber(ga.MinLevel() or 0) or 0 end
                 if not canTrain and ga.CanTrain then canTrain = (ga.CanTrain() == true) end
                 if aaType == 0 and ga.Type then aaType = tonumber(ga.Type() or 0) or 0 end
@@ -829,9 +1070,11 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
         end
     end)
 
+    if rank == 0 and cd and (tonumber(cd.rank) or 0) > 0 then rank = cd.rank end
     if knownRank ~= nil then rank = knownRank end
     if knownMaxRank ~= nil and knownMaxRank > 0 then maxRank = knownMaxRank end
     if knownCost ~= nil and knownCost > 0 then cost = knownCost end
+    if cost == 0 then cost = AA.cachedCostFor(cd, rank) end
 
     if not isCharacterAA and AA.specialTabAAs then
         for _, sName in ipairs(AA.specialTabAAs) do
@@ -875,6 +1118,7 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
             rank = rank,
             maxRank = maxRank,
             cost = cost,
+            costRank = rank,
             canTrain = canTrain,
             minLevel = minLevel,
             pointsSpent = pointsSpent,
@@ -893,6 +1137,7 @@ function AA.recordScannedAA(list, foundMap, name, knownRank, knownMaxRank, known
             rank = rank,
             maxRank = maxRank,
             cost = cost,
+            costRank = rank,
             category = category,
             id = id,
             minLevel = minLevel,
@@ -1086,7 +1331,9 @@ function AA.scanPlayerAAs(force)
             elseif isSkill or not AA.isAAAllowedForPlayer(cName, nil, false) then
                 rt.cachedAAData[cName] = nil
             elseif not foundMap[cName] then
-                AA.recordScannedAA(list, foundMap, cName, cd.rank, cd.maxRank, cd.cost, true, cd.category, false)
+                -- rank and cost are re-read live (recordScannedAA falls back
+                -- to the cached pair only when the client reports nothing)
+                AA.recordScannedAA(list, foundMap, cName, nil, cd.maxRank, nil, true, cd.category, false)
             end
         end
     end
@@ -1536,6 +1783,31 @@ function AA.processAATrainWorkflow()
         end
 
         if listName and listIdx and listIdx > 0 then
+            -- The row is the authority on rank and price. When it names the
+            -- AA exactly, refresh the caches from it and skip the click (no
+            -- failure backoff, the AA just keeps waiting) if the row says
+            -- the line is maxed or costs more than the character has.
+            if not (AA.isSpecialTabAA and AA.isSpecialTabAA(task.name)) then
+                local row = AA.readRowInfo(listObj, listIdx)
+                local clean = function(t) return tostring(t or ''):lower():gsub('[^%a%d]', '') end
+                if row and clean(row.name) == clean(task.name) then
+                    AA.applyRowInfo(task.name, row)
+                    local have = 0
+                    pcall(function() have = tonumber(mq.TLO.Me.AAPoints() or 0) or 0 end)
+                    if row.maxRank and row.maxRank > 0 and row.rank and row.rank >= row.maxRank then
+                        task.skipped = 'trained'
+                    elseif row.cost and row.cost > 0 and have < row.cost then
+                        task.skipped = 'points'
+                        task.rowCost = row.cost
+                        task.have = have
+                    end
+                    if task.skipped then
+                        task.step = 'finish'
+                        task.nextStepAt = now + 0.05
+                        return
+                    end
+                end
+            end
             -- Found the ability row! If found on a different tab, switch to that tab first
             if foundTab and foundTab ~= task.targetTab then
                 mq.cmdf('/nomodkey /notify %s AAW_Subwindows tabselect %d', winName, foundTab)
@@ -1698,6 +1970,21 @@ function AA.processAATrainWorkflow()
             AA.requestScan(1.2)
             AA.pendingPostTrainScanAt = nil
             core.saveLoadout(true)
+        elseif task.skipped then
+            -- The window showed the line maxed or priced above the pool:
+            -- nothing was clicked, so no backoff - the spender re-evaluates
+            -- with the refreshed cost. Logged once per price.
+            local key = task.name .. ':' .. task.skipped .. ':' .. tostring(task.rowCost or 0)
+            if AA.skipLogged ~= key then
+                AA.skipLogged = key
+                if task.skipped == 'trained' then
+                    print(string.format('\ay[Triune]\ax AA window shows "%s" already at max rank; nothing to buy.', task.name))
+                else
+                    print(string.format('\ay[Triune]\ax AA window prices "%s" at %d AA (have %d); waiting for points.',
+                        task.name, task.rowCost or 0, task.have or 0))
+                end
+            end
+            AA.requestScan(1.0)
         elseif task.failed == 'window' then
             -- could not even open the window: the 30 s per-AA spacing applies
             AA.aaFilterDirty = true
@@ -1747,6 +2034,10 @@ function AA.checkAutoSpendAA(allowStop)
 
     local now = os.clock()
     if (now - (AA.lastAutoSpendAAAt or 0)) < 2.0 then return false end
+    -- The priority pass probes the client per priority: once every 2 s is
+    -- plenty (a purchase is a multi-second window workflow anyway).
+    if AA.lastPrioEvalAt and (now - AA.lastPrioEvalAt) < 2.0 then return false end
+    AA.lastPrioEvalAt = now
 
     -- Reset unpurchasable skips if character level changed
     local myLevel = 0
@@ -1772,81 +2063,23 @@ function AA.checkAutoSpendAA(allowStop)
     end
     AA.lastObservedAutoSpendPts = unspent
 
-    -- 1. Check prioritized AAs
+    -- 1. Prioritized AAs. Every enabled priority is classified each pass:
+    -- purchasable now (a candidate), or not yet (waiting or blocked). While
+    -- any checked priority is still outstanding - anything short of maxed
+    -- or an invalid stub - only priorities are bought: the cap spender
+    -- below stays off so fireworks can never eat a pool a priority needs.
+    local outstanding, outstandingWhy = nil, nil
     if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
         local candidates = {}
         for nm, enabled in pairs(ctrl.auto_aa_priorities) do
             if enabled then
-                local lastAttempt = (AA.lastAATrainAttempt and AA.lastAATrainAttempt[nm]) or 0
-                local backoff = (AA.trainBackoff and AA.trainBackoff[nm]) or 0
-                if (now - lastAttempt) >= 30.0 and now >= backoff then
-                    local rank, maxRank, cost = 0, 0, 0
-                    local minLevel = 0
-                    if rt.cachedAAData and rt.cachedAAData[nm] then
-                        local cd = rt.cachedAAData[nm]
-                        if cd.rank ~= nil then rank = cd.rank end
-                        if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
-                        if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
-                        if cd.minLevel ~= nil and cd.minLevel > 0 then minLevel = cd.minLevel end
-                    end
-                    if (rank == 0 or maxRank == 0 or cost == 0) and AA.scannedAAMap then
-                        local itm = AA.scannedAAMap[nm]
-                        if itm then
-                            if rank == 0 and itm.rank then rank = itm.rank end
-                            if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
-                            if cost == 0 and itm.cost then cost = itm.cost end
-                            if minLevel == 0 and itm.minLevel then minLevel = itm.minLevel end
-                        end
-                    end
-                    pcall(function()
-                        local ma = mq.TLO.Me.AltAbility(nm)
-                        if ma and ma() then
-                            if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
-                            if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
-                            if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
-                            if minLevel == 0 and ma.MinLevel then minLevel = tonumber(ma.MinLevel() or 0) or 0 end
-                        end
-                    end)
-                    pcall(function()
-                        if maxRank == 0 or cost == 0 or minLevel == 0 then
-                            local ga = mq.TLO.AltAbility(nm)
-                            if ga and ga() then
-                                if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
-                                if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
-                                if minLevel == 0 and ga.MinLevel then minLevel = tonumber(ga.MinLevel() or 0) or 0 end
-                            end
-                        end
-                    end)
-                    local levelMet = (myLevel == 0 or minLevel == 0 or myLevel >= minLevel)
-                    local canTrainCheck = true
-                    pcall(function()
-                        local ma = mq.TLO.Me.AltAbility(nm)
-                        if ma and ma() and ma.CanTrain ~= nil then
-                            if ma.CanTrain() == false then canTrainCheck = false end
-                        else
-                            local ga = mq.TLO.AltAbility(nm)
-                            if ga and ga() and ga.CanTrain ~= nil then
-                                if ga.CanTrain() == false then canTrainCheck = false end
-                            end
-                        end
-                    end)
-
-                    local isSpecial = (AA.isSpecialTabAA and AA.isSpecialTabAA(nm))
-                    local fullyTrained = not isSpecial and (maxRank > 0 and rank >= maxRank)
-                    local isInvalidStub = not isSpecial and (not maxRank or maxRank <= 0)
-                    if isSpecial and cost <= 0 then
-                        cost = tonumber(ctrl.auto_spend_aa_cost) or 25
-                    end
-                    if isSpecial and (not maxRank or maxRank <= 0) then
-                        maxRank = 1
-                    end
-                    local canTrainMet = isSpecial or canTrainCheck
-                    if not fullyTrained and not isInvalidStub and levelMet and canTrainMet then
-                        if cost <= 0 then cost = AA.nextRankCost(nm, rank) end
-                        if unspent >= cost then
-                            candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
-                        end
-                    end
+                local info = AA.purchaseInfo(nm)
+                local why = AA.priorityBlocker(info, unspent, myLevel, now)
+                AA.notePriorityStatus(info, why, unspent)
+                if why == nil then
+                    candidates[#candidates + 1] = info
+                elseif why ~= 'trained' and why ~= 'stub' and not outstanding then
+                    outstanding, outstandingWhy = nm, why
                 end
             end
         end
@@ -1878,10 +2111,9 @@ function AA.checkAutoSpendAA(allowStop)
                 end)
             end
             local target = candidates[1]
-            local isSpecialTarget = AA.isSpecialTabAA and AA.isSpecialTabAA(target.name)
             AA.lastAutoSpendAAAt = now
             print(string.format('\ag[Triune]\ax Auto-spending AA on %s "%s" (Rank %d/%d, Cost: %d AA, Unspent: %d AA)...',
-                isSpecialTarget and 'Special tab ability' or 'prioritized ability',
+                target.isSpecial and 'Special tab ability' or 'prioritized ability',
                 target.name, target.rank, target.maxRank, target.cost, unspent))
             return AA.startAATrainWorkflow(target.name, allowStop)
         end
@@ -1893,7 +2125,7 @@ function AA.checkAutoSpendAA(allowStop)
     local effectiveName = ctrl.auto_spend_aa_name or 'Alternately Advanced Fireworks'
     local isSpecialCap = (AA.isSpecialTabAA and AA.isSpecialTabAA(effectiveName)) or effectiveName:lower():find('firework')
 
-    local lastCapAttempt = (AA.lastAATrainAttempt and AA.lastAATrainAttempt[effectiveName]) or 0
+    local lastCapAttempt = (AA.lastAATrainAttempt and AA.lastAATrainAttempt[effectiveName]) or -AA.PRIORITY_SPACING
     local capBackoff = (AA.trainBackoff and AA.trainBackoff[effectiveName]) or 0
     local effectiveThreshold = threshold
     -- With no threshold ever set, a Fireworks cap spender may spend as soon
@@ -1904,6 +2136,19 @@ function AA.checkAutoSpendAA(allowStop)
     elseif isSpecialCap and unspent >= cost and unspent >= threshold then
         effectiveThreshold = threshold
     end
+    -- Only checked priorities are bought while one is outstanding: the cap
+    -- spender waits until every priority is maxed. Logged once per hold.
+    if outstanding then
+        local key = outstanding .. ':' .. outstandingWhy
+        if AA.capHoldLogged ~= key then
+            AA.capHoldLogged = key
+            print(string.format('\ay[Triune]\ax Cap spender on hold: prioritized "%s" is still outstanding (%s); only checked priorities are bought.',
+                outstanding, AA.BLOCKER_TEXT[outstandingWhy] or outstandingWhy))
+        end
+        return false
+    end
+    AA.capHoldLogged = nil
+
     if unspent >= effectiveThreshold and (now - lastCapAttempt) >= 30.0 and now >= capBackoff then
         -- Movement check: if moving and allowStop is true, cleanly stop movement before purchasing
         local moving = false
@@ -1954,51 +2199,18 @@ function AA.manualSpendAA(targetName)
         unspent = tonumber(raw or 0) or 0
     end)
 
-    -- Check prioritized abilities
+    -- Check prioritized abilities (same live-first classification as the
+    -- automatic pass; the attempt spacing and backoffs were just cleared)
     local topPrioritized = nil
     if ctrl.auto_aa_priorities and next(ctrl.auto_aa_priorities) then
         local candidates = {}
+        local myLevel = 0
+        pcall(function() myLevel = tonumber(mq.TLO.Me.Level() or 0) or 0 end)
         for nm, enabled in pairs(ctrl.auto_aa_priorities) do
             if enabled then
-                local rank, maxRank, cost = 0, 0, 0
-                if rt.cachedAAData and rt.cachedAAData[nm] then
-                    local cd = rt.cachedAAData[nm]
-                    if cd.rank ~= nil then rank = cd.rank end
-                    if cd.maxRank ~= nil and cd.maxRank > 0 then maxRank = cd.maxRank end
-                    if cd.cost ~= nil and cd.cost > 0 then cost = cd.cost end
-                end
-                if (rank == 0 or maxRank == 0 or cost == 0) and AA.scannedAAMap then
-                    local itm = AA.scannedAAMap[nm]
-                    if itm then
-                        if rank == 0 and itm.rank then rank = itm.rank end
-                        if maxRank == 0 and itm.maxRank then maxRank = itm.maxRank end
-                        if cost == 0 and itm.cost then cost = itm.cost end
-                    end
-                end
-                pcall(function()
-                    local ma = mq.TLO.Me.AltAbility(nm)
-                    if ma and ma() then
-                        if rank == 0 then rank = tonumber(ma.Rank and ma.Rank() or 0) or 0 end
-                        if maxRank == 0 then maxRank = tonumber(ma.MaxRank and ma.MaxRank() or 0) or 0 end
-                        if cost == 0 then cost = tonumber(ma.Cost and ma.Cost() or 0) or 0 end
-                    end
-                end)
-                pcall(function()
-                    if maxRank == 0 or cost == 0 then
-                        local ga = mq.TLO.AltAbility(nm)
-                        if ga and ga() then
-                            if maxRank == 0 then maxRank = tonumber(ga.MaxRank and ga.MaxRank() or 0) or 0 end
-                            if cost == 0 then cost = tonumber(ga.Cost and ga.Cost() or 0) or 0 end
-                        end
-                    end
-                end)
-                local isSpecial = (AA.isSpecialTabAA and AA.isSpecialTabAA(nm))
-                local fullyTrained = not isSpecial and (maxRank > 0 and rank >= maxRank)
-                if not fullyTrained then
-                    if cost <= 0 then cost = AA.nextRankCost(nm, rank) end
-                    if unspent >= cost then
-                        candidates[#candidates + 1] = { name = nm, cost = cost, rank = rank, maxRank = maxRank }
-                    end
+                local info = AA.purchaseInfo(nm)
+                if AA.priorityBlocker(info, unspent, myLevel, os.clock()) == nil then
+                    candidates[#candidates + 1] = info
                 end
             end
         end
@@ -2280,7 +2492,7 @@ function AA.drawWindow()
     end
     if ImGui.IsItemDeactivatedAfterEdit() then core.saveLoadout(true) end
     if ImGui.IsItemHovered() then
-        ImGui.SetTooltip('%s', string.format('Bank threshold: %d AA points (min: 5).\nAuto-spending begins once your unspent points reach this number:\nprioritized abilities are bought first, and with none affordable the cap spender dumps into its ability.\nSpend Now ignores it.', curThresh))
+        ImGui.SetTooltip('%s', string.format('Bank threshold: %d AA points (min: 5).\nAuto-spending begins once your unspent points reach this number:\nonly checked priorities are bought while any is outstanding; the cap spender runs once they are all maxed.\nSpend Now ignores it.', curThresh))
     end
 
     ImGui.SameLine()
@@ -2747,6 +2959,8 @@ function AA.onCommand(cmd, args)
             local count = AA.scannedAAs and #AA.scannedAAs or 0
             print(string.format('\ag[Triune]\ax Scanned character Alternate Advancements: %d abilities found.', count))
         end
+    elseif cmd == 'aastatus' or cmd == 'aawhy' then
+        AA.printPriorityStatus()
     elseif cmd == 'aaprio' or cmd == 'prioritizeaa' then
         local aaName = table.concat(args, ' ', 2)
         if aaName and aaName ~= '' then
@@ -2879,6 +3093,7 @@ plugin.help = {
     '  \ag/ac aaname [name]\ax - Set the cap-spender AA ability name',
     '  \ag/ac aascan\ax - Force a rescan of purchasable AAs',
     '  \ag/ac aaprio [name]\ax - Toggle an AA on the priority list',
+    '  \ag/ac aastatus | aawhy\ax - Show why each prioritized AA is or is not being bought',
 }
 
 -- Exposed for tests and other plugins

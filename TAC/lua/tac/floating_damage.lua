@@ -3,7 +3,9 @@
 -- TAC/lua/tac/floating_damage.lua — Triune Floating Damage Text Plugin
 -- ============================================================================
 -- Renders flashy floating damage numbers above the player character when a
--- critical hit / crippling blow / deadly strike / spell crit lands.
+-- critical hit / crippling blow / deadly strike / spell crit lands. Melee,
+-- ranged and skill crits reach the client in third person with the attacker's
+-- name, so those events capture the actor and match it against Me.CleanName.
 --
 -- Every hit slams in with an elastic impact pop, rolls its number up from
 -- zero, and is stroked with a dark outline so it reads over any background.
@@ -19,7 +21,7 @@
 local plugin = {
     id                 = 'floating_damage',
     name               = 'Floating Damage Text',
-    version            = '2.0.0',
+    version            = '2.1.0',
     author             = 'Triune',
     description        = 'Renders animated floating critical hit damage numbers with impact pops, particle bursts, shockwaves, combo streaks and record callouts.',
     defaultEnabled     = true,
@@ -290,39 +292,67 @@ function plugin.onInit(coreApi)
         table.insert(registeredEvents, name)
     end
 
-    -- Self-only patterns: anchored at the start of the line on the first-person
-    -- wording so other people's crits ("Bob delivers a critical blast!") and
-    -- quoted chat never spawn a floater.
-    reg('TacCritHit', 'You score a critical hit!#*#(#1#)#*#', function(_, dmgStr)
+    -- Melee, ranged and skill crits are broadcast in third person with the
+    -- attacker's name even to the attacker ("Bob scores a critical hit! (123)",
+    -- "Bob's holy blade cleanses his target!(456)"); only spell and heal crits
+    -- get a first-person "You ..." line. Every melee pattern captures the actor
+    -- and isMine keeps other people's crits, pets and quoted chat out.
+    local function isMine(actor)
+        if type(actor) ~= 'string' then return false end
+        actor = actor:match('^%s*(.-)%s*$')
+        if actor == 'You' or actor == 'you' then return true end
+        local me = mq.TLO and mq.TLO.Me and mq.TLO.Me.CleanName and mq.TLO.Me.CleanName()
+        if type(me) ~= 'string' or me == '' then return false end
+        return actor:lower() == me:lower()
+    end
+
+    reg('TacCritHit', '#1# score#*#critical hit!#*#(#2#)#*#', function(_, actor, dmgStr)
+        if not isMine(actor) then return end
         spawnFloater('CRITICAL!', 'crit', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacCripBlow', 'You land a Crippling Blow!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacCripBlow', '#1# land#*#Crippling Blow!#*#(#2#)#*#', function(_, actor, dmgStr)
+        if not isMine(actor) then return end
         spawnFloater('CRIPPLING BLOW!', 'crip', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacDeadlyStrike', 'You score a Deadly Strike!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacDeadlyStrike', '#1# score#*#Deadly Strike#*#(#2#)#*#', function(_, actor, dmgStr)
+        if not isMine(actor) then return end
         spawnFloater('DEADLY STRIKE!', 'deadly', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacSlayUndead', 'You slay#*#undead!#*#(#1#)#*#', function(_, dmgStr)
+    reg('TacSlayUndead', "#1#'s holy blade cleanses#*#(#2#)#*#", function(_, actor, dmgStr)
+        if not isMine(actor) then return end
         spawnFloater('SLAY UNDEAD!', 'slay', tonumber(dmgStr) or 0)
     end)
 
-    reg('TacFinishBlow', 'You land a Finishing Blow!#*#(#1#)#*#', function(_, dmgStr)
-        spawnFloater('FINISHING BLOW!', 'finish', tonumber(dmgStr) or 0)
+    -- Finishing blows carry no number on emu ("Bob scores a Finishing Blow!!");
+    -- the "(X)" is optional so a server that appends one still counts.
+    reg('TacFinishBlow', '#1# score#*#Finishing Blow#*#', function(line, actor)
+        if not isMine(actor) then return end
+        local dmg = tonumber(type(line) == 'string' and line:match('%((%d+)%)') or nil) or 0
+        spawnFloater('FINISHING BLOW!', 'finish', dmg, dmg > 0 and nil or { tier = 1 })
     end)
 
     -- Instant kills carry no number, so they get the top tier outright.
-    reg('TacAssassinate', 'You assassinate#*#', function()
+    reg('TacAssassinate', '#1# ASSASSINATES#*#', function(_, actor)
+        if not isMine(actor) then return end
         spawnFloater('ASSASSINATE!', 'assassin', 0, { tier = 1 })
     end)
 
-    reg('TacHeadshot', 'You headshotted#*#', function()
+    reg('TacHeadshot', '#1# performs a FATAL BOW SHOT#*#', function(_, actor)
+        if not isMine(actor) then return end
         spawnFloater('HEADSHOT!', 'headshot', 0, { tier = 1 })
     end)
 
-    reg('TacFlurry', 'You flurry#*#', function()
+    -- Flurries are first person ("You unleash a flurry of attacks.") or third
+    -- person ("Bob executes a FLURRY of attacks on a rat!").
+    reg('TacFlurry', 'You unleash a flurry#*#', function()
+        spawnFloater('FLURRY!', 'flurry', 0)
+    end)
+
+    reg('TacFlurry2', '#1# executes a FLURRY#*#', function(_, actor)
+        if not isMine(actor) then return end
         spawnFloater('FLURRY!', 'flurry', 0)
     end)
 

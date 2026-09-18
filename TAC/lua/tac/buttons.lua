@@ -197,7 +197,10 @@ local browser = {
     search  = '',
     lists   = {},          -- tab -> { entries }
     scanAt  = {},          -- tab -> os.clock() of the last scan
-    boxScope = 'bar',      -- Box Control tab: bar (hotbar switch) | all | zone | group
+    boxScope = 'bar',      -- Box Control tab: bar (hotbar switch) | all | zone | group | name
+    boxName  = '',         -- Box Control tab: the box a 'name' scope sends to
+    boxCmd   = '',         -- Box Control tab: custom /ac command being built
+    boxLabel = '',         -- Box Control tab: label for the custom button ('' = from the command)
     scanRequest = {},      -- tab -> true: the draw thread wants onTick to (re)scan it
     gemFp   = nil,         -- memorized-gem fingerprint the Gem list was built from
     gemFpAt = 0,
@@ -298,7 +301,9 @@ local BOX_SCOPES = {
     { id = 'all',   label = 'All boxes' },
     { id = 'zone',  label = 'Same zone' },
     { id = 'group', label = 'My group' },
+    { id = 'name',  label = 'One box' },   -- a named character (browser.boxName)
 }
+local BOX_CUSTOM_COLOR = { 60, 95, 130 }
 -- The live scopes a hotbar switch can be set to (what `{scope}` becomes).
 local BAR_SCOPES = {
     { id = 'group', label = 'Group', desc = 'My group' },
@@ -1931,11 +1936,26 @@ local function boxScopeLabel(scope)
     return scope
 end
 
-local function boxPresetButton(preset, scope)
+-- What `/ac net` gets as its scope word: the `{scope}` token for the hotbar
+-- switch, the box's name for a 'name' scope, else the scope itself.
+local function boxScopeWord(scope, name)
+    scope = scope or 'bar'
+    if scope == 'bar' then return BOX_SCOPE_TOKEN end
+    if scope == 'name' then
+        name = trim(name or '')
+        if name == '' then return nil, 'type the name of the box to send to' end
+        if name:find('%s') then return nil, 'a box name is a single word' end
+        return name
+    end
+    return scope
+end
+
+local function boxPresetButton(preset, scope, name)
     scope = scope or 'bar'
     local live = scope == 'bar'
-    local cmd = preset.cmd:gsub('%%s', live and BOX_SCOPE_TOKEN or scope)
-    local suffix = ({ all = 'all', zone = 'zone', group = 'grp' })[scope] or scope
+    local word = boxScopeWord(scope, name) or scope
+    local cmd = preset.cmd:gsub('%%s', word)
+    local suffix = ({ all = 'all', zone = 'zone', group = 'grp' })[scope] or word
     return {
         -- Live-scope buttons keep the bare name: the switch on the bar says where they go.
         label = live and preset.name or string.format('%s (%s)', preset.name, suffix),
@@ -1949,10 +1969,63 @@ local function scanBoxControl()
     local out = {}
     local scope = browser.boxScope or 'bar'
     for _, preset in ipairs(BOX_PRESETS) do
-        local b = boxPresetButton(preset, scope)
+        local b = boxPresetButton(preset, scope, browser.boxName)
         out[#out + 1] = { name = preset.name, sub = preset.desc, icon = nil, iconType = 'Spell', button = b }
     end
     return out
+end
+
+-- Custom Box Control button: one command per line, each sent through
+-- `/ac net <scope> <command>` as a full slash command (`/ac net group /ac
+-- manual`, `/ac net all /camp`), which is what the boxes run as typed. A line
+-- without a slash is an /ac command and gets the "/ac" put back; nested net /
+-- boxnet lines are refused the way boxnet itself refuses them. Returns the
+-- lines, or nil + reason.
+local function boxCommandLines(text)
+    local out = {}
+    for raw in (tostring(text or '') .. '\n'):gmatch('(.-)\n') do
+        local line = trim(raw)
+        if line ~= '' then
+            if line:sub(1, 1) ~= '/' then line = '/ac ' .. line end
+            if line == '/ac' then return nil, 'empty command' end
+            local acWord = line:match('^/ac%s+(%S+)')
+            if acWord and (acWord:lower() == 'net' or acWord:lower() == 'boxnet') then return nil, 'nested net commands are not allowed' end
+            out[#out + 1] = line
+        end
+    end
+    if #out == 0 then return nil, 'type a command first' end
+    return out
+end
+
+-- '/ac burn on' -> 'Burn on', '/camp' -> 'Camp'; a placeholder argument is
+-- dropped from the label.
+local function defaultBoxLabel(lines)
+    local first = tostring(lines and lines[1] or ''):gsub('%s*[<%[].*$', '')
+    first = trim(first:gsub('^/ac%s+', ''):gsub('^/', ''))
+    if first == '' then first = 'Box Cmd' end
+    return (first:gsub('^%l', string.upper))
+end
+
+local function customBoxButton(text, label, scope, name)
+    local lines, why = boxCommandLines(text)
+    if not lines then return nil, why end
+    scope = scope or 'bar'
+    local word, whyScope = boxScopeWord(scope, name)
+    if not word then return nil, whyScope end
+    local cmds = {}
+    for i, line in ipairs(lines) do cmds[i] = '/ac net ' .. word .. ' ' .. line end
+    label = trim(label or '')
+    if label == '' then
+        label = defaultBoxLabel(lines)
+        local suffix = ({ all = 'all', zone = 'zone', group = 'grp' })[scope] or word
+        if scope ~= 'bar' then label = string.format('%s (%s)', label, suffix) end
+    end
+    return {
+        label = label,
+        cmd = table.concat(cmds, '\n'),
+        buttonColor = deepcopy(BOX_CUSTOM_COLOR),
+        timerType = 'None',
+    }
 end
 
 local function commandNeedsEdit(cmd)
@@ -2154,12 +2227,18 @@ end
 
 -- Creates a "Box Control" set holding every preset for the chosen scope and
 -- adds it to the target hotbar. Returns the set name.
-local function addBoxControlSet(scope, hb)
+local function addBoxControlSet(scope, hb, boxName)
     scope = scope or browser.boxScope or 'bar'
-    local name = uniqueSetName('Box Control' .. (scope ~= 'bar' and (' (' .. scope .. ')') or ''))
+    boxName = boxName or browser.boxName
+    local word, why = boxScopeWord(scope, boxName)
+    if not word then
+        setStatus('Box Control: %s.', why)
+        return nil
+    end
+    local name = uniqueSetName('Box Control' .. (scope ~= 'bar' and (' (' .. word .. ')') or ''))
     local set = {}
     for i, preset in ipairs(BOX_PRESETS) do
-        set[i] = addButton(boxPresetButton(preset, scope), false)
+        set[i] = addButton(boxPresetButton(preset, scope, boxName), false)
     end
     db.sets[name] = set
     if hb and not hotbarHasSet(hb, name) then hb.sets[#hb.sets + 1] = name end
@@ -3434,14 +3513,93 @@ local function drawBrowser()
                             ImGui.SameLine()
                         end
                         ImGui.NewLine()
+                        if browser.boxScope == 'name' then
+                            ImGui.Text('Box:')
+                            ImGui.SameLine()
+                            ImGui.SetNextItemWidth(core.px(140))
+                            local nm = ImGui.InputText('##boxName', browser.boxName)
+                            if type(nm) == 'string' and nm ~= browser.boxName then
+                                browser.boxName = nm
+                                browser.lists.Box = nil
+                            end
+                            if ImGui.IsItemHovered() then core.setTooltip('The character the buttons send to (/ac net <Name> ...). Pick a connected box from the list or type any name.') end
+                            local peers = {}
+                            if core.boxnet and type(core.boxnet.peers) == 'function' then
+                                local okP, list = pcall(core.boxnet.peers)
+                                if okP and type(list) == 'table' then peers = list end
+                            end
+                            ImGui.SameLine()
+                            ImGui.SetNextItemWidth(core.px(150))
+                            if ImGui.BeginCombo('##boxPeers', #peers > 0 and 'Connected boxes...' or 'No boxes connected') then
+                                for _, p in ipairs(peers) do
+                                    local pn = p and p.name
+                                    if pn and ImGui.Selectable(tostring(pn) .. '##peer', pn == browser.boxName) then
+                                        browser.boxName = tostring(pn)
+                                        browser.lists.Box = nil
+                                    end
+                                end
+                                ImGui.EndCombo()
+                            end
+                        end
                         if browser.mode == 'assign' and browser.target and browser.target.hbId then
                             if ImGui.Button('Add All as a Set##boxAddAll', core.px(150), core.px(22)) then
-                                addBoxControlSet(browser.boxScope, hotbars()[browser.target.hbId])
+                                addBoxControlSet(browser.boxScope, hotbars()[browser.target.hbId], browser.boxName)
                             end
                             if ImGui.IsItemHovered() then
                                 local who = browser.boxScope == 'bar' and 'that follow the hotbar\'s Group / Zone / All switch' or ('for ' .. boxScopeLabel(browser.boxScope))
                                 core.setTooltip('Creates a "Box Control" set with every preset ' .. who .. ' and adds it as a tab on this hotbar.')
                             end
+                        end
+                        ImGui.Separator()
+                        -- Custom command: any /ac command through /ac net <scope>.
+                        ImGui.TextColored(GOLD[1], GOLD[2], GOLD[3], GOLD[4], 'Custom command')
+                        ImGui.SameLine()
+                        ImGui.TextDisabled('(?)')
+                        if ImGui.IsItemHovered() then core.setTooltip('Any command the boxes should run, as you would type it: "/ac manual", "/ac assist chase", "/camp", "/dzquit".\nA line without a slash is an /ac command ("burn on"). One command per line. Sent as /ac net <scope> <command>.') end
+                        ImGui.Text('Command:')
+                        ImGui.SameLine()
+                        ImGui.SetNextItemWidth(-core.px(150))
+                        local ct = ImGui.InputText('##boxCmd', browser.boxCmd)
+                        if type(ct) == 'string' then browser.boxCmd = ct end
+                        ImGui.SameLine()
+                        ImGui.SetNextItemWidth(core.px(140))
+                        if ImGui.BeginCombo('##boxCmdPick', 'Triune commands...') then
+                            local cmdList = browser.listCached('Cmd')
+                            if not cmdList then
+                                ImGui.TextDisabled('Scanning...')
+                            else
+                                for i, e in ipairs(cmdList) do
+                                    local line = tostring(e.button and e.button.cmd or '')
+                                    if line ~= '' and line:match('^/ac%s+(%S+)') ~= 'net' then
+                                        if ImGui.Selectable(e.name .. '   ' .. line .. '##pick' .. i) then
+                                            browser.boxCmd = line
+                                            browser.boxLabel = e.name
+                                        end
+                                        if ImGui.IsItemHovered() then core.setTooltip(e.sub or line) end
+                                    end
+                                end
+                            end
+                            ImGui.EndCombo()
+                        end
+                        ImGui.Text('Label:')
+                        ImGui.SameLine()
+                        ImGui.SetNextItemWidth(core.px(150))
+                        local lt = ImGui.InputText('##boxLabel', browser.boxLabel)
+                        if type(lt) == 'string' then browser.boxLabel = lt end
+                        if ImGui.IsItemHovered() then core.setTooltip('Leave empty to name the button after the command.') end
+                        ImGui.SameLine()
+                        if ImGui.Button('Add Button##boxAddCustom', core.px(100), core.px(22)) then
+                            local b, why = customBoxButton(browser.boxCmd, browser.boxLabel, browser.boxScope, browser.boxName)
+                            if not b then
+                                setStatus('Box Control: %s.', why)
+                            elseif pickBrowserEntry({ name = b.label, sub = 'Custom box command', iconType = 'Spell', needsEdit = commandNeedsEdit(b.cmd), button = b }) then
+                                browser.boxCmd = ''
+                                browser.boxLabel = ''
+                            end
+                        end
+                        if ImGui.IsItemHovered() then
+                            local b = customBoxButton(browser.boxCmd, browser.boxLabel, browser.boxScope, browser.boxName)
+                            core.setTooltip(b and b.cmd or 'Adds a button sending the command to the chosen scope.')
                         end
                         ImGui.Separator()
                     elseif tab.id == 'Cmd' then
@@ -3855,6 +4013,7 @@ plugin._ = {
     browserList = browserList, openBrowser = openBrowser, pickBrowserEntry = pickBrowserEntry, firstFreeSlot = firstFreeSlot,
     scanCommands = scanCommands, parseHelpLine = parseHelpLine, commandNeedsEdit = commandNeedsEdit, CORE_COMMANDS = CORE_COMMANDS,
     scanBoxControl = scanBoxControl, boxPresetButton = boxPresetButton, addBoxControlSet = addBoxControlSet, BOX_PRESETS = BOX_PRESETS, BOX_SCOPES = BOX_SCOPES,
+    boxScopeWord = boxScopeWord, boxCommandLines = boxCommandLines, defaultBoxLabel = defaultBoxLabel, customBoxButton = customBoxButton,
     BAR_SCOPES = BAR_SCOPES, BOX_SCOPE_TOKEN = BOX_SCOPE_TOKEN, usesBoxScope = usesBoxScope, hotbarUsesBoxScope = hotbarUsesBoxScope,
     hotbarBoxScope = hotbarBoxScope, resolveBoxScope = resolveBoxScope, setHotbarBoxScope = setHotbarBoxScope, hotbarForSet = hotbarForSet,
     getDb = function() return db end,

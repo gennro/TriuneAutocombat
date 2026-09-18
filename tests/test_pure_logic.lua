@@ -9297,6 +9297,43 @@ do
     assert_true(effContent:find("ImGui%.MenuItem%(sm %.%. '##menuSort_'") ~= nil,
         'Suite 77: Effects window right-click menu has clickable MenuItem sort options')
 
+    -- 6b. Every long-buff slot is walked and the running discipline is appended
+    assert_true(effContent:find('local LONG_BUFF_SLOTS = 42', 1, true) ~= nil
+        and effContent:find("scanSlots(mq, ctrl, 'buff', function(i) return mq.TLO.Me.Buff(i) end, LONG_BUFF_SLOTS", 1, true) ~= nil
+        and effContent:find('MaxBuffSlots()', 1, true) == nil,
+        'Suite 77: long buffs walk all 42 client slots instead of the client-side Me.MaxBuffSlots count')
+    assert_true(effContent:find('mq.TLO.Me.ActiveDisc', 1, true) ~= nil
+        and effContent:find('scanActiveDisc(mq, now, list)', 1, true) ~= nil
+        and effContent:find('rt.discExpires[name]', 1, true) ~= nil,
+        'Suite 77: the active discipline is appended when no buff / song slot carries it (expiry from runtime.discExpires)')
+
+    -- 6c. The real parseDurationSec against MQ-style userdata (members and
+    -- the call both go through metamethods, so type() is 'userdata' as in game)
+    do
+        local a = triuneContent:find('local function tloTotalSeconds', 1, true)
+        local b = triuneContent:find('local function parseCombatAbilityTimer', 1, true)
+        assert_true(a ~= nil and b ~= nil and a < b, 'Suite 77: tloTotalSeconds / parseDurationSec found in triune.lua')
+        local realParse = assert(loadstring(triuneContent:sub(a, b - 1) .. '\nreturn parseDurationSec'))()
+        local function tlo(members, value)
+            local u = newproxy(true)
+            local mt = getmetatable(u)
+            mt.__index = function(_, k) return tlo({}, members[k]) end
+            mt.__call = function() return value end
+            return u
+        end
+        -- Spell.Duration is a ticks object: 600 ticks (60 min) stringifies as "600"
+        assert_eq(realParse(tlo({ TotalSeconds = 3600 }, '600')), 3600, 'Suite 77: 600-tick spell duration reads as 3600 s (was 600 s)')
+        assert_eq(realParse(tlo({ TotalSeconds = 9000 }, '1500')), 9000, 'Suite 77: 1500-tick spell duration reads as 9000 s (was 1.5 s)')
+        assert_eq(realParse(tlo({ TotalSeconds = 30 }, '5')), 30, 'Suite 77: short ticks duration unchanged')
+        -- Me.Buff.Duration is a timestamp: whole seconds from TotalSeconds, fraction from the raw ms string
+        assert_eq(realParse(tlo({ TotalSeconds = 18 }, '18450')), 18.45, 'Suite 77: timestamp keeps the sub-second remainder')
+        assert_eq(realParse(tlo({ TotalSeconds = 0 }, '700')), 0.7, 'Suite 77: timestamp under one second')
+        assert_eq(realParse(tlo({ TotalSeconds = 4294967 }, '4294967295')), 0, 'Suite 77: permanent-buff sentinel still reads as 0 (Perm)')
+        assert_eq(realParse(tlo({ TotalSeconds = 18446744073709 }, '-1')), 0, 'Suite 77: -1 timestamp reads as 0 (Perm)')
+        -- No TotalSeconds member: the string fallback still applies
+        assert_eq(realParse(tlo({}, '18000')), 18, 'Suite 77: string ms fallback without TotalSeconds')
+    end
+
     -- 7. Pure sorting logic validation
     local testList = {
         { name = 'Brevity', duration = 300, isSong = false, isBeneficial = true },
@@ -9372,8 +9409,8 @@ do
     -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '3.0', 'Suite 77: triune.lua VERSION is 3.0')
-    assert_eq(vReadme, '3.0', 'Suite 77: README.md version is 3.0')
+    assert_eq(vTriune, '3.1', 'Suite 77: triune.lua VERSION is 3.1')
+    assert_eq(vReadme, '3.1', 'Suite 77: README.md version is 3.1')
     assert_eq(vTriune, vReadme, 'Suite 77: Version numbers match across triune.lua and README.md')
 end
 
@@ -9488,8 +9525,8 @@ do
     -- 6. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '3.0', 'Suite 78: triune.lua VERSION is 3.0')
-    assert_eq(vReadme, '3.0', 'Suite 78: README.md version is 3.0')
+    assert_eq(vTriune, '3.1', 'Suite 78: triune.lua VERSION is 3.1')
+    assert_eq(vReadme, '3.1', 'Suite 78: README.md version is 3.1')
     assert_eq(vTriune, vReadme, 'Suite 78: Version numbers match across triune.lua and README.md')
 end
 
@@ -9538,6 +9575,9 @@ do
     -- 3. Verify toolbar buttons
     assert_true(readFile('TAC/lua/tac/hud_spellgems.lua'):find("flag = 'show_spell_gems'", 1, true) ~= nil,
         'Suite 79: hud_spellgems declares its header window button (drawn by pm.drawHeaderButtons)')
+    assert_true(sgContent:find('snap.maxGems = math.max(maxGems, highestUsed)', 1, true) ~= nil
+        and sgContent:find('if slot <= maxGems then', 1, true) == nil,
+        'Suite 79: every gem slot is polled and the bar grows to the highest memorized gem, not just Me.NumGems')
     assert_true(triuneContent:find("Gems##miniGems") == nil and triuneContent:find("pcall(pm.drawHeaderButtons, 0)", 1, true) ~= nil,
         'Suite 79: Mini GUI Gems button comes from pm.drawHeaderButtons, not a hardcoded button')
 
@@ -9647,8 +9687,8 @@ do
     -- 9. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '3.0', 'Suite 79: triune.lua VERSION is 3.0')
-    assert_eq(vReadme, '3.0', 'Suite 79: README.md version is 3.0')
+    assert_eq(vTriune, '3.1', 'Suite 79: triune.lua VERSION is 3.1')
+    assert_eq(vReadme, '3.1', 'Suite 79: README.md version is 3.1')
     assert_eq(vTriune, vReadme, 'Suite 79: Version numbers match across triune.lua and README.md')
 end
 
@@ -9834,8 +9874,8 @@ do
     -- 7. Verify version sync
     local vTriune = triuneContent:match("local VERSION%s*=%s*'(.-)'")
     local vReadme = readmeContent:match("Current version:%s*%*%*(.-)%*%*")
-    assert_eq(vTriune, '3.0', 'Suite 81: triune.lua VERSION is 3.0')
-    assert_eq(vReadme, '3.0', 'Suite 81: README.md version is 3.0')
+    assert_eq(vTriune, '3.1', 'Suite 81: triune.lua VERSION is 3.1')
+    assert_eq(vReadme, '3.1', 'Suite 81: README.md version is 3.1')
     assert_eq(vTriune, vReadme, 'Suite 81: Version numbers match across triune.lua and README.md')
 end
 
@@ -10177,10 +10217,10 @@ do
         'Suite 85: fireworks summoning uses /alt act command')
 
     -- 2. Verify priority candidate canTrainMet bypass for Special tab abilities
-    assert_true(AA_CONTENT:find("local canTrainMet = isSpecial or canTrainCheck", 1, true) ~= nil,
-        'Suite 85: checkAutoSpendAA allows isSpecial to bypass canTrainCheck')
-    assert_true(AA_CONTENT:find("not fullyTrained and not isInvalidStub and levelMet and canTrainMet", 1, true) ~= nil,
-        'Suite 85: candidate qualification uses canTrainMet')
+    assert_true(AA_CONTENT:find("info.canTrain = nil", 1, true) ~= nil,
+        'Suite 85: purchaseInfo lets Special tab abilities bypass the CanTrain check')
+    assert_true(AA_CONTENT:find("if info.canTrain == false then return 'cantrain' end", 1, true) ~= nil,
+        'Suite 85: priorityBlocker honours CanTrain=false for regular AAs')
 
     -- 3. Verify AAW_TrainFilter (CanPurchaseFilter) unchecking in processAATrainWorkflow
     assert_true(AA_CONTENT:find("AAW_TrainFilter", 1, true) ~= nil,
@@ -10273,6 +10313,7 @@ do
         local fdMq = {
             event = function(name, _, fn) fdHandlers[name] = fn end,
             unevent = function() end,
+            TLO = { Me = { CleanName = function() return 'Triunetester' end } },
         }
         local drawCalls = { text = 0, circle = 0, circleFilled = 0, rect = 0 }
         local fdDrawList = {
@@ -10297,7 +10338,7 @@ do
         local fdSaves = 0
         pFD.onInit({ ctrl = fdCtrl, mq = fdMq, ImGui = fdImGui, colors = {}, saveLoadout = function() fdSaves = fdSaves + 1 end })
         assert_eq(fdCtrl.show_crit_floaters, true, 'Suite 86: floating_damage seeds show_crit_floaters')
-        for _, n in ipairs({ 'TacCritHit', 'TacCripBlow', 'TacDeadlyStrike', 'TacSlayUndead', 'TacFinishBlow', 'TacAssassinate', 'TacHeadshot', 'TacFlurry', 'TacSpellCrit', 'TacHealCrit', 'TacDotCrit' }) do
+        for _, n in ipairs({ 'TacCritHit', 'TacCripBlow', 'TacDeadlyStrike', 'TacSlayUndead', 'TacFinishBlow', 'TacAssassinate', 'TacHeadshot', 'TacFlurry', 'TacFlurry2', 'TacSpellCrit', 'TacHealCrit', 'TacDotCrit' }) do
             assert_true(type(fdHandlers[n]) == 'function', 'Suite 86: floating_damage registers ' .. n)
         end
 
@@ -10327,12 +10368,31 @@ do
         pFD.onDrawUI()
         assert_eq(begun, 0, 'Suite 86: floating_damage skips the overlay when idle')
 
-        -- A crit, a bigger crit (record), and a massive spell crit (particles + rings + flash)
-        fdHandlers.TacCritHit('You score a critical hit! (420)', '420')
-        fdHandlers.TacCritHit('You score a critical hit! (1450)', '1450')
-        fdHandlers.TacSpellCrit('Bob hit a mob for 12450 points of non-melee damage. (Critical blast!) (12450)', '12450')
+        -- Melee / ranged / skill crits reach the client in third person with the
+        -- attacker's name (eqstr 1023 / 1021 / 1024 / 1007 / 1009 / 1016 / 5745 /
+        -- 1045); someone else's crit must not spawn anything.
+        fdHandlers.TacCritHit('Bob scores a critical hit! (999)', 'Bob', '999')
+        fdHandlers.TacCripBlow('Bobpet00 lands a Crippling Blow!(999)', 'Bobpet00', '999')
+        fdHandlers.TacDeadlyStrike("Bob tells you, 'Triunetester scores a Deadly Strike!(999)'", "Bob tells you, 'Triunetester", '999')
+        fdHandlers.TacAssassinate('Bob ASSASSINATES their victim!!', 'Bob')
+        fdHandlers.TacHeadshot('Bob performs a FATAL BOW SHOT!!', 'Bob')
+        fdHandlers.TacFlurry2('Bob executes a FLURRY of attacks on a rat!', 'Bob')
+        pFD.onDrawUI()
+        assert_eq(begun, 0, "Suite 86: floating_damage ignores other players' melee crits")
+
+        -- Own crits: a crit, a bigger crit (record), and a massive spell crit (particles + rings + flash)
+        fdHandlers.TacCritHit('Triunetester scores a critical hit! (420)', 'Triunetester', '420')
+        fdHandlers.TacCritHit('Triunetester scores a critical hit! (1450)', 'triunetester', '1450')
+        fdHandlers.TacCripBlow('Triunetester lands a Crippling Blow!(800)', 'Triunetester', '800')
+        fdHandlers.TacDeadlyStrike('Triunetester scores a Deadly Strike!(700)', 'Triunetester', '700')
+        fdHandlers.TacSlayUndead("Triunetester's holy blade cleanses his target!(1200)", 'Triunetester', '1200')
+        fdHandlers.TacFinishBlow('Triunetester scores a Finishing Blow!!', 'Triunetester')
+        fdHandlers.TacHeadshot('Triunetester performs a FATAL BOW SHOT!!', 'Triunetester')
+        fdHandlers.TacFlurry2('Triunetester executes a FLURRY of attacks on a rat!', 'Triunetester')
+        fdHandlers.TacFlurry('You unleash a flurry of attacks.')
+        fdHandlers.TacSpellCrit('You deliver a critical blast! (12450)', '12450')
         fdHandlers.TacHealCrit('You perform an exceptional heal! (3000)', '3000')
-        fdHandlers.TacAssassinate('You assassinate a rat!')
+        fdHandlers.TacAssassinate('Triunetester ASSASSINATES their victim!!', 'Triunetester')
         pFD.onDrawUI()
         assert_eq(begun, 1, 'Suite 86: floating_damage opens the overlay once floaters exist')
         assert_true(drawCalls.text > 0, 'Suite 86: floating_damage draws text')
@@ -10501,7 +10561,7 @@ do
     -- Test lifecycle with mock core API
     local mockCore = {
         ctrl = { show_unit_frames = true, uf_lock = false, uf_alpha = 0.85 },
-        VERSION = '3.0',
+        VERSION = '3.1',
         mq = {
             TLO = {
                 Me = {
@@ -10724,7 +10784,7 @@ do
         mq = mockMq,
         ImGui = mockImGui,
         UI = mockUI,
-        VERSION = '3.0',
+        VERSION = '3.1',
         DATA = {},
         loadout = {},
         scriptDir = './',
@@ -11751,13 +11811,13 @@ do
 
     -- Below the Bank threshold nothing happens, even with affordable priorities
     unspent = 12
-    AA.lastAutoSpendAAAt = -100
+    AA.lastAutoSpendAAAt = -100; AA.lastPrioEvalAt = nil
     assert_eq(AA.checkAutoSpendAA(), false, 'Suite 91: no purchase below the Bank threshold')
     assert_true(AA.pendingAATrain == nil, 'Suite 91: no window workflow started below the threshold')
 
     -- At the threshold the cheapest priority goes straight to the window trainer
     unspent = 20
-    AA.lastAutoSpendAAAt = -100
+    AA.lastAutoSpendAAAt = -100; AA.lastPrioEvalAt = nil
     assert_eq(AA.checkAutoSpendAA(), true, 'Suite 91: purchase starts once the pool reaches the threshold')
     assert_true(AA.pendingAATrain ~= nil, 'Suite 91: the AA window workflow is the purchase path')
     assert_eq(AA.pendingAATrain and AA.pendingAATrain.name, 'Innate Regeneration', 'Suite 91: cheapest priority first')
@@ -11768,7 +11828,7 @@ do
 
     -- A second call while a workflow is pending does nothing
     unspent = 40
-    AA.lastAutoSpendAAAt = -100
+    AA.lastAutoSpendAAAt = -100; AA.lastPrioEvalAt = nil
     AA.checkAutoSpendAA()
     local first = AA.pendingAATrain
     assert_eq(AA.checkAutoSpendAA(), false, 'Suite 91: one workflow at a time')
@@ -11778,7 +11838,7 @@ do
     -- No priorities: the cap spender dumps into Fireworks through the same trainer
     core.ctrl.auto_aa_priorities = {}
     unspent = 30
-    AA.lastAutoSpendAAAt = -100
+    AA.lastAutoSpendAAAt = -100; AA.lastPrioEvalAt = nil
     assert_eq(AA.checkAutoSpendAA(), true, 'Suite 91: cap spender fires at the threshold with no priorities')
     assert_eq(AA.pendingAATrain and AA.pendingAATrain.name, 'Alternately Advanced Fireworks', 'Suite 91: cap spender trains the fireworks AA natively')
     assert_eq(AA.pendingAATrain and AA.pendingAATrain.targetTab, 4, 'Suite 91: fireworks is looked up on the Special tab')
@@ -12187,7 +12247,11 @@ do
     -- E. Defaults and wiring
     assert_true(src:find("manual_stick%s*=%s*true,") ~= nil, 'Suite 94: manual_stick defaults to true')
     assert_true(src:find("manual_auto_nav%s*=%s*false,") ~= nil, 'Suite 94: manual_auto_nav defaults to false')
-    assert_true(src:find("manualMovePolicy(isXtar or inCombatState, pursuit.id == id)", 1, true) ~= nil, 'Suite 94: combatTick consults the policy')
+    assert_true(src:find("manualMovePolicy(isXtar or inCombatState or inReachNow, pursuit.id == id)", 1, true) ~= nil, 'Suite 94: combatTick consults the policy')
+    -- Stick off: a selected hostile already inside the style's reach (with LoS)
+    -- counts as engaged, so the player walking up to a mob is enough to fight it.
+    assert_true(src:find("if ctrl.manual_stick == false and not isXtar and not inCombatState then", 1, true) ~= nil, 'Suite 94: stick off checks reach for a selected target')
+    assert_true(src:find("inReachNow = (distToId(id) <= styleReach(id)) and hasLoS(id)", 1, true) ~= nil, 'Suite 94: reach test is the style reach with LoS')
     assert_true(src:find("if haveNPC and not manualHold and not noApproachMode and (ctrl.mode ~= 'Manual'", 1, true) ~= nil, 'Suite 94: approach timeout skipped while holding (and in Assist Backline)')
     assert_true(src:find("Stick to Target in Combat##manualStick", 1, true) ~= nil, 'Suite 94: Stick checkbox on the Control tab')
     assert_true(src:find("Auto-Nav to Selected Target##manualAutoNav", 1, true) ~= nil, 'Suite 94: Auto-Nav checkbox on the Control tab')
@@ -12238,7 +12302,7 @@ do
         UI = { accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop,
                drawStatusProgressBar = noop, drawSpellIcon = function() return false end,
                getConColorRgb = function() return { 1, 1, 1, 1 } end, resolveTargetOfTarget = function() return nil end },
-        VERSION = '3.0', DATA = {}, loadout = {}, scriptDir = './',
+        VERSION = '3.1', DATA = {}, loadout = {}, scriptDir = './',
         GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
         saveLoadout = noop, print = quietPrint,
         idxOf = function() return 0 end, fmtSec = tostring, parseDurationSec = function() return 0 end,
@@ -12709,6 +12773,14 @@ end
     assert_eq(A.inst.normalizeLine('  /ac burn on '), 'burn on', 'Suite 95: normalizeLine strips /ac and whitespace')
     assert_eq(A.inst.normalizeLine('net all run'), nil, 'Suite 95: nested net commands rejected')
     assert_eq(A.inst.normalizeLine('/ac'), nil, 'Suite 95: bare /ac rejected')
+    assert_eq(A.inst.normalizeLine('/ac manual'), 'manual', 'Suite 95: "/ac manual" travels as the /ac command "manual"')
+    assert_eq(A.inst.normalizeLine('  /camp  '), '/camp', 'Suite 95: a full slash command travels as typed')
+    assert_eq(A.inst.normalizeLine('/dzquit'), '/dzquit', 'Suite 95: any slash command is kept whole')
+    assert_eq(A.inst.normalizeLine('/acme'), '/acme', 'Suite 95: "/acme" is a slash command, not a bare /ac')
+    assert_eq(A.inst.normalizeLine('/ac net all run'), nil, 'Suite 95: "/ac net" is still a nested net command')
+    assert_true(A.inst.isSlashLine('/camp') and not A.inst.isSlashLine('burn on'), 'Suite 95: isSlashLine spots raw slash lines')
+    assert_eq(A.inst.displayLine('burn on'), '/ac burn on', 'Suite 95: displayLine shows an /ac command with its prefix')
+    assert_eq(A.inst.displayLine('/camp'), '/camp', 'Suite 95: displayLine shows a slash command as is')
     assert_eq(A.inst.resolveScope('ZONE'), 'zone', 'Suite 95: resolveScope is case-insensitive')
     assert_eq(A.inst.resolveScope('Bob'), 'name', 'Suite 95: resolveScope treats unknown words as a character name')
     assert_eq(A.inst.resolveScope(''), 'all', 'Suite 95: resolveScope defaults to the configured scope')
@@ -12771,7 +12843,7 @@ end
     assert_eq(B.cmds[#B.cmds], '/ac burn on', 'Suite 95: Bob ran the broadcast command')
     assert_eq(C.cmds[#C.cmds], '/ac burn on', 'Suite 95: Carol ran the broadcast command')
     assert_eq(#A.cmds, 0, 'Suite 95: Alice does not run her own broadcast')
-    assert_true(lastLog(B, '<- Alice: burn on') ~= nil, 'Suite 95: receiver logs the command with the sender')
+    assert_true(lastLog(B, '<- Alice: /ac burn on') ~= nil, 'Suite 95: receiver logs the command with the sender')
     assert_true(printed[#printed]:find('Alice -> /ac burn on', 1, true) ~= nil, 'Suite 95: receiver announces the command in chat')
     ok, why = A.inst.sendCommand('all', 'net all run')
     assert_eq(ok, false, 'Suite 95: nested net command refused at the sender')
@@ -12787,6 +12859,26 @@ end
     pump(1)
     assert_eq(B.cmds[#B.cmds - 1], '/ac ma Alice', 'Suite 95: multi-line command runs line 1')
     assert_eq(B.cmds[#B.cmds], '/ac assist chase', 'Suite 95: multi-line command runs line 2')
+
+    -- full slash commands run as typed on the receiver; the receiver's switch can refuse them
+    A.inst.sendCommand('Bob', { '/ac manual', '/camp' })
+    pump(1)
+    assert_eq(B.cmds[#B.cmds - 1], '/ac manual', 'Suite 95: "/ac net Bob /ac manual" runs /ac manual on the box')
+    assert_eq(B.cmds[#B.cmds], '/camp', 'Suite 95: "/ac net Bob /camp" runs /camp as typed on the box')
+    assert_true(lastLog(B, '<- Alice: /ac manual; /camp') ~= nil, 'Suite 95: receiver logs each line as the command it ran')
+    assert_true(printed[#printed]:find('Alice -> /ac manual; /camp', 1, true) ~= nil, 'Suite 95: receiver announces slash lines without a second /ac')
+    B.inst.cfg.acceptSlash = false
+    nB = #B.cmds
+    A.inst.sendCommand('Bob', '/dzquit')
+    pump(1)
+    assert_eq(#B.cmds, nB, 'Suite 95: acceptSlash off: the slash command is not run')
+    assert_true(lastLog(B, 'slash commands disabled (/dzquit)') ~= nil, 'Suite 95: acceptSlash off: refusal names the command')
+    A.inst.sendCommand('Bob', 'burn off')
+    pump(1)
+    assert_eq(B.cmds[#B.cmds], '/ac burn off', 'Suite 95: acceptSlash off: /ac commands still run')
+    B.inst.cfg.acceptSlash = true
+    local saved = B.inst.onSaveSettings and B.inst.onSaveSettings() or nil
+    assert_true(saved == nil or saved.acceptSlash == true, 'Suite 95: acceptSlash persists with the loadout')
 
     -- 5. Addressed command is an RPC: reply logged, unknown target reports RoutingFailed
     nB = #B.cmds
@@ -12820,6 +12912,33 @@ end
     tickAll()
     assert_eq(#A.inst.net.rpcInbox, 0, 'Suite 95: tick drains rpcInbox')
     assert_true(type(A.inst.api.peer('Bob').pingMs) == 'number', 'Suite 95: queued response applied on tick')
+
+    -- 6c. The response message MQ2Lua hands the callback is a reference into a
+    -- C++ object freed when the callback returns; the queue must hold Lua
+    -- copies of content / sender, never the userdata (crash in mq2lua.dll).
+    do
+        local dead = false
+        local proxy = setmetatable({}, { __index = function(_, k)
+            if dead then error('use after free: ' .. tostring(k)) end
+            if k == 'content' then return { v = 1, kind = 'reply', data = { ok = true } } end
+            if k == 'sender' then return { character = 'Bob', pid = 101 } end
+            return nil
+        end })
+        local got = nil
+        local q = A.inst.queueResponse(function(status, reply) got = { status = status, reply = reply } end)
+        q(0, proxy)
+        dead = true
+        assert_eq(#A.inst.net.rpcInbox, 1, 'Suite 95: response queued')
+        assert_true(A.inst.net.rpcInbox[1].reply ~= proxy, 'Suite 95: the queue never holds the message userdata itself')
+        A.inst.drainResponses()
+        assert_true(got ~= nil and got.status == 0, 'Suite 95: queued callback ran with the status')
+        assert_true(got.reply and got.reply.content and got.reply.content.data.ok == true, 'Suite 95: reply.content was read while the message was alive')
+        assert_eq(got.reply.sender.character, 'Bob', 'Suite 95: reply.sender was read while the message was alive')
+        got = nil
+        A.inst.queueResponse(function(status, reply) got = { status = status, reply = reply } end)(-1, nil)
+        A.inst.drainResponses()
+        assert_true(got.status == -1 and got.reply == nil, 'Suite 95: a failed send (no message) queues a nil reply')
+    end
 
     -- 7. Zone scope: same-zone boxes only
     nB, nC = #B.cmds, #C.cmds
@@ -13768,6 +13887,46 @@ end)()
     assert_eq(hbBox.sets[#hbBox.sets], 'Box Control (all)', 'Suite 96: the set is added to the hotbar as a tab')
     assert_eq(T.addBoxControlSet('zone', nil), 'Box Control (zone)', 'Suite 96: scoped set names stay unique')
 
+    -- 'One box' scope: presets and sets addressed to a named character
+    assert_eq(T.BOX_SCOPES[#T.BOX_SCOPES].id, 'name', 'Suite 96: the scope picker offers a single named box')
+    assert_eq(T.boxScopeWord('bar'), '{scope}', 'Suite 96: boxScopeWord: hotbar switch -> token')
+    assert_eq(T.boxScopeWord('group'), 'group', 'Suite 96: boxScopeWord: fixed scope -> itself')
+    assert_eq(T.boxScopeWord('name', ' Bob '), 'Bob', 'Suite 96: boxScopeWord: name scope -> trimmed name')
+    assert_eq(T.boxScopeWord('name', ''), nil, 'Suite 96: boxScopeWord: name scope needs a name')
+    assert_eq(T.boxScopeWord('name', 'Bob Smith'), nil, 'Suite 96: boxScopeWord: a name is one word')
+    local named = T.boxPresetButton(T.BOX_PRESETS[1], 'name', 'Bob')
+    assert_true(named.cmd == '/ac net Bob run' and named.label == 'Run (Bob)', 'Suite 96: named preset -> /ac net Bob run')
+    T.browser.boxScope, T.browser.boxName = 'name', 'Bob'
+    assert_eq(T.scanBoxControl()[#T.BOX_PRESETS].button.cmd, '/ac net camp Bob', 'Suite 96: named Camp Here -> /ac net camp Bob')
+    assert_eq(T.addBoxControlSet('name', nil, 'Bob'), 'Box Control (Bob)', 'Suite 96: a named set is named after the box')
+    assert_eq(T.addBoxControlSet('name', nil, ''), nil, 'Suite 96: a named set without a name is refused')
+    T.browser.boxScope, T.browser.boxName = 'all', ''
+
+    -- Custom command builder: any /ac command through /ac net <scope>
+    local lines, why = T.boxCommandLines('/ac burn on\n\n  manual  \n/camp')
+    assert_eq(table.concat(lines, '|'), '/ac burn on|/ac manual|/camp', 'Suite 96: boxCommandLines keeps full slash lines, puts /ac back on bare ones, skips blanks')
+    lines, why = T.boxCommandLines('net all pause')
+    assert_true(lines == nil and why:find('nested', 1, true), 'Suite 96: nested net lines are refused')
+    lines, why = T.boxCommandLines('/ac net all pause')
+    assert_true(lines == nil and why:find('nested', 1, true), 'Suite 96: "/ac net" lines are refused too')
+    lines, why = T.boxCommandLines('   ')
+    assert_true(lines == nil and why:find('first', 1, true), 'Suite 96: an empty command is refused')
+    assert_eq(T.defaultBoxLabel({ '/ac burn on' }), 'Burn on', 'Suite 96: default label drops /ac and capitalises')
+    assert_eq(T.defaultBoxLabel({ '/camp' }), 'Camp', 'Suite 96: default label for a game command drops the slash')
+    assert_eq(T.defaultBoxLabel({ '/ac pullhp <0-95>' }), 'Pullhp', 'Suite 96: default label drops a placeholder argument')
+    local custom = T.customBoxButton('burn on', '', 'bar')
+    assert_true(custom.cmd == '/ac net {scope} /ac burn on' and custom.label == 'Burn on' and custom.timerType == 'None' and custom.buttonColor[1] == 60, 'Suite 96: custom hotbar-switch button carries the token and a bare label')
+    custom = T.customBoxButton('/ac manual\n/camp', 'Camp All', 'group')
+    assert_eq(custom.cmd, '/ac net group /ac manual\n/ac net group /camp', 'Suite 96: every custom line is prefixed with /ac net <scope> and kept as a full slash command')
+    assert_eq(custom.label, 'Camp All', 'Suite 96: a typed label is kept as is')
+    custom = T.customBoxButton('pause', nil, 'name', 'Bob')
+    assert_true(custom.cmd == '/ac net Bob /ac pause' and custom.label == 'Pause (Bob)', 'Suite 96: custom named button -> /ac net Bob /ac pause')
+    local none, whyNone = T.customBoxButton('pause', '', 'name', '')
+    assert_true(none == nil and whyNone:find('name', 1, true), 'Suite 96: custom named button needs a box name')
+    cmds = {}
+    T.runButton(T.customBoxButton('/dzquit', '', 'bar'), nil, hbBox)
+    assert_eq(cmds[#cmds], '/ac net all /dzquit', 'Suite 96: a custom {scope} button resolves through the hotbar switch')
+
     -- Live scope: `{scope}` buttons follow the hotbar's Group / Zone / All switch at press time
     assert_eq(T.hotbarUsesBoxScope(hbBox), false, 'Suite 96: fixed-scope sets do not bring up the switch')
     local liveSet = T.addBoxControlSet('bar', hbBox)
@@ -14561,7 +14720,7 @@ end)()
         SameLine = function(x) if x then S.imgui.lastSameLineX = x end end,
     }, { __index = function() return function() end end })
     local core = setmetatable({
-        VERSION = '3.0', ctrl = { plugins = {}, show_dps = true }, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+        VERSION = '3.1', ctrl = { plugins = {}, show_dps = true }, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
         px = function(n) return n end, colors = {}, pushTheme = function() end, popTheme = function() end, accent = function() end, setTooltip = function() end,
         preBeginWindow = function() end, postBeginWindow = function() end, saveLoadout = function() end,
         drawStatusProgressBar = function(frac, w, h, label, r, g, b) S.imgui.bars = (S.imgui.bars or 0) + 1 S.lastBar = { frac = frac, label = label, r = r, g = g, b = b } texts[#texts + 1] = tostring(label) end,
@@ -17593,6 +17752,26 @@ end)()
     chat.runPendingLink()
     print = origPrint
     assert_eq(popped, 'items:1032100', 'Suite 103: a chat item link opens a database card for the exact id')
+    -- an NPC's dialogue link ("[Respawning] will repopulate over time") is an
+    -- item link carrying the server's saylink proxy id: clicking it says the
+    -- link text instead of looking for an item
+    local said = {}
+    chatCore.mq.cmdf = function(fmt, ...) said[#said + 1] = string.format(fmt, ...) end
+    local saylink = { name = 'Respawning', payload = '0000F423F' .. string.rep('0', 68) }
+    assert_true(chat.isSaylink(saylink), 'Suite 103: item id 999999 marks a dialogue link')
+    assert_true(not chat.isSaylink({ name = 'x', payload = '0000FBFA4' .. string.rep('0', 68) }), 'Suite 103: a real item is not a dialogue link')
+    popped = nil
+    print = quiet
+    chat.openItemLink(saylink)
+    chat.runPendingLink()
+    print = origPrint
+    assert_eq(said[1], '/say Respawning', 'Suite 103: clicking a dialogue link says its text to the target')
+    assert_nil(popped, 'Suite 103: and opens no database card')
+    assert_true(chat.rt.echo:find("Said 'Respawning'", 1, true) ~= nil, 'Suite 103: the status line reports the say')
+    assert_true(not chat.lookupInDatabase(saylink), 'Suite 103: Look up in Database refuses a dialogue link')
+    chat.cfg.saylinkId = 424242
+    assert_true(not chat.isSaylink(saylink), 'Suite 103: /tacchat saylink <id> moves the proxy id')
+    chat.cfg.saylinkId = 999999
     assert_true(chat.lookupInDatabase({ name = 'x', payload = '00000F23C' .. string.rep('0', 68) }), 'Suite 103: Look up in Database resolves by id')
     -- links handed in by the database land in the input line as [Name] and
     -- become the raw link when the line is sent
@@ -19588,6 +19767,445 @@ do
         assert_true(roam:find('noPath.los and noPath.dist <= pursuit.MESH_ISO.DIRECT_LOS_DIST', 1, true) ~= nil, 'Suite 110: direct approach needs LoS and range')
         assert_true(roam:find('runtime.noteMeshPathOk(); return targetId', 1, true) ~= nil, 'Suite 110: a found target clears the signal')
     end
+end
+
+-- ============================================================================
+-- Suite 111: Auto AA priorities vs. the cap spender -- live-first cost
+-- resolution, the reserve that keeps fireworks from starving a waiting
+-- priority, and the AA-window row check before a Train click.
+-- ============================================================================
+do
+    print('--- Suite 111: Auto AA priority purchasing ---')
+    local printed = {}
+    local quietPrint = function(...) printed[#printed + 1] = table.concat({ ... }, ' ') end
+
+    -- A client with one owned AA line ("Combat Agility" 2/5, next rank costs
+    -- 30 via NextIndex) and a fireworks cap spender.
+    local function makeWorld(opts)
+        opts = opts or {}
+        local W = { points = opts.points or 27, cmds = {} }
+        local function tlo(members, truthy)
+            return setmetatable(members, { __call = function() return truthy ~= false end })
+        end
+        local nextRank = tlo({ Cost = function() return opts.nextCost or 30 end })
+        local owned = {
+            ['Combat Agility'] = tlo({
+                ID = function() return 101 end, Rank = function() return opts.rank or 2 end,
+                MaxRank = function() return 5 end, MinLevel = function() return 51 end,
+                Cost = function() return 5 end,           -- the OWNED rank's price
+                NextIndex = function() return 102 end,
+                CanTrain = function() return opts.canTrain ~= false end,
+                Type = function() return 1 end,
+            }),
+        }
+        W.mq = {
+            cmdf = function(fmt, ...) W.cmds[#W.cmds + 1] = string.format(fmt, ...) end,
+            cmd = function(c) W.cmds[#W.cmds + 1] = c end,
+            TLO = {
+                Me = {
+                    AAPoints = function() return W.points end,
+                    AAPointsSpent = function() return 0 end,
+                    Level = function() return 60 end,
+                    Moving = function() return false end,
+                    Combat = function() return false end,
+                    CombatState = function() return 'ACTIVE' end,
+                    AutoFire = function() return false end,
+                    XTHaterCount = function() return 0 end,
+                    AltAbility = function(key) return owned[key] or tlo({}, false) end,
+                },
+                AltAbility = function(key)
+                    if key == 102 then return nextRank end
+                    return tlo({}, false)
+                end,
+                Window = function() return tlo({}, false) end,
+            },
+        }
+        W.ctrl = {
+            auto_spend_aa = true, auto_spend_aa_threshold = 25, auto_spend_aa_cost = 25,
+            auto_spend_aa_name = 'Alternately Advanced Fireworks', auto_spend_aa_id = 17788,
+            auto_aa_priorities = opts.priorities or { ['Combat Agility'] = true },
+        }
+        W.rt = { cachedAAData = opts.cache or {}, isCasting = function() return false end }
+        W.core = { ctrl = W.ctrl, runtime = W.rt, mq = W.mq, ImGui = {}, DATA = {}, myClasses = { 'War' },
+            saveLoadout = function() end, colors = {} }
+        local origPrint = print
+        print = quietPrint
+        local P = assert(loadfile('TAC/lua/tac/auto_aa.lua'))()
+        P.onInit(W.core)
+        print = origPrint
+        W.P, W.AA = P, P.AA
+        return W
+    end
+
+    local function run(W)
+        local origPrint = print
+        print = quietPrint
+        W.AA.lastAutoSpendAAAt = -10   -- os.clock() is tiny in the test process
+        W.AA.lastPrioEvalAt = nil
+        local ok, res = pcall(W.AA.checkAutoSpendAA)
+        print = origPrint
+        assert_true(ok, 'Suite 111: checkAutoSpendAA runs: ' .. tostring(res))
+        return res
+    end
+
+    -- 1. Live-first cost: the next rank's price comes from NextIndex, not the
+    --    owned rank's Cost, and not a stale cache recorded at the old rank.
+    do
+        local W = makeWorld({ cache = { ['Combat Agility'] = { rank = 1, maxRank = 5, cost = 5, costRank = 1 } } })
+        local info = W.AA.purchaseInfo('Combat Agility')
+        assert_eq(info.rank, 2, 'Suite 111: rank read live from the client')
+        assert_eq(info.cost, 30, 'Suite 111: next-rank cost probed through NextIndex, stale cache ignored')
+        assert_eq(info.fullyTrained, false, 'Suite 111: 2/5 is not fully trained')
+        assert_eq(W.AA.cachedCostFor({ cost = 9, costRank = 2 }, 2), 9, 'Suite 111: cached cost recorded at this rank counts')
+        assert_eq(W.AA.cachedCostFor({ cost = 9, costRank = 1 }, 2), 0, 'Suite 111: cached cost from the previous rank is stale')
+        assert_eq(W.AA.cachedCostFor({ cost = 9, rank = 2 }, 2), 9, 'Suite 111: legacy entry without costRank trusted when its rank matches')
+        assert_eq(W.AA.cachedCostFor({ cost = 9, rank = 1 }, 2), 0, 'Suite 111: legacy entry from another rank is stale')
+    end
+
+    -- 2. Starvation: 27 unspent, priority needs 30, threshold 25. The old
+    --    code let fireworks eat the pool every time it crossed 25.
+    do
+        local W = makeWorld({ points = 27 })
+        assert_eq(run(W), false, 'Suite 111: nothing bought while the priority is short of points')
+        assert_eq(W.AA.pendingAATrain, nil, 'Suite 111: cap spender held for the waiting priority')
+        assert_eq(W.AA.prioStatus['Combat Agility'].why, 'points', 'Suite 111: priority classified as waiting for points')
+        local held = false
+        for _, l in ipairs(printed) do if l:find('Cap spender on hold', 1, true) then held = true end end
+        assert_true(held, 'Suite 111: the hold is announced once')
+        W.points = 30
+        assert_eq(run(W), true, 'Suite 111: priority bought once affordable')
+        assert_eq(W.AA.pendingAATrain and W.AA.pendingAATrain.name, 'Combat Agility', 'Suite 111: the window trainer targets the priority, not fireworks')
+    end
+
+    -- 3. Only checked priorities are bought: a priority that was just
+    --    attempted (30 s spacing) keeps the cap spender off even with a
+    --    large surplus.
+    do
+        local W = makeWorld({ points = 60 })
+        W.AA.lastObservedAutoSpendPts = 60          -- a changed pool would clear the attempt spacing
+        W.AA.lastAATrainAttempt['Combat Agility'] = os.clock()
+        assert_eq(run(W), false, 'Suite 111: fireworks held during the priority spacing despite the surplus')
+        assert_eq(W.AA.pendingAATrain, nil, 'Suite 111: no cap-spender purchase while a priority is outstanding')
+    end
+
+    -- 4. No pending priority: the cap spender behaves as before.
+    do
+        local W = makeWorld({ points = 27, rank = 5 })
+        assert_eq(run(W), true, 'Suite 111: maxed priority does not hold the cap spender')
+        assert_eq(W.AA.pendingAATrain and W.AA.pendingAATrain.name, 'Alternately Advanced Fireworks', 'Suite 111: fireworks bought with no priority waiting')
+        assert_eq(W.AA.prioStatus['Combat Agility'].why, 'trained', 'Suite 111: maxed priority reported as trained')
+    end
+
+    -- 5. Blocked priorities are still outstanding: the cap spender stays off
+    --    until they are maxed (or unchecked).
+    do
+        local W = makeWorld({ points = 40, canTrain = false })
+        assert_eq(run(W), false, 'Suite 111: CanTrain=false priority still holds the cap spender')
+        assert_eq(W.AA.prioStatus['Combat Agility'].why, 'cantrain', 'Suite 111: CanTrain=false reported')
+        local W2 = makeWorld({ points = 27 })
+        W2.AA.trainBackoff['Combat Agility'] = os.clock() + 300
+        assert_eq(run(W2), false, 'Suite 111: a priority in failure backoff still holds the cap spender')
+        local W3 = makeWorld({ points = 27, priorities = {} })
+        assert_eq(run(W3), true, 'Suite 111: with nothing checked the cap spender runs')
+        assert_eq(W3.AA.pendingAATrain and W3.AA.pendingAATrain.name, 'Alternately Advanced Fireworks', 'Suite 111: fireworks bought with no priorities checked')
+    end
+
+    -- 6. The AA-window row is the authority before a Train click.
+    do
+        local W = makeWorld({ points = 27 })
+        local rows = { { 'Combat Agility', '2/5', '30', 'General' } }
+        local list = { Items = function() return #rows end, List = function(row, col) return rows[row] and rows[row][col or 1] end }
+        local info = W.AA.readRowInfo(list, 1)
+        assert_eq(info.name, 'Combat Agility', 'Suite 111: row name read')
+        assert_eq(info.rank, 2, 'Suite 111: row rank parsed from cur/max')
+        assert_eq(info.maxRank, 5, 'Suite 111: row max rank parsed')
+        assert_eq(info.cost, 30, 'Suite 111: row cost parsed')
+        W.rt.cachedAAData['Combat Agility'] = { rank = 1, maxRank = 5, cost = 5, costRank = 1 }
+        W.AA.applyRowInfo('Combat Agility', info)
+        assert_eq(W.rt.cachedAAData['Combat Agility'].cost, 30, 'Suite 111: cache cost refreshed from the row')
+        assert_eq(W.rt.cachedAAData['Combat Agility'].costRank, 2, 'Suite 111: cache cost tagged with the row rank')
+        assert_eq(W.AA.rowCost['Combat Agility'].cost, 30, 'Suite 111: row price remembered per rank')
+        -- A world whose client cannot report the next-rank cost falls back
+        -- to the remembered row price rather than the rank+1 guess.
+        local W3 = makeWorld({ points = 27 })
+        W3.mq.TLO.AltAbility = function() return setmetatable({}, { __call = function() return false end }) end
+        assert_eq(W3.AA.purchaseInfo('Combat Agility').cost, 3, 'Suite 111: without a probe or row the rank+1 guess applies')
+        W3.AA.rowCost['Combat Agility'] = { rank = 2, cost = 30 }
+        assert_eq(W3.AA.purchaseInfo('Combat Agility').cost, 30, 'Suite 111: the remembered row price beats the guess')
+    end
+
+    -- 7. Source contract
+    assert_true(AA_CONTENT:find("task.skipped = 'points'", 1, true) ~= nil, 'Suite 111: select_item skips the click when the row costs more than the pool')
+    assert_true(AA_CONTENT:find("elseif task.skipped then", 1, true) ~= nil, 'Suite 111: a skipped row is not a failure (no 5 minute backoff)')
+    assert_true(AA_CONTENT:find("cmd == 'aastatus'", 1, true) ~= nil, 'Suite 111: /ac aastatus command')
+end
+
+-- ============================================================================
+-- Suite 112: Puller (Hunt) combat anchor -- the circle the puller may not
+-- leave. huntAnchor gating, the roam-scan filter, the XTarget pick, the
+-- movement leash in moveToward, dropping a target that left the circle, and
+-- the idle walk back inside.
+-- ============================================================================
+print('--- Suite 112: Puller (Hunt) combat anchor ---')
+do
+    local function makeCtrl(over)
+        local c = { mode = 'Puller', submode = 'Hunt', hunter_combat_loc = { x = 0, y = 0, z = 0 },
+            hunter_combat_radius = 500, use_waypoints = false, waypoints = {}, combat_style = 'Melee' }
+        for k, v in pairs(over or {}) do c[k] = v end
+        if c.no_anchor then c.hunter_combat_loc = nil end
+        return c
+    end
+
+    -- 1. huntAnchor: only Puller / Hunt with an anchor, a radius and no patrol
+    local huntAnchor = loadFunc(src, 'huntAnchor', { ctrl = makeCtrl() })
+    local a, r = huntAnchor()
+    assert_true(a ~= nil and r == 500, 'Suite 112: Puller / Hunt with an anchor and radius is in force')
+    assert_nil(loadFunc(src, 'huntAnchor', { ctrl = makeCtrl({ submode = 'Camp' }) })(), 'Suite 112: Camp submode has no hunt anchor')
+    assert_nil(loadFunc(src, 'huntAnchor', { ctrl = makeCtrl({ mode = 'Manual' }) })(), 'Suite 112: Manual mode has no hunt anchor')
+    assert_nil(loadFunc(src, 'huntAnchor', { ctrl = makeCtrl({ no_anchor = true }) })(), 'Suite 112: no anchor set -> none')
+    assert_nil(loadFunc(src, 'huntAnchor', { ctrl = makeCtrl({ hunter_combat_radius = 0 }) })(), 'Suite 112: zero radius -> none')
+    assert_nil(loadFunc(src, 'huntAnchor', { ctrl = makeCtrl({ use_waypoints = true, waypoints = { { x = 1, y = 1, z = 0 } } }) })(),
+        'Suite 112: Waypoint Patrol overrides the anchor')
+    local wpOff = loadFunc(src, 'huntAnchor', { ctrl = makeCtrl({ use_waypoints = false, waypoints = { { x = 1, y = 1, z = 0 } } }) })
+    assert_true(wpOff() ~= nil, 'Suite 112: a saved but disabled route leaves the anchor in force')
+
+    -- A small world: me + spawns, wired into the anchor helpers.
+    local function makeWorld(over)
+        local w = { x = 0, y = 0, spawns = {}, cmds = {}, printed = {}, stops = 0, locMoves = {}, aggro = {},
+            navActive = false, paths = nil, sitting = false, now = 1000 }
+        w.ctrl = makeCtrl(over)
+        w.mq = {
+            TLO = {
+                Me = { X = function() return w.x end, Y = function() return w.y end, Z = function() return 0 end,
+                    Sitting = function() return w.sitting end },
+                Navigation = {
+                    Active = function() return w.navActive end,
+                    PathExists = function(q)
+                        return function()
+                            if w.paths == nil then return true end
+                            return w.paths(q)
+                        end
+                    end,
+                },
+                Zone = { ShortName = function() return w.zone or 'gfaydark' end },
+                Spawn = function(id)
+                    local sp = w.spawns[id]
+                    return setmetatable({
+                        X = function() return sp and sp.x end, Y = function() return sp and sp.y end,
+                        Distance = function()
+                            if not sp then return 9999 end
+                            return math.sqrt((sp.x - w.x) ^ 2 + (sp.y - w.y) ^ 2)
+                        end,
+                    }, { __call = function() return sp ~= nil end })
+                end,
+            },
+            cmd = function(c) w.cmds[#w.cmds + 1] = c end,
+        }
+        local env = {
+            ctrl = w.ctrl, mq = w.mq, pcall = pcall, math = math, string = string,
+            os = { clock = function() return w.now end, time = os.time },
+            print = function(m) w.printed[#w.printed + 1] = m end,
+            navLoaded = function() return true end,
+            pursuit = { wanderLoc = nil },
+            currentZoneShort = function() return w.zone or 'gfaydark' end,
+            desiredRange = function() return 14 end,
+            distToId = function(id) return w.mq.TLO.Spawn(id).Distance() end,
+            stopMoving = function() w.stops = w.stops + 1 end,
+            moveTowardLoc = function(x, y, z, d)
+                w.locMoves[#w.locMoves + 1] = { x = x, y = y, z = z, d = d }
+                return math.sqrt((x - w.x) ^ 2 + (y - w.y) ^ 2) <= d
+            end,
+        }
+        local rt = {}
+        env.runtime = rt
+        rt.playerHasAggro = function(id) return w.aggro[id] == true end
+        rt.ANCHOR_ROAM = loadstring('return ' .. src:match('runtime%.ANCHOR_ROAM = (%b{})'))()
+        rt.saveLoadout = function() w.saves = (w.saves or 0) + 1 end
+        rt.huntAnchor = loadFunc(src, 'huntAnchor', env)
+        rt.anchorAggroException = loadFunc(src, 'anchorAggroException', env)
+        rt.anchorRoamTick = loadFunc(src, 'anchorRoamTick', env)
+        rt.saveZoneAnchor = loadFunc(src, 'saveZoneAnchor', env)
+        rt.loadZoneAnchor = loadFunc(src, 'loadZoneAnchor', env)
+        w.pursuit = env.pursuit
+        rt.anchorDist = loadFunc(src, 'anchorDist', env)
+        rt.anchorRejects = loadFunc(src, 'anchorRejects', env)
+        rt.anchorLeashed = loadFunc(src, 'anchorLeashed', env)
+        rt.anchorReturnTick = loadFunc(src, 'anchorReturnTick', env)
+        rt.moveTowardLoc = env.moveTowardLoc
+        w.rt = rt
+        return w
+    end
+
+    -- 2. anchorDist
+    local W = makeWorld()
+    assert_eq(W.rt.anchorDist(300, 400), 500, 'Suite 112: anchorDist is the 2D distance to the anchor')
+    assert_nil(makeWorld({ no_anchor = true }).rt.anchorDist(1, 1), 'Suite 112: anchorDist is nil without an anchor')
+
+    -- 3. anchorRejects: outside AND beyond reach
+    W = makeWorld()
+    W.spawns[1] = { x = 200, y = 0 }   -- inside
+    W.spawns[2] = { x = 900, y = 0 }   -- outside, far
+    W.spawns[3] = { x = 505, y = 0 }   -- just outside, in reach from the edge
+    assert_eq(W.rt.anchorRejects(1), false, 'Suite 112: a mob inside the circle is never rejected')
+    assert_eq(W.rt.anchorRejects(2), true, 'Suite 112: a mob outside and out of reach is rejected')
+    W.x = 498
+    assert_eq(W.rt.anchorRejects(3), false, 'Suite 112: a mob just past the edge we can already hit is fair game')
+    assert_eq(W.rt.anchorRejects(999), false, 'Suite 112: an unknown spawn is not rejected')
+    assert_eq(makeWorld({ no_anchor = true }).rt.anchorRejects(2), false, 'Suite 112: nothing is rejected without an anchor')
+
+    -- 4. anchorLeashed: outside target, stop at the edge
+    W = makeWorld()
+    W.spawns[2] = { x = 900, y = 0 }
+    W.spawns[1] = { x = 200, y = 0 }
+    W.x = 100
+    assert_eq(W.rt.anchorLeashed(2), false, 'Suite 112: from inside, the approach toward an outside mob is allowed')
+    W.x = 492
+    assert_eq(W.rt.anchorLeashed(2), true, 'Suite 112: at the edge (inside the margin) the leash holds')
+    W.x = 700
+    assert_eq(W.rt.anchorLeashed(2), true, 'Suite 112: past the edge the leash holds')
+    assert_eq(W.rt.anchorLeashed(1), false, 'Suite 112: a mob inside the circle is never leashed, even from outside')
+    local small = makeWorld({ hunter_combat_radius = 20 })
+    small.spawns[2] = { x = 60, y = 0 }
+    small.x = 17
+    assert_eq(small.rt.anchorLeashed(2), false, 'Suite 112: the inner margin scales down with a small radius')
+    small.x = 18.5
+    assert_eq(small.rt.anchorLeashed(2), true, 'Suite 112: small radius still leashes at its edge')
+
+    -- 5. anchorReturnTick: walk back until half the radius, with hysteresis
+    W = makeWorld()
+    W.x = 100
+    assert_eq(W.rt.anchorReturnTick(), false, 'Suite 112: inside the circle there is nothing to return from')
+    assert_eq(#W.locMoves, 0, 'Suite 112: ... and no walk is issued')
+    W.x = 650
+    assert_eq(W.rt.anchorReturnTick(), true, 'Suite 112: outside the circle the return starts')
+    assert_eq(W.rt.anchorReturning, true, 'Suite 112: return flagged in progress')
+    assert_eq(W.locMoves[1].d, 250, 'Suite 112: the walk ends half a radius from the anchor')
+    assert_true(W.printed[1]:find('150 units outside', 1, true) ~= nil, 'Suite 112: the return announces how far out we were')
+    W.x = 400
+    assert_eq(W.rt.anchorReturnTick(), true, 'Suite 112: back inside the circle but not yet at half radius -> keep walking')
+    assert_eq(#W.printed, 1, 'Suite 112: announced once per trip')
+    W.x = 240
+    assert_eq(W.rt.anchorReturnTick(), false, 'Suite 112: arrived -> done')
+    assert_eq(W.rt.anchorReturning, false, 'Suite 112: return flag cleared on arrival')
+    W.ctrl.hunter_combat_loc = nil
+    W.rt.anchorReturning = true
+    assert_eq(W.rt.anchorReturnTick(), false, 'Suite 112: clearing the anchor cancels a return')
+    assert_eq(W.rt.anchorReturning, false, 'Suite 112: ... and drops the flag')
+
+    -- 6. The aggro exception: a mob outside with aggro on us is killed, not leashed
+    W = makeWorld()
+    W.spawns[2] = { x = 900, y = 0 }
+    W.x = 495
+    assert_eq(W.rt.anchorRejects(2), true, 'Suite 112: without aggro an outside mob is rejected')
+    assert_eq(W.rt.anchorLeashed(2), true, 'Suite 112: ... and the leash holds at the edge')
+    W.aggro[2] = true
+    assert_eq(W.rt.anchorRejects(2), false, 'Suite 112: a mob with aggro on us is not rejected outside the circle')
+    assert_eq(W.rt.anchorLeashed(2), false, 'Suite 112: ... and the leash lets us go and kill it')
+    W.spawns[1] = { x = 200, y = 0 }
+    W.aggro[1] = true
+    assert_eq(W.rt.anchorRejects(1), false, 'Suite 112: aggro inside the circle changes nothing')
+
+    -- 7. Idle roam inside the circle
+    W = makeWorld()
+    W.x, W.y = 100, 0
+    assert_eq(W.rt.anchorRoamTick(), true, 'Suite 112: idle inside the circle starts a roam leg')
+    local leg = W.pursuit.wanderLoc
+    assert_true(leg ~= nil and #W.locMoves == 1, 'Suite 112: the leg is the wander destination and a walk was issued')
+    local legDist = math.sqrt(leg.x ^ 2 + leg.y ^ 2)
+    assert_true(legDist >= 125 and legDist <= 450, 'Suite 112: the point lies between 25% and 90% of the radius from the anchor')
+    W.navActive = true
+    W.now = W.now + 1
+    assert_eq(W.rt.anchorRoamTick(), true, 'Suite 112: the leg continues while nav runs')
+    assert_eq(#W.locMoves, 2, 'Suite 112: ... re-driving the walk')
+    W.x, W.y = leg.x + 3, leg.y
+    W.now = W.now + 1
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: within 10 units (2D) the leg is over')
+    assert_nil(W.pursuit.wanderLoc, 'Suite 112: leg cleared on arrival')
+    assert_eq(W.rt.anchorRoamNextAt, W.now + W.rt.ANCHOR_ROAM.PAUSE_SECS, 'Suite 112: a pause follows each arrival')
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: no new leg during the pause')
+    W.now = W.now + W.rt.ANCHOR_ROAM.PAUSE_SECS + 0.1
+    W.navActive = false
+    assert_eq(W.rt.anchorRoamTick(), true, 'Suite 112: after the pause the next leg starts')
+    W.now = W.now + 3
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: nav finishing short of the point (a Z guess) still ends the leg')
+    assert_true(W.stops >= 1, 'Suite 112: ... with the walk stopped')
+    W.now = W.now + W.rt.ANCHOR_ROAM.PAUSE_SECS + 0.1
+    W.paths = function() return false end
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: no pathable point this round -> no leg')
+    assert_nil(W.pursuit.wanderLoc, 'Suite 112: ... nothing set')
+    W.paths = nil
+    W.now = W.now + W.rt.ANCHOR_ROAM.PAUSE_SECS + 0.1
+    W.sitting = true
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: a sitting character is not walked off')
+    W.sitting = false
+    W.ctrl.hunter_anchor_roam = false
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: roam off -> wait in place')
+    W.ctrl.hunter_anchor_roam = true
+    assert_eq(W.rt.anchorRoamTick(), true, 'Suite 112: roam on again -> a leg')
+    W.ctrl.hunter_combat_loc = nil
+    local stopsBefore = W.stops
+    assert_eq(W.rt.anchorRoamTick(), false, 'Suite 112: clearing the anchor ends the roam')
+    assert_true(W.pursuit.wanderLoc == nil and W.stops == stopsBefore + 1, 'Suite 112: ... leg cleared and the walk stopped')
+
+    -- 8. Per-zone persistence
+    W = makeWorld()
+    W.ctrl.zone_anchors = {}
+    W.ctrl.hunter_combat_loc = { x = 10, y = 20, z = 30 }
+    W.ctrl.hunter_combat_radius = 400
+    assert_eq(W.rt.saveZoneAnchor(), true, 'Suite 112: the anchor is saved for the zone')
+    assert_tbl_eq(W.ctrl.zone_anchors.gfaydark, { x = 10, y = 20, z = 30, radius = 400 }, 'Suite 112: ... with its radius')
+    assert_eq(W.saves, 1, 'Suite 112: ... and the loadout written')
+    W.ctrl.hunter_combat_loc = nil
+    W.ctrl.hunter_combat_radius = 250
+    W.zone = 'crushbone'
+    assert_eq(W.rt.loadZoneAnchor(), false, 'Suite 112: a zone without a saved anchor loads nothing')
+    assert_nil(W.ctrl.hunter_combat_loc, 'Suite 112: ... and leaves the live anchor alone')
+    W.zone = 'gfaydark'
+    W.rt.anchorReturning = true
+    assert_eq(W.rt.loadZoneAnchor(), true, 'Suite 112: zoning back restores the anchor')
+    assert_tbl_eq(W.ctrl.hunter_combat_loc, { x = 10, y = 20, z = 30 }, 'Suite 112: ... position')
+    assert_eq(W.ctrl.hunter_combat_radius, 400, 'Suite 112: ... and radius')
+    assert_eq(W.rt.anchorReturning, false, 'Suite 112: ... with any return in progress cancelled')
+    W.ctrl.hunter_combat_loc = nil
+    W.rt.saveZoneAnchor()
+    assert_nil(W.ctrl.zone_anchors.gfaydark, 'Suite 112: clearing the anchor forgets the zone entry')
+    assert_eq(W.rt.loadZoneAnchor(), false, 'Suite 112: ... so nothing comes back')
+
+    -- 9. Wiring
+    local roam = src:match('function runtime%.findRoamTarget.-\nend\n')
+    assert_true(roam:find('local huntAnchor, huntRadius = runtime.huntAnchor()', 1, true) ~= nil,
+        'Suite 112: the roam scan takes its anchor from huntAnchor')
+    assert_true(roam:find('radius = math.min(radius, math.ceil(md + huntRadius))', 1, true) ~= nil,
+        'Suite 112: the roam scan query is tightened to the anchor circle')
+    local mover = src:match('function runtime%.moveToward%(id, dist, followOnly%).-\nend\n')
+    assert_true(mover:find('if not followOnly and runtime.anchorLeashed(id) then', 1, true) ~= nil,
+        'Suite 112: moveToward is leashed to the anchor')
+    local leashAt = mover:find('runtime.anchorLeashed(id)', 1, true)
+    local arriveAt = mover:find('if d <= effectiveArrivalDist and', 1, true)
+    local stallAt = mover:find('PURSUIT_STALL_TIMEOUT or pursuit.navStalls >= 3', 1, true)
+    assert_true(arriveAt < leashAt and leashAt < stallAt, 'Suite 112: leash sits between the arrival check and the stall watchdog')
+    assert_true(src:find('local function huntNPCXtarget(maxZ, maxDist)', 1, true) ~= nil, 'Suite 112: Hunt has its own XTarget pick')
+    assert_true(src:find('return isUnreachable(id) or runtime.anchorRejects(id)', 1, true) ~= nil,
+        'Suite 112: the Hunt XTarget pick skips adds outside the circle')
+    local _, huntPicks = src:gsub('huntNPCXtarget%(maxHuntXtarZ, maxHuntXtarDist%)', '')
+    assert_eq(huntPicks, 2, 'Suite 112: both Hunt XTarget picks go through it')
+    assert_true(src:find("or tooFarAnchor and 'outside the combat anchor radius'", 1, true) ~= nil,
+        'Suite 112: a roam target that left the circle is dropped')
+    assert_true(src:find('if runtime.anchorReturnTick() then return end', 1, true) ~= nil,
+        'Suite 112: the idle branch walks back to the anchor')
+    assert_true(src:find('if runtime.anchorRoamTick() then return end', 1, true) ~= nil,
+        'Suite 112: the idle branch roams inside the circle')
+    assert_true(src:find("zone_anchors         = {},", 1, true) ~= nil and src:find("hunter_anchor_roam   = true,", 1, true) ~= nil,
+        'Suite 112: defaults for the zone anchors and the roam switch')
+    assert_true(src:find("if type(c.zone_anchors) ~= 'table' then c.zone_anchors = {} end", 1, true) ~= nil,
+        'Suite 112: sanitizer covers zone_anchors')
+    local apply = src:match('function runtime%.applyEntry%(e%).-\nend\n')
+    assert_true(apply:find('ctrl.hunter_combat_loc = nil\n        runtime.loadZoneAnchor()', 1, true) ~= nil,
+        'Suite 112: loading the loadout restores this zone\'s anchor')
+    assert_true(src:find('if runtime.loadZoneAnchor() then\n        print(string.format(\'\\ag[Triune]\\ax Loaded saved combat anchor for %s', 1, true) ~= nil,
+        'Suite 112: zoning in restores the zone\'s anchor')
+    local _, zoneSaves = src:gsub('runtime%.saveZoneAnchor%(%)', '')
+    assert_true(zoneSaves >= 3, 'Suite 112: Set / Clear / radius all update the zone entry')
 end
 
 print(string.format('\n=== Results: %d passed, %d failed ===', pass, fail))

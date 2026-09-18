@@ -57,11 +57,23 @@ local slotStatic = { buff = {}, song = {} }
 -- spellLookup[name] = { id, icon, maxDur, level, desc, ben } or false (negative
 -- result memoized so permanent buffs are not re-queried via Spell(name) forever).
 local spellLookup = {}
--- Song slot upper bound: Me.Song(i) is slot-indexed and slots can have gaps,
--- so we walk the whole slot range and skip empties (CountSongs is only a
--- count). Resolved once from Me.MaxSongSlots when the binding has it.
+-- Slot upper bounds. Me.Buff(i) / Me.Song(i) are slot-indexed and slots can
+-- have gaps, so the whole range is walked and empties skipped (CountBuffs /
+-- CountSongs are only counts). Long buffs always walk the client's full
+-- 42-slot array rather than Me.MaxBuffSlots: MQ computes that number
+-- client-side from level and AAs, and a server that grants more slots (or a
+-- buff landing past that count) would otherwise be dropped from the window.
+-- Empty slots are a cheap NULL read. Songs resolve once from Me.MaxSongSlots
+-- when the binding has it, else the fallback.
+local LONG_BUFF_SLOTS = 42
 local SONG_SLOT_FALLBACK = 30
 local songSlotMax = nil
+-- Active discipline shown when it is not in a buff / song slot (EQEmu keeps
+-- the running disc in its own slot after the songs, which Me.Song never
+-- reaches on some builds). Expiry is anchored locally when the core has no
+-- runtime.discExpires entry for it (disc fired by hand).
+local discRow = nil  -- { name = <disc name>, expiresAt = <os.clock() or nil> }
+local discStatic = {}  -- [disc name] = static facts (same shape as slotStatic entries)
 
 local function invalidateEffects()
     lastRefreshAt = 0
@@ -324,6 +336,78 @@ local function scanSlots(mq, ctrl, kind, getter, maxSlots, isSong, now, list)
     end
 end
 
+-- Appends the running discipline (Me.ActiveDisc) when no scanned buff / song
+-- row already carries its name. Remaining time comes from the core's
+-- runtime.discExpires when Triune fired the disc, otherwise from a local
+-- anchor of the spell's full duration taken the first time it is seen.
+local function scanActiveDisc(mq, now, list)
+    local name = nil
+    local ad = nil
+    pcall(function()
+        ad = mq.TLO.Me.ActiveDisc
+        if ad and ad() then
+            local n = ad.Name()
+            if n and n ~= '' and n ~= 'NULL' then name = n end
+        end
+    end)
+    if not name then
+        discRow = nil
+        return
+    end
+    for _, e in ipairs(list) do
+        if e.name == name then
+            discRow = nil
+            return
+        end
+    end
+    local st = discStatic[name]
+    if not st then
+        st = { name = name, spellId = 0, iconId = 0, maxDur = 0, level = 0, desc = '' }
+        pcall(function() st.spellId = ad.ID() or 0 end)
+        pcall(function() st.iconId = ad.SpellIcon() or 0 end)
+        pcall(function()
+            st.maxDur = core.parseDurationSec(ad.Duration)
+            if st.maxDur <= 0 then st.maxDur = core.parseDurationSec(ad.MyDuration) end
+        end)
+        pcall(function() st.level = ad.Level() or 0 end)
+        pcall(function() st.desc = (ad.Description and ad.Description()) or '' end)
+        local sp = lookupSpellByName(mq, name)
+        if sp then
+            if st.spellId == 0 then st.spellId = sp.id end
+            if st.iconId == 0 then st.iconId = sp.icon end
+            if st.maxDur == 0 then st.maxDur = sp.maxDur end
+            if st.level == 0 then st.level = sp.level end
+            if st.desc == '' then st.desc = sp.desc end
+        end
+        discStatic[name] = st
+    end
+    if not discRow or discRow.name ~= name then
+        discRow = { name = name, expiresAt = (st.maxDur > 0) and (now + st.maxDur) or nil }
+    end
+    local rt = core.runtime
+    local coreExp = rt and rt.discExpires and rt.discExpires[name]
+    if coreExp and coreExp > now then discRow.expiresAt = coreExp end
+    local expiresAt = discRow.expiresAt
+    if expiresAt and expiresAt <= now then expiresAt = nil end
+    local dur = expiresAt and (expiresAt - now) or 0
+    list[#list + 1] = {
+        slot = 0,
+        name = name,
+        spellId = st.spellId,
+        iconId = st.iconId,
+        duration = dur,
+        expiresAt = expiresAt,
+        maxDuration = math.max(st.maxDur, dur),
+        isSong = true,
+        isDisc = true,
+        isBeneficial = true,
+        caster = 'Unknown',
+        level = st.level,
+        description = st.desc,
+        counters = 0,
+    }
+end
+
 local function resolveSongSlotMax(mq)
     if songSlotMax then return songSlotMax end
     local n = nil
@@ -416,14 +500,15 @@ local function refreshEffects(force)
 
     -- 1. Long Buffs
     if ctrl.eff_show_buffs ~= false then
-        local maxBuffs = 42
-        pcall(function() maxBuffs = mq.TLO.Me.MaxBuffSlots() or 42 end)
-        scanSlots(mq, ctrl, 'buff', function(i) return mq.TLO.Me.Buff(i) end, maxBuffs, false, now, list)
+        scanSlots(mq, ctrl, 'buff', function(i) return mq.TLO.Me.Buff(i) end, LONG_BUFF_SLOTS, false, now, list)
     end
 
     -- 2. Short Buffs / Songs & Disciplines (slot-indexed; gaps are skipped)
     if ctrl.eff_show_songs ~= false then
         scanSlots(mq, ctrl, 'song', function(i) return mq.TLO.Me.Song(i) end, resolveSongSlotMax(mq), true, now, list)
+        scanActiveDisc(mq, now, list)
+    else
+        discRow = nil
     end
 
     local sortMode = ctrl.eff_sort_by or 'Time Left (Ascending)'
@@ -565,8 +650,8 @@ function plugin.onDrawUI()
                 -- Hover Tooltip
                 if ImGui.IsItemHovered() then
                     local lines = {
-                        string.format('%s (%s)', eff.name, eff.isSong and 'Song / Disc' or 'Buff'),
-                        string.format('Slot: %d  |  ID: %d', eff.slot, eff.spellId),
+                        string.format('%s (%s)', eff.name, eff.isDisc and 'Active Discipline' or (eff.isSong and 'Song / Disc' or 'Buff')),
+                        eff.isDisc and string.format('ID: %d', eff.spellId) or string.format('Slot: %d  |  ID: %d', eff.slot, eff.spellId),
                         isTimed and string.format('Time Left: %s (Total: %s)', core.fmtSec(duration), core.fmtSec(eff.maxDuration)) or 'Duration: Permanent / Aura',
                     }
                     if eff.caster and eff.caster ~= '' and eff.caster ~= 'Unknown' then

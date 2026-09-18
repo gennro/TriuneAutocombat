@@ -35,7 +35,7 @@ local mq                = require('mq')
 local ImGui             = require('ImGui')
 local scriptDir         = debug.getinfo(1, "S").source:match("@?(.*[/\\])") or "./"
 package.path            = scriptDir .. "?.lua;" .. package.path
-local VERSION           = '3.0'
+local VERSION           = '3.1'
 local open              = true
 -- File-backed diagnostic logger. Hooked into print() right away so every
 -- chat line from here on (core and plugins) is captured in its ring buffer;
@@ -234,6 +234,8 @@ local function sanitizeModeConfig(c)
     if type(c.zone_hazards) ~= 'table' then c.zone_hazards = {} end
     if type(c.zone_waypoints) ~= 'table' then c.zone_waypoints = {} end
     if type(c.zone_waypoint_presets) ~= 'table' then c.zone_waypoint_presets = {} end
+    if type(c.zone_anchors) ~= 'table' then c.zone_anchors = {} end
+    if c.hunter_anchor_roam == nil then c.hunter_anchor_roam = true end
 
     if c.show_cooldowns == nil then c.show_cooldowns = false end
     if c.show_spellbook == nil then c.show_spellbook = false end
@@ -371,6 +373,8 @@ local function defaultCtrl()
         hunter_max_level     = 100,
         hunter_combat_radius = 250, -- max roam distance from anchor when anchor is set
         hunter_combat_loc    = nil, -- {x,y,z} anchor; nil = no constraint
+        hunter_anchor_roam   = true, -- idle: wander to random points inside the anchor circle
+        zone_anchors         = {}, -- per-zone saved anchors: [zoneShort] = { x, y, z, radius }
         pull_min_level       = 1,
         pull_max_level       = 100,
         pull_con_filter      = {
@@ -4242,6 +4246,15 @@ do
     end
 end
 
+-- TotalSeconds() of a live MQ ticks / timestamp object, or nil when the
+-- member is missing or the value is a sentinel (permanent buff, -1, 0xFFFFFFFF).
+local function tloTotalSeconds(obj)
+    local ts = nil
+    pcall(function() ts = tonumber(obj.TotalSeconds()) end)
+    if ts and ts >= 0 and ts < 2000000 then return ts end
+    return nil
+end
+
 local function parseDurationSec(durObj)
     if not durObj then return 0 end
     local sec = 0
@@ -4277,6 +4290,25 @@ local function parseDurationSec(durObj)
                     sec = tk * 6
                     if sec > 0 then return end
                 end
+            end
+        end
+
+        -- Live MQ objects are userdata, so the function / number probes below
+        -- never match them. Read TotalSeconds() directly: it is right for both
+        -- the `ticks` type (Spell.Duration, CombatAbilityTimer) and the
+        -- `timestamp` type (Me.Buff.Duration), which the string fallback at the
+        -- bottom cannot tell apart once a ticks value passes 500 (a 60-minute
+        -- buff is 600 ticks and used to come back as 600 seconds).
+        if type(durObj) == 'userdata' then
+            local ts = tloTotalSeconds(durObj)
+            if ts then
+                sec = ts
+                -- A timestamp stringifies as raw ms: keep the fraction of a
+                -- second when both readings describe the same second.
+                local raw = nil
+                pcall(function() raw = tonumber(durObj()) end)
+                if raw and raw >= ts * 1000 and raw < (ts + 1) * 1000 then sec = raw / 1000.0 end
+                return
             end
         end
 
@@ -4338,6 +4370,11 @@ local function parseCombatAbilityTimer(cat)
             if cat.TotalSeconds then sec = tonumber(cat.TotalSeconds) or 0; return end
             if cat.Ticks then sec = (tonumber(cat.Ticks) or 0) * 6; return end
             if cat.Raw then sec = (tonumber(cat.Raw) or 0) / 1000.0; return end
+        end
+        -- Live ticks objects are userdata (see parseDurationSec).
+        if type(cat) == 'userdata' then
+            local ts = tloTotalSeconds(cat)
+            if ts then sec = ts; return end
         end
         if type(cat.TotalSeconds) == 'function' then
             local ts = tonumber(cat.TotalSeconds() or 0) or 0
@@ -5010,6 +5047,46 @@ function runtime.collectEntry()
         presets = loadout.presets or {}
     }
 end
+-- Per-zone Hunt combat anchors (ctrl.zone_anchors, keyed by zone short name,
+-- saved with the character's loadout): the anchor and the Combat Radius that
+-- went with it, restored on zoning in and on script start so a hunt spot
+-- survives a zone trip or a restart. The live anchor (ctrl.hunter_combat_loc)
+-- is still a position in one zone and is never applied from the saved file
+-- as-is -- it is looked up for the zone we are actually in.
+local function currentZoneShort()
+    local zs
+    pcall(function() zs = mq.TLO.Zone.ShortName() end)
+    if not zs or zs == '' then return nil end
+    return tostring(zs)
+end
+
+-- Records the live anchor (or its absence) for the current zone and saves.
+function runtime.saveZoneAnchor()
+    local zs = currentZoneShort()
+    if not zs then return false end
+    if type(ctrl.zone_anchors) ~= 'table' then ctrl.zone_anchors = {} end
+    local a = ctrl.hunter_combat_loc
+    if type(a) == 'table' and a.x and a.y then
+        ctrl.zone_anchors[zs] = { x = a.x, y = a.y, z = a.z or 0, radius = ctrl.hunter_combat_radius or 250 }
+    else
+        ctrl.zone_anchors[zs] = nil
+    end
+    runtime.saveLoadout(true)
+    return true
+end
+
+-- Applies the zone's saved anchor (and its radius) to the live settings.
+-- False when nothing is saved for the zone; the live anchor is left alone.
+function runtime.loadZoneAnchor(zs)
+    zs = zs or currentZoneShort()
+    local saved = zs and type(ctrl.zone_anchors) == 'table' and ctrl.zone_anchors[zs] or nil
+    if type(saved) ~= 'table' or not saved.x or not saved.y then return false end
+    ctrl.hunter_combat_loc = { x = saved.x, y = saved.y, z = saved.z or 0 }
+    if (tonumber(saved.radius) or 0) > 0 then ctrl.hunter_combat_radius = saved.radius end
+    runtime.anchorReturning = false
+    return true
+end
+
 function runtime.applyEntry(e)
     if type(e) ~= 'table' then return end
     if type(e.classes) == 'table' and #e.classes > 0 then myClasses = e.classes end
@@ -5127,9 +5204,11 @@ function runtime.applyEntry(e)
         if type(ctrl.plugins) ~= 'table' then ctrl.plugins = {} end
         if type(ctrl.scripts) ~= 'table' then ctrl.scripts = {} end
         -- The combat anchor location is a zone-specific position (like camp_loc): never
-        -- restore it from a saved file because the player will almost certainly
-        -- be in a different location or zone. Keep the user's radius setting intact.
+        -- restore it from a saved file as-is, the player may well be in another
+        -- zone. The per-zone list (zone_anchors) supplies the one for the zone we
+        -- are in, if any. The radius setting is kept either way.
         ctrl.hunter_combat_loc = nil
+        runtime.loadZoneAnchor()
     end
 end
 
@@ -11512,7 +11591,7 @@ function UI.drawControlTab()
         end
         if ImGui.IsItemHovered() then
             ImGui.SetTooltip(
-                'Checked: Selecting a hostile NPC immediately navigates to it and engages.\nUnchecked: A selected NPC is only engaged once it is on XTarget or combat starts.')
+                'Checked: Selecting a hostile NPC immediately navigates to it and engages.\nUnchecked: A selected NPC is only engaged once it is on XTarget or combat starts\n(or, with Stick to Target off, once you have it in reach).')
         end
     end
 
@@ -11672,8 +11751,14 @@ function UI.drawControlTab()
 
             accent(GOLD, 'Combat Radius Anchor (optional)')
             if ctrl.hunter_combat_loc then
-                ImGui.Text(string.format('Anchor: %.1f, %.1f, %.1f',
-                    ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.z))
+                local mx, my = mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0
+                local dx, dy = mx - ctrl.hunter_combat_loc.x, my - ctrl.hunter_combat_loc.y
+                ImGui.Text(string.format('Anchor: %.1f, %.1f, %.1f -- you are %.0f units from it (saved for %s)',
+                    ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.z,
+                    math.sqrt(dx * dx + dy * dy), runtime.getZoneDisplayName(runtime.getCurrentZoneShortName())))
+                if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then
+                    accent(WARN, 'Waypoint Patrol is on -- the route sets the ground, the anchor is ignored.')
+                end
             else
                 accent(MUTED, 'No anchor set -- Puller roams freely within Search Radius.')
             end
@@ -11685,15 +11770,26 @@ function UI.drawControlTab()
                     if (ctrl.hunter_combat_radius or 0) <= 0 then
                         ctrl.hunter_combat_radius = 250
                     end
+                    runtime.anchorReturning = false
+                    runtime.saveZoneAnchor()
                 end
             end
             if ImGui.IsItemHovered() then
-                ImGui.SetTooltip('Saves your current position as anchor for roaming.')
+                ImGui.SetTooltip(
+                    'Saves your current position as the anchor. The Puller never walks outside Combat Radius of it:\n'
+                    .. 'it only takes mobs inside the circle, kills a mob outside only when that mob has aggro on it\n'
+                    .. '(within Max XTarget Chase Range), and walks back in when it ends up outside with nothing to fight.\n'
+                    .. 'Remembered per zone: it comes back when you zone in here again or restart the script.')
             end
             ImGui.SameLine()
             if ImGui.Button('Clear Anchor##pullerAnchorClear') then
                 ctrl.hunter_combat_loc = nil
                 pursuit.wanderLoc = nil
+                runtime.anchorReturning = false
+                runtime.saveZoneAnchor()
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip('Forget the anchor for this zone -- the Puller roams anywhere within Search Radius again.')
             end
 
             ImGui.SetNextItemWidth(UI.px(220))
@@ -11702,7 +11798,25 @@ function UI.drawControlTab()
             local newRadius, changed = ImGui.SliderInt('Combat Radius##pullerAnchorRadius', curRadius, 1, 2000)
             if changed then
                 ctrl.hunter_combat_radius = newRadius
+                if ctrl.hunter_combat_loc then runtime.saveZoneAnchor() else runtime.saveLoadout(true) end
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'How far from the anchor the Puller may go. This caps Search Radius: a 2000 search with a 500 anchor\n'
+                    .. 'still only takes mobs within 500 of the anchor and never walks past that line.')
+            end
+
+            local roamOn, roamChanged = ImGui.Checkbox('Roam Inside the Circle While Idle##pullerAnchorRoam',
+                ctrl.hunter_anchor_roam ~= false)
+            if roamChanged then
+                ctrl.hunter_anchor_roam = roamOn
                 runtime.saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'With nothing to fight, walk to a random spot inside the circle, pause a few seconds, pick another --\n'
+                    .. 'so the hunt sweeps the whole circle instead of waiting at one spot for spawns to come by.\n'
+                    .. 'Unchecked: wait where you stand (still walks back in if outside).')
             end
         elseif ctrl.submode == 'Camp' then
             accent(GOLD, 'Puller Camp Location')
@@ -15792,6 +15906,17 @@ local function firstNPCXtarget(unmezzedOnly, maxZ, maxDist)
     return runtime.findFirstNPCXtarget(unmezzedOnly, isIgnored, isUnreachable, maxDist, maxZ, buffActive)
 end
 
+-- Puller (Hunt)'s XTarget pick. With a combat anchor in force, an XTarget
+-- outside the circle and beyond reach is left alone until it comes to us on
+-- its own -- chasing it is exactly what the anchor forbids, and leashed in
+-- place we would only sit through the approach watchdog and blacklist a mob
+-- that is on its way.
+local function huntNPCXtarget(maxZ, maxDist)
+    if not runtime.huntAnchor() then return firstNPCXtarget(false, maxZ, maxDist) end
+    return runtime.findFirstNPCXtarget(false, isIgnored,
+        function(id) return isUnreachable(id) or runtime.anchorRejects(id) end, maxDist, maxZ, buffActive)
+end
+
 -- Returns count of live, non-ignored NPCs occupying XTarget slots.
 function runtime.countNPCXtarget(includeUnreachable)
     local cnt = 0
@@ -19120,6 +19245,20 @@ function runtime.moveToward(id, dist, followOnly)
         return true
     end
 
+    -- Hunt anchor leash: the target is outside the anchor circle and we are
+    -- at its edge. Stop here and wait -- a mob with aggro comes to us, one
+    -- without is dropped by the hunt loop (anchorRejects) or the approach
+    -- watchdog. stopMoving() resets pursuit.id, so the stall clock starts
+    -- over when the approach resumes rather than counting the wait.
+    if not followOnly and runtime.anchorLeashed(id) then
+        stopMoving()
+        if (os.clock() - (pursuit.lastCombatFaceAt or 0)) > 0.4 then
+            pursuit.lastCombatFaceAt = os.clock()
+            mq.cmd('/face fast')
+        end
+        return false
+    end
+
     if (os.clock() - pursuit.improvedAt) > NAV_CONST.PURSUIT_STALL_TIMEOUT or pursuit.navStalls >= 3 then
         if d <= effectiveArrivalDist + 12 and losOk then
             stopMoving()
@@ -20707,6 +20846,155 @@ function runtime.idleReturn()
     end
 end
 
+-- Hunt-submode combat anchor: the circle the puller is not allowed to leave.
+-- Returns the anchor and its radius while one is in force (Puller / Hunt,
+-- anchor set, radius > 0, Waypoint Patrol off -- a patrol route defines its
+-- own ground), else nil. Every anchor check -- the roam scan, the XTarget
+-- pick, the movement leash in moveToward and the idle return -- goes through
+-- here so they cannot drift apart.
+function runtime.huntAnchor()
+    if not ctrl or ctrl.mode ~= 'Puller' or ctrl.submode ~= 'Hunt' then return nil end
+    if ctrl.use_waypoints and ctrl.waypoints and #ctrl.waypoints > 0 then return nil end
+    local a = ctrl.hunter_combat_loc
+    local r = tonumber(ctrl.hunter_combat_radius) or 0
+    if type(a) ~= 'table' or not a.x or not a.y or r <= 0 then return nil end
+    return a, r
+end
+
+-- 2D distance from (x, y) to the anchor; nil while no anchor is in force.
+function runtime.anchorDist(x, y)
+    local a = runtime.huntAnchor()
+    if not a then return nil end
+    local dx, dy = (x or 0) - a.x, (y or 0) - a.y
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+-- A mob outside the circle that has aggro on us (we are its target or its
+-- aggro holder) is the one exception to the anchor: it is killed where it
+-- stands -- within Max XTarget Chase Range, which moveToward still applies --
+-- and the idle return walks us back inside afterwards. Leaving it alone
+-- would mean standing at the edge taking hits from something we could reach.
+function runtime.anchorAggroException(id)
+    return runtime.playerHasAggro(id) == true
+end
+
+-- True when spawn `id` stands outside the anchor circle AND beyond our reach
+-- from where we are: engaging it would mean walking out. A mob just past the
+-- edge that we can already hit is fair game -- the limit is on where the
+-- character goes, not on what it may swing at -- and so is one that has
+-- aggro on us (anchorAggroException).
+function runtime.anchorRejects(id)
+    local a, r = runtime.huntAnchor()
+    if not a or not id or id <= 0 then return false end
+    local s = mq.TLO.Spawn(id)
+    if not s() then return false end
+    local sd = runtime.anchorDist(s.X() or 0, s.Y() or 0)
+    if not sd or sd <= r then return false end
+    if distToId(id) <= (desiredRange(id) + 4) then return false end
+    return not runtime.anchorAggroException(id)
+end
+
+-- The movement leash: true when moving toward spawn `id` would take us out of
+-- the anchor circle -- it is outside and we already stand at the edge. From
+-- inside, the approach is allowed and gets cut off here once we reach the
+-- edge. A small inner margin absorbs the ground covered between two ticks so
+-- we settle on the line rather than past it.
+function runtime.anchorLeashed(id)
+    local a, r = runtime.huntAnchor()
+    if not a or not id or id <= 0 then return false end
+    local s = mq.TLO.Spawn(id)
+    if not s() then return false end
+    local sd = runtime.anchorDist(s.X() or 0, s.Y() or 0)
+    if not sd or sd <= r then return false end
+    local me = mq.TLO.Me
+    local md = runtime.anchorDist(me.X() or 0, me.Y() or 0)
+    if not md or md < (r - math.min(10, r * 0.1)) then return false end
+    return not runtime.anchorAggroException(id)
+end
+
+-- Idle return to the anchor: nothing to fight and the character is outside
+-- the circle (an add dragged it out, or the anchor was set from afar). Walk
+-- back until well inside -- half the radius -- so the next roam scan, which
+-- is centred on us, covers the circle rather than the ground we were dragged
+-- to. Returns true while the walk is in progress.
+function runtime.anchorReturnTick()
+    local a, r = runtime.huntAnchor()
+    if not a then runtime.anchorReturning = false; return false end
+    local me = mq.TLO.Me
+    local md = runtime.anchorDist(me.X() or 0, me.Y() or 0) or 0
+    if not runtime.anchorReturning then
+        if md <= r then return false end
+        runtime.anchorReturning = true
+        print(string.format(
+            '\ay[Triune]\ax Puller (Hunt): %.0f units outside the combat anchor radius (%d) -- returning to the anchor.',
+            md - r, r))
+    end
+    local arrived = runtime.moveTowardLoc(a.x, a.y, a.z or (me.Z() or 0), math.max(10, r * 0.5))
+    if arrived then runtime.anchorReturning = false end
+    return not arrived
+end
+
+-- Idle roam inside the anchor circle (ctrl.hunter_anchor_roam): with nothing
+-- to fight, walk to a random pathable point inside the circle, pause there,
+-- pick another. The roam scan is centred on the character, so this sweeps
+-- the circle instead of camping one spot in it. pursuit.wanderLoc is the
+-- leg under way (the Status tab shows it); the target-acquire path clears it
+-- and stops the walk. Returns true while a leg is in progress.
+runtime.ANCHOR_ROAM = {
+    PAUSE_SECS   = 5,    -- dwell at each point before the next pick
+    LEG_MAX_SECS = 40,   -- a leg that has not arrived by then is abandoned
+    ARRIVE_DIST  = 10,   -- 2D: the point's Z is a guess (the anchor's)
+    MIN_FRAC     = 0.25, -- pick between these fractions of the radius...
+    MAX_FRAC     = 0.90, -- ...from the anchor: neither on the anchor nor on the line
+    TRIES        = 6,    -- candidate points per pick before giving up this round
+}
+function runtime.anchorRoamTick()
+    local a, r = runtime.huntAnchor()
+    if not a or ctrl.hunter_anchor_roam == false then
+        if pursuit.wanderLoc then pursuit.wanderLoc = nil; stopMoving() end
+        return false
+    end
+    local C = runtime.ANCHOR_ROAM
+    local now = os.clock()
+    local me = mq.TLO.Me
+    local mx, my = me.X() or 0, me.Y() or 0
+    local wl = pursuit.wanderLoc
+    if wl then
+        local dx, dy = mx - wl.x, my - wl.y
+        local navActive = false
+        pcall(function() navActive = mq.TLO.Navigation.Active() or false end)
+        local arrived = (dx * dx + dy * dy) <= (C.ARRIVE_DIST * C.ARRIVE_DIST)
+        -- nav finishing short of our 2D arrival (a Z guess, a mesh edge) still ends the leg
+        local navDone = (now - (wl.at or now)) > 2.0 and not navActive
+        if arrived or navDone or (now - (wl.at or now)) > C.LEG_MAX_SECS then
+            if not arrived then stopMoving() end
+            pursuit.wanderLoc = nil
+            runtime.anchorRoamNextAt = now + C.PAUSE_SECS
+            return false
+        end
+        runtime.moveTowardLoc(wl.x, wl.y, wl.z, C.ARRIVE_DIST)
+        return true
+    end
+    if now < (runtime.anchorRoamNextAt or 0) then return false end
+    local sitting = false
+    pcall(function() sitting = me.Sitting() or false end)
+    if sitting or not navLoaded() then return false end
+    local z = a.z or (me.Z() or 0)
+    for _ = 1, C.TRIES do
+        local ang = math.random() * 2 * math.pi
+        local d = r * (C.MIN_FRAC + (C.MAX_FRAC - C.MIN_FRAC) * math.random())
+        local x, y = a.x + math.cos(ang) * d, a.y + math.sin(ang) * d
+        local ok, has = pcall(function() return mq.TLO.Navigation.PathExists(string.format('locyx %.2f %.2f', y, x))() end)
+        if ok and has then
+            pursuit.wanderLoc = { x = x, y = y, z = z, at = now }
+            runtime.moveTowardLoc(x, y, z, C.ARRIVE_DIST)
+            return true
+        end
+    end
+    runtime.anchorRoamNextAt = now + C.PAUSE_SECS -- nothing pathable this round; try again after the pause
+    return false
+end
+
 -- Finds a mob for Hunter/Puller to engage on their own initiative: something
 -- already on your aggro list, or the nearest targetable NPC within your search
 -- radius. Skips anything on the ignore list, and (Hunter's own request) anything
@@ -20724,9 +21012,9 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local minLv        = minLevel or (isCampMode and (ctrl.pull_min_level or 1) or (ctrl.hunter_min_level or 1))
     local maxLv        = maxLevel or (isCampMode and (ctrl.pull_max_level or 100) or (ctrl.hunter_max_level or 100))
 
-    local anchorLoc    = isCampMode and ctrl.camp_loc or ctrl.hunter_combat_loc
-    local anchorRadius = isCampMode and (searchRadius or ctrl.camp_radius or 100) or
-        (anchorLoc and (ctrl.hunter_combat_radius or 0) or 0)
+    local huntAnchor, huntRadius = runtime.huntAnchor()
+    local anchorLoc    = isCampMode and ctrl.camp_loc or huntAnchor
+    local anchorRadius = isCampMode and (searchRadius or ctrl.camp_radius or 100) or (huntRadius or 0)
 
     -- Explicit Y/X handling to account for EQ's (Y, X) standard
     local function outsideAnchor(sy, sx)
@@ -20771,6 +21059,14 @@ function runtime.findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
 
     local function scanSpawns(maxZ)
         local radius = searchRadius or 100
+        -- Nothing inside the anchor circle is farther from us than the anchor
+        -- plus its radius: tighten the query so the 100-candidate cap below is
+        -- spent on mobs we may actually take, not on the ones ringing us
+        -- outside the circle.
+        if huntAnchor then
+            local md = runtime.anchorDist(mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0) or 0
+            radius = math.min(radius, math.ceil(md + huntRadius))
+        end
         local p = string.format('npc radius %d zradius %d targetable', radius, maxZ)
         for i = 1, 100 do
             local s = mq.TLO.NearestSpawn(i, p)
@@ -21508,9 +21804,15 @@ runtime.onZoned = function()
         print('\ay[Triune]\ax zoned -- clearing camp (it was set in the previous zone). Set a new one if needed.')
         ctrl.camp_loc = nil
     end
-    if ctrl.hunter_combat_loc then
+    local hadAnchor = ctrl.hunter_combat_loc ~= nil
+    ctrl.hunter_combat_loc = nil -- the previous zone's; this zone's saved one replaces it
+    runtime.anchorReturning = false
+    if runtime.loadZoneAnchor() then
+        print(string.format('\ag[Triune]\ax Loaded saved combat anchor for %s (%.0f, %.0f, %.0f; radius %d).',
+            runtime.getZoneDisplayName(runtime.getCurrentZoneShortName()),
+            ctrl.hunter_combat_loc.x, ctrl.hunter_combat_loc.y, ctrl.hunter_combat_loc.z, ctrl.hunter_combat_radius or 250))
+    elseif hadAnchor then
         print('\ay[Triune]\ax zoned -- clearing Hunter combat anchor (it was set in the previous zone).')
-        ctrl.hunter_combat_loc = nil
     end
     if runtime.loadZoneWaypoints() then
         print(string.format('\ag[Triune]\ax Loaded saved waypoint route for %s (%d waypoint(s)).',
@@ -21842,7 +22144,8 @@ end
 --   'move' -- close to / stick to it (moveToward)
 --   'hold' -- fight from wherever the player left the character; never move
 --   'wait' -- target is merely selected; do nothing until it engages
--- `engaged` means the target is on XTarget or we are already in combat.
+-- `engaged` means the target is on XTarget, we are already in combat, or
+-- (Stick off) the selected hostile is already inside the style's reach.
 -- `approaching` means an auto-nav approach to this target is still in flight
 -- (pursuit.id still points at it), which is allowed to finish even with stick
 -- off so a selected target is actually reached before we plant our feet.
@@ -22186,7 +22489,18 @@ local function combatTick()
             else
                 local inCombatState = mq.TLO.Me.Combat() or (mq.TLO.Me.CombatState and mq.TLO.Me.CombatState() == 'COMBAT')
                 local isXtar = isXTargetId(id)
-                local policy = manualMovePolicy(isXtar or inCombatState, pursuit.id == id)
+                -- Stick off ("you drive"): there is no approach step, so the
+                -- player's own positioning is the engage signal. A selected
+                -- hostile that is already inside the style's reach with LoS
+                -- is fought from here instead of waiting for XTarget or for
+                -- the player to press attack -- otherwise a melee walked up
+                -- to its mob (or a caster standing at Combat Distance) sat
+                -- in 'wait' and never fired a skill, disc, AA or spell.
+                local inReachNow = false
+                if ctrl.manual_stick == false and not isXtar and not inCombatState then
+                    inReachNow = (distToId(id) <= styleReach(id)) and hasLoS(id)
+                end
+                local policy = manualMovePolicy(isXtar or inCombatState or inReachNow, pursuit.id == id)
                 if policy == 'move' then
                     if moveToward(id, desiredRange(id)) then
                         engage = true
@@ -22270,8 +22584,9 @@ local function combatTick()
                     haveNPC = false
                     clearTarget()
                 elseif isXTargetId(tid) then
-                    if distToId(tid) > (maxHuntXtarDist + 20) and not mq.TLO.Me.Combat() then
-                        -- XTarget is beyond max chase range + buffer and not actively engaged in melee
+                    if (distToId(tid) > (maxHuntXtarDist + 20) or runtime.anchorRejects(tid)) and not mq.TLO.Me.Combat() then
+                        -- XTarget is beyond max chase range + buffer (or outside the
+                        -- combat anchor circle) and not actively engaged in melee
                         haveNPC = false
                         clearTarget()
                         stopMoving()
@@ -22280,16 +22595,21 @@ local function combatTick()
                     local okZ, sz = pcall(function() return tspawn.Z() end)
                     local tooFarZ = okZ and sz and math.abs(sz - myZ) > (maxHuntZ + 15)
                     local tooFarDist = not isMoveActive() and distToId(tid) > dropDist
+                    -- A roam target that wandered out of the anchor circle since
+                    -- the scan picked it: the leash would only hold us at the edge.
+                    local tooFarAnchor = runtime.anchorRejects(tid)
                     local yieldTo = (tid ~= forceId) and runtime.boxnetYieldTarget(tid) or nil
                     if yieldTo then
                         runtime.boxnetYieldNow(tid, yieldTo, 'Puller (Hunt)')
                         haveNPC = false
-                    elseif (tooFarZ or tooFarDist) and tid ~= forceId then
+                    elseif (tooFarZ or tooFarDist or tooFarAnchor) and tid ~= forceId then
                         -- Mark unreachable so findRoamTarget() won't immediately re-acquire the
                         -- same spawn on the very next tick, causing the acquire/drop spam loop.
                         -- The blacklist expires after 60s in case the mob moves closer or a path
                         -- opens up (same TTL as the navmesh-fail unreachable entries).
-                        local reason = tooFarZ and 'elevation diff' or 'stationary+out-of-range'
+                        local reason = tooFarZ and 'elevation diff'
+                            or tooFarAnchor and 'outside the combat anchor radius'
+                            or 'stationary+out-of-range'
                         print(string.format(
                             '\ay[Triune]\ax Hunt: dropping #%d (%s) -- %s. Blacklisting for 60s.',
                             tid, tostring(tspawn.CleanName()), reason))
@@ -22300,7 +22620,7 @@ local function combatTick()
                 end
             end
 
-            local xtarId = firstNPCXtarget(false, maxHuntXtarZ, maxHuntXtarDist)
+            local xtarId = huntNPCXtarget(maxHuntXtarZ, maxHuntXtarDist)
             if xtarId then
                 if pursuit.unreachableIds then pursuit.unreachableIds[xtarId] = nil end
                 local curId = haveNPC and mq.TLO.Target.ID() or 0
@@ -22360,7 +22680,7 @@ local function combatTick()
                 end
 
                 local scanRadius = hasWps and (ctrl.waypoint_scan_radius or 100) or (ctrl.hunter_radius or 1500)
-                local id = firstNPCXtarget(false, maxHuntXtarZ, maxHuntXtarDist)
+                local id = huntNPCXtarget(maxHuntXtarZ, maxHuntXtarDist)
                 if not id then
                     id = findRoamTarget(scanRadius, maxHuntZ, ctrl.hunter_min_level, ctrl.hunter_max_level)
                 end
@@ -22386,11 +22706,11 @@ local function combatTick()
                     if hasWps then
                         runtime.wpTick()
                     else
-                        if pursuit.wanderLoc then
-                            pursuit.wanderLoc = nil
-                            if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
-                            if mq.TLO.Stick.Active() then mq.cmd('/stick off') end
-                        end
+                        -- Dragged outside the combat anchor circle with nothing
+                        -- to fight: walk back in before waiting on spawns. Inside
+                        -- it, sweep the circle instead of standing still.
+                        if runtime.anchorReturnTick() then return end
+                        if runtime.anchorRoamTick() then return end
 
                         local radius = ctrl.hunter_radius or 1500
                         local minLv = ctrl.hunter_min_level or 1

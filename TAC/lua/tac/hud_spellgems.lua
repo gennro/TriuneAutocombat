@@ -125,8 +125,11 @@ local function refreshGems(force)
     if not force and (now - lastRefreshAt) < REFRESH_INTERVAL then return end
     lastRefreshAt = now
 
+    -- Me.NumGems is the drawn count; a spell memorized past it (the count is
+    -- read from the game's gem window, which can lag the real gem count)
+    -- still shows, so every slot is polled and the count grows to the
+    -- highest occupied gem.
     local maxGems = core.getNumGems() or 8
-    snap.maxGems = maxGems
 
     local myMana = 0
     pcall(function() myMana = mq.TLO.Me.CurrentMana() or 0 end)
@@ -146,95 +149,97 @@ local function refreshGems(force)
     M.gemCooldownEnd = M.gemCooldownEnd or {}
     M.gemCooldownSpell = M.gemCooldownSpell or {}
 
+    local highestUsed = 0
     for slot = 1, MAX_GEM_SLOTS do
         local gemData = nil
-        if slot <= maxGems then
-            pcall(function()
-                local g = mq.TLO.Me.Gem(slot)
-                if not (g and g()) then return end
-                local sName = g.Name()
-                if not sName or sName == '' then return end
+        pcall(function()
+            local g = mq.TLO.Me.Gem(slot)
+            if not (g and g()) then return end
+            local sName = g.Name()
+            if not sName or sName == '' then return end
 
-                local st = gemStatic[slot]
-                if not st or st.name ~= sName then
-                    st = readGemStatic(g, sName)
-                    gemStatic[slot] = st
-                end
-                if M.gemCooldownSpell[slot] ~= sName then
-                    M.gemCooldownSpell[slot] = sName
-                    M.gemCooldownEnd[slot] = nil
-                end
+            local st = gemStatic[slot]
+            if not st or st.name ~= sName then
+                st = readGemStatic(g, sName)
+                gemStatic[slot] = st
+            end
+            if M.gemCooldownSpell[slot] ~= sName then
+                M.gemCooldownSpell[slot] = sName
+                M.gemCooldownEnd[slot] = nil
+            end
 
-                local sRecast = st.recast
-                local querySec = core.getGemCooldownSec(slot, sName, sRecast)
+            local sRecast = st.recast
+            local querySec = core.getGemCooldownSec(slot, sName, sRecast)
 
-                local isReady = false
-                pcall(function() isReady = (mq.TLO.Me.SpellReady(slot)() == true) end)
+            local isReady = false
+            pcall(function() isReady = (mq.TLO.Me.SpellReady(slot)() == true) end)
 
-                local isCastingThis = (activeCastingName and activeCastingName == sName)
-                local timer = 0
-                if isReady then
-                    M.gemCooldownEnd[slot] = nil
-                elseif isCastingThis then
-                    -- Actively casting this spell: prime recast countdown so it begins immediately on cast completion
-                    local baseRecast = math.max(2.25, sRecast or 0)
-                    M.gemCooldownEnd[slot] = now + (castTimeLeft or 0) + baseRecast
+            local isCastingThis = (activeCastingName and activeCastingName == sName)
+            local timer = 0
+            if isReady then
+                M.gemCooldownEnd[slot] = nil
+            elseif isCastingThis then
+                -- Actively casting this spell: prime recast countdown so it begins immediately on cast completion
+                local baseRecast = math.max(2.25, sRecast or 0)
+                M.gemCooldownEnd[slot] = now + (castTimeLeft or 0) + baseRecast
+            else
+                local endAt = M.gemCooldownEnd[slot]
+                local isOtherCasting = (activeCastingName and activeCastingName ~= sName)
+                local baseRecast = isOtherCasting and 2.25 or (querySec > 0 and querySec or 2.25)
+                local maxAllowed = (sRecast and sRecast > 0) and math.max(2.5, sRecast + 3.0) or 3.0
+
+                if not endAt then
+                    local dur = (querySec > 0) and querySec or baseRecast
+                    dur = math.min(dur, maxAllowed)
+                    endAt = now + dur
+                    M.gemCooldownEnd[slot] = endAt
+                    timer = dur
                 else
-                    local endAt = M.gemCooldownEnd[slot]
-                    local isOtherCasting = (activeCastingName and activeCastingName ~= sName)
-                    local baseRecast = isOtherCasting and 2.25 or (querySec > 0 and querySec or 2.25)
-                    local maxAllowed = (sRecast and sRecast > 0) and math.max(2.5, sRecast + 3.0) or 3.0
-
-                    if not endAt then
-                        local dur = (querySec > 0) and querySec or baseRecast
-                        dur = math.min(dur, maxAllowed)
-                        endAt = now + dur
+                    local rem = endAt - now
+                    if rem > maxAllowed then
+                        rem = maxAllowed
+                        endAt = now + maxAllowed
                         M.gemCooldownEnd[slot] = endAt
-                        timer = dur
-                    else
-                        local rem = endAt - now
-                        if rem > maxAllowed then
-                            rem = maxAllowed
-                            endAt = now + maxAllowed
-                            M.gemCooldownEnd[slot] = endAt
-                        end
+                    end
 
-                        if rem > 0 then
-                            timer = rem
+                    if rem > 0 then
+                        timer = rem
+                    else
+                        if querySec > 0 then
+                            local dur = math.min(querySec, maxAllowed)
+                            endAt = now + dur
+                            M.gemCooldownEnd[slot] = endAt
+                            timer = dur
                         else
-                            if querySec > 0 then
-                                local dur = math.min(querySec, maxAllowed)
-                                endAt = now + dur
-                                M.gemCooldownEnd[slot] = endAt
-                                timer = dur
-                            else
-                                timer = 0
-                            end
+                            timer = 0
                         end
                     end
                 end
-                local ready = isReady or (timer <= 0.05 and not activeCastingName)
+            end
+            local ready = isReady or (timer <= 0.05 and not activeCastingName)
 
-                gemData = {
-                    slot = slot,
-                    name = sName,
-                    id = st.id,
-                    level = st.level,
-                    mana = st.mana,
-                    icon = st.icon,
-                    range = st.range,
-                    castTime = st.castTime,
-                    recast = st.recast,
-                    ready = ready,
-                    readyAt = (timer > 0) and (now + timer) or nil,
-                }
-            end)
-        end
+            gemData = {
+                slot = slot,
+                name = sName,
+                id = st.id,
+                level = st.level,
+                mana = st.mana,
+                icon = st.icon,
+                range = st.range,
+                castTime = st.castTime,
+                recast = st.recast,
+                ready = ready,
+                readyAt = (timer > 0) and (now + timer) or nil,
+            }
+        end)
         if not gemData then
             gemStatic[slot] = nil
+        else
+            highestUsed = slot
         end
         snap.slots[slot] = gemData
     end
+    snap.maxGems = math.max(maxGems, highestUsed)
 end
 
 -- Right-click-on-background settings content (hoisted so no closure is

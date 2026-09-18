@@ -12,7 +12,9 @@
 --   * Peer roster: every box running Triune broadcasts a 1s heartbeat with
 --     its vitals (HP/mana/end, zone, mode, running/burn, target, MA, pet).
 --     Peers that go quiet for `peerTimeoutSec` drop off the roster.
---   * Remote commands: `/ac net <all|zone|group|Name> <any /ac command>`
+--   * Remote commands: `/ac net <all|zone|group|Name> <any /ac command>`;
+--     a full slash command (`/ac net group /ac manual`, `/ac net all /camp`)
+--     runs as typed on the boxes, so game commands work too.
 --     runs that command on the matching boxes. The receiver just executes
 --     `/ac <line>` locally, so every existing command works across boxes.
 --   * Camp Here: pushes this character's location as the camp anchor to
@@ -83,6 +85,7 @@ local SCOPES             = { 'all', 'zone', 'group' }
 -- ----------------------------------------------------------------------------
 local cfg = {
     acceptCommands  = true,     -- run /ac commands sent by peers
+    acceptSlash     = true,     -- also run other slash commands (/camp, /dzquit ...) sent by peers
     trust           = 'all',    -- 'all' (any box on this launcher) | 'allow' (allowlist only)
     allowlist       = {},       -- character names (case-insensitive) when trust == 'allow'
     announce        = true,     -- print received commands to chat
@@ -332,9 +335,25 @@ end
 
 -- Wraps an RPC callback so the response is queued and applied from tick()
 -- (see header). The callback then runs as cb(status, reply, receivedAt).
+-- MQ2Lua hands the response callback its message as a *reference* to the
+-- C++ CallbackInstance that owns it (sol pushes lvalues by reference), and
+-- deletes that instance as soon as the callback returns. The userdata must
+-- therefore never outlive this function: read `content` / `sender` now (both
+-- come back as fresh Lua tables) and queue only those. Keeping the userdata
+-- for tick() to read was a use-after-free that crashed the client in
+-- mq2lua.dll after a few RPCs (e.g. a group / named /ac net button pressed
+-- more than once).
 local function queueResponse(cb)
     return function(status, reply)
-        net.rpcInbox[#net.rpcInbox + 1] = { cb = cb, status = status, reply = reply, at = nowSec() }
+        local snap = nil
+        if reply ~= nil then
+            snap = {}
+            local okC, content = pcall(function() return reply.content end)
+            if okC then snap.content = content end
+            local okS, sender = pcall(function() return reply.sender end)
+            if okS then snap.sender = sender end
+        end
+        net.rpcInbox[#net.rpcInbox + 1] = { cb = cb, status = status, reply = snap, at = nowSec() }
     end
 end
 
@@ -664,15 +683,30 @@ end
 -- ----------------------------------------------------------------------------
 -- Outbound: commands, camp, ping
 -- ----------------------------------------------------------------------------
--- Normalizes a remote command line: strips a leading "/ac", rejects empty
--- lines and anything that would re-enter the network (loops).
+-- Normalizes a remote command line. An /ac command travels without its
+-- "/ac" ("burn on"); any other slash command travels as typed ("/camp") and
+-- the receiver runs it verbatim. Rejects empty lines and anything that would
+-- re-enter the network (loops).
 local function normalizeLine(line)
     line = tostring(line or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if line:sub(1, 1) == '/' and not line:match('^/ac%f[%s]') and line ~= '/ac' then
+        return line
+    end
     line = line:gsub('^/ac%s+', ''):gsub('^/ac$', '')
     if line == '' then return nil, 'empty command' end
     local first = line:match('^(%S+)'):lower()
     if first == 'net' or first == 'boxnet' then return nil, 'nested net commands are not allowed' end
     return line
+end
+
+-- A normalized line is a raw slash command when it still starts with '/'.
+local function isSlashLine(line)
+    return type(line) == 'string' and line:sub(1, 1) == '/'
+end
+
+-- The command a normalized line runs as, for logs and chat.
+local function displayLine(line)
+    return isSlashLine(line) and line or ('/ac ' .. line)
 end
 
 local function resolveScope(scope)
@@ -917,7 +951,11 @@ end
 
 local function runLines(lines)
     for _, line in ipairs(lines) do
-        mq.cmdf('/ac %s', line)
+        if isSlashLine(line) then
+            mq.cmd(line)
+        else
+            mq.cmdf('/ac %s', line)
+        end
     end
 end
 
@@ -939,17 +977,23 @@ local function handleCmd(message, payload, sender)
     if not isTrusted(sender, payload) then return refuse('not on allowlist') end
 
     -- Re-validate on the receiving side; never trust a peer to have done it.
-    local clean = {}
+    local clean, shown = {}, {}
     for _, l in ipairs(lines) do
         local n = normalizeLine(l)
-        if n then clean[#clean + 1] = n end
+        if n and isSlashLine(n) and not cfg.acceptSlash then
+            return refuse('slash commands disabled (' .. n:match('^(%S+)') .. ')')
+        end
+        if n then
+            clean[#clean + 1] = n
+            shown[#shown + 1] = displayLine(n)
+        end
     end
     if #clean == 0 then return refuse('no runnable command') end
 
     runLines(clean)
-    local summary = table.concat(clean, '; ')
+    local summary = table.concat(shown, '; ')
     logEvent(string.format('<- %s: %s', from, summary))
-    if cfg.announce then chat('%s -> /ac %s', from, summary) end
+    if cfg.announce then chat('%s -> %s', from, summary) end
     replyTo(message, data, 0, { ok = true, ran = clean })
 end
 
@@ -1286,7 +1330,7 @@ local function drawQuickButtons(MUTED)
         if not ok then logEvent('not sent: ' .. tostring(why), 'warn') end
     end
     ImGui.SameLine()
-    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Same as /ac net <scope> <command>')
+    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Same as /ac net <scope> <command>  -  an /ac command (burn on) or a full slash command (/ac manual, /camp)')
 end
 
 local function drawPeerTable(GOOD, WARN, ERR, MUTED, ARC)
@@ -1551,6 +1595,7 @@ function plugin.onSaveSettings()
     for i, n in ipairs(cfg.allowlist or {}) do allow[i] = tostring(n) end
     return {
         acceptCommands = cfg.acceptCommands == true,
+        acceptSlash    = cfg.acceptSlash == true,
         trust          = cfg.trust == 'allow' and 'allow' or 'all',
         allowlist      = allow,
         announce       = cfg.announce == true,
@@ -1563,6 +1608,7 @@ end
 function plugin.onLoadSettings(s)
     if type(s) ~= 'table' then return end
     if s.acceptCommands ~= nil then cfg.acceptCommands = (s.acceptCommands == true) end
+    if s.acceptSlash ~= nil then cfg.acceptSlash = (s.acceptSlash == true) end
     if s.trust == 'allow' or s.trust == 'all' then cfg.trust = s.trust end
     if type(s.allowlist) == 'table' then
         cfg.allowlist = {}
@@ -1602,6 +1648,12 @@ function plugin.onDrawSettings()
         core.saveLoadout(true)
     end
     if ImGui.IsItemHovered() then core.setTooltip('Off: this character ignores commands and Camp Here from every other box (it still shows up on their roster).') end
+    local slash = ImGui.Checkbox('Also run other slash commands (/camp, /dzquit ...)##bnSlash', cfg.acceptSlash)
+    if slash ~= cfg.acceptSlash then
+        cfg.acceptSlash = slash
+        core.saveLoadout(true)
+    end
+    if ImGui.IsItemHovered() then core.setTooltip('A line sent as a full slash command (/ac net group /camp) runs as typed on this character.\nOff: only /ac commands are run; anything else is refused.') end
     local allowOnly = ImGui.Checkbox('Only accept from the allowlist below##bnTrust', cfg.trust == 'allow')
     local newTrust = allowOnly and 'allow' or 'all'
     if newTrust ~= cfg.trust then
@@ -1736,7 +1788,7 @@ end
 
 plugin.help = {
     '  \ag/ac net\ax - Toggle the Box Network window (boxnet plugin)',
-    '  \ag/ac net <all|zone|group|Name> <command>\ax - Run an /ac command on other boxes (e.g. /ac net all burn on)',
+    '  \ag/ac net <all|zone|group|Name> <command>\ax - Run a command on other boxes: an /ac command (/ac net all burn on) or any slash command as typed (/ac net group /ac manual, /ac net all /camp)',
     '  \ag/ac net peers | ping <Name> | camp [scope]\ax - List boxes, ping one, or push your location as their camp',
     '  \ag/ac net buffme [scope|Name]\ax - Ask your other boxes for the loadout buffs you are missing',
 }
@@ -1751,6 +1803,10 @@ plugin.tick = tick
 plugin.snapshot = snapshot
 plugin.sanitize = sanitize
 plugin.normalizeLine = normalizeLine
+plugin.queueResponse = queueResponse
+plugin.drainResponses = drainResponses
+plugin.isSlashLine = isSlashLine
+plugin.displayLine = displayLine
 plugin.resolveScope = resolveScope
 plugin.sendCommand = sendCommand
 plugin.sendCampHere = sendCampHere

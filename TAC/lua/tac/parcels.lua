@@ -45,14 +45,15 @@ local MERCHANT_WND   = 'MerchantWnd'
 local TAB_BOX        = 'MerchantWnd/MW_MerchantSubwindows'
 local PARCEL_LIST    = 'MerchantWnd/MW_ItemListMail'
 local RETRIEVE_BTN   = 'MerchantWnd/MW_Retrieve_Button'
-local PARCEL_TAB_IDX = 3          -- MW_PurchasePage, MW_RecoveryPage, MW_MailPage
+-- The Parcels page is MW_MailPage; its position in the tab box depends on
+-- the UI (the stock XML lists Purchase / Recover / Parcels, other UIs drop
+-- the Recover page), so the tab is found by caption / ScreenID, never index.
 local PARCEL_TAB_NAME = 'Parcels'
+local PARCEL_PAGE_ID = 'MW_MailPage'
 
--- MW_ItemListMail columns (1-based). The XML defines 6 columns with no
--- labels; the names here are the working assumption and are only used for
--- headers/keys, never for logic.
-local LIST_COLS = { { 2, 'Item' }, { 3, 'Qty' }, { 4, 'Price' }, { 5, 'From' }, { 6, 'Note' } }
-local COL_NAME, COL_QTY, COL_PRICE, COL_FROM, COL_NOTE = 2, 3, 4, 5, 6
+-- MW_ItemListMail columns (1-based): icon, Item Name, Qty, From, Sent, Note.
+local LIST_COLS = { { 2, 'Item' }, { 3, 'Qty' }, { 4, 'From' }, { 5, 'Sent' }, { 6, 'Note' } }
+local COL_NAME, COL_QTY, COL_FROM, COL_SENT, COL_NOTE = 2, 3, 4, 5, 6
 
 -- Client string ids the server uses (eqstr_us.txt):
 --   6465 You have received a new parcel delivery!
@@ -90,6 +91,8 @@ local state = {
     isParcelMerchant = false,
     tabIndex      = 0,
     tabCount      = 0,
+    parcelTabIdx  = nil,        -- 1-based Parcels tab position in this UI, nil = no such tab
+    onParcelTab   = false,
     rows          = {},         -- { key, name, qty, from, note }
     listCount     = 0,
     lastMerchantPollAt = 0,
@@ -167,8 +170,43 @@ local function listCell(row, col)
     return s
 end
 
-local function rowKey(name, qty, from, note)
-    return table.concat({ name or '', qty or '', from or '', note or '' }, '|')
+local function rowKey(name, qty, from, sent, note)
+    return table.concat({ name or '', qty or '', from or '', sent or '', note or '' }, '|')
+end
+
+-- True while the tab box shows the Parcels page (by caption, then ScreenID).
+local function onParcelTab()
+    local ok = false
+    pcall(function()
+        local tab = mq.TLO.Window(TAB_BOX).CurrentTab
+        if not tab then return end
+        local txt = tostring(tab.Text() or '')
+        if txt:lower() == PARCEL_TAB_NAME:lower() then ok = true; return end
+        local sid = tostring(tab.ScreenID() or '')
+        if sid == PARCEL_PAGE_ID then ok = true; return end
+        local nm = tostring(tab.Name() or '')
+        if nm == PARCEL_PAGE_ID then ok = true end
+    end)
+    return ok
+end
+
+-- 1-based index of the Parcels page in the tab box, or nil when the UI has
+-- no such tab (not a parcel merchant / tab hidden).
+local function parcelTabIndex()
+    local idx = nil
+    pcall(function()
+        local box = mq.TLO.Window(TAB_BOX)
+        local n = tonumber(box.TabCount()) or 0
+        for i = 1, n do
+            local tab = box.Tab(i)
+            if tab then
+                local txt = tostring(tab.Text() or '')
+                local sid = tostring(tab.ScreenID() or '')
+                if txt:lower() == PARCEL_TAB_NAME:lower() or sid == PARCEL_PAGE_ID then idx = i; return end
+            end
+        end
+    end)
+    return idx
 end
 
 -- ---------------------------------------------------------------------------
@@ -220,10 +258,10 @@ local function readRows()
     for r = 1, n do
         local name = listCell(r, COL_NAME)
         local qty = listCell(r, COL_QTY)
-        local price = listCell(r, COL_PRICE)
         local from = listCell(r, COL_FROM)
+        local sent = listCell(r, COL_SENT)
         local note = listCell(r, COL_NOTE)
-        rows[#rows + 1] = { row = r, name = name, qty = qty, price = price, from = from, note = note, key = rowKey(name, qty, from, note) }
+        rows[#rows + 1] = { row = r, name = name, qty = qty, from = from, sent = sent, note = note, key = rowKey(name, qty, from, sent, note) }
     end
     return rows, n
 end
@@ -273,13 +311,15 @@ local function pollMerchant(force)
     end)
     state.tabIndex = windowInt(TAB_BOX, 'CurrentTabIndex')
     state.tabCount = windowInt(TAB_BOX, 'TabCount')
+    state.parcelTabIdx = parcelTabIndex()
+    state.onParcelTab = onParcelTab()
     state.rows, state.listCount = readRows()
 
     -- NMS parcel merchants carry the surname "Parcel"/"Parcels"; a populated
     -- parcel list is proof either way (the server only sends the list when the
     -- NPC is flagged as a parcel merchant).
     local surname = merchantSurname():lower()
-    state.isParcelMerchant = (surname:find('parcel', 1, true) ~= nil) or state.listCount > 0
+    state.isParcelMerchant = (surname:find('parcel', 1, true) ~= nil) or state.listCount > 0 or state.parcelTabIdx ~= nil
 
     if not wasOpen and settings.autoOpenAtMerchant and ctrl and not ctrl.show_parcels and state.isParcelMerchant then
         ctrl.show_parcels = true
@@ -383,12 +423,15 @@ end
 -- Collect All (runs inside onTick on the plugin fiber; core.delay yields)
 -- ---------------------------------------------------------------------------
 local function switchToParcelTab()
-    if windowInt(TAB_BOX, 'CurrentTabIndex') == PARCEL_TAB_IDX then return true end
+    if onParcelTab() then return true end
     pcall(function() mq.TLO.Window(TAB_BOX).SetCurrentTab(PARCEL_TAB_NAME) end)
-    local ok = core.delay(TAB_SWITCH_TIMEOUT_MS, function() return windowInt(TAB_BOX, 'CurrentTabIndex') == PARCEL_TAB_IDX end)
+    local ok = core.delay(TAB_SWITCH_TIMEOUT_MS, onParcelTab)
     if not ok then
-        pcall(function() mq.TLO.Window(TAB_BOX).SetCurrentTab(PARCEL_TAB_IDX) end)
-        ok = core.delay(TAB_SWITCH_TIMEOUT_MS, function() return windowInt(TAB_BOX, 'CurrentTabIndex') == PARCEL_TAB_IDX end)
+        local idx = parcelTabIndex()
+        if idx then
+            pcall(function() mq.TLO.Window(TAB_BOX).SetCurrentTab(idx) end)
+            ok = core.delay(TAB_SWITCH_TIMEOUT_MS, onParcelTab)
+        end
     end
     return ok
 end
@@ -690,7 +733,7 @@ local function drawMerchantSection(colors)
     end
     if state.debug then
         ImGui.SameLine()
-        ImGui.TextDisabled(string.format('[tab %d/%d]', state.tabIndex, state.tabCount))
+        ImGui.TextDisabled(string.format('[tab %d/%d, parcels tab %s, on it: %s]', state.tabIndex, state.tabCount, tostring(state.parcelTabIdx or '-'), tostring(state.onParcelTab)))
     end
 
     local btnW = core.px(180)
@@ -715,13 +758,14 @@ local function drawMerchantSection(colors)
     if ImGui.BeginTable('TriuneParcelList', #LIST_COLS, tableFlags, ImVec2(0, h)) then
         for _, c in ipairs(LIST_COLS) do
             local flags = (c[2] == 'Item' or c[2] == 'Note') and ImGuiTableColumnFlags.WidthStretch or ImGuiTableColumnFlags.WidthFixed
-            ImGui.TableSetupColumn(c[2], flags, c[2] == 'Item' and 3 or (c[2] == 'Note' and 3 or core.px(60)))
+            local w = c[2] == 'Item' and 3 or (c[2] == 'Note' and 2 or (c[2] == 'Sent' and core.px(150) or (c[2] == 'From' and core.px(90) or core.px(40))))
+            ImGui.TableSetupColumn(c[2], flags, w)
         end
         ImGui.TableHeadersRow()
         if #rows == 0 then
             ImGui.TableNextRow()
             ImGui.TableSetColumnIndex(0)
-            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], state.tabIndex == PARCEL_TAB_IDX and '(mailbox is empty)' or '(list fills once the Parcels tab is open)')
+            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], state.onParcelTab and '(mailbox is empty)' or '(list fills once the Parcels tab is open)')
         else
             for _, r in ipairs(rows) do
                 ImGui.TableNextRow()
@@ -733,8 +777,8 @@ local function drawMerchantSection(colors)
                     ImGui.Text(r.name)
                 end
                 ImGui.TableSetColumnIndex(1); ImGui.TextDisabled(r.qty)
-                ImGui.TableSetColumnIndex(2); ImGui.TextDisabled(r.price or '')
-                ImGui.TableSetColumnIndex(3); ImGui.Text(r.from)
+                ImGui.TableSetColumnIndex(2); ImGui.Text(r.from)
+                ImGui.TableSetColumnIndex(3); ImGui.TextDisabled(r.sent)
                 ImGui.TableSetColumnIndex(4); ImGui.TextDisabled(r.note)
             end
         end

@@ -34,6 +34,11 @@
 -- those) are drawn as links when the database knows the name, and open the
 -- card. Lines tokenized before the indexes were in are re-tokenized once
 -- they are.
+-- Dialogue links: NPC prompts ("[Respawning] will repopulate over time",
+-- "The instance is [ready]") carry EQEmu saylinks - item links whose id is
+-- the server's saylink proxy item (cfg.saylinkId, 999999 in stock EQEmu).
+-- The game's click tells the server to say the link's text to your target;
+-- a click here does the same with /say (see isSaylink, /tacchat saylink).
 --
 -- Layout, filters and colors persist per character in
 -- config/triune_chat_<Name>.lua. Window visibility is ctrl.show_chat (header
@@ -43,7 +48,7 @@
 local plugin = {
     id                 = 'chat',
     name               = 'Chat Windows',
-    version            = '1.9.0',
+    version            = '1.10.0',
     author             = 'Triune',
     description        = 'Chat window replacement: channel-filtered tabs, multiple windows, colors, timestamps, an input line and keyword filters.',
     defaultEnabled     = true,
@@ -210,6 +215,7 @@ local cfg = {
     history = { on = true, lines = 1000 },  -- tells and notifications kept on disk and restored on the next start
     inputHistory = {},        -- lines sent from the input, oldest first: { text, links = { [name] = raw } | nil } (see IH)
     mentionComplete = true,   -- @Name in the input line completes player names seen in chat (see AC)
+    saylinkId = 999999,       -- item id the server puts in dialogue (saylink) links; clicking one says its text (see isSaylink)
 }
 local RECENT_TELLS = 5
 -- Tell / notification history helpers (filled in with the logging below;
@@ -943,6 +949,8 @@ local function sanitizeConfig(c)
     if type(c.gameLinksWindow) ~= 'string' or c.gameLinksWindow == '' then c.gameLinksWindow = nil end
     c.gameLineClose = (c.gameLineClose ~= false)
     c.mentionComplete = (c.mentionComplete ~= false)
+    c.saylinkId = math.floor(tonumber(c.saylinkId) or 999999)
+    if c.saylinkId <= 0 then c.saylinkId = 999999 end
     local h = type(c.history) == 'table' and c.history or {}
     c.history = {
         on = (h.on ~= false),
@@ -1168,6 +1176,23 @@ end
 local gamedbPlugin, linkItemId -- defined below
 
 local function executeLink(link)
+    -- A dialogue link: the game's click sends the server an item-link click
+    -- for the saylink proxy item, and the server answers by saying the
+    -- link's text for you (to your target, like any /say). The saylink
+    -- table is server side, so the click cannot be reproduced from MQ; /say
+    -- of the link's name is what the click does. Silent saylinks (heard by
+    -- the NPC only) end up said aloud this way - a cosmetic difference.
+    if plugin.isSaylink(link) then
+        local text = trim(link.name)
+        if text == '' then echo('This dialogue link has no text to say.'); return false end
+        local ok, err = pcall(mq.cmdf, '/say %s', text)
+        if ok then
+            echo("Said '" .. text .. "' (dialogue link)")
+        else
+            echo("Could not say '" .. text .. "': " .. tostring(err))
+        end
+        return ok
+    end
     -- Preferred: a Game Database card for the exact item and tier from the
     -- link's id - works for items you do not carry.
     local db = gamedbPlugin and gamedbPlugin()
@@ -1221,7 +1246,22 @@ function linkItemId(payload)
     return nil
 end
 
+-- True for a dialogue (saylink) link: an item link carrying the server's
+-- saylink proxy item id (stock EQEmu SAYLINK_ITEM_ID, 999999). A line's
+-- links are tokenized once and cached, so this reads the payload each time
+-- rather than caching a flag that /tacchat saylink <id> would invalidate.
+-- On the plugin table (the main chunk is at Lua's 200-local limit).
+function plugin.isSaylink(link)
+    local payload = type(link) == 'table' and link.payload or link
+    local id = linkItemId(payload)
+    return id ~= nil and id == cfg.saylinkId
+end
+
 local function lookupInDatabase(link)
+    if plugin.isSaylink(link) then
+        echo(link.name .. ' is a dialogue link, not an item.')
+        return false
+    end
     local db = gamedbPlugin()
     if not db then
         echo('The Game Database plugin is not loaded.')
@@ -1242,7 +1282,7 @@ end
 -- Called from the UI: defers the actual execution to the next tick.
 local function openItemLink(link)
     rt.pendingLink = link
-    echo('Opening ' .. link.name .. '...')
+    echo((plugin.isSaylink(link) and 'Saying ' or 'Opening ') .. link.name .. '...')
     return true
 end
 
@@ -2848,6 +2888,8 @@ local function drawRun(text, link, isTs, entry, r, g, b, isName)
         if ImGui.IsItemHovered and ImGui.IsItemHovered() and core.setTooltip then
             if l.kind then
                 core.setTooltip('Open ' .. l.name .. (l.kind == 'npcs' and ' (NPC card)' or ' (spell card)'))
+            elseif plugin.isSaylink(l) then
+                core.setTooltip("Say '" .. l.name .. "' to your target (dialogue link)")
             else
                 core.setTooltip(gamedbPlugin and gamedbPlugin() and ('Open ' .. l.name .. ' (Game Database card)') or ('Open ' .. l.name .. ' (items you carry or have banked)'))
             end
@@ -3027,7 +3069,11 @@ local function drawLineContextMenuBody(win, tab)
         end
         -- Re-post an item someone linked: the same raw link into my input line.
         for i, l in ipairs(extractItemLinks(e.raw)) do
-            if ImGui.MenuItem('Link ' .. l.name .. ' to chat##relink' .. i) then insertLink(LINK .. l.payload .. LINK, l.name) end
+            if plugin.isSaylink(l) then
+                if ImGui.MenuItem("Say '" .. l.name .. "' (dialogue link)##saylink" .. i) then openItemLink(l) end
+            elseif ImGui.MenuItem('Link ' .. l.name .. ' to chat##relink' .. i) then
+                insertLink(LINK .. l.payload .. LINK, l.name)
+            end
         end
     end
     local sender = e.sender
@@ -3951,7 +3997,8 @@ local function drawTabMenuBody(win, tab, ti)
     if ImGui.BeginMenu('Links', #rt.recentLinks > 0) then
         for i = #rt.recentLinks, 1, -1 do
             local link = rt.recentLinks[i]
-            if ImGui.MenuItem(link.name .. '##tacchatLink_' .. i) then openItemLink(link) end
+            local label = plugin.isSaylink(link) and ("Say '" .. link.name .. "'") or link.name
+            if ImGui.MenuItem(label .. '##tacchatLink_' .. i) then openItemLink(link) end
         end
         ImGui.EndMenu()
     end
@@ -3959,7 +4006,7 @@ local function drawTabMenuBody(win, tab, ti)
     if ImGui.BeginMenu('Look up in Database', #rt.recentLinks > 0 and gamedbPlugin() ~= nil) then
         for i = #rt.recentLinks, 1, -1 do
             local link = rt.recentLinks[i]
-            if ImGui.MenuItem(link.name .. '##tacchatDb_' .. i) then lookupInDatabase(link) end
+            if not plugin.isSaylink(link) and ImGui.MenuItem(link.name .. '##tacchatDb_' .. i) then lookupInDatabase(link) end
         end
         ImGui.EndMenu()
     end
@@ -5023,6 +5070,20 @@ function chatCommand(sub, arg1, arg2)
         if on then GL.disabled = nil; GL.errors = 0; GL.last = nil end
         print('\ag[Triune Chat]\ax item window icon links ' .. (on and 'go to the chat input.' or 'stay in the game\'s chat line.'))
         return
+    elseif sub == 'saylink' then
+        -- The proxy item id of dialogue links. A link that opens as
+        -- "Database card failed for X (id N): not in the database" when the
+        -- game would have said X is a saylink with a different id: set it here.
+        local id = tonumber(arg1)
+        if id and id > 0 then
+            cfg.saylinkId = math.floor(id)
+            markDirty()
+        elseif arg1 and arg1 ~= '' and tostring(arg1):lower() ~= 'status' then
+            print('\ay[Triune Chat]\ax usage: /tacchat saylink <item id>|status')
+            return
+        end
+        print(string.format('\ag[Triune Chat]\ax dialogue links: item id %d says the link text on click (stock EQEmu 999999).', cfg.saylinkId))
+        return
     elseif sub == 'complete' then
         local what = tostring(arg1 or ''):lower()
         local on
@@ -5330,7 +5391,7 @@ function plugin.onCommand(cmd, args)
 end
 
 plugin.help = {
-    '  \ag/ac chat [show|hide|toggle|focus|settings|clear|capture on|off|history on|off|clear|gamelinks on|off|status|gameline on|off|complete on|off|ghost [window]|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|reset]\ax - Chat Windows (also /tacchat)',
+    '  \ag/ac chat [show|hide|toggle|focus|settings|clear|capture on|off|history on|off|clear|gamelinks on|off|status|gameline on|off|saylink <id>|status|complete on|off|ghost [window]|tab <name>|tabs|window new|close <name>|mute|unmute <name>|timestamps|stats|reset]\ax - Chat Windows (also /tacchat)',
 }
 
 -- Exposed for tests
