@@ -11053,7 +11053,7 @@ do
             },
         }
         local core = {
-            VERSION = '3.0', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            VERSION = '3.1', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
@@ -11402,7 +11402,7 @@ do
             UI = { accent = noop, setTooltip = noop, pushTheme = noop, popTheme = noop, preBeginWindow = noop, postBeginWindow = noop,
                    drawStatusProgressBar = noop, drawSpellIcon = function() return false end,
                    getConColorRgb = function() return { 1, 1, 1, 1 } end, resolveTargetOfTarget = function() return nil end },
-            VERSION = '3.0', DATA = {}, loadout = {}, scriptDir = './',
+            VERSION = '3.1', DATA = {}, loadout = {}, scriptDir = './',
             GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 },
             saveLoadout = noop, print = quietPrint,
             idxOf = function() return 0 end, fmtSec = tostring, parseDurationSec = function() return 0 end,
@@ -11655,7 +11655,7 @@ do
         ctrl = { auto_summon_fireworks = true, auto_spend_aa_id = 17788, plugins = {} }, mq = mq,
         ImGui = setmetatable({}, { __index = function() return noop end }),
         runtime = { isCasting = function() return false end, cachedAAData = {} },
-        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '3.0',
+        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '3.1',
     }
     local origPrint = print
     print = quietPrint
@@ -11790,7 +11790,7 @@ do
                 ['Alternately Advanced Fireworks'] = { cost = 25, rank = 0, maxRank = 1, category = 'Special' },
             },
         },
-        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '3.0',
+        DATA = {}, colors = {}, accent = noop, saveLoadout = noop, VERSION = '3.1',
     }
     local origPrint = print
     print = quietPrint
@@ -12711,7 +12711,7 @@ end
             },
         }
         local core = setmetatable({
-            mq = mq, ImGui = mockImGui, runtime = { pullState = 'IDLE' }, VERSION = '3.0',
+            mq = mq, ImGui = mockImGui, runtime = { pullState = 'IDLE' }, VERSION = '3.1',
             colors = {}, saveLoadout = function() box.saves = box.saves + 1 end,
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
@@ -13372,7 +13372,7 @@ end)()
         },
     }
     local core = setmetatable({
-        mq = mq, ImGui = mockImGui, runtime = {}, VERSION = '3.0', colors = {},
+        mq = mq, ImGui = mockImGui, runtime = {}, VERSION = '3.1', colors = {},
         saveLoadout = function() saves = saves + 1 end,
         px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
         preBeginWindow = noop, postBeginWindow = noop,
@@ -14963,7 +14963,7 @@ end)()
     }
     local UI = {}
     local env = setmetatable({
-        ctrl = ctrl, runtime = runtime, mq = mq, ImGui = mockImGui, UI = UI, VERSION = '3.0', open = true,
+        ctrl = ctrl, runtime = runtime, mq = mq, ImGui = mockImGui, UI = UI, VERSION = '3.1', open = true,
         GOLD = { 1, 0.7, 0.54, 1 }, ARC = { 0.3, 0.7, 1, 1 }, MUTED = { 0.49, 0.56, 0.65, 1 }, GOOD = { 0.37, 0.88, 0.64, 1 }, WARN = { 1, 0.72, 0.3, 1 },
         accent = function(c, txt) mockImGui.TextColored(c[1], c[2], c[3], c[4], txt) end,
         idxOf = loadFunc(src, 'idxOf', {}),
@@ -18490,7 +18490,7 @@ do
         }
         local ctrl = { plugins = {}, show_inv = true }
         local core = {
-            VERSION = '3.0', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            VERSION = '3.1', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
@@ -18952,7 +18952,7 @@ do
         }
         local ctrl = { plugins = {} }
         local core = {
-            VERSION = '3.0', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
+            VERSION = '3.1', ctrl = ctrl, mq = mq, ImGui = mockImGui, runtime = {}, DATA = {},
             colors = { GOLD = { 1, 1, 1, 1 }, ARC = { 1, 1, 1, 1 }, MUTED = { 1, 1, 1, 1 }, GOOD = { 1, 1, 1, 1 }, WARN = { 1, 1, 1, 1 }, ERR = { 1, 1, 1, 1 } },
             px = function(n) return n end, pushTheme = noop, popTheme = noop, accent = noop, setTooltip = noop,
             preBeginWindow = noop, postBeginWindow = noop,
