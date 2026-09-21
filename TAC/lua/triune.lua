@@ -413,6 +413,7 @@ local function defaultCtrl()
         aa_purchased_only        = true,
         disc_trained_only        = true,
         medbreak_enabled         = false,
+        medbreak_ignore_group_combat = false,
         medbreak_hp_on           = false,
         medbreak_hp_start        = 20,
         medbreak_hp_stop         = 90,
@@ -14196,6 +14197,18 @@ function UI.drawSettingsTab()
                 .. 'resources have recovered up to their "until" threshold.')
         end
         if ctrl.medbreak_enabled then
+            local mbIgnoreGroup = ImGui.Checkbox('Ignore Group Combat While Medding##mbignoregroup', ctrl.medbreak_ignore_group_combat or false)
+            if mbIgnoreGroup ~= (ctrl.medbreak_ignore_group_combat or false) then
+                ctrl.medbreak_ignore_group_combat = mbIgnoreGroup
+                runtime.saveLoadout(true)
+            end
+            if ImGui.IsItemHovered() then
+                ImGui.SetTooltip(
+                    'Allows Med Break to continue while other group members are fighting.\n'
+                    .. 'Med Break still cancels if this character enters combat, gains aggro,\n'
+                    .. 'or a hostile XTarget is fighting this character or one of its pets.')
+            end
+
             local mbHp = ImGui.Checkbox('HP##mbhp', ctrl.medbreak_hp_on or false)
             if mbHp ~= (ctrl.medbreak_hp_on or false) then
                 ctrl.medbreak_hp_on = mbHp
@@ -16518,6 +16531,91 @@ do
         runtime.isCombatCache = { tick = runtime.tickSerial, v = v }
         return v
     end
+end
+
+-- Med Break uses a deliberately narrower combat definition when the user opts
+-- to ignore group combat. The normal TAC combat scanners intentionally treat
+-- shared group XTarget activity as combat in Puller/Assist modes; that is useful
+-- everywhere else, but would defeat this Med Break option.
+--
+-- Returns: threatened:boolean, reason:string|nil
+function runtime.medBreakCombatThreat()
+    if not (ctrl and ctrl.medbreak_ignore_group_combat == true) then
+        -- Preserve the pre-option Med Break behavior exactly when disabled.
+        local threatened = isCombat() or (runtime.anyXtarAlive and runtime.anyXtarAlive(true)) or false
+        if not threatened then
+            pcall(function()
+                if mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then threatened = true end
+                if mq.TLO.Me.CombatState() == 'COMBAT' then threatened = true end
+                local hCount = mq.TLO.Me.XTHaterCount() or 0
+                if hCount > 0 then threatened = true end
+                local aCount = mq.TLO.Me.XTAggroCount() or 0
+                if aCount > 0 then threatened = true end
+            end)
+        end
+        return threatened, threatened and 'combat / hostile on XTarget' or nil
+    end
+
+    local threatened = false
+    local reason = nil
+
+    -- Do not use isCombat(), anyXtarAlive(), XTHaterCount or XTAggroCount in
+    -- this branch: on this server those can reflect another group member's
+    -- fight. Only personal combat state and XTargets demonstrably fighting us
+    -- (or one of our pets) should interrupt the break.
+    local ok = pcall(function()
+        if mq.TLO.Me.Combat() then
+            threatened = true; reason = 'auto-attack active'; return
+        end
+        if mq.TLO.Me.AutoFire() then
+            threatened = true; reason = 'autofire active'; return
+        end
+        if mq.TLO.Me.CombatState() == 'COMBAT' then
+            threatened = true; reason = 'personal combat state'; return
+        end
+
+        -- A manually selected hostile can exist outside XTarget briefly. Its
+        -- aggro percentages are personal, unlike the group-wide XT counters.
+        local t = mq.TLO.Target
+        if t and t() then
+            local tid = t.ID() or 0
+            if tid > 0 and isSpawnAlive(tid) and not isGroupOrRaidMember(tid) and not isSpawnPetOrPlayer(tid) then
+                local stype = t.Type() or ''
+                if (stype == 'NPC' or stype == 'Pet') and not t.Dead() and stype ~= 'Corpse' then
+                    local aggro = t.PctAggro() or 0
+                    local secondary = t.SecondaryPctAggro() or 0
+                    if aggro > 0 or secondary > 0 then
+                        threatened = true; reason = 'local aggro on current target'; return
+                    end
+                end
+            end
+        end
+
+        local slots = mq.TLO.Me.XTargetSlots() or 13
+        for i = 1, slots do
+            local xt = mq.TLO.Me.XTarget(i)
+            if xt and xt() then
+                local id = xt.ID() or 0
+                if id > 0 and isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
+                    local s = mq.TLO.Spawn(id)
+                    if s and s() then
+                        local stype = s.Type() or ''
+                        if (stype == 'NPC' or stype == 'Pet') and not s.Dead() and stype ~= 'Corpse'
+                            and xtSlotFightingMe(xt) then
+                            threatened = true
+                            reason = 'local aggro / owned pet engaged on XTarget'
+                            return
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Fail safe: an unexpected TLO error should wake the character rather than
+    -- leave it sitting through a fight.
+    if not ok then return true, 'combat safety check failed' end
+    return threatened, reason
 end
 
 function runtime.anyNearbyEngagedNpc(radius)
@@ -22244,18 +22342,9 @@ local function combatTick()
         local myEnd = mq.TLO.Me.PctEndurance() or 100
         local maxEnd = mq.TLO.Me.MaxEndurance() or 0
 
-        -- Strictly verify we are not in combat and have NO hostile NPCs on XTarget
-        local inCombatOrXtar = isCombat() or anyXtarAlive(true)
-        if not inCombatOrXtar then
-            pcall(function()
-                if mq.TLO.Me.Combat() or mq.TLO.Me.AutoFire() then inCombatOrXtar = true end
-                if mq.TLO.Me.CombatState() == 'COMBAT' then inCombatOrXtar = true end
-                local hCount = mq.TLO.Me.XTHaterCount() or 0
-                if hCount > 0 then inCombatOrXtar = true end
-                local aCount = mq.TLO.Me.XTAggroCount() or 0
-                if aCount > 0 then inCombatOrXtar = true end
-            end)
-        end
+        -- By default this is the original strict group-aware check. With
+        -- Ignore Group Combat enabled it becomes a local-only safety check.
+        local inCombatOrXtar, medThreatReason = runtime.medBreakCombatThreat()
 
         if not runtime.medBreakActive then
             if not inCombatOrXtar then
@@ -22266,7 +22355,11 @@ local function combatTick()
                 if needHp or needMana or needEnd then
                     fullStop()
                     runtime.medBreakActive = true
-                    print('\ay[Triune]\ax Med Break -- resting to recover.')
+                    if ctrl.medbreak_ignore_group_combat then
+                        print('\ay[Triune]\ax Med Break -- resting to recover (ignoring group-only combat).')
+                    else
+                        print('\ay[Triune]\ax Med Break -- resting to recover.')
+                    end
                     if not mq.TLO.Me.Sitting() and not mq.TLO.Me.Ducking() and not mq.TLO.Me.Combat() and not mq.TLO.Me.Moving() and not isMoveActive() then
                         mq.cmd('/sit')
                     end
@@ -22276,7 +22369,7 @@ local function combatTick()
             if inCombatOrXtar then
                 runtime.medBreakActive = false
                 if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-                print('\ay[Triune]\ax Med Break cancelled -- combat / hostile on XTarget!')
+                print(string.format('\ay[Triune]\ax Med Break cancelled -- %s!', tostring(medThreatReason or 'combat / hostile on XTarget')))
             else
                 local hpOk   = not ctrl.medbreak_hp_on or myHp >= (ctrl.medbreak_hp_stop or 90)
                 local manaOk = not ctrl.medbreak_mana_on or maxMana == 0 or myMana >= (ctrl.medbreak_mana_stop or 90)
